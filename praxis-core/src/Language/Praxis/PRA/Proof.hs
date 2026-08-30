@@ -188,6 +188,8 @@ inferSequent = runInferenceMachine . cata infer
           pt = subst x t p'
           ps = subst x s p'
       γ :|- c <- asSubproof 0 prf
+      -- NOTE: in case of pt and ps coincides, we need to remove all the matching
+      -- premises once, then push back appropriate ones.
       γ' <- discharge (MissingPremise (t === s) γ) (t === s) γ
       γ'' <- discharge (MissingPremise pt γ') pt γ'
       γ''' <- discharge (MissingPremise ps γ'') ps γ''
