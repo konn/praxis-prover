@@ -321,6 +321,7 @@ data RuleName
   | ImplLRule
   | ImplRRule
   | DefeqRule
+  | SubstRule
   deriving (Show, Eq, Generic)
   deriving anyclass (Hashable)
 
@@ -338,6 +339,7 @@ instance HasRuleName (Proof a) where
   ruleName ImplL {} = ImplLRule
   ruleName ImplR {} = ImplRRule
   ruleName Defeq {} = DefeqRule
+  ruleName Subst {} = SubstRule
 
 instance HasRuleName (ProofF a b) where
   ruleName IdF {} = IdRule
@@ -350,3 +352,4 @@ instance HasRuleName (ProofF a b) where
   ruleName ImplLF {} = ImplLRule
   ruleName ImplRF {} = ImplRRule
   ruleName DefeqF {} = DefeqRule
+  ruleName SubstF {} = SubstRule

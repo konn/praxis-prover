@@ -31,6 +31,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import GHC.Generics
+import Language.Praxis.PRA.Equality
 import Language.Praxis.PRA.Syntax
 
 data ProofErrorReason a
@@ -49,6 +50,11 @@ data ProofErrorReason a
       !(Formula a)
       -- | actual
       !(Formula a)
+  | EqualityCheckFailed
+      -- | left
+      !(Term a)
+      -- | right
+      !(Term a)
   deriving (Show, Eq, Generic)
 
 data ProofContext
@@ -194,6 +200,11 @@ inferSequent = runInferenceMachine . cata infer
       γ'' <- discharge (MissingPremise pt γ') pt γ'
       γ''' <- discharge (MissingPremise ps γ'') ps γ''
       pure $ MS.insertOne (t === s) (MS.insertOne pt γ''') |- c
+    infer0 (DefeqF s t prf) = do
+      γ :|- c <- asSubproof 0 prf
+      γ' <- discharge (MissingPremise (s === t) γ) (s === t) γ
+      failIf (EqualityCheckFailed s t) $ not $ defEq s t
+      pure $ γ' |- c
 
 -- TODO: more efficient and direct implementation.
 isProofOf :: (Hashable a) => Proof a -> Sequent a -> Bool
