@@ -22,13 +22,16 @@ module Language.Praxis.PRA.Syntax (
   Substitutable (..),
 ) where
 
+import Control.Lens (prism')
 import Data.Functor.Foldable.TH (MakeBaseFunctor (makeBaseFunctor))
 import Data.Generics.Labels ()
 import Data.Hashable (Hashable (..))
 import Data.Multiset (Multiset)
 import Data.Sized
+import Data.Sized qualified as SV
 import Data.Type.Equality
-import Data.Type.Natural hiding (Succ)
+import Data.Type.Natural hiding (Succ, Zero)
+import Data.Type.Ordinal
 import Data.Vector qualified as V
 import GHC.Generics
 import Language.Praxis.PRA.PrimitiveRecursion
@@ -64,6 +67,37 @@ instance (Eq a) => Eq (Term a) where
   (:$) {} == _ = False
 
 infix 6 :$
+
+{- | Terms are the syntactic model of the primitive-recursive numerals: an
+application which cannot be reduced is kept as a
+'Language.Praxis.PRA.PrimitiveRecursion.residual', which is what turns
+'Language.Praxis.PRA.PrimitiveRecursion.evalPRFCodeM' into a partial evaluator
+on open terms.
+
+Numerals are canonicalised to 'Lit', so 'Succ' only survives in front of a term
+which is not itself a numeral.  Consequently the prisms are lawful only up to
+definitional equality — rebuilding a matched @'Succ' ':$' ['Lit' n]@ yields
+@'Lit' (n + 1)@ — which is precisely the equivalence
+"Language.Praxis.PRA.Equality" decides.
+-}
+instance Evalable (Term a) where
+  _Zero = prism' (const $ Lit 0) \case
+    Lit 0 -> Just ()
+    -- 'Zero' denotes the constant @0@ at every arity, so it is a numeral
+    -- whatever it is applied to — including @'Zero' ':$' 'SV.Nil'@.
+    Zero :$ _ -> Just ()
+    _ -> Nothing
+  _Succ =
+    prism'
+      \case
+        Lit n -> Lit (n + 1)
+        t -> Succ :$ SV.singleton t
+      \case
+        Lit n | n > 0 -> Just $ Lit (n - 1)
+        Succ :$ args -> Just $ sIndex [od|0|] args
+        _ -> Nothing
+  fromNatural = Lit
+  residual = (:$)
 
 data Atomic a = !(Term a) :=== !(Term a)
   deriving (Show, Eq, Generic, Functor, Foldable, Traversable)

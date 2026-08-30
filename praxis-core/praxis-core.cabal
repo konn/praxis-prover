@@ -72,6 +72,7 @@ library
   -- cabal-gild: discover src --exclude=src/**/Internal.hs --exclude=src/**/Internal/**/*.hs
   exposed-modules:
     Data.Multiset
+    Language.Praxis.PRA.Equality
     Language.Praxis.PRA.PrimitiveRecursion
     Language.Praxis.PRA.Proof
     Language.Praxis.PRA.Syntax
@@ -105,7 +106,14 @@ test-suite praxis-core-test
     -rtsopts
     -with-rtsopts=-N
 
-  build-depends: praxis-core
+  build-depends:
+    ghc-typelits-knownnat,
+    lens,
+    praxis-core,
+    sized,
+    tasty,
+    tasty-hunit,
+    type-natural,
 
 test-suite praxis-core-doctest
   import: defaults

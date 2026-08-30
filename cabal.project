@@ -1,1 +1,4 @@
 packages: */*.cabal
+-- Required by the doctest suite: doctest-parallel locates the built package
+-- database through the GHC environment file.
+write-ghc-environment-files: always
