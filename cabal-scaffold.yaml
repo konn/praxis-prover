@@ -1,0 +1,13 @@
+templateDirs: []
+hpack: false
+
+defaults:
+  template: monorepo-single
+  snapshot: lts
+  project-file: false
+
+params:
+  monorepo: praxis
+  author-name: Hiromi ISHII
+  author-email: konn.jinro_at_gmail.com
+  github-username: konn

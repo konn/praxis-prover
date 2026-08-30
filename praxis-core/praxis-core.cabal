@@ -1,0 +1,123 @@
+cabal-version: 3.4
+name: praxis-core
+version: 0.1.0.0
+description: Please see the README on GitHub at <https://github.com/konn/praxis/praxis-core#readme>
+homepage: https://github.com/konn/praxis#readme
+bug-reports: https://github.com/konn/praxis/issues
+author: Hiromi ISHII
+maintainer: konn.jinro_at_gmail.com
+copyright: (c) Hiromi ISHII 2026- present
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+tested-with:
+  ghc ==9.12.4
+
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
+source-repository head
+  type: git
+  location: https://github.com/konn/praxis
+  subdir: praxis-core
+
+common defaults
+  autogen-modules: Paths_praxis_core
+  other-modules: Paths_praxis_core
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Widentities
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wmissing-export-lists
+    -Wmissing-home-modules
+    -Wpartial-fields
+    -Wredundant-constraints
+    -Wunused-packages
+
+  default-language: GHC2024
+  default-extensions:
+    ApplicativeDo
+    BlockArguments
+    DeriveAnyClass
+    DerivingStrategies
+    DerivingVia
+    MultiWayIf
+    ScopedTypeVariables
+
+  build-depends: base >=4.7 && <5
+
+library
+  import: defaults
+  build-depends:
+    bound,
+    data-fix,
+    dlist,
+    equational-reasoning,
+    generic-lens,
+    ghc-typelits-knownnat,
+    ghc-typelits-presburger,
+    hashable,
+    lens,
+    recursion-schemes,
+    sized,
+    transformers,
+    type-natural,
+    unordered-containers,
+    vector,
+
+  hs-source-dirs: src
+  -- cabal-gild: discover src --exclude=src/**/Internal.hs --exclude=src/**/Internal/**/*.hs
+  exposed-modules:
+    Data.Multiset
+    Language.Praxis.PRA.PrimitiveRecursion
+    Language.Praxis.PRA.Proof
+    Language.Praxis.PRA.Syntax
+
+  -- cabal-gild: discover src --include=src/**/Internal.hs --include=src/**/Internal/**/*.hs
+  other-modules:
+
+executable praxis-core
+  import: defaults
+  hs-source-dirs: app
+  main-is: Main.hs
+  -- cabal-gild: discover app --exclude=app/Main.hs
+  other-modules:
+  ghc-options:
+    -threaded
+    -rtsopts
+    -with-rtsopts=-N
+
+  build-depends: praxis-core
+
+test-suite praxis-core-test
+  import: defaults
+  type: exitcode-stdio-1.0
+  main-is: Test.hs
+  hs-source-dirs: test
+  -- cabal-gild: discover test --exclude=test/Test.hs
+  other-modules:
+  ghc-options:
+    -threaded
+    -O2
+    -rtsopts
+    -with-rtsopts=-N
+
+  build-depends: praxis-core
+
+test-suite praxis-core-doctest
+  import: defaults
+  type: exitcode-stdio-1.0
+  hs-source-dirs: doctest
+  main-is: DocTest.hs
+  ghc-options:
+    -threaded
+    -rtsopts
+    -O2
+    -with-rtsopts=-N
+
+  build-depends:
+    doctest-parallel,
+    praxis-core,
