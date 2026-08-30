@@ -82,13 +82,20 @@ instance Substitutable Term where
 instance Substitutable Atomic where
   subst x t (t1 :=== t2) = subst x t t1 :=== subst x t t2
 
+instance Substitutable Formula where
+  subst x t (Atm p) = Atm $ subst x t p
+  subst x t (f1 :/\ f2) = subst x t f1 :/\ subst x t f2
+  subst x t (f1 :\/ f2) = subst x t f1 :\/ subst x t f2
+  subst x t (f1 :==> f2) = subst x t f1 :==> subst x t f2
+  subst _ _ Bot = Bot
+
 data Formula a
   = Atm !(Atomic a)
   | !(Formula a) :/\ !(Formula a)
   | !(Formula a) :\/ !(Formula a)
   | !(Formula a) :==> !(Formula a)
   | Bot
-  deriving (Show, Eq, Generic)
+  deriving (Show, Eq, Generic, Functor)
   deriving anyclass (Hashable)
 
 (===) :: Term a -> Term a -> Formula a

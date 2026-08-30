@@ -183,6 +183,15 @@ inferSequent = runInferenceMachine . cata infer
       γ :|- b <- asSubproof 0 prf
       discharge (MissingPremise a γ) a γ
       pure $ γ |- a ==> b
+    infer0 (SubstF x t s p prf) = do
+      let p' = Atm p
+          pt = subst x t p'
+          ps = subst x s p'
+      γ :|- c <- asSubproof 0 prf
+      γ' <- discharge (MissingPremise (t === s) γ) (t === s) γ
+      γ'' <- discharge (MissingPremise pt γ') pt γ'
+      γ''' <- discharge (MissingPremise ps γ'') ps γ''
+      pure $ MS.insertOne (t === s) (MS.insertOne pt γ''') |- c
 
 -- TODO: more efficient and direct implementation.
 isProofOf :: (Hashable a) => Proof a -> Sequent a -> Bool
