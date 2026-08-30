@@ -19,6 +19,7 @@ module Language.Praxis.PRA.Syntax (
   ProofF (..),
   RuleName (..),
   HasRuleName (..),
+  Substitutable (..),
 ) where
 
 import Data.Functor.Foldable.TH (MakeBaseFunctor (makeBaseFunctor))
@@ -40,6 +41,12 @@ data Term a where
 
 deriving instance (Show a) => Show (Term a)
 
+deriving instance Functor Term
+
+deriving instance Foldable Term
+
+deriving instance Traversable Term
+
 instance (Hashable a) => Hashable (Term a) where
   hashWithSalt salt (Var x) = hashWithSalt salt (0 :: Int, x)
   hashWithSalt salt (Lit n) = hashWithSalt salt (1 :: Int, n)
@@ -59,8 +66,21 @@ instance (Eq a) => Eq (Term a) where
 infix 6 :$
 
 data Atomic a = !(Term a) :=== !(Term a)
-  deriving (Show, Eq, Generic)
+  deriving (Show, Eq, Generic, Functor, Foldable, Traversable)
   deriving anyclass (Hashable)
+
+class (Functor t) => Substitutable t where
+  subst :: (Eq a) => a -> Term a -> t a -> t a
+
+instance Substitutable Term where
+  subst x t (Var y)
+    | x == y = t
+    | otherwise = Var y
+  subst _ _ (Lit n) = Lit n
+  subst x t (f :$ xs) = f :$ fmap (subst x t) xs
+
+instance Substitutable Atomic where
+  subst x t (t1 :=== t2) = subst x t t1 :=== subst x t t2
 
 data Formula a
   = Atm !(Atomic a)
@@ -221,14 +241,30 @@ data Proof a
       Definitional equality:
 
       @
-            s ≡ t
-        ------------- Defeq(s, t; Γ)
-        Γ |- s === t
+                 :
+                 P
+                 :
+               Γ |- C
+        ------------- Defeq(s, t; P)
+        s ≡ t, Γ |- C
       @
 
       where, @≡@ is the definitional equality of terms, checked by the trusted evaluator of primitive-recursive functions.
     -}
-    Defeq !(Term a) !(Term a) !(Multiset (Formula a))
+    Defeq !(Term a) !(Term a) !(Proof a)
+  | {- |
+      Substitution rule (for P: atomic):
+
+      @
+          :
+          P
+          :
+        t = s, P[x := t], P[x := s], Γ |- C
+        ------------------------------------ 'Subst'(x, t, s; P)
+                   t = s, P[x := t], Γ |- C
+      @
+    -}
+    Subst !a !(Term a) !(Term a) !(Atomic a) !(Proof a)
   deriving (Show, Eq)
 
 makeBaseFunctor ''Proof
