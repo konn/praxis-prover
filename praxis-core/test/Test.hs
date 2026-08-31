@@ -11,6 +11,8 @@ import Data.Sized (pattern Nil, pattern (:<))
 import Data.Type.Ordinal (od)
 import Language.Praxis.PRA.Equality
 import Language.Praxis.PRA.PrimitiveRecursion
+import Language.Praxis.PRA.PrimitiveRecursion.Examples
+import Language.Praxis.PRA.ProofTest (proofTests)
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural
 import Test.Tasty
@@ -26,25 +28,8 @@ main =
       , normalizeTests
       , defEqTests
       , fuelTests
+      , proofTests
       ]
-
--- * A small library of codes to test against
-
--- | @predC n = n - 1@, truncated at zero.
-predC :: PRFCode 1
-predC = Rec Zero (Proj [od|0|])
-
--- | @plus (y, x) = y + x@, by recursion on @y@.
-plus :: PRFCode 2
-plus = Rec (Proj [od|0|]) (Comp Succ (Proj [od|1|] :< Nil))
-
--- | @mult (y, x) = y * x@, by recursion on @y@.
-mult :: PRFCode 2
-mult = Rec Zero (Comp plus (Proj [od|1|] :< Proj [od|2|] :< Nil))
-
--- | @expo (y, x) = x ^ y@, by recursion on @y@.
-expo :: PRFCode 2
-expo = Rec (Comp Succ (Zero :< Nil)) (Comp mult (Proj [od|1|] :< Proj [od|2|] :< Nil))
 
 -- | Every term below is closed, so no environment is ever consulted.
 noFreeVars :: String -> Natural
