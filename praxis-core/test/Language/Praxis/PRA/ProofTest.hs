@@ -20,7 +20,7 @@ import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Sized (pattern Nil, pattern (:<))
 import Data.Type.Ordinal (od)
-import Language.Praxis.PRA.PrimitiveRecursion
+import Language.Praxis.PRA.PrimitiveRecursion hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Examples (mult, plus)
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Syntax
@@ -102,7 +102,7 @@ conjLTests =
     , testCase "discharges each conjunct once when they coincide" $
         inferConclusion (ConjL a a (Id pA (ctx [a]))) @?= Right (ctx [a /\ a] |- a)
     , testCase "rejects a premise lacking a conjunct" $
-        reasons (ConjL a c (Id pA (ctx [b]))) @?= [MissingPremise c (ctx [b])]
+        reasons (ConjL a c (Id pA (ctx [b]))) @?= [MissingAssumption c (ctx [b])]
     ]
 
 conjRTests :: TestTree
@@ -114,7 +114,7 @@ conjRTests =
           @?= Right (ctx [a] |- a /\ (b \/ a))
     , testCase "rejects branches whose contexts differ" $
         reasons (ConjR (Id pA MS.empty) (Id pB MS.empty))
-          @?= [PremiseMismatch (ctx [a]) (ctx [b])]
+          @?= [AssumptionMismatch (ctx [a]) (ctx [b])]
     ]
 
 disjLTests :: TestTree
@@ -126,13 +126,13 @@ disjLTests =
           @?= Right (ctx [a \/ b, c] |- c)
     , testCase "rejects branches proving different conclusions" $
         reasons (DisjL a b (Id pC (ctx [a])) (DisjR1 a (Id pC (ctx [b]))))
-          @?= [ConclusionMismatch c (a \/ c)]
+          @?= [ConsequentMismatch c (a \/ c)]
     , testCase "rejects branches whose remaining contexts differ" $
         reasons (DisjL a b (Id pC (ctx [a])) (Id pC (ctx [b, a])))
-          @?= [PremiseMismatch (ctx [c]) (ctx [c, a])]
+          @?= [AssumptionMismatch (ctx [c]) (ctx [c, a])]
     , testCase "rejects a branch lacking its disjunct" $
         reasons (DisjL a b (Id pC (ctx [a])) (Id pC (ctx [a])))
-          @?= [MissingPremise b (ctx [c, a])]
+          @?= [MissingAssumption b (ctx [c, a])]
     ]
 
 disjRTests :: TestTree
@@ -154,13 +154,13 @@ implLTests =
           @?= Right (ctx [a ==> b, a] |- b)
     , testCase "rejects a left branch proving the wrong antecedent" $
         reasons (ImplL a b (Id pC (ctx [a ==> b])) (Id pB (ctx [c])))
-          @?= [ConclusionMismatch a c]
+          @?= [ConsequentMismatch a c]
     , testCase "rejects a left branch lacking the implication" $
         reasons (ImplL a b (Id pA MS.empty) (Id pB MS.empty))
-          @?= [MissingPremise (a ==> b) (ctx [a])]
+          @?= [MissingAssumption (a ==> b) (ctx [a])]
     , testCase "rejects branches whose remaining contexts differ" $
         reasons (ImplL a b (Id pA (ctx [a ==> b])) (Id pB MS.empty))
-          @?= [PremiseMismatch (ctx [a]) MS.empty]
+          @?= [AssumptionMismatch (ctx [a]) MS.empty]
     ]
 
 implRTests :: TestTree
@@ -172,7 +172,7 @@ implRTests =
     , testCase "discharges only the antecedent" $
         inferConclusion (ImplR a (Id pB (ctx [a]))) @?= Right (ctx [b] |- a ==> b)
     , testCase "rejects a premise lacking the antecedent" $
-        reasons (ImplR b (Id pA MS.empty)) @?= [MissingPremise b (ctx [a])]
+        reasons (ImplR b (Id pA MS.empty)) @?= [MissingAssumption b (ctx [a])]
     ]
 
 -- | @'Succ' 4@, definitionally but not syntactically the numeral @5@.
@@ -207,7 +207,7 @@ defeqTests =
           @?= [EqualityCheckFailed (Lit 5) (Lit 4)]
     , testCase "rejects a premise lacking the equation" $
         reasons (Defeq (Lit 5) (Lit 5) (Id pA MS.empty))
-          @?= [MissingPremise (Lit 5 === Lit 5) (ctx [a])]
+          @?= [MissingAssumption (Lit 5 === Lit 5) (ctx [a])]
     ]
 
 -- | Open arguments, so that a rule can only fire by its defining equation.
@@ -277,7 +277,7 @@ substTests =
           @?= Right (ctx [Lit 1 === Lit 1, one0] |- Lit 1 === Lit 1)
     , testCase "rejects a premise lacking the substituted instance" $
         reasons (Subst "n" (Lit 1) (Lit 2) substP (Id (Lit 1 :=== Lit 0) (ctx [eq12])))
-          @?= [MissingPremise two0 MS.empty]
+          @?= [MissingAssumption two0 MS.empty]
     ]
 
 errorContextTests :: TestTree

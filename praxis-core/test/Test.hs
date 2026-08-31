@@ -13,7 +13,7 @@ import Language.Praxis.PRA.Equality
 import Language.Praxis.PRA.PrimitiveRecursion
 import Language.Praxis.PRA.PrimitiveRecursion.Examples
 import Language.Praxis.PRA.ProofTest (proofTests)
-import Language.Praxis.PRA.Syntax
+import Language.Praxis.PRA.Syntax hiding (suc)
 import Numeric.Natural
 import Test.Tasty
 import Test.Tasty.HUnit
