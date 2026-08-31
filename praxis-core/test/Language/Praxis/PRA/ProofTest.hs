@@ -4,7 +4,7 @@
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 
 {- |
-Coverage for 'inferSequent'.
+Coverage for 'inferConclusion'.
 
 Every rule is exercised in both directions: the sequent it must infer from a
 well-formed premise, and the reason it must report when its side condition
@@ -30,7 +30,7 @@ import Test.Tasty.HUnit
 proofTests :: TestTree
 proofTests =
   testGroup
-    "inferSequent"
+    "inferConclusion"
     [ idTests
     , exFalsoTests
     , conjLTests
@@ -65,20 +65,20 @@ ctx = foldr MS.insertOne MS.empty
 
 -- | The reasons reported by a rejected proof; empty if it was accepted.
 reasons :: Proof String -> [ProofErrorReason String]
-reasons = either (map reason . NE.toList) (const []) . inferSequent
+reasons = either (map reason . NE.toList) (const []) . inferConclusion
 
 -- | The rule stack each reported error was raised under, innermost first.
 errorContexts :: Proof String -> [NonEmpty ProofContext]
-errorContexts = either (map context . NE.toList) (const []) . inferSequent
+errorContexts = either (map context . NE.toList) (const []) . inferConclusion
 
 idTests :: TestTree
 idTests =
   testGroup
     "Id"
     [ testCase "concludes its own atom against the extended context" $
-        inferSequent (Id pA (ctx [b])) @?= Right (ctx [a, b] |- a)
+        inferConclusion (Id pA (ctx [b])) @?= Right (ctx [a, b] |- a)
     , testCase "the principal formula is added, not merged" $
-        inferSequent (Id pA (ctx [a])) @?= Right (ctx [a, a] |- a)
+        inferConclusion (Id pA (ctx [a])) @?= Right (ctx [a, a] |- a)
     ]
 
 exFalsoTests :: TestTree
@@ -86,9 +86,9 @@ exFalsoTests =
   testGroup
     "ExFalso"
     [ testCase "concludes anything from an absurd context" $
-        inferSequent (ExFalso (ctx [a]) b) @?= Right (ctx [Bot, a] |- b)
+        inferConclusion (ExFalso (ctx [a]) b) @?= Right (ctx [Bot, a] |- b)
     , testCase "the context may already contain an absurdity" $
-        inferSequent (ExFalso (ctx [Bot]) a) @?= Right (ctx [Bot, Bot] |- a)
+        inferConclusion (ExFalso (ctx [Bot]) a) @?= Right (ctx [Bot, Bot] |- a)
     ]
 
 conjLTests :: TestTree
@@ -96,11 +96,11 @@ conjLTests =
   testGroup
     "ConjL"
     [ testCase "discharges both conjuncts" $
-        inferSequent (ConjL a b (Id pA (ctx [b]))) @?= Right (ctx [a /\ b] |- a)
+        inferConclusion (ConjL a b (Id pA (ctx [b]))) @?= Right (ctx [a /\ b] |- a)
     , testCase "leaves the rest of the context alone" $
-        inferSequent (ConjL a b (Id pC (ctx [a, b]))) @?= Right (ctx [a /\ b, c] |- c)
+        inferConclusion (ConjL a b (Id pC (ctx [a, b]))) @?= Right (ctx [a /\ b, c] |- c)
     , testCase "discharges each conjunct once when they coincide" $
-        inferSequent (ConjL a a (Id pA (ctx [a]))) @?= Right (ctx [a /\ a] |- a)
+        inferConclusion (ConjL a a (Id pA (ctx [a]))) @?= Right (ctx [a /\ a] |- a)
     , testCase "rejects a premise lacking a conjunct" $
         reasons (ConjL a c (Id pA (ctx [b]))) @?= [MissingPremise c (ctx [b])]
     ]
@@ -110,7 +110,7 @@ conjRTests =
   testGroup
     "ConjR"
     [ testCase "accepts branches sharing a context" $
-        inferSequent (ConjR (Id pA MS.empty) (DisjR1 b (Id pA MS.empty)))
+        inferConclusion (ConjR (Id pA MS.empty) (DisjR1 b (Id pA MS.empty)))
           @?= Right (ctx [a] |- a /\ (b \/ a))
     , testCase "rejects branches whose contexts differ" $
         reasons (ConjR (Id pA MS.empty) (Id pB MS.empty))
@@ -122,7 +122,7 @@ disjLTests =
   testGroup
     "DisjL"
     [ testCase "discharges one disjunct from each branch" $
-        inferSequent (DisjL a b (Id pC (ctx [a])) (Id pC (ctx [b])))
+        inferConclusion (DisjL a b (Id pC (ctx [a])) (Id pC (ctx [b])))
           @?= Right (ctx [a \/ b, c] |- c)
     , testCase "rejects branches proving different conclusions" $
         reasons (DisjL a b (Id pC (ctx [a])) (DisjR1 a (Id pC (ctx [b]))))
@@ -140,9 +140,9 @@ disjRTests =
   testGroup
     "DisjR"
     [ testCase "DisjR1 introduces the new disjunct on the left" $
-        inferSequent (DisjR1 b (Id pA MS.empty)) @?= Right (ctx [a] |- b \/ a)
+        inferConclusion (DisjR1 b (Id pA MS.empty)) @?= Right (ctx [a] |- b \/ a)
     , testCase "DisjR2 introduces the new disjunct on the right" $
-        inferSequent (DisjR2 b (Id pA MS.empty)) @?= Right (ctx [a] |- a \/ b)
+        inferConclusion (DisjR2 b (Id pA MS.empty)) @?= Right (ctx [a] |- a \/ b)
     ]
 
 implLTests :: TestTree
@@ -150,7 +150,7 @@ implLTests =
   testGroup
     "ImplL"
     [ testCase "keeps the implication and discharges its consequent" $
-        inferSequent (ImplL a b (Id pA (ctx [a ==> b])) (Id pB (ctx [a])))
+        inferConclusion (ImplL a b (Id pA (ctx [a ==> b])) (Id pB (ctx [a])))
           @?= Right (ctx [a ==> b, a] |- b)
     , testCase "rejects a left branch proving the wrong antecedent" $
         reasons (ImplL a b (Id pC (ctx [a ==> b])) (Id pB (ctx [c])))
@@ -168,9 +168,9 @@ implRTests =
   testGroup
     "ImplR"
     [ testCase "discharges the antecedent" $
-        inferSequent (ImplR a (Id pA MS.empty)) @?= Right (MS.empty |- a ==> a)
+        inferConclusion (ImplR a (Id pA MS.empty)) @?= Right (MS.empty |- a ==> a)
     , testCase "discharges only the antecedent" $
-        inferSequent (ImplR a (Id pB (ctx [a]))) @?= Right (ctx [b] |- a ==> b)
+        inferConclusion (ImplR a (Id pB (ctx [a]))) @?= Right (ctx [b] |- a ==> b)
     , testCase "rejects a premise lacking the antecedent" $
         reasons (ImplR b (Id pA MS.empty)) @?= [MissingPremise b (ctx [a])]
     ]
@@ -186,7 +186,7 @@ evaluator identifies @s@ and @t@.
 -}
 unfoldsTo :: Term String -> Term String -> Assertion
 unfoldsTo s t =
-  inferSequent (Defeq s t (Id (s :=== t) MS.empty)) @?= Right (MS.empty |- s === t)
+  inferConclusion (Defeq s t (Id (s :=== t) MS.empty)) @?= Right (MS.empty |- s === t)
 
 -- | The same proof, rejected: reduction finds no common form for @s@ and @t@.
 doesNotUnfoldTo :: Term String -> Term String -> Assertion
@@ -200,7 +200,7 @@ defeqTests =
     [ testCase "proves a definitional equation from no assumptions" $
         sucFour `unfoldsTo` Lit 5
     , testCase "discharges the equation from a larger context" $
-        inferSequent (Defeq (Lit 5) (Lit 5) (Id pA (ctx [Lit 5 === Lit 5])))
+        inferConclusion (Defeq (Lit 5) (Lit 5) (Id pA (ctx [Lit 5 === Lit 5])))
           @?= Right (ctx [a] |- a)
     , testCase "rejects an equation reduction does not decide" $
         reasons (Defeq (Lit 5) (Lit 4) (Id (Lit 5 :=== Lit 4) MS.empty))
@@ -266,11 +266,11 @@ substTests =
   testGroup
     "Subst"
     [ testCase "keeps the equation and the witness it was substituted into" $
-        inferSequent
+        inferConclusion
           (Subst "n" (Lit 1) (Lit 2) substP (Id (Lit 2 :=== Lit 0) (ctx [eq12, one0])))
           @?= Right (ctx [eq12, one0] |- two0)
     , testCase "discharges both instances when they coincide" $
-        inferSequent
+        inferConclusion
           ( Subst "n" (Lit 1) (Lit 1) substP $
               Id (Lit 1 :=== Lit 1) (ctx [one0, one0])
           )

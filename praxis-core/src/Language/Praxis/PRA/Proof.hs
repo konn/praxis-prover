@@ -9,7 +9,7 @@
 
 module Language.Praxis.PRA.Proof (
   Proof (..),
-  inferSequent,
+  inferConclusion,
   ProofError (..),
   ProofErrorReason (..),
   ProofContext (..),
@@ -137,11 +137,11 @@ discharge ::
   InferenceMachine a (Multiset (Formula a))
 discharge reason f g = fromMaybeM reason $ MS.removeOne f g
 
-inferSequent ::
+inferConclusion ::
   forall a.
   (Hashable a) =>
   Proof a -> Either (NonEmpty (ProofError a)) (Sequent a)
-inferSequent = runInferenceMachine . cata infer
+inferConclusion = runInferenceMachine . cata infer
   where
     infer prf = withRule (ruleName prf) $ infer0 prf
 
@@ -206,4 +206,4 @@ inferSequent = runInferenceMachine . cata infer
 
 -- TODO: more efficient and direct implementation.
 isProofOf :: (Hashable a) => Proof a -> Sequent a -> Bool
-isProofOf prf p = inferSequent prf == Right p
+isProofOf prf p = inferConclusion prf == Right p
