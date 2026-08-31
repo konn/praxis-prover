@@ -6,11 +6,6 @@
 {- |
 Proof trees for the quantifier-free fragment of G3i, and the checker which
 infers what they prove.
-
-Neither the datatype nor the checker is written out here.  Both are compiled
-from "Language.Praxis.PRA.Rule.G3i" by "Language.Praxis.PRA.Rule.TH", so the
-calculus has one source of truth; to see what this module actually declares,
-build it with @-ddump-splices@.
 -}
 module Language.Praxis.PRA.Proof (
   -- * Proofs
