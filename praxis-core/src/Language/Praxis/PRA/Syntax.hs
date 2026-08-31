@@ -180,7 +180,7 @@ data Proof a
     Ex falso quodlibet.
 
     @
-      ---------- 'ExFalso'(Γ, A), if ⊥ ∈ Γ
+      ---------- 'ExFalso'(Γ, A)
       ⊥, Γ |- A
     @
     -}
@@ -285,12 +285,14 @@ data Proof a
                  :
                  P
                  :
-               Γ |- C
-        ------------- Defeq(s, t; P)
         s ≡ t, Γ |- C
+        ------------- 'Defeq'(s, t; P)
+               Γ |- C
       @
 
       where, @≡@ is the definitional equality of terms, checked by the trusted evaluator of primitive-recursive functions.
+      As the equation holds definitionally, it may be discharged from the context; the converse reading would be mere
+      weakening, and would leave no way to conclude @Γ |- s = t@.
     -}
     Defeq !(Term a) !(Term a) !(Proof a)
   | {- |

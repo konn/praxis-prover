@@ -146,27 +146,25 @@ inferSequent = runInferenceMachine . cata infer
     infer prf = withRule (ruleName prf) $ infer0 prf
 
     infer0 (IdF a g) = pure $ MS.insertOne (Atm a) g |- Atm a
-    infer0 (ExFalsoF g c) = do
-      failIf (MissingPremise Bot g) $ Bot `MS.member` g
-      pure $ MS.insertOne Bot g |- c
+    infer0 (ExFalsoF g c) = pure $ MS.insertOne Bot g |- c
     infer0 (ConjLF a b prf) = do
       γ :|- c <- asSubproof 0 prf
       γ' <- discharge (MissingPremise a γ) a γ
-      γ'' <- discharge (MissingPremise b γ) b γ'
+      γ'' <- discharge (MissingPremise b γ') b γ'
       pure $ MS.insertOne (a /\ b) γ'' |- c
     infer0 (ConjRF prf1 prf2) = do
       γ1 :|- a <- asSubproof 0 prf1
       γ2 :|- b <- asSubproof 1 prf2
-      failIf (PremiseMismatch γ1 γ2) $ γ1 == γ2
+      failIf (PremiseMismatch γ1 γ2) $ γ1 /= γ2
       pure $ γ1 |- a /\ b
     infer0 (DisjLF a b prf1 prf2) = do
       γ1 :|- c1 <- asSubproof 0 prf1
       γ1' <- discharge (MissingPremise a γ1) a γ1
       γ2 :|- c2 <- asSubproof 1 prf2
       γ2' <- discharge (MissingPremise b γ2) b γ2
-      failIf (ConclusionMismatch c1 c2) $ c1 == c2
-      failIf (PremiseMismatch γ1' γ2') $ γ1' == γ2'
-      pure $ MS.insertOne (a \/ b) γ1 |- c1
+      failIf (ConclusionMismatch c1 c2) $ c1 /= c2
+      failIf (PremiseMismatch γ1' γ2') $ γ1' /= γ2'
+      pure $ MS.insertOne (a \/ b) γ1' |- c1
     infer0 (DisjR1F a prf) = do
       γ :|- b <- asSubproof 0 prf
       pure $ γ |- a \/ b
@@ -176,19 +174,19 @@ inferSequent = runInferenceMachine . cata infer
     infer0 (ImplLF a b prf1 prf2) = do
       γ1 <- asSubproof 0 do
         γ1 :|- a' <- prf1
-        failIf (ConclusionMismatch a a') $ a == a'
+        failIf (ConclusionMismatch a a') $ a /= a'
         γ1' <- discharge (MissingPremise (a ==> b) γ1) (a ==> b) γ1
         pure γ1'
       (c, γ2) <- asSubproof 1 do
         γ2 :|- c <- prf2
         γ2' <- discharge (MissingPremise b γ2) b γ2
         pure (c, γ2')
-      failIf (PremiseMismatch γ1 γ2) $ γ1 == γ2
+      failIf (PremiseMismatch γ1 γ2) $ γ1 /= γ2
       pure $ MS.insertOne (a ==> b) γ1 |- c
     infer0 (ImplRF a prf) = do
       γ :|- b <- asSubproof 0 prf
-      discharge (MissingPremise a γ) a γ
-      pure $ γ |- a ==> b
+      γ' <- discharge (MissingPremise a γ) a γ
+      pure $ γ' |- a ==> b
     infer0 (SubstF x t s p prf) = do
       let p' = Atm p
           pt = subst x t p'
