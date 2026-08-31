@@ -20,6 +20,9 @@ module Language.Praxis.PRA.Syntax (
   RuleName (..),
   HasRuleName (..),
   Substitutable (..),
+  suc,
+  var,
+  lit,
 ) where
 
 import Control.Lens (prism')
@@ -34,13 +37,25 @@ import Data.Type.Natural hiding (Succ, Zero)
 import Data.Type.Ordinal
 import Data.Vector qualified as V
 import GHC.Generics
-import Language.Praxis.PRA.PrimitiveRecursion
+import Language.Praxis.PRA.PrimitiveRecursion hiding (suc)
 import Numeric.Natural
 
 data Term a where
   Var :: !a -> Term a
   Lit :: !Natural -> Term a
   (:$) :: (KnownNat n) => !(PRFCode n) -> !(V n (Term a)) -> Term a
+
+suc :: Term a -> Term a
+{-# INLINE suc #-}
+suc t = Succ :$ SV.singleton t
+
+lit :: Natural -> Term a
+{-# INLINE lit #-}
+lit = Lit
+
+var :: a -> Term a
+{-# INLINE var #-}
+var = Var
 
 deriving instance (Show a) => Show (Term a)
 
@@ -308,6 +323,43 @@ data Proof a
       @
     -}
     Subst !a !(Term a) !(Term a) !(Atomic a) !(Proof a)
+  | -- PRA-specific axioms
+
+    {- |
+      Non-identity of Succ:
+
+      @
+        -------------------- 'SuccNonZero'(t, Γ, A)
+        Succ t === 0, Γ |- A
+      @
+    -}
+    SuccNonZero !(Term a) !(Multiset (Formula a)) !(Formula a)
+  | {- |
+      Injectivity of Succ:
+
+      @
+                                      :
+                                      P
+                                      :
+        t === s, Succ t === Succ s, Γ |- A
+        ---------------------------------- 'SuccInj'(t, s; P)
+                 Succ t === Succ s, Γ |- A
+      @
+    -}
+    SuccInj !(Term a) !(Term a) !(Proof a)
+  | {- |
+      Quantifier-free induction:
+
+      @
+          P                    Q
+          :                    :
+        Γ |- A[x := 0]    A, Γ |- A[x := Succ x]
+        ------------------------------------------ 'Ind'(x, A, t; P, Q)
+                  Γ |- A[x := t]
+      @
+      where x not free in Γ and t.
+    -}
+    Ind !a !(Formula a) !(Term a) !(Proof a) !(Proof a)
   deriving (Show, Eq)
 
 makeBaseFunctor ''Proof
@@ -324,6 +376,9 @@ data RuleName
   | ImplRRule
   | DefeqRule
   | SubstRule
+  | SuccNonZeroRule
+  | SuccInjRule
+  | IndRule
   deriving (Show, Eq, Generic)
   deriving anyclass (Hashable)
 
@@ -342,6 +397,9 @@ instance HasRuleName (Proof a) where
   ruleName ImplR {} = ImplRRule
   ruleName Defeq {} = DefeqRule
   ruleName Subst {} = SubstRule
+  ruleName SuccNonZero {} = SuccNonZeroRule
+  ruleName SuccInj {} = SuccInjRule
+  ruleName Ind {} = IndRule
 
 instance HasRuleName (ProofF a b) where
   ruleName IdF {} = IdRule
@@ -355,3 +413,6 @@ instance HasRuleName (ProofF a b) where
   ruleName ImplRF {} = ImplRRule
   ruleName DefeqF {} = DefeqRule
   ruleName SubstF {} = SubstRule
+  ruleName SuccNonZeroF {} = SuccNonZeroRule
+  ruleName SuccInjF {} = SuccInjRule
+  ruleName IndF {} = IndRule

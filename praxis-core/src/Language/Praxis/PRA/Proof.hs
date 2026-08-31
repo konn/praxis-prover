@@ -203,6 +203,23 @@ inferConclusion = runInferenceMachine . cata infer
       γ' <- discharge (MissingAssumption (s === t) γ) (s === t) γ
       failIf (EqualityCheckFailed s t) $ not $ defEq s t
       pure $ γ' |- c
+    infer0 (SuccNonZeroF t γ a) = do
+      pure $ MS.insertOne (suc t === lit 0) γ |- a
+    infer0 (SuccInjF t1 t2 prf) = do
+      γ :|- c <- asSubproof 0 prf
+      γ' <- discharge (MissingAssumption (suc t1 === suc t2) γ) (suc t1 === suc t2) γ
+      γ'' <- discharge (MissingAssumption (t1 === t2) γ') (t1 === t2) γ'
+      pure $ MS.insertOne (suc t1 === suc t2) γ'' |- c
+    infer0 (IndF z a t base step) = do
+      let a0 = subst z (lit 0) a
+          aS = subst z (suc (var z)) a
+      γ :|- c1 <- asSubproof 0 base
+      failIf (ConsequentMismatch a0 c1) $ a0 /= c1
+      γ2 :|- c2 <- asSubproof 1 step
+      failIf (ConsequentMismatch aS c2) $ aS /= c2
+      let stepAssumps = MS.insertOne a γ
+      failIf (AssumptionMismatch γ2 stepAssumps) $ γ2 /= stepAssumps
+      pure $ γ |- subst z t a
 
 -- TODO: more efficient and direct implementation.
 isProofOf :: (Hashable a) => Proof a -> Sequent a -> Bool
