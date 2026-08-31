@@ -53,6 +53,7 @@ library
   import: defaults
   build-depends:
     bound,
+    containers,
     data-fix,
     dlist,
     equational-reasoning,
@@ -63,6 +64,7 @@ library
     lens,
     recursion-schemes,
     sized,
+    template-haskell,
     transformers,
     type-natural,
     unordered-containers,
@@ -75,10 +77,14 @@ library
     Language.Praxis.PRA.Equality
     Language.Praxis.PRA.PrimitiveRecursion
     Language.Praxis.PRA.Proof
+    Language.Praxis.PRA.Rule
+    Language.Praxis.PRA.Rule.G3i
+    Language.Praxis.PRA.Rule.TH
+    Language.Praxis.PRA.Rule.TH.Name
     Language.Praxis.PRA.Syntax
 
   -- cabal-gild: discover src --include=src/**/Internal.hs --include=src/**/Internal/**/*.hs
-  other-modules:
+  other-modules: Language.Praxis.PRA.Proof.Internal
 
 executable praxis-core
   import: defaults

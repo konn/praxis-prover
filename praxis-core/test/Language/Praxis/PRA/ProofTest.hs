@@ -284,12 +284,12 @@ errorContextTests :: TestTree
 errorContextTests =
   testGroup
     "error contexts"
-    [ testCase "an error names the rule which raised it" $
+    [ testCase "an error names the rule and the premise which raised it" $
         errorContexts (ConjR (Id pA MS.empty) (Id pB MS.empty))
-          @?= [CheckingRule ConjRRule :| []]
+          @?= [Subproof 1 :| [CheckingRule ConjRRule]]
     , testCase "an error inside a subproof names the enclosing rule" $
         errorContexts (ConjL a b (ConjR (Id pA MS.empty) (Id pB MS.empty)))
-          @?= [CheckingRule ConjRRule :| [Subproof 0, CheckingRule ConjLRule]]
+          @?= [Subproof 1 :| [CheckingRule ConjRRule, Subproof 0, CheckingRule ConjLRule]]
     , testCase "a side condition is reported under the branch it constrains" $
         errorContexts (ImplL a b (Id pA MS.empty) (Id pB MS.empty))
           @?= [Subproof 0 :| [CheckingRule ImplLRule]]
