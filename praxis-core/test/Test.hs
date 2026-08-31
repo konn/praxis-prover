@@ -7,6 +7,7 @@ module Main (main) where
 
 import Control.Lens ((^?))
 import Control.Lens.Extras (is)
+import Data.Hashable (hash)
 import Data.Sized (pattern Nil, pattern (:<))
 import Data.Type.Ordinal (od)
 import Language.Praxis.PRA.Equality
@@ -25,6 +26,7 @@ main =
       "praxis-core"
       [ primitiveRecursionTests
       , evalableTermTests
+      , canonicalTermTests
       , normalizeTests
       , defEqTests
       , fuelTests
@@ -162,4 +164,32 @@ fuelTests =
         evalTerm (const 4) (plus :$ (Lit 2 :< Var "x" :< Nil)) @?= 6
     , testCase "toNatural rejects open terms" $
         toNatural (plus :$ (Lit 2 :< Var "x" :< Nil)) @?= Nothing
+    ]
+
+{- |
+'Term' has two spellings for a numeral — @'Lit' (n + 1)@ and
+@'Succ' ':$' ['Lit' n]@, and @'Lit' 0@ and @'Zero' ':$' _@ — and equality
+identifies them, so a rule which builds one meets a context which spells it the
+other way.  Equality must not go further and /reduce/: that is
+'Language.Praxis.PRA.Equality.defEq'\'s job, and the @Defeq@ rule's, and a
+proof which could bypass it would be unsound.
+-}
+canonicalTermTests :: TestTree
+canonicalTermTests =
+  testGroup
+    "canonical terms"
+    [ testCase "a successor of a numeral is the next numeral" $
+        (Lit 4 :: Term String) == Succ :$ (Lit 3 :< Nil) @?= True
+    , testCase "an application of Zero is zero at every arity" $
+        (Zero :$ (Var "x" :< Nil) :: Term String) == Lit 0 @?= True
+    , testCase "canonicalisation reaches under a residual application" $
+        (Proj [od|0|] :$ ((Succ :$ (Lit 3 :< Nil)) :< Nil) :: Term String)
+          == (Proj [od|0|] :$ (Lit 4 :< Nil))
+          @?= True
+    , testCase "hashing agrees with equality, so contexts merge the two spellings" $
+        hash (Lit 4 :: Term String) == hash (Succ :$ (Lit 3 :< Nil) :: Term String) @?= True
+    , testCase "equality does NOT reduce a redex to its value" $
+        (Proj [od|0|] :$ (Lit 7 :< Nil) :: Term String) == Lit 7 @?= False
+    , testCase "but defEq still decides that redex" $
+        defEq (Proj [od|0|] :$ (Lit 7 :< Nil) :: Term String) (Lit 7) @?= True
     ]

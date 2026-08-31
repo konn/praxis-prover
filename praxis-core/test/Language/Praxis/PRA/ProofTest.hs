@@ -332,6 +332,17 @@ succTests =
     , testCase "SuccInj keeps the successor equation and discharges what it derives" $
         inferConclusion (SuccInj xt yt (Id pA (ctx [suc xt === suc yt, xt === yt])))
           @?= Right (ctx [suc xt === suc yt, a] |- a)
+    , testCase "SuccNonZero meets a context spelling the successor the other way" $
+        inferConclusion (SuccNonZero (Lit 3) (ctx [Succ :$ (Lit 3 :< Nil) === Lit 0]) a)
+          @?= Right (ctx [Lit 4 === Lit 0, Lit 4 === Lit 0] |- a)
+    , testCase "SuccInj discharges a successor equation spelled the other way" $
+        inferConclusion
+          ( SuccInj
+              (Lit 3)
+              (Lit 3)
+              (Id pA (ctx [Succ :$ (Lit 3 :< Nil) === Succ :$ (Lit 3 :< Nil), Lit 3 === Lit 3]))
+          )
+          @?= Right (ctx [Lit 4 === Lit 4, a] |- a)
     , testCase "SuccInj rejects a premise lacking the derived equation" $
         reasons (SuccInj xt yt (Id pA (ctx [suc xt === suc yt])))
           @?= [MissingAssumption (xt === yt) (ctx [a])]
