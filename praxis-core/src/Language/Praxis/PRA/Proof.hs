@@ -55,6 +55,16 @@ data ProofErrorReason a
       !(Term a)
       -- | right
       !(Term a)
+  | TermEigenVariableViolation
+      -- | eigen variable
+      !a
+      -- | term
+      !(Term a)
+  | FormulaEigenVariableViolation
+      -- | eigen variable
+      !a
+      -- | formula
+      !(Formula a)
   deriving (Show, Eq, Generic)
 
 data ProofContext
@@ -211,6 +221,8 @@ inferConclusion = runInferenceMachine . cata infer
       γ'' <- discharge (MissingAssumption (t1 === t2) γ') (t1 === t2) γ'
       pure $ MS.insertOne (suc t1 === suc t2) γ'' |- c
     infer0 (IndF z a t base step) = do
+      failIf (TermEigenVariableViolation z t) $ z `elem` t
+      failIf (FormulaEigenVariableViolation z a) $ z `elem` a
       let a0 = subst z (lit 0) a
           aS = subst z (suc (var z)) a
       γ :|- c1 <- asSubproof 0 base

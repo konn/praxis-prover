@@ -144,7 +144,7 @@ data Formula a
   | !(Formula a) :\/ !(Formula a)
   | !(Formula a) :==> !(Formula a)
   | Bot
-  deriving (Show, Eq, Generic, Functor)
+  deriving (Show, Eq, Generic, Functor, Foldable, Traversable)
   deriving anyclass (Hashable)
 
 (===) :: Term a -> Term a -> Formula a
