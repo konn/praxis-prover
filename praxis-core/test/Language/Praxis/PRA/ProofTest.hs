@@ -42,6 +42,8 @@ proofTests =
     , defeqTests
     , defeqUnfoldingTests
     , substTests
+    , succTests
+    , indTests
     , errorContextTests
     , isProofOfTests
     ]
@@ -305,4 +307,63 @@ isProofOfTests =
         isProofOf (ImplR a (Id pA MS.empty)) (ctx [a] |- a ==> a) @?= False
     , testCase "rejects a proof which does not typecheck at all" $
         isProofOf (ImplR b (Id pA MS.empty)) (MS.empty |- b ==> a) @?= False
+    ]
+
+-- | An open term, so that a successor of it cannot be canonicalised to a numeral.
+xt, yt :: Term String
+xt = Var "x"
+yt = Var "y"
+
+{- |
+The PRA successor axioms.  'suc' canonicalises, so a successor of a numeral is
+the next numeral and only a successor of an open term stays syntactic; both
+readings have to reach the context the rule discharges from.
+-}
+succTests :: TestTree
+succTests =
+  testGroup
+    "Succ axioms"
+    [ testCase "SuccNonZero canonicalises a numeral successor" $
+        inferConclusion (SuccNonZero (Lit 3) MS.empty a)
+          @?= Right (ctx [Lit 4 === Lit 0] |- a)
+    , testCase "SuccNonZero keeps an open successor syntactic" $
+        inferConclusion (SuccNonZero xt MS.empty a)
+          @?= Right (ctx [suc xt === Lit 0] |- a)
+    , testCase "SuccInj keeps the successor equation and discharges what it derives" $
+        inferConclusion (SuccInj xt yt (Id pA (ctx [suc xt === suc yt, xt === yt])))
+          @?= Right (ctx [suc xt === suc yt, a] |- a)
+    , testCase "SuccInj rejects a premise lacking the derived equation" $
+        reasons (SuccInj xt yt (Id pA (ctx [suc xt === suc yt])))
+          @?= [MissingAssumption (xt === yt) (ctx [a])]
+    ]
+
+{- |
+Quantifier-free induction.  @x = x@ is proved at @0@ and carried across the
+successor by 'Defeq' alone, so the conclusion instantiates the eigenvariable at
+an arbitrary closed term.
+-}
+indTests :: TestTree
+indTests =
+  testGroup
+    "Ind"
+    [ testCase "instantiates the induction formula at the target term" $
+        inferConclusion
+          ( Ind
+              "x"
+              (xt === xt)
+              (Lit 5)
+              (Defeq (Lit 0) (Lit 0) (Id (Lit 0 :=== Lit 0) MS.empty))
+              (Defeq (suc xt) (suc xt) (Id (suc xt :=== suc xt) (ctx [xt === xt])))
+          )
+          @?= Right (MS.empty |- Lit 5 === Lit 5)
+    , testCase "rejects an eigenvariable occurring in the target term" $
+        reasons
+          ( Ind
+              "x"
+              (xt === xt)
+              xt
+              (Defeq (Lit 0) (Lit 0) (Id (Lit 0 :=== Lit 0) MS.empty))
+              (Defeq (suc xt) (suc xt) (Id (suc xt :=== suc xt) (ctx [xt === xt])))
+          )
+          @?= [TermEigenVariableViolation "x" xt]
     ]

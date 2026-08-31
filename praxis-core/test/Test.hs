@@ -10,10 +10,10 @@ import Control.Lens.Extras (is)
 import Data.Sized (pattern Nil, pattern (:<))
 import Data.Type.Ordinal (od)
 import Language.Praxis.PRA.Equality
-import Language.Praxis.PRA.PrimitiveRecursion
+import Language.Praxis.PRA.PrimitiveRecursion hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Examples
 import Language.Praxis.PRA.ProofTest (proofTests)
-import Language.Praxis.PRA.Syntax hiding (suc)
+import Language.Praxis.PRA.Syntax
 import Numeric.Natural
 import Test.Tasty
 import Test.Tasty.HUnit

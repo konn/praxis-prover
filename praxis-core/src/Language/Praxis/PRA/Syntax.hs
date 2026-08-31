@@ -21,7 +21,7 @@ module Language.Praxis.PRA.Syntax (
   lit,
 ) where
 
-import Control.Lens (prism')
+import Control.Lens (prism', review)
 import Data.Generics.Labels ()
 import Data.Hashable (Hashable (..))
 import Data.Multiset (Multiset)
@@ -40,9 +40,14 @@ data Term a where
   Lit :: !Natural -> Term a
   (:$) :: (KnownNat n) => !(PRFCode n) -> !(V n (Term a)) -> Term a
 
+{- | The successor, canonicalised: a numeral steps to the next numeral, so a
+syntactic @Succ@ survives only in front of a term which is not itself a
+numeral.  This is the invariant the 'Evalable' instance below documents, and
+which "Language.Praxis.PRA.Equality" decides against.
+-}
 suc :: Term a -> Term a
 {-# INLINE suc #-}
-suc t = Succ :$ SV.singleton t
+suc = review _Succ
 
 lit :: Natural -> Term a
 {-# INLINE lit #-}
