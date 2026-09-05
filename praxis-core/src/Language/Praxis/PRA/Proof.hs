@@ -12,6 +12,11 @@ module Language.Praxis.PRA.Proof (
   Proof (..),
   ProofF (..),
 
+  -- * Steps, generically
+  Arg (..),
+  stepFields,
+  mkStep,
+
   -- * Rules
   RuleName (..),
   HasRuleName (..),
@@ -19,6 +24,7 @@ module Language.Praxis.PRA.Proof (
 
   -- * Checking
   inferConclusion,
+  inferConclusionOpen,
   isProofOf,
 
   -- * Errors
@@ -27,6 +33,7 @@ module Language.Praxis.PRA.Proof (
   ProofContext (..),
 ) where
 
+import Control.Monad.Free (Free, iter)
 import Data.Functor.Foldable (cata)
 import Data.Hashable (Hashable)
 import Data.List.NonEmpty (NonEmpty)
@@ -48,6 +55,20 @@ inferConclusion ::
   Proof a ->
   Either (NonEmpty (ProofError a)) (Sequent a)
 inferConclusion = runInferenceMachine . cata inferStep
+
+{- |
+Infer the sequent an /open/ proof establishes.  The leaves of an open proof are
+assumptions, each standing for the sequent the first argument assigns to it;
+an error raised under a leaf is reported in the context of the premise it sits
+in, as for a closed proof.  'inferConclusion' is the case with no leaves.
+-}
+inferConclusionOpen ::
+  (Hashable a) =>
+  -- | the sequent each leaf is assumed to establish
+  (h -> Sequent a) ->
+  Free (ProofF a) h ->
+  Either (NonEmpty (ProofError a)) (Sequent a)
+inferConclusionOpen leaf = runInferenceMachine . iter inferStep . fmap (pure . leaf)
 
 -- TODO: more efficient and direct implementation.
 isProofOf :: (Hashable a) => Proof a -> Sequent a -> Bool

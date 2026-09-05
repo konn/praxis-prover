@@ -16,6 +16,9 @@ module Language.Praxis.PRA.Proof.Internal (
   RuleName (..),
   HasRuleName (..),
 
+  -- * Steps
+  Arg (..),
+
   -- * Errors
   ProofErrorReason (..),
   ProofContext (..),
@@ -59,6 +62,21 @@ $(deriveRuleName allRules)
 -- | Recover the rule a proof step appeals to.
 class HasRuleName a where
   ruleName :: a -> RuleName
+
+{- |
+A field of a proof step, tagged with its sort: the value-level counterpart of a
+'Language.Praxis.PRA.Rule.Param'.  The generated @stepFields@ and @mkStep@ in
+"Language.Praxis.PRA.Proof" present every step as a rule name applied to its
+arguments and its premises, which is what lets a tool treat the calculus
+uniformly instead of one constructor at a time.
+-}
+data Arg a
+  = ArgVar !a
+  | ArgTerm !(Term a)
+  | ArgAtom !(Atomic a)
+  | ArgForm !(Formula a)
+  | ArgCtx !(Multiset (Formula a))
+  deriving (Show, Eq, Generic)
 
 data ProofErrorReason a
   = MissingAssumption

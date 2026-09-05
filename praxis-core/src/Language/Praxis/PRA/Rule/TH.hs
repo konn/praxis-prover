@@ -8,9 +8,10 @@ This module contains no knowledge of any particular rule.  It is a
 syntax-directed transcription in two halves:
 
 * 'deriveProofSyntax' builds the proof datatype, its base functor, the
-  recursion-schemes instances, the rule-name instances and the runtime rule
-  table.  None of it is semantic — every declaration is a rearrangement of a
-  rule's 'R.ruleParams' and 'R.rulePremises'.
+  recursion-schemes instances, the rule-name instances, the runtime rule
+  table and the generic step view (@stepFields@ and @mkStep@).  None of it is
+  semantic — every declaration is a rearrangement of a rule's 'R.ruleParams'
+  and 'R.rulePremises'.
 
 * 'deriveChecker' builds the checking algebra.  It emits a fixed skeleton per
   rule — collect the premises, match each one, run the side conditions,
@@ -136,11 +137,22 @@ conNameOf r = mkName (R.ruleLabel r)
 conFNameOf :: R.Rule -> Name
 conFNameOf r = mkName (R.ruleLabel r <> "F")
 
-proofTyName, proofFTyName, inferStepName, ruleSpecName :: Name
+proofTyName, proofFTyName, inferStepName, ruleSpecName, stepFieldsName, mkStepName :: Name
 proofTyName = mkName "Proof"
 proofFTyName = mkName "ProofF"
 inferStepName = mkName "inferStep"
 ruleSpecName = mkName "ruleSpec"
+stepFieldsName = mkName "stepFields"
+mkStepName = mkName "mkStep"
+
+-- | The 'Arg' constructor which carries a parameter of the given sort.
+argCon :: R.Param -> Name
+argCon = \case
+  R.PVar _ -> 'ArgVar
+  R.PTerm _ -> 'ArgTerm
+  R.PAtom _ -> 'ArgAtom
+  R.PForm _ -> 'ArgForm
+  R.PCtx _ -> 'ArgCtx
 
 -- | A readable stem for a generated binder, derived from the metavariable it holds.
 stemOf :: R.Param -> String
@@ -235,7 +247,23 @@ deriveProofSyntax rules = do
       , funD ruleSpecName [clause [conP (ruleNameCon rule) []] (normalB (lift rule)) [] | rule <- rules]
       ]
 
-  pure (dataDecs <> instanceDecs <> ruleSpecDecs)
+  addModFinalizer $
+    putDoc
+      (DeclDoc stepFieldsName)
+      "The arguments and the premises of a step, in the order of the rule's parameters and premises.  Inverse to 'mkStep'."
+  addModFinalizer $
+    putDoc
+      (DeclDoc mkStepName)
+      "Assemble a step from a rule name, its arguments and its premises; 'Nothing' when the arguments do not have the sorts and the number the rule's parameters demand, or the premises are miscounted."
+  stepDecs <-
+    sequence
+      [ sigD stepFieldsName [t|forall a r. $(conT proofFTyName) a r -> ([Arg a], [r])|]
+      , funD stepFieldsName (map fieldsClause rules)
+      , sigD mkStepName [t|forall a r. RuleName -> [Arg a] -> [r] -> Maybe ($(conT proofFTyName) a r)|]
+      , funD mkStepName (map buildClause rules <> [clause [wildP, wildP, wildP] (normalB [|Nothing|]) []])
+      ]
+
+  pure (dataDecs <> instanceDecs <> ruleSpecDecs <> stepDecs)
   where
     stock = derivClause (Just StockStrategy)
     nameMatch con rule =
@@ -244,6 +272,33 @@ deriveProofSyntax rules = do
     conversion from to ar rule = do
       xs <- traverse (const (newName "x")) [1 .. ar rule]
       match (conP (from rule) (map varP xs)) (normalB (foldl appE (conE (to rule)) (map varE xs))) []
+    fieldNames rule = do
+      ps <- traverse (newName . stemOf) (R.ruleParams rule)
+      ds <- traverse (\i -> newName ("d" <> show i)) [1 .. length (R.rulePremises rule)]
+      pure (ps, ds)
+    -- @ConjLF a b d -> ([ArgForm a, ArgForm b], [d])@
+    fieldsClause rule = do
+      (ps, ds) <- fieldNames rule
+      clause
+        [conP (conFNameOf rule) (map varP (ps <> ds))]
+        ( normalB
+            ( tupE
+                [ listE [conE (argCon p) `appE` varE n | (p, n) <- zip (R.ruleParams rule) ps]
+                , listE (map varE ds)
+                ]
+            )
+        )
+        []
+    -- @ConjLRule [ArgForm a, ArgForm b] [d] -> Just (ConjLF a b d)@
+    buildClause rule = do
+      (ps, ds) <- fieldNames rule
+      clause
+        [ conP (ruleNameCon rule) []
+        , listP [conP (argCon p) [varP n] | (p, n) <- zip (R.ruleParams rule) ps]
+        , listP (map varP ds)
+        ]
+        (normalB [|Just $(foldl appE (conE (conFNameOf rule)) (map varE (ps <> ds)))|])
+        []
 
 -- * The checker
 
