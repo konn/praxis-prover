@@ -24,6 +24,7 @@ import Language.Praxis.PRA.Syntax.Parser
 import Language.Praxis.PRA.Syntax.Pretty
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
+import Language.Praxis.PRA.Tactic.Quote (schemaScope)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -351,6 +352,16 @@ declarationTests =
           (const (pure ()))
           (const (assertFailure "accepted"))
           (parseDecls (plainMetaScope sig) "rule r (A : formula) : A |- A by assumption")
+    , testCase "atomic metavariables parse in primitive and derived tactic arguments" $ do
+        let scope = schemaScope sig [("P", AtomS), ("Q", AtomS)]
+        mapM_
+          (parsed . parseTactic scope)
+          ["Id (P)", "Subst x t s (P)", "symmetry (P)", "rewrite P in (Q)"]
+    , testCase "formula and context metavariables are refused in atomic positions" $ do
+        let scope = schemaScope sig [("A", FormS), ("G", CtxS)]
+        mapM_
+          (\src -> either (const (pure ())) (const (assertFailure ("accepted " <> src))) (parseTactic scope src))
+          ["Id (A)", "Subst x t s (A)", "symmetry A", "rewrite A in (A)", "Id (G)"]
     ]
   where
     source =

@@ -7,6 +7,7 @@ results to the checker, which is what the certification promises will succeed.
 -}
 module Language.Praxis.PRA.QuoteTest (quoteTests) where
 
+import Control.Monad (forM_)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Language.Praxis.PRA.Proof
@@ -30,6 +31,19 @@ by induction y as n
 
 rule symm (t s : term) (Γ : ctx) : t = s, Γ |- s = t
 by Defeq t t; Subst x t s (x = t); Id
+
+rule symmFixed (t s : term) : x = x, t = s |- s = t
+by Defeq t t; Subst x t s (x = t); Id
+
+rule symmPremise (t s : term) (D : x = x, t = s, t = t, s = t |- s = t)
+  : x = x, t = s |- s = t
+by Defeq t t; Subst x t s (x = t); exact D
+
+rule identityAtom (P : atom) : P |- P
+by Id (P)
+
+rule substAtom (P : atom) (t s : term) : x = x, t = s, P |- P
+by Subst x t s (P); Id (P)
 
 rule trans (t s u : term) (Γ : ctx) : t = s, s = u, Γ |- t = u
 by Subst x s u (t = x); Id
@@ -67,6 +81,21 @@ quoteTests =
     , testCase "the internal variable of a rule avoids the arguments" $
         inferConclusion (symm (Var "x") (Var "x'") (ctx ["x = x'"]))
           @?= Right (sequent "x = x', x = x' |- x' = x")
+    , testCase "a substitution placeholder is fresh even when its name is in the statement" $
+        forM_ [Var "a", Var "x", Var "x'", suc (Var "x"), Lit 0] $ \t ->
+          forM_ [Var "x", Var "x'", Lit 0] $ \s ->
+            inferConclusion (symmFixed t s)
+              @?= Right (MS.insertOne (t === s) (ctx ["x = x"]) :|- s === t)
+    , testCase "freshening a substitution preserves free variables in a premise" $
+        inferConclusion
+          (symmPremise (Var "x") (Lit 0) (Id (Lit 0 :=== Var "x") (ctx ["x = x", "x = 0", "x = x"])))
+          @?= Right (sequent "x = x, x = 0 |- 0 = x")
+    , testCase "an explicit atom metavariable instantiates under Id" $
+        inferConclusion (identityAtom (Var "x" :=== Lit 0))
+          @?= Right (sequent "x = 0 |- x = 0")
+    , testCase "Subst does not capture names inside an explicit atom metavariable" $
+        inferConclusion (substAtom (Var "x" :=== Lit 0) (Var "a") (Var "b"))
+          @?= Right (sequent "x = x, a = b, x = 0 |- x = 0")
     , testCase "transitivity" $
         inferConclusion (trans (Var "a") (Var "b") (Lit 1) MS.empty)
           @?= Right (sequent "a = b, b = 1 |- a = 1")

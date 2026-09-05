@@ -39,6 +39,9 @@ A rule is checked once, with its metavariables opaque, and is valid for every
 instantiation by the substitution property of the rules: a metavariable of
 sort @term@ is an opaque variable, and one of sort @atom@, @formula@ or @ctx@
 an opaque atom, which the lifter turns back into the parameter.  The object
+variable bound by each @Subst@ template is renamed independently of free
+occurrences in the statement or premises before lifting, so instantiation
+cannot introduce occurrences that the substitution would capture.  The object
 variables a rule's script introduces — the @x@ of a @Subst@, the eigenvariable
 of an @Ind@ — are chosen at run time, fresh for the names in the actual
 arguments, which is what keeps them valid.  A metavariable of sort @var@ is
@@ -150,6 +153,9 @@ schemaScope sig metas =
         Just s
           | s `elem` [R.VarS, R.TermS] -> Right (Var (Meta s n))
           | otherwise -> Left (n <> " is a " <> sortName s <> " metavariable, not a term")
+    , scopeAtomic = \n -> case lookup n metas of
+        Just R.AtomS -> Just (metaAtom R.AtomS n)
+        _ -> Nothing
     , scopeFormula = \n -> case lookup n metas of
         Just s | s `elem` [R.AtomS, R.FormS] -> Just (Atm (metaAtom s n))
         _ -> Nothing
@@ -194,7 +200,7 @@ compileDecl sig decl = do
       prems = Map.fromList [(n, s) | PremiseBinder n s <- binders]
   unless (startsLower dname) $
     fail ("pra: " <> dname <> " is not a Haskell variable name")
-  proof <-
+  checked <-
     either (fail . renderTacticError sig renderSchemaName) pure $
       proveOpen prems (declGoal decl) (declTactic decl)
 
@@ -206,6 +212,7 @@ compileDecl sig decl = do
   -- The object variables the script introduces, to be chosen fresh at run
   -- time when there are metavariables whose instantiations could clash.
   let stated = HS.unions (map schemaNames (declGoal decl : Map.elems prems))
+      proof = freshenSubstitutions stated checked
       internal = sort [s | Obj s <- HS.toList (proofNames proof), not (Obj s `HS.member` stated)]
       runtimeFresh = not (null metas) && not (null internal)
   internalNames <- traverse (newName . stem) internal
@@ -302,6 +309,23 @@ proofNames = iter step . fmap (const HS.empty)
       ArgAtom p -> HS.fromList (toList p)
       ArgForm f -> HS.fromList (toList f)
       ArgCtx g -> HS.fromList (foldMap toList g)
+
+{- |
+Alpha-rename the variable bound by each substitution template.  Renaming the
+whole proof would also change free occurrences in the statement and premises;
+leaving the binder unchanged would let it capture names inside metavariables
+when those are instantiated.  The new names are internal, so the runtime
+freshening in 'compileDecl' also keeps them apart from the actual arguments.
+-}
+freshenSubstitutions :: HashSet SchemaName -> Free (ProofF SchemaName) h -> Free (ProofF SchemaName) h
+freshenSubstitutions stated proof = go proof
+  where
+    used = stated <> proofNames proof
+    go (Pure h) = Pure h
+    go (Free (SubstF x t s p d)) =
+      let x' = freshen used x
+       in Free (SubstF x' t s (subst x (Var x') p) (go d))
+    go (Free step) = Free (fmap go step)
 
 -- | The inference figure attached to a generated binding.
 figure :: Signature -> Decl SchemaName -> String

@@ -103,6 +103,8 @@ data Scope a = Scope
   -- ^ an identifier standing for an object variable, as in @Subst x …@
   , scopeTerm :: String -> Either String (Term a)
   -- ^ an identifier in term position which is not a symbol
+  , scopeAtomic :: String -> Maybe (Atomic a)
+  -- ^ an identifier standing alone as an atom, excluding formula metavariables
   , scopeFormula :: String -> Maybe (Formula a)
   -- ^ an identifier standing alone as a formula
   , scopeContext :: String -> Maybe (Formula a)
@@ -117,6 +119,7 @@ plainScope sig =
     , scopeReserved = []
     , scopeVariable = Right
     , scopeTerm = Right . Var
+    , scopeAtomic = const Nothing
     , scopeFormula = const Nothing
     , scopeContext = const Nothing
     }
@@ -238,7 +241,11 @@ termP sc =
 -- * Formulae
 
 atomicP :: Scope a -> Parser (Atomic (Hole a))
-atomicP sc = (:===) <$> termP sc <* equalsP <*> termP sc
+atomicP sc = metaAtomicP <|> ((:===) <$> termP sc <* equalsP <*> termP sc)
+  where
+    metaAtomicP = try do
+      name <- identifierP sc
+      maybe (fail "not an atom") (pure . fmap Named) (scopeAtomic sc name)
 
 formulaP :: Scope a -> Parser (Formula (Hole a))
 formulaP sc = implP
