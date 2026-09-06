@@ -10,6 +10,7 @@ import Control.Lens.Extras (is)
 import Data.Hashable (hash)
 import Data.Sized (pattern Nil, pattern (:<))
 import Data.Type.Ordinal (od)
+import Language.Praxis.PRA.ElaborationTest (elaborationTests)
 import Language.Praxis.PRA.Equality
 import Language.Praxis.PRA.PrimitiveRecursion hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Examples
@@ -26,7 +27,8 @@ main =
   defaultMain $
     testGroup
       "praxis-core"
-      [ primitiveRecursionTests
+      [ elaborationTests
+      , primitiveRecursionTests
       , evalableTermTests
       , canonicalTermTests
       , normalizeTests

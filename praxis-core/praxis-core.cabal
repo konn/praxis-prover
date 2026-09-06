@@ -67,6 +67,7 @@ library
     recursion-schemes,
     sized,
     template-haskell,
+    text,
     transformers,
     type-natural,
     unordered-containers,
@@ -79,6 +80,7 @@ library
     Language.Praxis.PRA.Equality
     Language.Praxis.PRA.Pattern
     Language.Praxis.PRA.PrimitiveRecursion
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration
     Language.Praxis.PRA.Proof
     Language.Praxis.PRA.Rule
     Language.Praxis.PRA.Rule.G3i
@@ -115,6 +117,7 @@ test-suite praxis-core-test
   hs-source-dirs: test
   -- cabal-gild: discover test --exclude=test/Test.hs
   other-modules:
+    Language.Praxis.PRA.ElaborationTest
     Language.Praxis.PRA.PrimitiveRecursion.Examples
     Language.Praxis.PRA.ProofTest
     Language.Praxis.PRA.QuoteSignature
