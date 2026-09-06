@@ -8,6 +8,7 @@ Renaming checks scope and arity; it does not compile recursion to PRF codes.
 module Language.Praxis.PRA.PrimitiveRecursion.Elaboration (
   Equation (..),
   Pattern (..),
+  IrrelevantName (..),
   EqTerm (..),
   Function (..),
   SomeFunction (..),
@@ -37,15 +38,13 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration (
 
 import Control.Monad (foldM, void)
 import Data.Hashable (Hashable (..))
-import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
-import Data.Set (Set)
-import Data.Set qualified as Set
 import Data.Sized qualified as SV
 import Data.String (IsString)
 import Data.Text qualified as T
+import Data.Type.Ordinal (Ordinal, enumOrdinal)
 import Data.Void (Void)
 import GHC.Generics (Generic)
 import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal)
@@ -66,7 +65,7 @@ data Equation name = Equation
   deriving anyclass (Hashable)
 
 data Pattern name = VarP !name | SuccP !(Pattern name) | ZeroP
-  deriving (Show, Eq, Ord, Generic)
+  deriving (Show, Eq, Ord, Functor, Generic)
   deriving anyclass (Hashable)
 
 -- | Unresolved syntax: identifiers have no variable/function distinction.
@@ -90,22 +89,30 @@ deriving instance Show SomeFunction
 
 type Env = Map T.Text SomeFunction
 
-{- | Each application carries a vector of exactly the callee's arity.
-Variables retain their textual names from the source patterns.
+{- | A term in a context of @n@ argument slots. Variables use zero-based
+indices in left-to-right argument order. A variable beneath 'SuccP' refers
+to the predecessor bound by that pattern, at the same argument slot;
+'ZeroP' binds no variable. Each application independently carries a vector
+of exactly the callee's arity.
 -}
-data FunctionalTerm
+data FunctionalTerm n
   = LitFT !Natural
-  | VarFT !T.Text
-  | forall n. (KnownNat n) => AppFT !(Function n) !(V n FunctionalTerm)
+  | VarFT !(Ordinal n)
+  | forall m. (KnownNat m) => AppFT !(Function m) !(V m (FunctionalTerm n))
 
-deriving instance Show FunctionalTerm
+deriving instance (KnownNat n) => Show (FunctionalTerm n)
 
-data RenamedEquation = RenamedEquation
+{- | The existential arity ties the pattern vector to the body's index bound.
+Pattern names are retained for display only. The renamer only introduces
+indices for slots containing a variable, including beneath successors.
+-}
+data RenamedEquation = forall n. (KnownNat n) => RenamedEquation
   { renamedName :: !T.Text
-  , renamedArgs :: ![Pattern T.Text]
-  , renamedClause :: !FunctionalTerm
+  , renamedArgs :: !(V n (Pattern IrrelevantName))
+  , renamedClause :: !(FunctionalTerm n)
   }
-  deriving (Show)
+
+deriving instance Show RenamedEquation
 
 {- | Existing symbols, with S and Succ as built-in successor aliases.
 Explicit signature entries take precedence over the aliases.
@@ -135,12 +142,12 @@ equationEnv initial equations = (<> initial) <$> foldM add Map.empty equations
         arity = fromIntegral (length (args eq))
 
 -- | Local variables shadow global functions and cannot be applied.
-renameTerm :: Env -> Set T.Text -> EqTerm T.Text -> Either String FunctionalTerm
+renameTerm :: Env -> Map T.Text (Ordinal n) -> EqTerm T.Text -> Either String (FunctionalTerm n)
 renameTerm env locals term = case spine term [] of
   (LitET n, []) -> Right (LitFT n)
   (NameET ident, arguments)
-    | Set.member ident locals ->
-        if null arguments then Right (VarFT ident) else Left ("Cannot apply variable " <> T.unpack ident)
+    | Just index <- Map.lookup ident locals ->
+        if null arguments then Right (VarFT index) else Left ("Cannot apply variable " <> T.unpack ident)
     | Just (SomeFunction (fun :: Function n)) <- Map.lookup ident env -> do
         let expected = natVal (Proxy @n)
         if fromIntegral (length arguments) /= expected
@@ -161,21 +168,21 @@ Patterns must be jointly linear: each variable may occur at most once
 across all arguments, including beneath successor patterns.
 -}
 renameEquation :: Env -> Equation T.Text -> Either String RenamedEquation
-renameEquation env eq = do
-  case Map.lookup (name eq) env of
-    Nothing -> Left ("Unknown function: " <> T.unpack (name eq))
-    Just (SomeFunction (_ :: Function n))
-      | natVal (Proxy @n) /= fromIntegral (length (args eq)) -> Left ("Inconsistent arity for " <> T.unpack (name eq))
-      | otherwise -> Right ()
-  locals <- foldM bind Set.empty (args eq)
-  body <- renameTerm env locals (clause eq)
-  pure (RenamedEquation (name eq) (args eq) body)
+renameEquation env eq = case Map.lookup (name eq) env of
+  Nothing -> Left ("Unknown function: " <> T.unpack (name eq))
+  Just (SomeFunction (_ :: Function n)) -> do
+    patterns <- maybe (Left ("Inconsistent arity for " <> T.unpack (name eq))) Right (SV.fromList' (args eq) :: Maybe (V n (Pattern T.Text)))
+    -- enumOrdinal subtracts one from the bound, so it underflows at zero.
+    let indices = if null patterns then [] else enumOrdinal (SV.sLength patterns)
+    locals <- foldM (\locals (index, pat) -> bind index locals pat) Map.empty (zip indices (args eq))
+    body <- renameTerm env locals (clause eq)
+    pure (RenamedEquation (name eq) (fmap (fmap IrrelevantName) patterns) body)
   where
-    bind locals ZeroP = Right locals
-    bind locals (SuccP p) = bind locals p
-    bind locals (VarP ident)
-      | Set.member ident locals = Left ("Nonlinear pattern: repeated variable " <> T.unpack ident)
-      | otherwise = Right (Set.insert ident locals)
+    bind _ locals ZeroP = Right locals
+    bind index locals (SuccP p) = bind index locals p
+    bind index locals (VarP ident)
+      | Map.member ident locals = Left ("Nonlinear pattern: repeated variable " <> T.unpack ident)
+      | otherwise = Right (Map.insert ident index locals)
 
 renameEquations :: Env -> [Equation T.Text] -> Either String [RenamedEquation]
 renameEquations env equations = do
