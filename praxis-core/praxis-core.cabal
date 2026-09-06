@@ -82,6 +82,11 @@ library
     Language.Praxis.PRA.Pattern
     Language.Praxis.PRA.PrimitiveRecursion
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.CaseTree
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
     Language.Praxis.PRA.Proof
     Language.Praxis.PRA.Rule
     Language.Praxis.PRA.Rule.G3i
@@ -96,7 +101,9 @@ library
     Language.Praxis.PRA.Tactic.Quote
 
   -- cabal-gild: discover src --include=src/**/Internal.hs --include=src/**/Internal/**/*.hs
-  other-modules: Language.Praxis.PRA.Proof.Internal
+  other-modules:
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Internal
+    Language.Praxis.PRA.Proof.Internal
 
 executable praxis-core
   import: defaults
@@ -141,6 +148,7 @@ test-suite praxis-core-test
     tasty,
     tasty-hunit,
     template-haskell,
+    text,
     type-natural,
 
 test-suite praxis-core-doctest
