@@ -21,8 +21,8 @@ syntax-directed transcription in two halves:
 The pattern instantiators 'instT', 'instA' and 'instF' are written with typed
 quotations, as are the side conditions and conclusion, so an ill-sorted
 expression is a type error in /this/ module rather than at a splice site.
-Assembly of declarations and variable-length @do@ blocks uses untyped
-quotations and TH's smart constructors. The splice site checks the resulting
+Assembly of declarations uses th-desugar; variable-length @do@ blocks are
+assembled from quotation templates. The splice site checks the resulting
 function polymorphically in @a@ under its 'Hashable' constraint.
 
 The checker body is emitted as a @do@ block, and the splice site is required
@@ -46,7 +46,7 @@ import Data.Map.Strict qualified as Map
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Set qualified as Set
-import Language.Haskell.TH
+import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, ExpQ, Name, Q, TypeQ, mkName, newName, putDoc, unTypeCode, unsafeCodeCoerce)
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Syntax (
   addModFinalizer,
@@ -56,6 +56,7 @@ import Language.Praxis.PRA.Proof.Internal
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Rule.TH.Name (ruleNameCon)
 import Language.Praxis.PRA.Syntax
+import Language.Praxis.TH.Internal qualified as QTH
 
 -- * The splice-time environment
 
@@ -83,7 +84,7 @@ emptyGEnv = GEnv Map.empty Map.empty Map.empty Map.empty Map.empty
 
 -- | The one unsafe seam: a pattern-bound argument re-entering as typed code.
 bound :: Name -> Code Q x
-bound = unsafeCodeCoerce . varE
+bound = unsafeCodeCoerce . QTH.varE
 
 look :: String -> String -> Map String v -> v
 look what n =
@@ -172,15 +173,15 @@ stemOf p = case filter isAlphaNum (R.refName (R.paramRef p)) of
 -- * The syntax layer
 
 strictT :: TypeQ -> Q D.DBangType
-strictT ty = (,) <$> bang noSourceUnpackedness sourceStrict <*> (ty >>= D.dsType)
+strictT = QTH.strictField
 
 paramType :: Name -> R.Param -> TypeQ
 paramType a p = case p of
-  R.PVar _ -> varT a
-  R.PTerm _ -> [t|Term $(varT a)|]
-  R.PAtom _ -> [t|Atomic $(varT a)|]
-  R.PForm _ -> [t|Formula $(varT a)|]
-  R.PCtx _ -> [t|Multiset (Formula $(varT a))|]
+  R.PVar _ -> QTH.varT a
+  R.PTerm _ -> [t|Term $(QTH.varT a)|]
+  R.PAtom _ -> [t|Atomic $(QTH.varT a)|]
+  R.PForm _ -> [t|Formula $(QTH.varT a)|]
+  R.PCtx _ -> [t|Multiset (Formula $(QTH.varT a))|]
 
 {- |
 Generate the proof datatype, its base functor, the recursion-schemes
@@ -191,8 +192,8 @@ deriveProofSyntax rules = do
   validateAll rules
   a <- newName "a"
   r <- newName "r"
-  let proofTy = [t|$(conT proofTyName) $(varT a)|]
-      proofFTy = [t|$(conT proofFTyName) $(varT a) $(varT r)|]
+  let proofTy = [t|$(QTH.conT proofTyName) $(QTH.varT a)|]
+      proofFTy = [t|$(QTH.conT proofFTyName) $(QTH.varT a) $(QTH.varT r)|]
       constructor names name result fields =
         D.DCon (map (`D.DPlainTV` D.SpecifiedSpec) names) [] name
           <$> (D.DNormalC False <$> sequence fields)
@@ -204,7 +205,7 @@ deriveProofSyntax rules = do
       proofFCon rule =
         constructor [a, r] (conFNameOf rule) proofFTy $
           map (strictT . paramType a) (R.ruleParams rule)
-            <> replicate (length (R.rulePremises rule)) (strictT (varT r))
+            <> replicate (length (R.rulePremises rule)) (strictT (QTH.varT r))
       arity rule = length (R.ruleParams rule) + length (R.rulePremises rule)
 
   -- Attach the inference figure to each generated constructor.
@@ -221,27 +222,29 @@ deriveProofSyntax rules = do
       , datatype proofFTyName [a, r] (map proofFCon rules) [[t|Show|], [t|Eq|], [t|Functor|], [t|Foldable|], [t|Traversable|]]
       ]
 
+  projectCases <- traverse (conversion conNameOf conFNameOf arity) rules
+  embedCases <- traverse (conversion conFNameOf conNameOf arity) rules
   instanceDecs <-
     [d|
-      type instance Base $proofTy = $(conT proofFTyName) $(varT a)
+      type instance Base $proofTy = $(QTH.conT proofFTyName) $(QTH.varT a)
 
       instance Recursive $proofTy where
-        project = $(lamCaseE (map (conversion conNameOf conFNameOf arity) rules))
+        project = $(QTH.lambdaCase projectCases)
 
       instance Corecursive $proofTy where
-        embed = $(lamCaseE (map (conversion conFNameOf conNameOf arity) rules))
+        embed = $(QTH.lambdaCase embedCases)
 
       instance HasRuleName $proofTy where
-        ruleName = $(lamCaseE (map (nameMatch conNameOf) rules))
+        ruleName = $(QTH.lambdaCase (map (nameMatch conNameOf arity) rules))
 
-      instance HasRuleName ($(conT proofFTyName) $(varT a) $(varT r)) where
-        ruleName = $(lamCaseE (map (nameMatch conFNameOf) rules))
+      instance HasRuleName ($(QTH.conT proofFTyName) $(QTH.varT a) $(QTH.varT r)) where
+        ruleName = $(QTH.lambdaCase (map (nameMatch conFNameOf arity) rules))
       |]
 
   ruleSpecDecs <-
     sequence
-      [ sigD ruleSpecName [t|RuleName -> R.Rule|]
-      , funD ruleSpecName [clause [conP (ruleNameCon rule) []] (normalB (lift rule)) [] | rule <- rules]
+      [ QTH.signature ruleSpecName [t|RuleName -> R.Rule|]
+      , QTH.function ruleSpecName [([D.DConP (ruleNameCon rule) [] []], lift rule) | rule <- rules]
       ]
 
   addModFinalizer $
@@ -252,12 +255,14 @@ deriveProofSyntax rules = do
     putDoc
       (DeclDoc mkStepName)
       "Assemble a step from a rule name, its arguments and its premises; 'Nothing' when the arguments do not have the sorts and the number the rule's parameters demand, or the premises are miscounted."
+  fieldClauses <- traverse fieldsClause rules
+  buildClauses <- traverse buildClause rules
   stepDecs <-
     sequence
-      [ sigD stepFieldsName [t|forall a r. $(conT proofFTyName) a r -> ([Arg a], [r])|]
-      , funD stepFieldsName (map fieldsClause rules)
-      , sigD mkStepName [t|forall a r. RuleName -> [Arg a] -> [r] -> Maybe ($(conT proofFTyName) a r)|]
-      , funD mkStepName (map buildClause rules <> [clause [wildP, wildP, wildP] (normalB [|Nothing|]) []])
+      [ QTH.signature stepFieldsName [t|forall a r. $(QTH.conT proofFTyName) a r -> ([Arg a], [r])|]
+      , QTH.function stepFieldsName fieldClauses
+      , QTH.signature mkStepName [t|forall a r. RuleName -> [Arg a] -> [r] -> Maybe ($(QTH.conT proofFTyName) a r)|]
+      , QTH.function mkStepName (buildClauses <> [(replicate 3 D.DWildP, [|Nothing|])])
       ]
 
   pure (dataDecs <> instanceDecs <> ruleSpecDecs <> stepDecs)
@@ -268,12 +273,12 @@ deriveProofSyntax rules = do
       cons <- sequence constructors
       derivings <- traverse (>>= D.dsType) classes
       pure (D.decToTH (D.DDataD D.Data [] name (map (`D.DPlainTV` D.BndrReq) vars) Nothing cons [D.DDerivClause (Just D.DStockStrategy) derivings]))
-    nameMatch con rule =
-      match (recP (con rule) []) (normalB (conE (ruleNameCon rule))) []
+    nameMatch con ar rule =
+      (D.DConP (con rule) [] (replicate (ar rule) D.DWildP), QTH.conE (ruleNameCon rule))
     -- @ConjL a b p -> ConjLF a b p@, and the reverse for @embed@.
     conversion from to ar rule = do
       xs <- traverse (const (newName "x")) [1 .. ar rule]
-      match (conP (from rule) (map varP xs)) (normalB (foldl (\f x -> [|$f $x|]) (conE (to rule)) (map varE xs))) []
+      pure (D.DConP (from rule) [] (map D.DVarP xs), foldl (\f x -> [|$f $x|]) (QTH.conE (to rule)) (map QTH.varE xs))
     fieldNames rule = do
       ps <- traverse (newName . stemOf) (R.ruleParams rule)
       ds <- traverse (\i -> newName ("d" <> show i)) [1 .. length (R.rulePremises rule)]
@@ -281,20 +286,21 @@ deriveProofSyntax rules = do
     -- @ConjLF a b d -> ([ArgForm a, ArgForm b], [d])@
     fieldsClause rule = do
       (ps, ds) <- fieldNames rule
-      clause
-        [conP (conFNameOf rule) (map varP (ps <> ds))]
-        (normalB [|($(listE [[|$(conE (argCon p)) $(varE n)|] | (p, n) <- zip (R.ruleParams rule) ps]), $(listE (map varE ds)))|])
-        []
+      pure
+        ( [D.DConP (conFNameOf rule) [] (map D.DVarP (ps <> ds))]
+        , [|($(QTH.listE [[|$(QTH.conE (argCon p)) $(QTH.varE n)|] | (p, n) <- zip (R.ruleParams rule) ps]), $(QTH.listE (map QTH.varE ds)))|]
+        )
     -- @ConjLRule [ArgForm a, ArgForm b] [d] -> Just (ConjLF a b d)@
     buildClause rule = do
       (ps, ds) <- fieldNames rule
-      clause
-        [ conP (ruleNameCon rule) []
-        , listP [conP (argCon p) [varP n] | (p, n) <- zip (R.ruleParams rule) ps]
-        , listP (map varP ds)
-        ]
-        (normalB [|Just $(foldl (\f x -> [|$f $x|]) (conE (conFNameOf rule)) (map varE (ps <> ds)))|])
-        []
+      pure
+        (
+          [ D.DConP (ruleNameCon rule) [] []
+          , QTH.listPattern [D.DConP (argCon p) [] [D.DVarP n] | (p, n) <- zip (R.ruleParams rule) ps]
+          , QTH.listPattern (map D.DVarP ds)
+          ]
+        , [|Just $(foldl (\f x -> [|$f $x|]) (QTH.conE (conFNameOf rule)) (map QTH.varE (ps <> ds)))|]
+        )
 
 -- * The checker
 
@@ -317,27 +323,26 @@ deriveChecker rules = do
   validateAll rules
   clauses <- traverse compileRule rules
   sequence
-    [ sigD
+    [ QTH.signature
         inferStepName
         [t|
           forall a.
           (Hashable a) =>
-          $(conT proofFTyName) a (InferenceMachine a (Sequent a)) ->
+          $(QTH.conT proofFTyName) a (InferenceMachine a (Sequent a)) ->
           InferenceMachine a (Sequent a)
           |]
-    , funD inferStepName (map pure clauses)
+    , QTH.function inferStepName clauses
     ]
 
-compileRule :: R.Rule -> Q Clause
+compileRule :: R.Rule -> Q ([D.DPat], ExpQ)
 compileRule rule = do
   paramNames <- traverse (newName . stemOf) (R.ruleParams rule)
   subNames <- traverse (\i -> newName ("d" <> show i)) [0 .. length (R.rulePremises rule) - 1]
   let env0 = foldl (\e (p, n) -> bindParam p n e) emptyGEnv (zip (R.ruleParams rule) paramNames)
-  body <- ruleBody rule env0 subNames
-  clause
-    [conP (conFNameOf rule) (map varP (paramNames <> subNames))]
-    (normalB [|withRule $(conE (ruleNameCon rule)) $(pure body)|])
-    []
+  pure
+    ( [D.DConP (conFNameOf rule) [] (map D.DVarP (paramNames <> subNames))]
+    , [|withRule $(QTH.conE (ruleNameCon rule)) $(ruleBody rule env0 subNames)|]
+    )
 
 {- |
 Compile one rule's body.
@@ -357,27 +362,24 @@ ruleBody rule env0 subNames = do
       closedSides = filter isClosed (R.ruleSides rule)
       openSides = filter (not . isClosed) (R.ruleSides rule)
 
-      -- Each premise is run on its own line, so independent premises are
-      -- independent statements and get combined with '(<*>)'.
+      -- Each premise is a separate statement. GHC chooses groups using the
+      -- dependencies of the entire block, including the matches below.
       collectStmts =
-        [ bindS (varP q) [|asSubproof i $(varE d)|]
+        [ QTH.bindStatement (D.DVarP q) [|asSubproof i $(QTH.varE d)|]
         | (i, d, q) <- zip3 [0 :: Word ..] subNames qNames
         ]
 
-      go env [] = pure (map (noBindS . sideExp env) openSides <> [noBindS (conclusionExp env rule)])
+      go env [] = pure (map (QTH.statement . sideExp env) openSides <> [QTH.statement (conclusionExp env rule)])
       go env ((i, prem, qn) : rest) = do
         (matchE, newBinders, env') <- matchPremise env i prem qn
         let stmt = case newBinders of
-              [] -> noBindS matchE
-              [n] -> bindS (varP n) matchE
-              ns -> bindS (tupP (map varP ns)) matchE
+              [] -> QTH.statement matchE
+              ns -> QTH.bindStatement (D.mkTupleDPat (map D.DVarP ns)) matchE
         (stmt :) <$> go env' rest
 
   matchStmts <- go env0 (zip3 [0 :: Word ..] (R.rulePremises rule) qNames)
-  -- Keep the variable-length do block in TH's smart-constructor API:
-  -- desugaring it here would bypass ApplicativeDo at the splice site and
-  -- change the checker's error accumulation.
-  doE (map (noBindS . sideExp env0) closedSides <> collectStmts <> matchStmts)
+  -- Quote native do syntax so ApplicativeDo still runs at the splice site.
+  QTH.doBlock (map (QTH.statement . sideExp env0) closedSides <> collectStmts <> matchStmts)
 
 {- |
 Match one premise: discharge the formulae the rule names, then either bind or
@@ -396,34 +398,34 @@ matchPremise env i (fs R.:+ g R.:|- c) qn = do
       residFinal = last residuals
 
       dischargeStmts =
-        [ bindS (varP h) [|dischargeIn $(untyped (instF env f)) $(varE resid)|]
+        [ QTH.bindStatement (D.DVarP h) [|dischargeIn $(untyped (instF env f)) $(QTH.varE resid)|]
         | (f, resid, h) <- zip3 fs residuals hs
         ]
 
       (tailStmt, tailVals, tailBinders, env1) = case Map.lookup (ctxKey g) (gCtxs env) of
         Just held ->
-          ([noBindS [|checkAssumptions $(untyped held) $(varE residFinal)|]], [], [], env)
+          ([QTH.statement [|checkAssumptions $(untyped held) $(QTH.varE residFinal)|]], [], [], env)
         Nothing ->
-          ([], [varE residFinal], [gammaOut], bindCtx g gammaOut env)
+          ([], [QTH.varE residFinal], [gammaOut], bindCtx g gammaOut env)
 
       (succStmt, succVals, succBinders, env2) = case c of
         R.FMeta m
           | Map.notMember (formKey m) (gForms env1) ->
-              ([], [varE dN], [dOut], bindForm m dOut env1)
+              ([], [QTH.varE dN], [dOut], bindForm m dOut env1)
         _ ->
-          ([noBindS [|checkConsequent $(untyped (instF env1 c)) $(varE dN)|]], [], [], env1)
+          ([QTH.statement [|checkConsequent $(untyped (instF env1 c)) $(QTH.varE dN)|]], [], [], env1)
 
       result = case tailVals <> succVals of
         [] -> [|pure ()|]
         [v] -> [|pure $v|]
-        vs -> [|pure $(tupE vs)|]
+        vs -> [|pure $(QTH.tupleE vs)|]
 
       inner = case dischargeStmts <> tailStmt <> succStmt of
         [] -> result
-        ss -> doE (ss <> [noBindS result])
+        ss -> QTH.doBlock (ss <> [QTH.statement result])
 
       matchE =
-        [|asSubproof i (case $(varE qn) of ($(varP gammaN) :|- $(varP dN)) -> $inner)|]
+        [|asSubproof i (case $(QTH.varE qn) of ($(QTH.varP gammaN) :|- $(QTH.varP dN)) -> $inner)|]
 
   pure (matchE, tailBinders <> succBinders, env2)
 

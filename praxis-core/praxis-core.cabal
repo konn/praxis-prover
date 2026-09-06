@@ -111,6 +111,7 @@ library
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Internal
     Language.Praxis.PRA.PrimitiveRecursion.TH.Internal
     Language.Praxis.PRA.Proof.Internal
+    Language.Praxis.TH.Internal
 
 executable praxis-core
   import: defaults

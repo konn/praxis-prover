@@ -286,7 +286,13 @@ errorContextTests :: TestTree
 errorContextTests =
   testGroup
     "error contexts"
-    [ testCase "an error names the rule and the premise which raised it" $
+    [ testCase "generated do blocks stop when a dependent context check fails" $
+        reasons (ConjL a b (Id pC MS.empty))
+          @?= [MissingAssumption a (ctx [c])]
+    , testCase "generated do blocks accumulate a side failure and a premise failure" $
+        reasons (Defeq (Lit 0) (Lit 1) (Defeq (Lit 2) (Lit 3) (Id (Lit 2 :=== Lit 3) MS.empty)))
+          @?= [EqualityCheckFailed (Lit 0) (Lit 1), EqualityCheckFailed (Lit 2) (Lit 3)]
+    , testCase "an error names the rule and the premise which raised it" $
         errorContexts (ConjR (Id pA MS.empty) (Id pB MS.empty))
           @?= [Subproof 1 :| [CheckingRule ConjRRule]]
     , testCase "an error inside a subproof names the enclosing rule" $

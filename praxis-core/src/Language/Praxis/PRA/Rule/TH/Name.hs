@@ -15,9 +15,10 @@ module Language.Praxis.PRA.Rule.TH.Name (
 
 import Data.Hashable (Hashable)
 import GHC.Generics (Generic)
-import Language.Haskell.TH
 import Language.Haskell.TH.Desugar qualified as D
+import Language.Haskell.TH.Syntax (Dec, Name, Q, mkName)
 import Language.Praxis.PRA.Rule (Rule (..))
+import Language.Praxis.TH.Internal qualified as QTH
 
 -- | The constructor a rule contributes to @RuleName@: @ConjL@ becomes @ConjLRule@.
 ruleNameCon :: Rule -> Name
@@ -40,18 +41,18 @@ deriveRuleName rules = do
       constructors = [D.DCon [] [] (ruleNameCon r) (D.DNormalC False []) (D.DConT name) | r <- rules]
   instances <-
     [d|
-      deriving stock instance Show $(conT name)
+      deriving stock instance Show $(QTH.conT name)
 
-      deriving stock instance Eq $(conT name)
+      deriving stock instance Eq $(QTH.conT name)
 
-      deriving stock instance Ord $(conT name)
+      deriving stock instance Ord $(QTH.conT name)
 
-      deriving stock instance Enum $(conT name)
+      deriving stock instance Enum $(QTH.conT name)
 
-      deriving stock instance Bounded $(conT name)
+      deriving stock instance Bounded $(QTH.conT name)
 
-      deriving stock instance Generic $(conT name)
+      deriving stock instance Generic $(QTH.conT name)
 
-      deriving anyclass instance Hashable $(conT name)
+      deriving anyclass instance Hashable $(QTH.conT name)
       |]
   pure (declaration : instances)

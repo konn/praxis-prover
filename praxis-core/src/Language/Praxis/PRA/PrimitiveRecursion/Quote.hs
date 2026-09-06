@@ -31,7 +31,6 @@ import Data.Set qualified as Set
 import Data.Text qualified as T
 import GHC.TypeNats (KnownNat)
 import Language.Haskell.TH qualified as TH
-import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift, getQ, liftTyped, mkNameG_v, putQ, unTypeCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
@@ -42,6 +41,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Environment
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (arityType)
 import Language.Praxis.PRA.Signature qualified as Sig
+import Language.Praxis.TH.Internal qualified as QTH
 import Text.Megaparsec (SourcePos (..), eof, errorBundlePretty, getSourcePos, optional, parse, sourcePosPretty, try, (<|>))
 
 data Header = Header !T.Text !(Maybe T.Text)
@@ -139,7 +139,7 @@ compileQuote initial source = do
     Nothing -> do
       shared <- TH.newName "prfSignature"
       binding <- valueDeclaration shared [t|Sig.Signature|] (unTypeCode (liftSignature fullSig))
-      aliases <- concat <$> traverse (\ident -> valueDeclaration (TH.mkName (T.unpack ident)) [t|Sig.Signature|] (TH.varE shared)) (Set.toList signatureNames)
+      aliases <- concat <$> traverse (\ident -> valueDeclaration (TH.mkName (T.unpack ident)) [t|Sig.Signature|] (QTH.varE shared)) (Set.toList signatureNames)
       pure (binding <> aliases)
     Just (Header ident _) ->
       valueDeclaration (TH.mkName (T.unpack ident)) [t|Sig.Signature|] (unTypeCode (liftSignature fullSig))
@@ -173,9 +173,9 @@ emitDefinition qualify (ElaboratedDefinition ident (_ :: F.Program n) _ _ _) =
 -- name on the left of a type signature. Keep that boundary in th-desugar.
 valueDeclaration :: TH.Name -> TH.TypeQ -> TH.ExpQ -> TH.Q [TH.Dec]
 valueDeclaration binding ty body = do
-  signatureType <- ty >>= D.dsType
-  declaration <- [d|$(TH.varP binding) = $body|]
-  pure (D.letDecToTH (D.DSigD binding signatureType) : declaration)
+  signatureDeclaration <- QTH.signature binding ty
+  declaration <- [d|$(QTH.varP binding) = $body|]
+  pure (signatureDeclaration : declaration)
 
 -- Preserve the concrete arity when lifting a value out of an existential
 -- definition or symbol. The constructor traversal itself comes from DeriveLift.
@@ -204,7 +204,7 @@ liftSignature sig = TH.joinCode do
     -- The signature records each referenced binding's type. The witness fixes
     -- its arity here; the splice site checks the actual Haskell binding again.
     reference :: TH.Name -> (a -> F.Function n) -> TH.Code TH.Q a
-    reference binding _ = TH.unsafeCodeCoerce (TH.varE binding)
+    reference binding _ = TH.unsafeCodeCoerce (QTH.varE binding)
 
 listCode :: [TH.Code TH.Q a] -> TH.Code TH.Q [a]
 listCode = foldr (\x xs -> [||$$x : $$xs||]) [||[]||]

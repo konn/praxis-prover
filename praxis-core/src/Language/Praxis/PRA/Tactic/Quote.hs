@@ -78,9 +78,9 @@ import Data.Sized qualified as SV
 import Data.String (IsString, fromString)
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
-import Language.Haskell.TH
+import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, Name, Q, Type, mkName, nameBase, newName, putDoc, unTypeCode, unsafeCodeCoerce)
 import Language.Haskell.TH.Datatype (ConstructorInfo (..), DatatypeInfo (..), reifyDatatype)
-import Language.Haskell.TH.Datatype.TyVarBndr (plainTVSpecified)
+import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (addModFinalizer)
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..))
@@ -94,6 +94,7 @@ import Language.Praxis.PRA.Syntax.Parser (Scope (..))
 import Language.Praxis.PRA.Syntax.Pretty
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
+import Language.Praxis.TH.Internal qualified as QTH
 
 -- * Schematic names
 
@@ -229,32 +230,29 @@ compileDecl sig decl = do
   usedName <- newName "used"
   let freshDecs
         | runtimeFresh =
-            valD (varP usedName) (normalB (usedNames env binders [s | Obj s <- HS.toList stated])) []
-              : [ valD
-                    (varP x)
-                    (normalB [|freshen $(foldr (\y acc -> [|HS.insert $(varE y) $acc|]) (varE usedName) earlier) (fromString $(stringE s))|])
-                    []
+            (usedName, usedNames env binders [s | Obj s <- HS.toList stated])
+              : [ (x, [|freshen $(foldr (\y acc -> [|HS.insert $(QTH.varE y) $acc|]) (QTH.varE usedName) earlier) (fromString s)|])
                 | (s, x, earlier) <- zip3 internal internalNames (inits' internalNames)
                 ]
         | otherwise = []
       flags'
         | runtimeFresh = Set.insert NeedsFresh (Set.insert NeedsIsString flags)
         | otherwise = flags
-      body' = if null freshDecs then pure body else letE freshDecs (pure body)
+      body' = QTH.letBindings freshDecs (pure body)
 
   a <- newName "a"
   let constraints =
-        [[t|Fresh $(varT a)|] | NeedsFresh `Set.member` flags']
-          <> [[t|Hashable $(varT a)|] | NeedsHashable `Set.member` flags', NeedsFresh `Set.notMember` flags']
-          <> [[t|IsString $(varT a)|] | NeedsIsString `Set.member` flags']
+        [[t|Fresh $(QTH.varT a)|] | NeedsFresh `Set.member` flags']
+          <> [[t|Hashable $(QTH.varT a)|] | NeedsHashable `Set.member` flags', NeedsFresh `Set.notMember` flags']
+          <> [[t|IsString $(QTH.varT a)|] | NeedsIsString `Set.member` flags']
       paramTypes = [binderType a b | b <- binders, _ <- binderNames b]
-      ty = forallT [plainTVSpecified a] (sequence constraints) (foldr (\p r -> [t|$p -> $r|]) [t|Proof $(varT a)|] paramTypes)
+      ty = QTH.forallType [a] constraints (foldr (\p r -> [t|$p -> $r|]) [t|Proof $(QTH.varT a)|] paramTypes)
       name = mkName dname
 
   addModFinalizer $ putDoc (DeclDoc name) (figure sig decl)
   sequence
-    [ sigD name ty
-    , funD name [clause (map varP params) (normalB body') []]
+    [ QTH.signature name ty
+    , QTH.function name [(map D.DVarP params, body')]
     ]
   where
     startsLower = \case
@@ -280,19 +278,19 @@ binderNames = \case
 binderType :: Name -> Binder a -> Q Type
 binderType a = \case
   MetaBinder _ s -> case s of
-    R.VarS -> varT a
-    R.TermS -> [t|Term $(varT a)|]
-    R.AtomS -> [t|Atomic $(varT a)|]
-    R.FormS -> [t|Formula $(varT a)|]
-    R.CtxS -> [t|Multiset (Formula $(varT a))|]
-  PremiseBinder _ _ -> [t|Proof $(varT a)|]
+    R.VarS -> QTH.varT a
+    R.TermS -> [t|Term $(QTH.varT a)|]
+    R.AtomS -> [t|Atomic $(QTH.varT a)|]
+    R.FormS -> [t|Formula $(QTH.varT a)|]
+    R.CtxS -> [t|Multiset (Formula $(QTH.varT a))|]
+  PremiseBinder _ _ -> [t|Proof $(QTH.varT a)|]
 
 -- | Every name in the actual arguments, and those the statement fixes, as an expression.
 usedNames :: LiftEnv -> [Binder SchemaName] -> [String] -> Q Exp
 usedNames env binders fixed =
-  [|HS.unions $(listE (fixedSet : [nameSet s (varE p) | (n, Left s) <- binderParams binders, Just p <- [Map.lookup (s, n) (leMeta env)]]))|]
+  [|HS.unions $(QTH.listE (fixedSet : [nameSet s (QTH.varE p) | (n, Left s) <- binderParams binders, Just p <- [Map.lookup (s, n) (leMeta env)]]))|]
   where
-    fixedSet = [|HS.fromList (map fromString $(listE (map stringE fixed)))|]
+    fixedSet = [|HS.fromList (map fromString fixed)|]
     nameSet s p = case s of
       R.VarS -> [|HS.singleton $p|]
       R.CtxS -> [|HS.fromList (foldMap toList $p)|]
@@ -371,7 +369,7 @@ type LCode a = L (Code Q a)
 -- Only references to parameters/signature entries cross an untyped boundary.
 -- Their sorts are established by the checked declaration and LiftEnv.
 boundName :: Name -> Code Q a
-boundName = unsafeCodeCoerce . varE
+boundName = unsafeCodeCoerce . QTH.varE
 
 need :: Flag -> L ()
 need = tell . Set.singleton
@@ -471,7 +469,7 @@ liftProof env proof = do
   cons <- lift proofConstructors
   let go = \case
         Pure d -> case Map.lookup d (lePremise env) of
-          Just p -> lift (varE p)
+          Just p -> lift (QTH.varE p)
           Nothing -> failL ("no parameter for the premise " <> d)
         Free step -> do
           con <- case Map.lookup (R.ruleLabel (ruleSpec (ruleName step))) cons of
@@ -480,5 +478,5 @@ liftProof env proof = do
           let (args, subs) = stepFields step
           args' <- traverse (liftArg env) args
           subs' <- traverse go subs
-          lift (foldl (\f x -> [|$f $(pure x)|]) (conE con) (args' <> subs'))
+          lift (foldl (\f x -> [|$f $(pure x)|]) (QTH.conE con) (args' <> subs'))
   go proof
