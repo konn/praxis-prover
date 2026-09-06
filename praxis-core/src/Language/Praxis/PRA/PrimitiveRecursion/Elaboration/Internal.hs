@@ -17,8 +17,8 @@ import Data.Type.Equality (testEquality, (:~:) (Refl))
 import Data.Type.Natural (sNat)
 import Data.Type.Ordinal (Ordinal)
 import GHC.TypeNats (KnownNat)
-import Language.Praxis.PRA.PrimitiveRecursion (V)
-import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
+import Language.Praxis.PRA.PrimitiveRecursion.Code (V)
+import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 
 -- | Unlike enumOrdinal, this also handles an empty context.
@@ -60,6 +60,7 @@ sameTerm a b = case (canonical a, canonical b) of
   where
     sameFunction (Defined x) (Defined y) = x == y
     sameFunction (Primitive x) (Primitive y) = x == y
+    sameFunction (Bound x) (Bound y) = x == y
     sameFunction _ _ = False
     canonical (AppFT (Primitive PR.Succ) xs) = successorTerm (canonical (SV.head xs))
     canonical t = t
@@ -69,4 +70,5 @@ functionCalls (AppFT f xs) = headCall f <> foldMap functionCalls xs
   where
     headCall (Defined ident) = Set.singleton ident
     headCall (Primitive _) = Set.empty
+    headCall (Bound _) = Set.empty
 functionCalls _ = Set.empty

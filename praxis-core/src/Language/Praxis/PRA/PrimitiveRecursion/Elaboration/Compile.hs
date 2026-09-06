@@ -5,9 +5,11 @@
 module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile (
   ElaboratedDefinition (..),
   definitionCode,
+  SomeProgram (..),
   elaborateDefinition,
   elaborateRenamedEquations,
   elaborateEquations,
+  elaborateEquationsWith,
 ) where
 
 import Control.Monad (foldM, unless)
@@ -22,13 +24,14 @@ import Data.Type.Equality (testEquality, (:~:) (Refl))
 import Data.Type.Natural (sNat)
 import Data.Type.Ordinal (Ordinal, ordToNatural)
 import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal, type (+))
-import Language.Praxis.PRA.PrimitiveRecursion (PRFCode, V)
-import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
+import Language.Praxis.PRA.PrimitiveRecursion.Code (V)
+import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.CaseTree
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Internal
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (renameEquations)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
-import Language.Praxis.PRA.Signature qualified as Sig
+import Language.Praxis.PRA.PrimitiveRecursion.Function (Program)
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Numeric.Natural (Natural)
 
 {- | Compilation evidence retained for subsequent unfolding-lemma generation.
@@ -37,7 +40,7 @@ identifies which split implements source recursion.
 -}
 data ElaboratedDefinition = forall n. (KnownNat n) => ElaboratedDefinition
   { compiledName :: !T.Text
-  , compiledCode :: !(PRFCode n)
+  , compiledCode :: !(Program n)
   , compiledRows :: ![EquationRow n]
   , compiledTree :: !(CaseTree n)
   , compiledRecursionArgument :: !(Maybe (Ordinal n))
@@ -45,8 +48,15 @@ data ElaboratedDefinition = forall n. (KnownNat n) => ElaboratedDefinition
 
 deriving instance Show ElaboratedDefinition
 
-definitionCode :: ElaboratedDefinition -> Sig.SomeCode
-definitionCode (ElaboratedDefinition _ code _ _ _) = Sig.SomeCode code
+data SomeProgram = forall n. (KnownNat n) => SomeProgram !(Program n)
+
+deriving instance Show SomeProgram
+
+projection :: Data.Type.Ordinal.Ordinal n -> Program n
+projection = F.Base . PR.Proj
+
+definitionCode :: ElaboratedDefinition -> SomeProgram
+definitionCode (ElaboratedDefinition _ code _ _ _) = SomeProgram code
 
 -- Check against the original patterns, before case-tree substitutions.
 checkCandidate :: (KnownNat n) => T.Text -> Ordinal n -> [EquationRow n] -> Either String ()
@@ -63,20 +73,20 @@ checkCandidate self index = mapM_ checkRow
     checkCalls row (AppFT _ xs) = mapM_ (checkCalls row) xs
     checkCalls _ _ = Right ()
 
-literalCode :: Natural -> PRFCode n
-literalCode 0 = PR.Zero
-literalCode n = PR.Comp PR.Succ (literalCode (n - 1) SV.:< SV.Nil)
+literalCode :: Natural -> Program n
+literalCode 0 = (F.Base PR.Zero)
+literalCode n = F.Comp (F.Base PR.Succ) (literalCode (n - 1) SV.:< SV.Nil)
 
-lookupCode :: forall n. (KnownNat n) => Map T.Text Sig.SomeCode -> T.Text -> Either String (PRFCode n)
+lookupCode :: forall n. (KnownNat n) => Map T.Text SomeProgram -> T.Text -> Either String (Program n)
 lookupCode env ident = case Map.lookup ident env of
   Nothing -> Left ("No compiled code for " <> T.unpack ident)
-  Just (Sig.SomeCode (code :: PRFCode m)) -> case testEquality (sNat @n) (sNat @m) of
+  Just (SomeProgram (code :: Program m)) -> case testEquality (sNat @n) (sNat @m) of
     Just Refl -> Right code
     Nothing -> Left ("Compiled arity mismatch for " <> T.unpack ident)
 
 -- The recursive-result code is separate from the source slot vector, and is
 -- lifted along with it beneath parameter case splits.
-compileBody :: Map T.Text Sig.SomeCode -> T.Text -> Maybe (PRFCode k) -> V n (PRFCode k) -> FunctionalTerm n -> Either String (PRFCode k)
+compileBody :: Map T.Text SomeProgram -> T.Text -> Maybe (Program k) -> V n (Program k) -> FunctionalTerm n -> Either String (Program k)
 compileBody env self previous slots = go
   where
     go (LitFT n) = Right (literalCode n)
@@ -86,41 +96,42 @@ compileBody env self previous slots = go
           maybe (Left "Unexpected recursive call") Right previous
     go (AppFT fun xs) = do
       code <- case fun of
-        Primitive code -> Right code
+        Primitive code -> Right (F.Base code)
+        Bound bound -> Right (F.functionProgram bound)
         Defined ident -> lookupCode env ident
-      PR.Comp code <$> traverse go xs
+      F.Comp code <$> traverse go xs
 
 -- Ordinary case analysis retains all current inputs as parameters. Its local
 -- recursor ignores its own recursive result; any outer result is passed through.
-compileTree :: forall n k. (KnownNat n, KnownNat k) => Map T.Text Sig.SomeCode -> T.Text -> Maybe (PRFCode k) -> V n (PRFCode k) -> CaseTree n -> Either String (PRFCode k)
+compileTree :: forall n k. (KnownNat n, KnownNat k) => Map T.Text SomeProgram -> T.Text -> Maybe (Program k) -> V n (Program k) -> CaseTree n -> Either String (Program k)
 compileTree env self previous slots = \case
   Leaf _ body -> compileBody env self previous slots body
   Split index z s -> do
-    base <- compileTree env self previous (replaceSlot index PR.Zero slots) z
-    let lifted :: V k (PRFCode (k + 2))
-        lifted = fmap (\i -> PR.Proj (fromIntegral (ordToNatural i + 2))) (slotIndices @k)
-        liftCode code = PR.Comp code lifted
+    base <- compileTree env self previous (replaceSlot index (F.Base PR.Zero) slots) z
+    let lifted :: V k (Program (k + 2))
+        lifted = fmap (\i -> projection (fromIntegral (ordToNatural i + 2))) (slotIndices @k)
+        liftCode code = F.Comp code lifted
     step <-
       compileTree
         env
         self
         (fmap liftCode previous)
-        (replaceSlot index (PR.Proj 0) (fmap liftCode slots))
+        (replaceSlot index (projection 0) (fmap liftCode slots))
         s
-    pure (PR.Comp (PR.Rec base step) (SV.sIndex index slots SV.:< fmap PR.Proj (slotIndices @k)))
+    pure (F.Comp (F.Rec base step) (SV.sIndex index slots SV.:< fmap projection (slotIndices @k)))
 
 {- | Compile one function, retaining its matrix, case tree, and selected recursor.
 Candidates are tried in argument order. Selected recursion patterns must be
 shallow; other columns may contain arbitrarily nested successor patterns.
 -}
-elaborateDefinition :: Map T.Text Sig.SomeCode -> [RenamedEquation] -> Either String ElaboratedDefinition
+elaborateDefinition :: Map T.Text SomeProgram -> [RenamedEquation] -> Either String ElaboratedDefinition
 elaborateDefinition _ [] = Left "Empty function definition"
 elaborateDefinition env equations@(RenamedEquation self (_ :: V n (Pattern IrrelevantName)) _ : _) = do
   rows <- traverse unpack (zip [0 ..] equations)
   tree <- buildCaseTree rows
   if all (Set.notMember self . functionCalls . rowBody) rows
     then do
-      code <- compileTree env self Nothing (fmap PR.Proj (slotIndices @n)) tree
+      code <- compileTree env self Nothing (fmap projection (slotIndices @n)) tree
       pure (ElaboratedDefinition self code rows tree Nothing)
     else choose rows tree [] (toList (slotIndices @n))
   where
@@ -141,12 +152,17 @@ elaborateDefinition env equations@(RenamedEquation self (_ :: V n (Pattern Irrel
       case someNatVal (natVal (Proxy @n) - 1) of
         SomeNat (_ :: Proxy k) -> do
           let parameterIndices = filter (/= index) (toList (slotIndices @n))
-          baseSlots <- vector $ map (\i -> if i == index then PR.Zero else PR.Proj (parameterSlot index i)) (toList (slotIndices @n))
-          base <- compileTree env self Nothing (baseSlots :: V n (PRFCode k)) baseTree
-          stepSlots <- vector $ map (\i -> if i == index then PR.Proj 0 else PR.Proj (fromIntegral (ordToNatural (parameterSlot index i :: Ordinal k) + 2))) (toList (slotIndices @n))
-          step <- compileTree env self (Just (PR.Proj 1)) (stepSlots :: V n (PRFCode (k + 2))) stepTree
-          inputs <- vector (PR.Proj index : map PR.Proj parameterIndices)
-          pure (PR.Comp (PR.Rec base step) inputs)
+          baseSlots <- vector $ map (\i -> if i == index then (F.Base PR.Zero) else projection (parameterSlot index i)) (toList (slotIndices @n))
+          base <- compileTree env self Nothing (baseSlots :: V n (Program k)) baseTree
+          stepSlots <- vector $ map (\i -> if i == index then projection 0 else projection (fromIntegral (ordToNatural (parameterSlot index i :: Ordinal k) + 2))) (toList (slotIndices @n))
+          step <- compileTree env self (Just (projection 1)) (stepSlots :: V n (Program (k + 2))) stepTree
+          inputs <- vector (projection index : map projection parameterIndices)
+          -- No permutation is needed when the source already recurses on its
+          -- first argument. Avoid an identity composition, which otherwise
+          -- introduces extra reductions and changes residual code shapes.
+          case testEquality (sNat @n) (sNat @(k + 1)) of
+            Just Refl | ordToNatural index == 0 -> pure (F.Rec base step)
+            _ -> pure (F.Comp (F.Rec base step) inputs)
     parameterSlot index i = fromIntegral (ordToNatural i - if i > index then 1 else 0)
 
 vector :: (KnownNat n) => [a] -> Either String (V n a)
@@ -156,8 +172,11 @@ vector = maybe (Left "Internal elaborator vector arity mismatch") Right . SV.fro
 Self recursion is handled by elaborateDefinition; other cycles are rejected.
 The result contains only newly elaborated definitions, not the initial codes.
 -}
-elaborateRenamedEquations :: Map T.Text Sig.SomeCode -> [RenamedEquation] -> Either String (Map T.Text ElaboratedDefinition)
-elaborateRenamedEquations initial equations = foldM (visit Set.empty) Map.empty (Map.keys groups)
+elaborateRenamedEquations :: Map T.Text SomeProgram -> [RenamedEquation] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateRenamedEquations = elaborateRenamedEquationsWith id
+
+elaborateRenamedEquationsWith :: (T.Text -> T.Text) -> Map T.Text SomeProgram -> [RenamedEquation] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateRenamedEquationsWith qualify initial equations = foldM (visit Set.empty) Map.empty (Map.keys groups)
   where
     groups = foldr (\eq -> Map.insertWith (<>) (renamedName eq) [eq]) Map.empty equations
     visit active done ident
@@ -169,8 +188,9 @@ elaborateRenamedEquations initial equations = foldM (visit Set.empty) Map.empty 
           Just clauses -> do
             let dependencies = Set.delete ident (foldMap (\(RenamedEquation _ _ body) -> functionCalls body) clauses)
             done' <- foldM (dependency (Set.insert ident active)) done (Set.toList dependencies)
-            result <- elaborateDefinition (Map.map definitionCode done' <> initial) clauses
+            result <- elaborateDefinition (Map.mapWithKey reference done' <> initial) clauses
             pure (Map.insert ident result done')
+    reference ident (ElaboratedDefinition _ (_ :: Program n) _ _ _) = SomeProgram (F.Call (F.DefId (qualify ident) :: F.DefId n))
     dependency active done ident
       | Map.member ident groups = visit active done ident
       | Map.member ident initial = Right done
@@ -181,9 +201,13 @@ to every definition. Unresolved environmental names must be supplied as code
 before use. Coverage and overlap checks precede recursive-call compilation.
 -}
 elaborateEquations :: Env -> [Equation T.Text] -> Either String (Map T.Text ElaboratedDefinition)
-elaborateEquations env equations = do
+elaborateEquations = elaborateEquationsWith id
+
+elaborateEquationsWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateEquationsWith qualify env equations = do
   renamed <- renameEquations env equations
-  elaborateRenamedEquations (Map.mapMaybe primitive env) renamed
+  elaborateRenamedEquationsWith qualify (Map.mapMaybe primitive env) renamed
   where
-    primitive (SomeFunction (Primitive code)) = Just (Sig.SomeCode code)
+    primitive (SomeFunction (Primitive code)) = Just (SomeProgram (F.Base code))
+    primitive (SomeFunction (Bound fun)) = Just (SomeProgram (F.functionProgram fun))
     primitive _ = Nothing

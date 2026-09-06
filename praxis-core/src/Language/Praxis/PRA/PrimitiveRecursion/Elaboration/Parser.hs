@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Parsing applicative terms and semicolon-separated equations.
+-- | Applicative equations with indentation or explicit semicolon separators.
 module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   Parser,
   spaceConsumer,
@@ -13,6 +13,9 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   patternP,
   eqTermP,
   equationP,
+  LocatedEquation (..),
+  equationsP,
+  parseLocatedEquations,
   parseEqTerm,
   parseEquation,
   parseEquations,
@@ -23,7 +26,7 @@ import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 import Numeric.Natural (Natural)
-import Text.Megaparsec (Parsec, between, eof, errorBundlePretty, many, notFollowedBy, parse, sepEndBy, try, (<|>))
+import Text.Megaparsec (Parsec, Pos, SourcePos (..), between, eof, errorBundlePretty, getSourcePos, label, many, notFollowedBy, parse, sepEndBy, try, (<|>))
 import Text.Megaparsec.Char qualified as CP
 import Text.Megaparsec.Char.Lexer qualified as L
 
@@ -54,19 +57,70 @@ anySymbol :: Parser T.Text
 anySymbol = lexeme (T.pack <$> ((:) <$> CP.letterChar <*> many identRest))
 
 patternP :: Parser (Pattern T.Text)
-patternP =
-  (ZeroP <$ reserved "0")
-    <|> (SuccP <$> ((reserved "S" <|> reserved "Succ") *> patternP))
-    <|> parens patternP
-    <|> (VarP <$> anySymbol)
+patternP = patternWith (pure ())
+
+patternWith :: Parser () -> Parser (Pattern T.Text)
+patternWith next =
+  next
+    *> ( (ZeroP <$ reserved "0")
+           <|> (SuccP <$> ((reserved "S" <|> reserved "Succ") *> patternWith next))
+           <|> parens patternP
+           <|> (VarP <$> anySymbol)
+       )
 
 eqTermP :: Parser (EqTerm T.Text)
-eqTermP = foldl (:@) <$> atom <*> many atom
+eqTermP = termWith (pure ())
+
+termWith :: Parser () -> Parser (EqTerm T.Text)
+termWith next = foldl (:@) <$> atom <*> many atom
   where
-    atom = (LitET <$> decimal) <|> parens eqTermP <|> (NameET <$> anySymbol)
+    atom = next *> ((LitET <$> decimal) <|> parens eqTermP <|> (NameET <$> anySymbol))
 
 equationP :: Parser (Equation T.Text)
-equationP = Equation <$> anySymbol <*> many patternP <* symbol "=" <*> eqTermP
+equationP = do
+  start <- getSourcePos
+  equationWith (continuation (sourceColumn start) start)
+
+equationWith :: Parser () -> Parser (Equation T.Text)
+equationWith next = Equation <$> anySymbol <*> many (patternWith next) <* (next *> symbol "=") <*> label "right-hand side (indent continuation lines)" (termWith next)
+
+-- Whitespace retains source positions even though lexemes consume newlines.
+-- Only tokens outside parentheses are subject to the equation's offside rule.
+continuation :: Pos -> SourcePos -> Parser ()
+continuation column start = do
+  here <- getSourcePos
+  if sourceLine here == sourceLine start
+    then pure ()
+    else void (L.indentGuard (pure ()) GT column)
+
+-- | Start position of a clause, retained for compile-time diagnostics.
+data LocatedEquation = LocatedEquation
+  { equationPosition :: !SourcePos
+  , locatedEquation :: !(Equation T.Text)
+  }
+  deriving (Show, Eq)
+
+{- | A block uses the first equation's column as its layout baseline. A deeper
+line continues an equation; an aligned line starts the next one. Parentheses
+suspend layout. Semicolons explicitly separate equations at any column, and
+an enclosing @{ ... }@ disables layout and requires semicolons throughout.
+-}
+equationsP :: Parser [LocatedEquation]
+equationsP = explicit <|> layout
+  where
+    located p = LocatedEquation <$> getSourcePos <*> p
+    explicit = between (symbol "{") (symbol "}") (located (equationWith (pure ())) `sepEndBy` symbol ";")
+    layout = (eof *> pure []) <|> (getSourcePos >>= go . sourceColumn)
+    go column = do
+      start <- getSourcePos
+      eq <- located (equationWith (continuation column start))
+      rest <-
+        (eof *> pure [])
+          <|> (symbol ";" *> ((eof *> pure []) <|> go column))
+          <|> do
+            void $ label "next equation at the block indentation (or ';')" (L.indentGuard (pure ()) EQ column)
+            go column
+      pure (eq : rest)
 
 runFully :: Parser a -> T.Text -> Either String a
 runFully p = either (Left . errorBundlePretty) Right . parse (spaceConsumer *> p <* eof) "<equation>"
@@ -78,4 +132,7 @@ parseEquation :: T.Text -> Either String (Equation T.Text)
 parseEquation = runFully equationP
 
 parseEquations :: T.Text -> Either String [Equation T.Text]
-parseEquations = runFully (equationP `sepEndBy` symbol ";")
+parseEquations = fmap (map locatedEquation) . parseLocatedEquations
+
+parseLocatedEquations :: T.Text -> Either String [LocatedEquation]
+parseLocatedEquations = runFully equationsP

@@ -1,6 +1,6 @@
 {- | Applicative equation syntax and arity-checked name resolution.
 Applications associate to the left; nested arguments use parentheses.
-Multiple equations are separated by semicolons (no Haskell layout rule).
+Equations use Haskell-like indentation or explicit semicolon separators.
 Elaboration checks coverage and disjointness, then compiles primitive recursion
 with unchanged parameters and calls to environmentally bound PRF codes.
 
@@ -30,6 +30,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration (
   CaseTree (..),
   ElaboratedDefinition (..),
   definitionCode,
+  SomeProgram (..),
   buildCaseTree,
   elaborateDefinition,
   elaborateRenamedEquations,
@@ -48,6 +49,9 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration (
   parseEqTerm,
   parseEquation,
   parseEquations,
+  LocatedEquation (..),
+  equationsP,
+  parseLocatedEquations,
 ) where
 
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.CaseTree

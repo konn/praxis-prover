@@ -18,7 +18,8 @@ import Data.Text qualified as T
 import Data.Type.Ordinal (Ordinal)
 import GHC.Generics (Generic)
 import GHC.TypeNats (KnownNat)
-import Language.Praxis.PRA.PrimitiveRecursion (PRFCode, V)
+import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode, V)
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Numeric.Natural (Natural)
 
 data Equation name = Equation
@@ -44,7 +45,7 @@ data EqTerm name
 infixl 9 :@
 
 -- | A reference to a top-level definition, or an existing primitive code.
-data Function n = Defined !T.Text | Primitive !(PRFCode n)
+data Function n = Defined !T.Text | Primitive !(PRFCode n) | Bound !(F.Function n)
 
 deriving instance (KnownNat n) => Show (Function n)
 

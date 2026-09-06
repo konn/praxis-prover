@@ -26,6 +26,7 @@ import Data.Type.Natural (sNat)
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
 import Language.Praxis.PRA.PrimitiveRecursion
+import Language.Praxis.PRA.PrimitiveRecursion.Function (Function)
 import Language.Praxis.PRA.Syntax
 
 -- | A variable position in a pattern: a wildcard, or a variable proper.
@@ -57,11 +58,11 @@ matchTerm pat = go (canonicalise pat) . canonicalise
     go (Succ :$ ps) u = case u ^? _Succ of
       Just u' -> go (SV.sIndex [od|0|] ps) u'
       Nothing -> False
-    go ((f :: PRFCode n) :$ ps) ((g :: PRFCode m) :$ us) =
+    go (App (f :: Function n) ps) (App (g :: Function m) us) =
       case testEquality (sNat @n) (sNat @m) of
         Just Refl -> f == g && and (zipWith go (SV.toList ps) (SV.toList us))
         Nothing -> False
-    go (_ :$ _) _ = False
+    go (App _ _) _ = False
 
 matchAtomic :: (Eq a) => Atomic (Hole a) -> Atomic a -> Bool
 matchAtomic (p :=== q) (s :=== t) = matchTerm p s && matchTerm q t

@@ -30,6 +30,10 @@ module Language.Praxis.PRA.Equality (
   -- * Partial evaluation
   normalize,
   normalizeWith,
+  normalizeIn,
+  defEqIn,
+  evalTermIn,
+  toNaturalIn,
 
   -- * Total evaluation
   evalTerm,
@@ -40,9 +44,10 @@ module Language.Praxis.PRA.Equality (
   defaultFuel,
 ) where
 
+import Control.Monad.Trans.Except (ExceptT (..), runExceptT)
 import Control.Monad.Trans.State.Strict (State, evalState, state)
 import Data.Void (absurd)
-import Language.Praxis.PRA.PrimitiveRecursion
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural
 
@@ -112,11 +117,25 @@ untouched, so the result is always a term denoting the same number:
 Rec (Proj #(0 / 1)) (Comp Succ [Proj #(1 / 3)]) :$ [Lit 2,Lit 3]
 -}
 normalizeWith :: Fuel -> Term a -> Term a
-normalizeWith fuel = flip evalState fuel . go
+normalizeWith fuel term = either (const term) id (normalizeIn F.emptyKernelEnv fuel term)
+
+{- | Normalize against a checked definition environment. Missing references and
+arity mismatches are errors; exhausted fuel retains shared residual calls.
+-}
+normalizeIn :: F.KernelEnv -> Fuel -> Term a -> Either String (Term a)
+normalizeIn env fuel = flip evalState fuel . runExceptT . go
   where
     go t@Var {} = pure t
     go t@Lit {} = pure t
-    go (f :$ args) = evalPRFCodeM spend f =<< traverse go args
+    go (App f args) = do
+      xs <- traverse go args
+      ExceptT (F.evalFunctionM spend App env f xs)
+
+-- | Environment-aware conversion. Only the PRA interpreter is consulted.
+defEqIn :: (Eq a) => F.KernelEnv -> Fuel -> Term a -> Term a -> Either String Bool
+defEqIn env fuel s t
+  | s == t = Right True
+  | otherwise = (==) <$> normalizeIn env fuel s <*> normalizeIn env fuel t
 
 {- | Decides definitional equality of two terms under the 'defaultFuel'.
 
@@ -175,11 +194,15 @@ unbudgeted.
 6
 -}
 evalTerm :: (a -> Natural) -> Term a -> Natural
-evalTerm env = go
+evalTerm vars = either error id . evalTermIn F.emptyKernelEnv vars
+
+-- | Evaluate named or raw applications without erasing their definitions.
+evalTermIn :: F.KernelEnv -> (a -> Natural) -> Term a -> Either String Natural
+evalTermIn env vars = go
   where
-    go (Var x) = env x
-    go (Lit n) = n
-    go (f :$ args) = evalPRFCode f (fmap go args)
+    go (Var x) = Right (vars x)
+    go (Lit n) = Right n
+    go (App f args) = traverse go args >>= F.evalFunction env f
 
 {- | Evaluates a /closed/ term to the numeral it denotes; 'Nothing' when the
 term mentions a variable.
@@ -190,4 +213,8 @@ Just 5
 Nothing
 -}
 toNatural :: Term a -> Maybe Natural
-toNatural t = evalTerm absurd <$> traverse (const Nothing) t
+toNatural = either (const Nothing) id . toNaturalIn F.emptyKernelEnv
+
+-- | Closed-term evaluation with explicit definition-resolution errors.
+toNaturalIn :: F.KernelEnv -> Term a -> Either String (Maybe Natural)
+toNaturalIn env t = traverse (evalTermIn env absurd) (traverse (const Nothing) t)

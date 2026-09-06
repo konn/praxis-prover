@@ -14,6 +14,7 @@ import Data.Type.Ordinal (Ordinal, ordToNatural)
 import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration
 import Language.Praxis.PRA.PrimitiveRecursion.Examples (plus)
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature qualified as Sig
 import Numeric.Natural (Natural)
 import Test.Tasty
@@ -219,7 +220,7 @@ compilerTests =
     , testCase "compiled dependency arities are checked" $ do
         eqs <- expectRight (parseEquations "f x = plus x x")
         renamed <- expectRight (renameEquations (Map.insert "plus" (SomeFunction (Defined "plus" :: Function 2)) compilerEnv) eqs)
-        case elaborateRenamedEquations (Map.singleton "plus" (Sig.SomeCode PR.Succ)) renamed of
+        case elaborateRenamedEquations (Map.singleton "plus" (SomeProgram (F.Base PR.Succ))) renamed of
           Left err -> assertBool err ("arity mismatch" `isInfixOf` err)
           Right _ -> assertFailure "accepted an environmental code of the wrong arity"
     , testCase "empty programs are allowed, empty individual definitions are rejected" $ do
@@ -240,13 +241,19 @@ checkValues :: Map.Map T.Text ElaboratedDefinition -> T.Text -> [([Natural], Nat
 checkValues defs ident examples = case Map.lookup ident defs of
   Nothing -> assertFailure ("missing definition " <> T.unpack ident)
   Just def -> case definitionCode def of
-    Sig.SomeCode code ->
+    SomeProgram code ->
       mapM_
         ( \(inputs, expected) -> case SV.fromList' inputs of
             Nothing -> assertFailure "test input arity mismatch"
-            Just xs -> PR.evalPRFCode code xs @?= expected
+            Just xs -> F.evalFunction kernel (F.Inline code) xs @?= Right expected
         )
         examples
+  where
+    kernel =
+      either error id $
+        F.extendKernelEnv
+          F.emptyKernelEnv
+          [F.Definition (F.DefId name) code | (name, ElaboratedDefinition _ code _ _ _) <- Map.toList defs]
 
 chosenArgument :: Map.Map T.Text ElaboratedDefinition -> T.Text -> Maybe Natural
 chosenArgument defs ident = case Map.lookup ident defs of

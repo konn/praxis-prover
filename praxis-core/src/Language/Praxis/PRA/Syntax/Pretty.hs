@@ -52,9 +52,9 @@ renderTerm sig name = go . canonicalise
     go (Var x) = name x
     go (Lit n) = show n
     go (Succ :$ args) = "S(" <> go (SV.sIndex [od|0|] args) <> ")"
-    go (f :$ args) = head' <> argList
+    go (App f args) = head' <> argList
       where
-        head' = case symbolOfCode f sig of
+        head' = case symbolOfFunction f sig of
           Just sym -> symbolName sym
           Nothing -> "<" <> show f <> ">"
         argList = case SV.toList args of

@@ -24,7 +24,9 @@ module Language.Praxis.PRA.Proof (
 
   -- * Checking
   inferConclusion,
+  inferConclusionIn,
   inferConclusionOpen,
+  inferConclusionOpenIn,
   isProofOf,
 
   -- * Errors
@@ -37,6 +39,7 @@ import Control.Monad.Free (Free, iter)
 import Data.Functor.Foldable (cata)
 import Data.Hashable (Hashable)
 import Data.List.NonEmpty (NonEmpty)
+import Language.Praxis.PRA.PrimitiveRecursion.Function (KernelEnv, emptyKernelEnv)
 import Language.Praxis.PRA.Proof.Internal
 import Language.Praxis.PRA.Rule.G3i (allRules)
 import Language.Praxis.PRA.Rule.TH (deriveChecker, deriveProofSyntax)
@@ -54,7 +57,11 @@ inferConclusion ::
   (Hashable a) =>
   Proof a ->
   Either (NonEmpty (ProofError a)) (Sequent a)
-inferConclusion = runInferenceMachine . cata inferStep
+inferConclusion = inferConclusionIn emptyKernelEnv
+
+-- | Check conversion using the supplied PRA definition environment.
+inferConclusionIn :: (Hashable a) => KernelEnv -> Proof a -> Either (NonEmpty (ProofError a)) (Sequent a)
+inferConclusionIn env = runInferenceMachineIn env . cata inferStep
 
 {- |
 Infer the sequent an /open/ proof establishes.  The leaves of an open proof are
@@ -68,7 +75,11 @@ inferConclusionOpen ::
   (h -> Sequent a) ->
   Free (ProofF a) h ->
   Either (NonEmpty (ProofError a)) (Sequent a)
-inferConclusionOpen leaf = runInferenceMachine . iter inferStep . fmap (pure . leaf)
+inferConclusionOpen = inferConclusionOpenIn emptyKernelEnv
+
+-- | Environment-aware checking of an open proof.
+inferConclusionOpenIn :: (Hashable a) => KernelEnv -> (h -> Sequent a) -> Free (ProofF a) h -> Either (NonEmpty (ProofError a)) (Sequent a)
+inferConclusionOpenIn env leaf = runInferenceMachineIn env . iter inferStep . fmap (pure . leaf)
 
 -- TODO: more efficient and direct implementation.
 isProofOf :: (Hashable a) => Proof a -> Sequent a -> Bool

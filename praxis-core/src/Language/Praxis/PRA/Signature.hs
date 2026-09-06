@@ -16,6 +16,8 @@ module Language.Praxis.PRA.Signature (
   Symbol (..),
   symbol,
   symbolNamed,
+  functionSymbol,
+  functionSymbolNamed,
   symbolArity,
   applySymbol,
 
@@ -25,6 +27,9 @@ module Language.Praxis.PRA.Signature (
   symbols,
   lookupSymbol,
   symbolOfCode,
+  symbolOfFunction,
+  signatureKernelEnv,
+  withKernelEnv,
 ) where
 
 import Data.List (find)
@@ -36,7 +41,8 @@ import Data.Type.Equality (testEquality, (:~:) (Refl))
 import Data.Type.Natural (sNat)
 import GHC.TypeNats (KnownNat, natVal)
 import Language.Haskell.TH.Syntax (Name)
-import Language.Praxis.PRA.PrimitiveRecursion (PRFCode)
+import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode)
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Syntax (Term (..))
 import Numeric.Natural (Natural)
 
@@ -58,7 +64,7 @@ someCodeArity (SomeCode (_ :: PRFCode n)) = natVal (Proxy @n)
 -- | A code under a name.
 data Symbol = Symbol
   { symbolName :: !String
-  , symbolCode :: !SomeCode
+  , symbolFunction :: !F.SomeFunction
   , symbolHaskellName :: !(Maybe Name)
   -- ^ the Haskell binding holding the code, for spliced code to refer to
   }
@@ -66,46 +72,65 @@ data Symbol = Symbol
 
 -- | A symbol for use at run time only.
 symbol :: (KnownNat n) => String -> PRFCode n -> Symbol
-symbol n c = Symbol n (SomeCode c) Nothing
+symbol n c = functionSymbol n (F.Primitive c)
 
 {- |
 A symbol which also records where the code is bound in Haskell, so that the
 quasiquoter can splice a reference to it: @'symbolNamed' "plus" \'plus plus@.
 -}
 symbolNamed :: (KnownNat n) => String -> Name -> PRFCode n -> Symbol
-symbolNamed n hs c = Symbol n (SomeCode c) (Just hs)
+symbolNamed n hs c = Symbol n (F.SomeFunction (F.Primitive c)) (Just hs)
+
+functionSymbol :: (KnownNat n) => String -> F.Function n -> Symbol
+functionSymbol n f = Symbol n (F.SomeFunction f) Nothing
+
+functionSymbolNamed :: (KnownNat n) => String -> Name -> F.Function n -> Symbol
+functionSymbolNamed n hs f = Symbol n (F.SomeFunction f) (Just hs)
 
 symbolArity :: Symbol -> Natural
-symbolArity = someCodeArity . symbolCode
+symbolArity sym = case symbolFunction sym of
+  F.SomeFunction (_ :: F.Function n) -> natVal (Proxy @n)
 
 -- | Apply a symbol to arguments; 'Nothing' when their number is not the arity.
 applySymbol :: Symbol -> [Term a] -> Maybe (Term a)
-applySymbol sym args = case symbolCode sym of
-  SomeCode (code :: PRFCode n)
-    | fromIntegral (length args) == natVal (Proxy @n) -> (code :$) <$> SV.fromList' args
+applySymbol sym args = case symbolFunction sym of
+  F.SomeFunction (fun :: F.Function n)
+    | fromIntegral (length args) == natVal (Proxy @n) -> App fun <$> SV.fromList' args
     | otherwise -> Nothing
 
 -- | A table of symbols, keyed by name.
-newtype Signature = Signature (Map String Symbol)
+data Signature = Signature (Map String Symbol) (Either String F.KernelEnv)
   deriving (Show, Eq)
 
--- | Left-biased union.
+{- | Left-biased symbol union. Definition tables are merged only when shared
+identities agree; 'signatureKernelEnv' reports a conflicting merge.
+-}
 instance Semigroup Signature where
-  Signature l <> Signature r = Signature (Map.union l r)
+  Signature l le <> Signature r re = Signature (Map.union l r) (le >>= \a -> re >>= F.unionKernelEnv a)
 
 instance Monoid Signature where
-  mempty = Signature Map.empty
+  mempty = Signature Map.empty (Right F.emptyKernelEnv)
 
 -- | A later symbol shadows an earlier one of the same name.
 signature :: [Symbol] -> Signature
-signature = Signature . Map.fromList . map (\s -> (symbolName s, s))
+signature xs = Signature (Map.fromList (map (\s -> (symbolName s, s)) xs)) (Right F.emptyKernelEnv)
 
 symbols :: Signature -> [Symbol]
-symbols (Signature m) = Map.elems m
+symbols (Signature m _) = Map.elems m
 
 lookupSymbol :: String -> Signature -> Maybe Symbol
-lookupSymbol n (Signature m) = Map.lookup n m
+lookupSymbol n (Signature m _) = Map.lookup n m
 
 -- | The symbol standing for a code, if the signature names it.
 symbolOfCode :: (KnownNat n) => PRFCode n -> Signature -> Maybe Symbol
-symbolOfCode c (Signature m) = find ((== SomeCode c) . symbolCode) (Map.elems m)
+symbolOfCode c = symbolOfFunction (F.Primitive c)
+
+symbolOfFunction :: (KnownNat n) => F.Function n -> Signature -> Maybe Symbol
+symbolOfFunction f (Signature m _) = find ((== F.SomeFunction f) . symbolFunction) (Map.elems m)
+
+-- | Resolve the checked table, reporting any conflicting signature union.
+signatureKernelEnv :: Signature -> Either String F.KernelEnv
+signatureKernelEnv (Signature _ env) = env
+
+withKernelEnv :: F.KernelEnv -> Signature -> Signature
+withKernelEnv env (Signature syms _) = Signature syms (Right env)

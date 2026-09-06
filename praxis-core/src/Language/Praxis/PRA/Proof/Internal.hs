@@ -27,6 +27,7 @@ module Language.Praxis.PRA.Proof.Internal (
   -- * The inference machine
   InferenceMachine,
   runInferenceMachine,
+  runInferenceMachineIn,
   withRule,
   asSubproof,
 
@@ -41,18 +42,17 @@ module Language.Praxis.PRA.Proof.Internal (
 
 import Control.Exception (Exception)
 import Control.Monad.Trans.Reader (Reader, ReaderT (..), local, reader, runReader)
-import Data.Coerce (coerce)
 import Data.DList.DNonEmpty (DNonEmpty)
 import Data.DList.DNonEmpty qualified as DLNE
 import Data.Functor.Compose (Compose (..))
-import Data.Functor.Identity (Identity)
 import Data.Hashable (Hashable)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import GHC.Generics (Generic)
-import Language.Praxis.PRA.Equality (defEq)
+import Language.Praxis.PRA.Equality (defEqIn, defaultFuel)
+import Language.Praxis.PRA.PrimitiveRecursion.Function (KernelEnv, emptyKernelEnv)
 import Language.Praxis.PRA.Rule.G3i (allRules)
 import Language.Praxis.PRA.Rule.TH.Name (deriveRuleName)
 import Language.Praxis.PRA.Syntax
@@ -79,7 +79,8 @@ data Arg a
   deriving (Show, Eq, Generic)
 
 data ProofErrorReason a
-  = MissingAssumption
+  = DefinitionResolutionFailed !String
+  | MissingAssumption
       -- | expected
       !(Formula a)
       -- | actual
@@ -148,9 +149,14 @@ instance Monad (Try e) where
   Success x >>= f = f x
   Failure es >>= _ = Failure es
 
-newtype InferenceMachine a x = IM {unIM :: Reader [ProofContext] (Try (ProofError a) x)}
+data InferenceContext = InferenceContext
+  { proofContexts :: [ProofContext]
+  , evaluationEnv :: KernelEnv
+  }
+
+newtype InferenceMachine a x = IM {unIM :: Reader InferenceContext (Try (ProofError a) x)}
   deriving (Functor)
-  deriving (Applicative) via Compose (Reader [ProofContext]) (Try (ProofError a))
+  deriving (Applicative) via Compose (Reader InferenceContext) (Try (ProofError a))
 
 instance Monad (InferenceMachine a) where
   m >>= f = IM $ reader \ctx ->
@@ -159,7 +165,7 @@ instance Monad (InferenceMachine a) where
       Failure es -> Failure es
 
 addContext :: ProofContext -> InferenceMachine a x -> InferenceMachine a x
-addContext @a @x ctx = coerce $ local @_ @Identity @(Try (ProofError a) x) (ctx :)
+addContext ctx (IM action) = IM (local (\c -> c {proofContexts = ctx : proofContexts c}) action)
 
 -- | Report everything raised inside as having been raised while checking this rule.
 withRule :: RuleName -> InferenceMachine a x -> InferenceMachine a x
@@ -170,11 +176,14 @@ asSubproof :: Word -> InferenceMachine a x -> InferenceMachine a x
 asSubproof = addContext . Subproof
 
 runInferenceMachine :: InferenceMachine a x -> Either (NonEmpty (ProofError a)) x
-runInferenceMachine = runTry . flip runReader [] . unIM
+runInferenceMachine = runInferenceMachineIn emptyKernelEnv
+
+runInferenceMachineIn :: KernelEnv -> InferenceMachine a x -> Either (NonEmpty (ProofError a)) x
+runInferenceMachineIn env = runTry . flip runReader (InferenceContext [] env) . unIM
 
 reportError :: ProofErrorReason a -> InferenceMachine a x
 reportError r = IM $ reader \ctx ->
-  let err = ProofError (NE.fromList ctx) r
+  let err = ProofError (NE.fromList (proofContexts ctx)) r
    in Failure (DLNE.singleton err)
 
 failIf :: ProofErrorReason a -> Bool -> InferenceMachine a ()
@@ -218,7 +227,11 @@ checkAssumptions expected actual =
 
 -- | The trusted evaluator must identify the two terms.
 checkDefEq :: (Hashable a) => Term a -> Term a -> InferenceMachine a ()
-checkDefEq s t = failIf (EqualityCheckFailed s t) (not (defEq s t))
+checkDefEq s t = do
+  env <- IM (reader (Success . evaluationEnv))
+  case defEqIn env defaultFuel s t of
+    Left err -> reportError (DefinitionResolutionFailed err)
+    Right equal -> failIf (EqualityCheckFailed s t) (not equal)
 
 -- | The eigenvariable must not occur in the term.
 checkNotFreeInTerm :: (Hashable a) => a -> Term a -> InferenceMachine a ()

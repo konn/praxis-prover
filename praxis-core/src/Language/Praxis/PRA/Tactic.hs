@@ -25,6 +25,7 @@ module Language.Praxis.PRA.Tactic (
   -- * Running
   prove,
   proveOpen,
+  proveOpenIn,
   runTactic,
   Leaf (..),
   Partial,
@@ -65,9 +66,10 @@ import Data.Type.Equality qualified as TE
 import Data.Type.Natural (sNat)
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
-import Language.Praxis.PRA.Equality (defEq)
+import Language.Praxis.PRA.Equality (defEqIn, defaultFuel)
 import Language.Praxis.PRA.Pattern
 import Language.Praxis.PRA.PrimitiveRecursion (Evalable (..), PRFCode (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Function (Function, KernelEnv, emptyKernelEnv)
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Signature (Signature)
@@ -242,15 +244,19 @@ proveOpen ::
   Sequent a ->
   Tactic a ->
   Either (TacticError a) (Free (ProofF a) String)
-proveOpen prems goal t = do
-  p <- runTactic prems t goal
+proveOpen = proveOpenIn emptyKernelEnv
+
+-- | Run and certify a tactic against checked, shared PRF definitions.
+proveOpenIn :: (Fresh a) => KernelEnv -> Map String (Sequent a) -> Sequent a -> Tactic a -> Either (TacticError a) (Free (ProofF a) String)
+proveOpenIn env prems goal t = do
+  p <- runTacticIn env prems t goal
   let opens = [g | Open g <- toList p]
   unless (null opens) $ Left (TacticError Nothing goal (Unsolved opens))
   let p' =
         p >>= \case
           Open g -> Pure ("", g)
           Premise d g -> Pure (d, g)
-  case inferConclusionOpen snd p' of
+  case inferConclusionOpenIn env snd p' of
     Left errs -> Left (TacticError Nothing goal (Rejected errs))
     Right s
       | s == goal -> Right (fmap fst p')
@@ -268,7 +274,10 @@ runTactic ::
   Tactic a ->
   Sequent a ->
   Either (TacticError a) (Partial a)
-runTactic prems = go
+runTactic = runTacticIn emptyKernelEnv
+
+runTacticIn :: forall a. (Fresh a) => KernelEnv -> Map String (Sequent a) -> Tactic a -> Sequent a -> Either (TacticError a) (Partial a)
+runTacticIn env prems = go
   where
     go :: Tactic a -> Sequent a -> Either (TacticError a) (Partial a)
     go tac goal@(ctx :|- c) = case tac of
@@ -297,7 +306,7 @@ runTactic prems = go
         Just s
           | s == goal -> Right (Pure (Premise d s))
           | otherwise -> failWith (PremiseMismatch d s)
-      Apply name args -> first (TacticError Nothing goal) (applyRule name args goal)
+      Apply name args -> first (TacticError Nothing goal) (applyRule env name args goal)
       Refl -> case c of
         Atm (s :=== t) ->
           go (applyWith DefeqRule [term s, term t] `Then` applyWith IdRule []) goal
@@ -419,11 +428,12 @@ data Obligation = MatchSuccedent !R.FormPat | Discharge !R.FormPat
 applyRule ::
   forall a.
   (Fresh a) =>
+  KernelEnv ->
   RuleName ->
   [Maybe (Arg (Hole a))] ->
   Sequent a ->
   Either (Failure a) (Partial a)
-applyRule name userArgs (ctx :|- c) = do
+applyRule env name userArgs (ctx :|- c) = do
   when (length userArgs /= length params) $
     Left (Malformed (show name <> " takes " <> show (length params) <> " arguments"))
   (b0, cons) <- foldM seed (emptyBindings, Constraints Map.empty Map.empty Map.empty) (zip params userArgs)
@@ -502,7 +512,8 @@ applyRule name userArgs (ctx :|- c) = do
       R.DefEq sp tp -> do
         s <- instTermE b sp
         t <- instTermE b tp
-        unless (defEq s t) $ Left (SideCondition name (EqualityCheckFailed s t))
+        equal <- either (Left . SideCondition name . DefinitionResolutionFailed) Right (defEqIn env defaultFuel s t)
+        unless equal $ Left (SideCondition name (EqualityCheckFailed s t))
       R.NotFreeIn (R.VarM xn) target -> do
         x <- maybe (Left (CannotInfer name [R.MetaRef R.VarS xn])) Right (Map.lookup xn (bVars b))
         case target of
@@ -650,12 +661,12 @@ abstractMatch x = goF
     go (Succ :$ ps) u = case u ^? _Succ of
       Just u' -> go (SV.sIndex [od|0|] ps) u'
       Nothing -> Nothing
-    go ((f :: PRFCode n) :$ ps) ((g :: PRFCode m) :$ us) =
+    go (App (f :: Function n) ps) (App (g :: Function m) us) =
       case TE.testEquality (sNat @n) (sNat @m) of
         Just TE.Refl
           | f == g -> foldr merge (Just Nothing) (zipWith go (SV.toList ps) (SV.toList us))
         _ -> Nothing
-    go (_ :$ _) _ = Nothing
+    go (App _ _) _ = Nothing
 
     merge Nothing _ = Nothing
     merge _ Nothing = Nothing
@@ -697,7 +708,7 @@ occursIn t (s :=== u) = go s || go u
   where
     go v =
       v == t || case v of
-        _ :$ args -> any go args
+        App _ args -> any go args
         _ -> False
 
 -- | Replace every occurrence of the term by the variable.
@@ -707,7 +718,7 @@ abstract t x (s :=== u) = go s :=== go u
     go v
       | v == t = Var x
       | otherwise = case v of
-          f :$ args -> f :$ fmap go args
+          App f args -> App f (fmap go args)
           _ -> v
 
 -- * Rendering
@@ -774,6 +785,7 @@ renderTacticError sig name = intercalate "\n" . render
 
     side = \case
       EqualityCheckFailed s t -> rt s <> " and " <> rt t <> " are not definitionally equal"
+      DefinitionResolutionFailed err -> err
       TermEigenVariableViolation x t -> name x <> " occurs in " <> rt t
       AssumptionEigenVariableViolation x g -> name x <> " occurs in the context " <> rc g
       MissingAssumption f g -> rf f <> " is not among " <> rc g

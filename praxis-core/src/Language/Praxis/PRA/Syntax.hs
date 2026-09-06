@@ -1,12 +1,13 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 
 module Language.Praxis.PRA.Syntax (
-  Term (..),
+  Term (Var, Lit, App, (:$)),
   Atomic (..),
   (===),
   Formula (..),
@@ -33,13 +34,18 @@ import Data.Type.Natural hiding (Succ, Zero)
 import Data.Type.Ordinal
 import Data.Vector qualified as V
 import GHC.Generics
-import Language.Praxis.PRA.PrimitiveRecursion hiding (suc)
+import Language.Praxis.PRA.PrimitiveRecursion.Code hiding (suc)
+import Language.Praxis.PRA.PrimitiveRecursion.Function (Function (..))
 import Numeric.Natural
 
 data Term a where
   Var :: !a -> Term a
   Lit :: !Natural -> Term a
-  (:$) :: (KnownNat n) => !(PRFCode n) -> !(V n (Term a)) -> Term a
+  App :: (KnownNat n) => !(Function n) -> !(V n (Term a)) -> Term a
+
+-- | Compatibility constructor for applications of bare PRA code.
+pattern (:$) :: () => (KnownNat n) => PRFCode n -> V n (Term a) -> Term a
+pattern code :$ args = App (Primitive code) args
 
 {- | The successor, canonicalised: a numeral steps to the next numeral, so a
 syntactic @Succ@ survives only in front of a term which is not itself a
@@ -58,7 +64,11 @@ var :: a -> Term a
 {-# INLINE var #-}
 var = Var
 
-deriving instance (Show a) => Show (Term a)
+instance (Show a) => Show (Term a) where
+  showsPrec d (Var x) = showParen (d > 10) (showString "Var " . showsPrec 11 x)
+  showsPrec d (Lit n) = showParen (d > 10) (showString "Lit " . showsPrec 11 n)
+  showsPrec d (App (Primitive f) xs) = showParen (d > 6) (showsPrec 7 f . showString " :$ " . showsPrec 7 xs)
+  showsPrec d (App f xs) = showParen (d > 10) (showString "App " . showsPrec 11 f . showString " " . showsPrec 11 xs)
 
 deriving instance Functor Term
 
@@ -83,7 +93,7 @@ canonicalise t@Var {} = t
 canonicalise t@Lit {} = t
 canonicalise (Zero :$ _) = Lit 0
 canonicalise (Succ :$ xs) = suc (canonicalise (sIndex [od|0|] xs))
-canonicalise (f :$ xs) = f :$ fmap canonicalise xs
+canonicalise (App f xs) = App f (fmap canonicalise xs)
 
 {- |
 Equality identifies the spellings 'canonicalise' conflates, so a rule which
@@ -99,11 +109,11 @@ eqCanonical (Var x1) (Var x2) = x1 == x2
 eqCanonical Var {} _ = False
 eqCanonical (Lit n1) (Lit n2) = n1 == n2
 eqCanonical Lit {} _ = False
-eqCanonical ((f1 :: PRFCode m) :$ xs1) ((f2 :: PRFCode m') :$ xs2) =
+eqCanonical (App (f1 :: Function m) xs1) (App (f2 :: Function m') xs2) =
   case testEquality (sNat @m) (sNat @m') of
     Nothing -> False
     Just Refl -> f1 == f2 && V.and (V.zipWith eqCanonical (unsized xs1) (unsized xs2))
-eqCanonical (:$) {} _ = False
+eqCanonical App {} _ = False
 
 infix 6 :$
 
@@ -114,7 +124,7 @@ instance (Hashable a) => Hashable (Term a) where
 hashCanonical :: (Hashable a) => Int -> Term a -> Int
 hashCanonical salt (Var x) = hashWithSalt salt (0 :: Int, x)
 hashCanonical salt (Lit n) = hashWithSalt salt (1 :: Int, n)
-hashCanonical salt (f :$ xs) =
+hashCanonical salt (App f xs) =
   V.foldl' hashCanonical (hashWithSalt salt (2 :: Int, f)) (unsized xs)
 
 {- | Terms are the syntactic model of the primitive-recursive numerals: an
@@ -160,7 +170,7 @@ instance Substitutable Term where
     | x == y = t
     | otherwise = Var y
   subst _ _ (Lit n) = Lit n
-  subst x t (f :$ xs) = f :$ fmap (subst x t) xs
+  subst x t (App f xs) = App f (fmap (subst x t) xs)
 
 instance Substitutable Atomic where
   subst x t (t1 :=== t2) = subst x t t1 :=== subst x t t2

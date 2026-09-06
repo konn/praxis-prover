@@ -17,9 +17,10 @@ import Data.Sized qualified as SV
 import Data.Text qualified as T
 import Data.Type.Ordinal (Ordinal, enumOrdinal)
 import GHC.TypeNats (SomeNat (..), natVal, someNatVal)
-import Language.Praxis.PRA.PrimitiveRecursion (V)
-import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
+import Language.Praxis.PRA.PrimitiveRecursion.Code (V)
+import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature qualified as Sig
 
 {- | Existing symbols, with S and Succ as built-in successor aliases.
@@ -28,8 +29,9 @@ Explicit signature entries take precedence over the aliases.
 signatureEnv :: Sig.Signature -> Env
 signatureEnv sig = Map.fromList (map entry (Sig.symbols sig)) <> builtins
   where
-    entry sym = case Sig.symbolCode sym of
-      Sig.SomeCode code -> (T.pack (Sig.symbolName sym), SomeFunction (Primitive code))
+    entry sym = case Sig.symbolFunction sym of
+      F.SomeFunction (F.Primitive code) -> (T.pack (Sig.symbolName sym), SomeFunction (Primitive code))
+      F.SomeFunction fun -> (T.pack (Sig.symbolName sym), SomeFunction (Bound fun))
     builtins = Map.fromList [("S", SomeFunction (Primitive PR.Succ)), ("Succ", SomeFunction (Primitive PR.Succ))]
 
 {- | Collect all definitions before renaming, allowing forward and self references.

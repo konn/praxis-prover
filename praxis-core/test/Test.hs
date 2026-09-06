@@ -12,6 +12,7 @@ import Data.Sized (pattern Nil, pattern (:<))
 import Data.Type.Ordinal (od)
 import Language.Praxis.PRA.ElaborationTest (elaborationTests)
 import Language.Praxis.PRA.Equality
+import Language.Praxis.PRA.PRFQuoteTest (prfQuoteTests)
 import Language.Praxis.PRA.PrimitiveRecursion hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Examples
 import Language.Praxis.PRA.ProofTest (proofTests)
@@ -27,7 +28,8 @@ main =
   defaultMain $
     testGroup
       "praxis-core"
-      [ elaborationTests
+      [ prfQuoteTests
+      , elaborationTests
       , primitiveRecursionTests
       , evalableTermTests
       , canonicalTermTests

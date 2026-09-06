@@ -83,6 +83,7 @@ import Language.Haskell.TH
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (addModFinalizer)
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Signature
@@ -174,8 +175,9 @@ praQuoter :: Signature -> QuasiQuoter
 praQuoter sig =
   QuasiQuoter
     { quoteExp = \src -> do
+        env <- either fail pure (signatureKernelEnv sig)
         (goal, tac) <- either fail pure (parseGoal (schemaScope sig []) src)
-        proof <- either (fail . renderTacticError sig renderSchemaName) pure (proveOpen Map.empty goal tac)
+        proof <- either (fail . renderTacticError sig renderSchemaName) pure (proveOpenIn env Map.empty goal tac)
         (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty) proof)
         pure body
     , quoteDec = \src -> do
@@ -194,6 +196,7 @@ proofConstructors =
 
 compileDecl :: Signature -> Decl SchemaName -> Q [Dec]
 compileDecl sig decl = do
+  kernel <- either fail pure (signatureKernelEnv sig)
   let dname = declName decl
       binders = declBinders decl
       metas = binderMetas binders
@@ -202,7 +205,7 @@ compileDecl sig decl = do
     fail ("pra: " <> dname <> " is not a Haskell variable name")
   checked <-
     either (fail . renderTacticError sig renderSchemaName) pure $
-      proveOpen prems (declGoal decl) (declTactic decl)
+      proveOpenIn kernel prems (declGoal decl) (declTactic decl)
 
   -- One parameter per binder, in order.
   params <- traverse (newName . stem . fst) (binderParams binders)
@@ -391,14 +394,15 @@ liftTerm env = go . canonicalise
       Succ :$ args -> do
         t <- go (SV.sIndex [od|0|] args)
         lift [|suc $(pure t)|]
-      f :$ args -> do
-        hs <- case symbolOfCode f (leSig env) of
+      App f args -> do
+        hs <- case symbolOfFunction f (leSig env) of
           Nothing -> failL ("the code " <> show f <> " has no symbol in the signature")
           Just sym -> case symbolHaskellName sym of
             Nothing -> failL ("the symbol " <> symbolName sym <> " records no Haskell name; declare it with symbolNamed")
             Just hs -> pure hs
         as <- traverse go (SV.toList args)
-        lift [|$(varE hs) :$ $(foldr (\x acc -> [|$(pure x) :< $acc|]) [|Nil|] as)|]
+        let applied = case f of F.Primitive _ -> [|F.Primitive $(varE hs)|]; _ -> varE hs
+        lift [|App $applied $(foldr (\x acc -> [|$(pure x) :< $acc|]) [|Nil|] as)|]
 
 liftAtom :: LiftEnv -> Atomic SchemaName -> L Exp
 liftAtom env p@(s :=== t) = case decodeMeta p of

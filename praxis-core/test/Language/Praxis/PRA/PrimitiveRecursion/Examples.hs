@@ -1,9 +1,6 @@
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE QuasiQuotes #-}
-{-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 
--- | A small library of 'PRFCode's to test against.
+-- | Quote-defined arithmetic, explicitly erased for the bare-kernel fixtures.
 module Language.Praxis.PRA.PrimitiveRecursion.Examples (
   predC,
   plus,
@@ -11,22 +8,30 @@ module Language.Praxis.PRA.PrimitiveRecursion.Examples (
   expo,
 ) where
 
-import Data.Sized (pattern Nil, pattern (:<))
-import Data.Type.Ordinal (od)
-import Language.Praxis.PRA.PrimitiveRecursion
+import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode)
+import Language.Praxis.PRA.PrimitiveRecursion.Function
+import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
+import Language.Praxis.PRA.Signature (signatureKernelEnv)
 
--- | @predC n = n - 1@, truncated at zero.
+[prf|
+  environment examples
+  predecessor 0 = 0
+  predecessor (S n) = n
+
+  addition 0 x = x
+  addition (S y) x = S (addition y x)
+
+  multiplication 0 x = 0
+  multiplication (S y) x = addition (multiplication y x) x
+
+  exponentiation 0 x = 1
+  exponentiation (S y) x = multiplication (exponentiation y x) x
+|]
+
 predC :: PRFCode 1
-predC = Rec Zero (Proj [od|0|])
+predC = either error id (signatureKernelEnv examples >>= (`eraseFunction` predecessor))
 
--- | @plus (y, x) = y + x@, by recursion on @y@.
-plus :: PRFCode 2
-plus = Rec (Proj [od|0|]) (Comp Succ (Proj [od|1|] :< Nil))
-
--- | @mult (y, x) = y * x@, by recursion on @y@.
-mult :: PRFCode 2
-mult = Rec Zero (Comp plus (Proj [od|1|] :< Proj [od|2|] :< Nil))
-
--- | @expo (y, x) = x ^ y@, by recursion on @y@.
-expo :: PRFCode 2
-expo = Rec (Comp Succ (Zero :< Nil)) (Comp mult (Proj [od|1|] :< Proj [od|2|] :< Nil))
+plus, mult, expo :: PRFCode 2
+plus = either error id (signatureKernelEnv examples >>= (`eraseFunction` addition))
+mult = either error id (signatureKernelEnv examples >>= (`eraseFunction` multiplication))
+expo = either error id (signatureKernelEnv examples >>= (`eraseFunction` exponentiation))

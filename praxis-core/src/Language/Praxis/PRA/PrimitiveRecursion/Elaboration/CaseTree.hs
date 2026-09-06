@@ -14,7 +14,7 @@ import Data.Maybe (mapMaybe)
 import Data.Sized qualified as SV
 import Data.Type.Ordinal (Ordinal)
 import GHC.TypeNats (KnownNat)
-import Language.Praxis.PRA.PrimitiveRecursion (V)
+import Language.Praxis.PRA.PrimitiveRecursion.Code (V)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Internal
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 
