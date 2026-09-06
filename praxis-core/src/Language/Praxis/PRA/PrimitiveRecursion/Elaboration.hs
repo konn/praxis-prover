@@ -36,13 +36,15 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration (
 ) where
 
 import Control.Monad (foldM, void)
-import Data.Hashable (Hashable)
+import Data.Hashable (Hashable (..))
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Sized qualified as SV
+import Data.String (IsString)
 import Data.Text qualified as T
 import Data.Void (Void)
 import GHC.Generics (Generic)
@@ -232,3 +234,27 @@ parseEquation = runFully equationP
 
 parseEquations :: T.Text -> Either String [Equation T.Text]
 parseEquations = runFully (equationP `sepEndBy` symbol ";")
+
+-- | A textual variable name, which is irrelevant for equality and hashing.
+newtype IrrelevantName = IrrelevantName {rawName :: T.Text}
+  deriving newtype (IsString, Show)
+
+instance Eq IrrelevantName where
+  _ == _ = True
+  {-# INLINE (==) #-}
+
+instance Ord IrrelevantName where
+  compare _ _ = EQ
+  {-# INLINE compare #-}
+  (<) = const $ const False
+  {-# INLINE (<) #-}
+  (<=) = const $ const True
+  {-# INLINE (<=) #-}
+  (>) = const $ const False
+  {-# INLINE (>) #-}
+  (>=) = const $ const True
+  {-# INLINE (>=) #-}
+
+instance Hashable IrrelevantName where
+  hashWithSalt salt _ = hash salt
+  {-# INLINE hashWithSalt #-}
