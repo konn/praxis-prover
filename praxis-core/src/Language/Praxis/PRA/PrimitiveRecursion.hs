@@ -37,7 +37,12 @@ data PRFCode m where
   Succ :: PRFCode 1
   Proj :: !(Ordinal n) -> PRFCode n
   Comp :: (KnownNat m) => !(PRFCode m) -> !(V m (PRFCode n)) -> PRFCode n
-  Rec :: !(PRFCode k) -> !(PRFCode (k + 2)) -> PRFCode (k + 1)
+  Rec ::
+    -- | Base case: the recursion parameter is zero, given with the fixed arguments.
+    !(PRFCode k) ->
+    -- | Successor step: the recursion parameter first, the result of the previous step second, then the fixed arguments.
+    !(PRFCode (k + 2)) ->
+    PRFCode (k + 1)
 
 deriving instance (KnownNat n) => Show (PRFCode n)
 
@@ -147,3 +152,33 @@ evalPRFCodeM step = go
 -}
 evalPRFCode :: (KnownNat n, Evalable a) => PRFCode n -> V n a -> a
 evalPRFCode f = runIdentity . evalPRFCodeM (pure True) f
+
+flipPRF :: PRFCode 2 -> PRFCode 2
+flipPRF f = Comp f (Proj [od|1|] :< Proj [od|0|] :< Nil)
+
+add :: PRFCode 2
+add =
+  flipPRF $ Rec (Proj [od|0|]) (Succ `Comp` (Proj [od|1|] :< Nil))
+
+addNative :: Natural -> Natural -> Natural
+addNative = (+)
+
+mul :: PRFCode 2
+mul =
+  flipPRF $
+    Rec
+      Zero
+      (add `Comp` (Proj [od|1|] :< Proj [od|2|] :< Nil))
+
+mulNative :: Natural -> Natural -> Natural
+mulNative = (*)
+
+pow :: PRFCode 2
+pow =
+  flipPRF $
+    Rec
+      (Succ `Comp` (Zero :< Nil))
+      (mul `Comp` (Proj [od|1|] :< Proj [od|2|] :< Nil))
+
+powNative :: Natural -> Natural -> Natural
+powNative = (^)
