@@ -26,20 +26,21 @@ import Control.Monad (unless, void, when)
 import Data.Char (isAlphaNum, isLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import GHC.TypeNats (KnownNat, natVal)
+import GHC.TypeNats (KnownNat)
 import Language.Haskell.TH qualified as TH
+import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Language.Haskell.TH.Syntax (Lift, getQ, lift, mkNameG_v, putQ)
+import Language.Haskell.TH.Syntax (Lift, getQ, liftTyped, mkNameG_v, putQ, unTypeCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Environment
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
+import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (arityType)
 import Language.Praxis.PRA.Signature qualified as Sig
 import Text.Megaparsec (SourcePos (..), eof, errorBundlePretty, getSourcePos, optional, parse, sourcePosPretty, try, (<|>))
 
@@ -137,19 +138,11 @@ compileQuote initial source = do
     Nothing | null equations -> pure []
     Nothing -> do
       shared <- TH.newName "prfSignature"
-      body <- liftSignature fullSig
-      let signatureType = TH.ConT ''Sig.Signature
-          aliases =
-            concat
-              [ [TH.SigD binding signatureType, TH.ValD (TH.VarP binding) (TH.NormalB (TH.VarE shared)) []]
-              | ident <- Set.toList signatureNames
-              , let binding = TH.mkName (T.unpack ident)
-              ]
-      pure (TH.SigD shared signatureType : TH.ValD (TH.VarP shared) (TH.NormalB body) [] : aliases)
-    Just (Header ident _) -> do
-      body <- liftSignature fullSig
-      let binding = TH.mkName (T.unpack ident)
-      pure [TH.SigD binding (TH.ConT ''Sig.Signature), TH.ValD (TH.VarP binding) (TH.NormalB body) []]
+      binding <- valueDeclaration shared [t|Sig.Signature|] (unTypeCode (liftSignature fullSig))
+      aliases <- concat <$> traverse (\ident -> valueDeclaration (TH.mkName (T.unpack ident)) [t|Sig.Signature|] (TH.varE shared)) (Set.toList signatureNames)
+      pure (binding <> aliases)
+    Just (Header ident _) ->
+      valueDeclaration (TH.mkName (T.unpack ident)) [t|Sig.Signature|] (unTypeCode (liftSignature fullSig))
   let registered = case header of
         Nothing -> snapshots registry
         Just (Header ident _) -> Map.insert ident (extended, fullSig) (snapshots registry)
@@ -170,32 +163,48 @@ validBinding ident = case T.uncons ident of
   Nothing -> False
 
 emitDefinition :: (T.Text -> T.Text) -> ElaboratedDefinition -> TH.Q [TH.Dec]
-emitDefinition qualify (ElaboratedDefinition ident (_ :: F.Program n) _ _ _) = do
-  body <- lift (F.Defined (F.DefId (qualify ident)) :: F.Function n)
-  let binding = TH.mkName (T.unpack ident)
-      ty = TH.AppT (TH.ConT ''F.Function) (TH.LitT (TH.NumTyLit (toInteger (natVal (Proxy @n)))))
-  pure [TH.SigD binding ty, TH.ValD (TH.VarP binding) (TH.NormalB body) []]
+emitDefinition qualify (ElaboratedDefinition ident (_ :: F.Program n) _ _ _) =
+  valueDeclaration
+    (TH.mkName (T.unpack ident))
+    [t|F.Function $(arityType @n)|]
+    (unTypeCode (liftTyped (F.Defined (F.DefId (qualify ident)) :: F.Function n)))
+
+-- Declaration quotes permit a generated binding pattern, but not a generated
+-- name on the left of a type signature. Keep that boundary in th-desugar.
+valueDeclaration :: TH.Name -> TH.TypeQ -> TH.ExpQ -> TH.Q [TH.Dec]
+valueDeclaration binding ty body = do
+  signatureType <- ty >>= D.dsType
+  declaration <- [d|$(TH.varP binding) = $body|]
+  pure (D.letDecToTH (D.DSigD binding signatureType) : declaration)
 
 -- Preserve the concrete arity when lifting a value out of an existential
 -- definition or symbol. The constructor traversal itself comes from DeriveLift.
-liftAtArity :: forall n f. (KnownNat n, Lift (f n)) => TH.Name -> f n -> TH.Q TH.Exp
-liftAtArity constructor value = do
-  body <- lift value
-  let ty = TH.AppT (TH.ConT constructor) (TH.LitT (TH.NumTyLit (toInteger (natVal (Proxy @n)))))
-  pure (TH.SigE body ty)
+liftAtArity :: forall n f. (KnownNat n, Lift (f n)) => TH.TypeQ -> f n -> TH.Code TH.Q (f n)
+liftAtArity constructor value =
+  -- Only the concrete type index crosses this untyped boundary. The value's
+  -- recursive construction is checked by its derived Lift instance.
+  TH.unsafeCodeCoerce [|$(unTypeCode (liftTyped value)) :: $constructor $(arityType @n)|]
 
-liftSignature :: Sig.Signature -> TH.Q TH.Exp
-liftSignature sig = do
+liftSignature :: Sig.Signature -> TH.Code TH.Q Sig.Signature
+liftSignature sig = TH.joinCode do
   env <- either fail pure (Sig.signatureKernelEnv sig)
-  [|
+  pure
+    [||
     Sig.withKernelEnv
-      (either error id (F.extendKernelEnv F.emptyKernelEnv $(TH.listE (map definition (F.definitions env)))))
-      (Sig.signature $(TH.listE (map entry (Sig.symbols sig))))
-    |]
+      (either error id (F.extendKernelEnv F.emptyKernelEnv $$(listCode (map definition (F.definitions env)))))
+      (Sig.signature $$(listCode (map entry (Sig.symbols sig))))
+    ||]
   where
-    definition (F.Definition (F.DefId ident) code) = [|F.Definition (F.DefId $(lift ident)) $(liftAtArity ''F.Program code)|]
+    definition (F.Definition ident code) = [||F.Definition $$(liftTyped ident) $$(liftAtArity [t|F.Program|] code)||]
     entry sym = case Sig.symbolFunction sym of
-      F.SomeFunction fun -> case (fun, Sig.symbolHaskellName sym) of
-        (F.Primitive _, Just binding) -> [|Sig.symbolNamed $(TH.stringE (Sig.symbolName sym)) $(lift binding) $(TH.varE binding)|]
-        (_, Just binding) -> [|Sig.functionSymbolNamed $(TH.stringE (Sig.symbolName sym)) $(lift binding) $(TH.varE binding)|]
-        (_, Nothing) -> [|Sig.functionSymbol $(TH.stringE (Sig.symbolName sym)) $(liftAtArity ''F.Function fun)|]
+      F.SomeFunction (fun :: F.Function n) -> case (fun, Sig.symbolHaskellName sym) of
+        (F.Primitive _, Just binding) -> [||Sig.symbolNamed $$(liftTyped (Sig.symbolName sym)) $$(liftTyped binding) $$(reference binding (F.Primitive @n))||]
+        (_, Just binding) -> [||Sig.functionSymbolNamed $$(liftTyped (Sig.symbolName sym)) $$(liftTyped binding) $$(reference binding (id @(F.Function n)))||]
+        (_, Nothing) -> [||Sig.functionSymbol $$(liftTyped (Sig.symbolName sym)) $$(liftAtArity [t|F.Function|] fun)||]
+    -- The signature records each referenced binding's type. The witness fixes
+    -- its arity here; the splice site checks the actual Haskell binding again.
+    reference :: TH.Name -> (a -> F.Function n) -> TH.Code TH.Q a
+    reference binding _ = TH.unsafeCodeCoerce (TH.varE binding)
+
+listCode :: [TH.Code TH.Q a] -> TH.Code TH.Q [a]
+listCode = foldr (\x xs -> [||$$x : $$xs||]) [||[]||]

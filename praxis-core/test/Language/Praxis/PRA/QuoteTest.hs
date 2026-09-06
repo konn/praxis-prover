@@ -10,6 +10,8 @@ module Language.Praxis.PRA.QuoteTest (quoteTests) where
 import Control.Monad (forM_)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
+import Data.Text (Text)
+import Data.Text qualified as T
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.QuoteSignature (pra, testSignature)
 import Language.Praxis.PRA.Syntax
@@ -70,6 +72,11 @@ quoteTests =
     "quasiquoter"
     [ testCase "a theorem is the proof of its sequent" $
         inferConclusion plusZeroLeft @?= Right (sequent "|- plus(0, y) = y")
+    , testCase "typed quotation witnesses do not specialize generated proofs" $ do
+        inferConclusion (plusZeroLeft :: Proof Text)
+          @?= Right (asText (sequent "|- plus(0, y) = y"))
+        inferConclusion (identityAtom (Var (T.pack "a") :=== Lit 0))
+          @?= Right (asText (sequent "a = 0 |- a = 0"))
     , testCase "a theorem by induction" $
         inferConclusion plusZeroRight @?= Right (sequent "|- plus(y, 0) = y")
     , testCase "an expression quote is a proof" $
@@ -125,3 +132,5 @@ quoteTests =
     atom = either error id . parseFormula sc
     ctx :: [String] -> Multiset (Formula String)
     ctx = foldr (MS.insertOne . atom) MS.empty
+    asText :: Sequent String -> Sequent Text
+    asText (g :|- f) = foldr (MS.insertOne . fmap T.pack) MS.empty g :|- fmap T.pack f

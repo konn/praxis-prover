@@ -16,6 +16,7 @@ module Language.Praxis.PRA.Rule.TH.Name (
 import Data.Hashable (Hashable)
 import GHC.Generics (Generic)
 import Language.Haskell.TH
+import Language.Haskell.TH.Desugar qualified as D
 import Language.Praxis.PRA.Rule (Rule (..))
 
 -- | The constructor a rule contributes to @RuleName@: @ConjL@ becomes @ConjLRule@.
@@ -32,17 +33,25 @@ data RuleName = IdRule | ExFalsoRule | ...
 with the derivings the rest of the package expects of it.
 -}
 deriveRuleName :: [Rule] -> Q [Dec]
-deriveRuleName rules =
-  pure
-    [ DataD
-        []
-        (mkName "RuleName")
-        []
-        Nothing
-        [NormalC (ruleNameCon r) [] | r <- rules]
-        [ DerivClause
-            (Just StockStrategy)
-            [ConT ''Show, ConT ''Eq, ConT ''Ord, ConT ''Enum, ConT ''Bounded, ConT ''Generic]
-        , DerivClause (Just AnyclassStrategy) [ConT ''Hashable]
-        ]
-    ]
+deriveRuleName rules = do
+  let name = mkName "RuleName"
+      -- Constructor lists cannot be spliced into a declaration quote.
+      declaration = D.decToTH (D.DDataD D.Data [] name [] Nothing constructors [])
+      constructors = [D.DCon [] [] (ruleNameCon r) (D.DNormalC False []) (D.DConT name) | r <- rules]
+  instances <-
+    [d|
+      deriving stock instance Show $(conT name)
+
+      deriving stock instance Eq $(conT name)
+
+      deriving stock instance Ord $(conT name)
+
+      deriving stock instance Enum $(conT name)
+
+      deriving stock instance Bounded $(conT name)
+
+      deriving stock instance Generic $(conT name)
+
+      deriving anyclass instance Hashable $(conT name)
+      |]
+  pure (declaration : instances)

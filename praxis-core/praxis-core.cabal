@@ -68,6 +68,8 @@ library
     sized,
     template-haskell,
     text,
+    th-abstraction,
+    th-desugar,
     transformers,
     type-natural,
     unordered-containers,

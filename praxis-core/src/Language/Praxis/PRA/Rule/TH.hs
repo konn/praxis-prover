@@ -19,10 +19,11 @@ syntax-directed transcription in two halves:
   instantiated patterns.
 
 The pattern instantiators 'instT', 'instA' and 'instF' are written with typed
-quotations, so an ill-sorted pattern is a type error in /this/ module rather
-than at a splice site.  Assembly of the checker body drops to untyped
-quotations: the generated function is polymorphic in @a@ under a 'Hashable'
-constraint, which a typed quotation cannot express.
+quotations, as are the side conditions and conclusion, so an ill-sorted
+expression is a type error in /this/ module rather than at a splice site.
+Assembly of declarations and variable-length @do@ blocks uses untyped
+quotations and TH's smart constructors. The splice site checks the resulting
+function polymorphically in @a@ under its 'Hashable' constraint.
 
 The checker body is emitted as a @do@ block, and the splice site is required
 to enable @ApplicativeDo@ with @-foptimal-applicative-do@ (see
@@ -46,6 +47,7 @@ import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Set qualified as Set
 import Language.Haskell.TH
+import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Syntax (
   addModFinalizer,
   lift,
@@ -169,8 +171,8 @@ stemOf p = case filter isAlphaNum (R.refName (R.paramRef p)) of
 
 -- * The syntax layer
 
-strictT :: TypeQ -> BangTypeQ
-strictT = bangType (bang noSourceUnpackedness sourceStrict)
+strictT :: TypeQ -> Q D.DBangType
+strictT ty = (,) <$> bang noSourceUnpackedness sourceStrict <*> (ty >>= D.dsType)
 
 paramType :: Name -> R.Param -> TypeQ
 paramType a p = case p of
@@ -190,18 +192,19 @@ deriveProofSyntax rules = do
   a <- newName "a"
   r <- newName "r"
   let proofTy = [t|$(conT proofTyName) $(varT a)|]
+      proofFTy = [t|$(conT proofFTyName) $(varT a) $(varT r)|]
+      constructor names name result fields =
+        D.DCon (map (`D.DPlainTV` D.SpecifiedSpec) names) [] name
+          <$> (D.DNormalC False <$> sequence fields)
+          <*> (result >>= D.dsType)
       proofCon rule =
-        normalC
-          (conNameOf rule)
-          ( map (strictT . paramType a) (R.ruleParams rule)
-              <> replicate (length (R.rulePremises rule)) (strictT proofTy)
-          )
+        constructor [a] (conNameOf rule) proofTy $
+          map (strictT . paramType a) (R.ruleParams rule)
+            <> replicate (length (R.rulePremises rule)) (strictT proofTy)
       proofFCon rule =
-        normalC
-          (conFNameOf rule)
-          ( map (strictT . paramType a) (R.ruleParams rule)
-              <> replicate (length (R.rulePremises rule)) (strictT (varT r))
-          )
+        constructor [a, r] (conFNameOf rule) proofFTy $
+          map (strictT . paramType a) (R.ruleParams rule)
+            <> replicate (length (R.rulePremises rule)) (strictT (varT r))
       arity rule = length (R.ruleParams rule) + length (R.rulePremises rule)
 
   -- Attach the inference figure to each generated constructor.
@@ -214,14 +217,8 @@ deriveProofSyntax rules = do
 
   dataDecs <-
     sequence
-      [ dataD (pure []) proofTyName [plainTV a] Nothing (map proofCon rules) [stock [[t|Show|], [t|Eq|]]]
-      , dataD
-          (pure [])
-          proofFTyName
-          [plainTV a, plainTV r]
-          Nothing
-          (map proofFCon rules)
-          [stock [[t|Show|], [t|Eq|], [t|Functor|], [t|Foldable|], [t|Traversable|]]]
+      [ datatype proofTyName [a] (map proofCon rules) [[t|Show|], [t|Eq|]]
+      , datatype proofFTyName [a, r] (map proofFCon rules) [[t|Show|], [t|Eq|], [t|Functor|], [t|Foldable|], [t|Traversable|]]
       ]
 
   instanceDecs <-
@@ -265,13 +262,18 @@ deriveProofSyntax rules = do
 
   pure (dataDecs <> instanceDecs <> ruleSpecDecs <> stepDecs)
   where
-    stock = derivClause (Just StockStrategy)
+    -- Constructor counts and field types depend on the rule table, so use
+    -- th-desugar's GHC-independent declaration representation here.
+    datatype name vars constructors classes = do
+      cons <- sequence constructors
+      derivings <- traverse (>>= D.dsType) classes
+      pure (D.decToTH (D.DDataD D.Data [] name (map (`D.DPlainTV` D.BndrReq) vars) Nothing cons [D.DDerivClause (Just D.DStockStrategy) derivings]))
     nameMatch con rule =
       match (recP (con rule) []) (normalB (conE (ruleNameCon rule))) []
     -- @ConjL a b p -> ConjLF a b p@, and the reverse for @embed@.
     conversion from to ar rule = do
       xs <- traverse (const (newName "x")) [1 .. ar rule]
-      match (conP (from rule) (map varP xs)) (normalB (foldl appE (conE (to rule)) (map varE xs))) []
+      match (conP (from rule) (map varP xs)) (normalB (foldl (\f x -> [|$f $x|]) (conE (to rule)) (map varE xs))) []
     fieldNames rule = do
       ps <- traverse (newName . stemOf) (R.ruleParams rule)
       ds <- traverse (\i -> newName ("d" <> show i)) [1 .. length (R.rulePremises rule)]
@@ -281,13 +283,7 @@ deriveProofSyntax rules = do
       (ps, ds) <- fieldNames rule
       clause
         [conP (conFNameOf rule) (map varP (ps <> ds))]
-        ( normalB
-            ( tupE
-                [ listE [conE (argCon p) `appE` varE n | (p, n) <- zip (R.ruleParams rule) ps]
-                , listE (map varE ds)
-                ]
-            )
-        )
+        (normalB [|($(listE [[|$(conE (argCon p)) $(varE n)|] | (p, n) <- zip (R.ruleParams rule) ps]), $(listE (map varE ds)))|])
         []
     -- @ConjLRule [ArgForm a, ArgForm b] [d] -> Just (ConjLF a b d)@
     buildClause rule = do
@@ -297,7 +293,7 @@ deriveProofSyntax rules = do
         , listP [conP (argCon p) [varP n] | (p, n) <- zip (R.ruleParams rule) ps]
         , listP (map varP ds)
         ]
-        (normalB [|Just $(foldl appE (conE (conFNameOf rule)) (map varE (ps <> ds)))|])
+        (normalB [|Just $(foldl (\f x -> [|$f $x|]) (conE (conFNameOf rule)) (map varE (ps <> ds)))|])
         []
 
 -- * The checker
@@ -378,6 +374,9 @@ ruleBody rule env0 subNames = do
         (stmt :) <$> go env' rest
 
   matchStmts <- go env0 (zip3 [0 :: Word ..] (R.rulePremises rule) qNames)
+  -- Keep the variable-length do block in TH's smart-constructor API:
+  -- desugaring it here would bypass ApplicativeDo at the splice site and
+  -- change the checker's error accumulation.
   doE (map (noBindS . sideExp env0) closedSides <> collectStmts <> matchStmts)
 
 {- |
@@ -436,22 +435,22 @@ formKey (R.FormM n) = n
 
 sideExp :: GEnv -> R.Side -> ExpQ
 sideExp e (R.DefEq s t) =
-  [|checkDefEq $(untyped (instT e s)) $(untyped (instT e t))|]
+  untyped [||checkDefEq $$(instT e s) $$(instT e t)||]
 sideExp e (R.NotFreeIn (R.VarM x) tgt) = case tgt of
   R.InTerm t ->
-    [|checkNotFreeInTerm $(untyped (look "variable" x (gVars e))) $(untyped (instT e t))|]
+    untyped [||checkNotFreeInTerm $$(look "variable" x (gVars e)) $$(instT e t)||]
   R.InCtx g ->
-    [|checkNotFreeInCtx $(untyped (look "variable" x (gVars e))) $(untyped (look "context" (ctxKey g) (gCtxs e)))|]
+    untyped [||checkNotFreeInCtx $$(look "variable" x (gVars e)) $$(look "context" (ctxKey g) (gCtxs e))||]
 
 conclusionExp :: GEnv -> R.Rule -> ExpQ
 conclusionExp env rule =
-  [|pure ($ctxE |- $(untyped (instF env succ')))|]
+  untyped @(InferenceMachine W (Sequent W)) [||pure ($$ctxE |- $$(instF env succ'))||]
   where
     fs R.:+ g R.:|- succ' = R.ruleConclusion rule
     ctxE =
       foldr
-        (\f acc -> [|MS.insertOne $(untyped (instF env f)) $acc|])
-        (untyped (look "context" (ctxKey g) (gCtxs env)))
+        (\f acc -> [||MS.insertOne $$(instF env f) $$acc||])
+        (look "context" (ctxKey g) (gCtxs env))
         fs
 
 {- |

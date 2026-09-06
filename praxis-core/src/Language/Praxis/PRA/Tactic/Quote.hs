@@ -74,16 +74,18 @@ import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Set (Set)
 import Data.Set qualified as Set
-import Data.Sized (pattern Nil, pattern (:<))
 import Data.Sized qualified as SV
 import Data.String (IsString, fromString)
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
 import Language.Haskell.TH
+import Language.Haskell.TH.Datatype (ConstructorInfo (..), DatatypeInfo (..), reifyDatatype)
+import Language.Haskell.TH.Datatype.TyVarBndr (plainTVSpecified)
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (addModFinalizer)
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
+import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (liftSizedWith)
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Signature
@@ -189,10 +191,9 @@ praQuoter sig =
 
 -- | The constructor of 'Proof' for each rule, by its label.
 proofConstructors :: Q (Map String Name)
-proofConstructors =
-  reify ''Proof >>= \case
-    TyConI (DataD _ _ _ _ cons _) -> pure (Map.fromList [(nameBase n, n) | NormalC n _ <- cons])
-    _ -> fail "pra: Proof is not a data type"
+proofConstructors = do
+  info <- reifyDatatype ''Proof
+  pure (Map.fromList [(nameBase n, n) | con <- datatypeCons info, let n = constructorName con])
 
 compileDecl :: Signature -> Decl SchemaName -> Q [Dec]
 compileDecl sig decl = do
@@ -247,7 +248,7 @@ compileDecl sig decl = do
           <> [[t|Hashable $(varT a)|] | NeedsHashable `Set.member` flags', NeedsFresh `Set.notMember` flags']
           <> [[t|IsString $(varT a)|] | NeedsIsString `Set.member` flags']
       paramTypes = [binderType a b | b <- binders, _ <- binderNames b]
-      ty = forallT [PlainTV a SpecifiedSpec] (sequence constraints) (foldr (\p r -> [t|$p -> $r|]) [t|Proof $(varT a)|] paramTypes)
+      ty = forallT [plainTVSpecified a] (sequence constraints) (foldr (\p r -> [t|$p -> $r|]) [t|Proof $(varT a)|] paramTypes)
       name = mkName dname
 
   addModFinalizer $ putDoc (DeclDoc name) (figure sig decl)
@@ -361,86 +362,97 @@ data Flag = NeedsHashable | NeedsIsString | NeedsFresh
 
 type L = WriterT (Set Flag) Q
 
+-- As in Rule.TH, expressions are checked at a witness type, then rechecked
+-- polymorphically at the splice site. No witness-type annotation is emitted.
+type W = String
+
+type LCode a = L (Code Q a)
+
+-- Only references to parameters/signature entries cross an untyped boundary.
+-- Their sorts are established by the checked declaration and LiftEnv.
+boundName :: Name -> Code Q a
+boundName = unsafeCodeCoerce . varE
+
 need :: Flag -> L ()
 need = tell . Set.singleton
 
 failL :: String -> L x
 failL = lift . fail . ("pra: " <>)
 
-metaParam :: LiftEnv -> R.Sort -> String -> L Exp
+metaParam :: LiftEnv -> R.Sort -> String -> LCode a
 metaParam env s n = case Map.lookup (s, n) (leMeta env) of
-  Just p -> pure (VarE p)
+  Just p -> pure (boundName p)
   Nothing -> failL ("no parameter for the " <> sortName s <> " metavariable " <> n)
 
-liftName :: LiftEnv -> SchemaName -> L Exp
+liftName :: LiftEnv -> SchemaName -> LCode W
 liftName env = \case
   Obj s -> case Map.lookup s (leObj env) of
-    Just x -> pure (VarE x)
+    Just x -> pure (boundName x)
     Nothing -> do
       need NeedsIsString
-      lift [|fromString $(stringE s)|]
+      pure [||fromString s||]
   Meta R.VarS n -> metaParam env R.VarS n
   Meta s n -> failL (n <> " is a " <> sortName s <> " metavariable, but stands as a variable")
 
-liftTerm :: LiftEnv -> Term SchemaName -> L Exp
+liftTerm :: LiftEnv -> Term SchemaName -> LCode (Term W)
 liftTerm env = go . canonicalise
   where
     go = \case
       Var (Meta R.TermS n) -> metaParam env R.TermS n
       Var v -> do
         x <- liftName env v
-        lift [|Var $(pure x)|]
-      Lit n -> lift [|Lit n|]
+        pure [||Var $$x||]
+      Lit n -> pure [||Lit n||]
       Succ :$ args -> do
         t <- go (SV.sIndex [od|0|] args)
-        lift [|suc $(pure t)|]
+        pure [||suc $$t||]
       App f args -> do
         hs <- case symbolOfFunction f (leSig env) of
           Nothing -> failL ("the code " <> show f <> " has no symbol in the signature")
           Just sym -> case symbolHaskellName sym of
             Nothing -> failL ("the symbol " <> symbolName sym <> " records no Haskell name; declare it with symbolNamed")
             Just hs -> pure hs
-        as <- traverse go (SV.toList args)
-        let applied = case f of F.Primitive _ -> [|F.Primitive $(varE hs)|]; _ -> varE hs
-        lift [|App $applied $(foldr (\x acc -> [|$(pure x) :< $acc|]) [|Nil|] as)|]
+        as <- traverse go args
+        let applied = case f of F.Primitive _ -> [||F.Primitive $$(boundName hs)||]; _ -> boundName hs
+        pure [||App $$applied $$(liftSizedWith id as)||]
 
-liftAtom :: LiftEnv -> Atomic SchemaName -> L Exp
+liftAtom :: LiftEnv -> Atomic SchemaName -> LCode (Atomic W)
 liftAtom env p@(s :=== t) = case decodeMeta p of
   Just (R.AtomS, n) -> metaParam env R.AtomS n
   Just (sort', n) -> failL (n <> " is a " <> sortName sort' <> " metavariable, but stands where an atom is required; declare it an atom")
   Nothing -> do
     s' <- liftTerm env s
     t' <- liftTerm env t
-    lift [|$(pure s') :=== $(pure t')|]
+    pure [||$$s' :=== $$t'||]
 
-liftFormula :: LiftEnv -> Formula SchemaName -> L Exp
+liftFormula :: LiftEnv -> Formula SchemaName -> LCode (Formula W)
 liftFormula env = \case
   Atm p -> case decodeMeta p of
     Just (R.FormS, n) -> metaParam env R.FormS n
     Just (R.CtxS, n) -> failL (n <> " is a ctx metavariable, but stands as a formula")
     _ -> do
       p' <- liftAtom env p
-      lift [|Atm $(pure p')|]
-  Bot -> lift [|Bot|]
-  f :/\ g -> binary '(:/\) f g
-  f :\/ g -> binary '(:\/) f g
-  f :==> g -> binary '(:==>) f g
+      pure [||Atm $$p'||]
+  Bot -> pure [||Bot||]
+  f :/\ g -> binary [||(:/\)||] f g
+  f :\/ g -> binary [||(:\/)||] f g
+  f :==> g -> binary [||(:==>)||] f g
   where
     binary con f g = do
       f' <- liftFormula env f
       g' <- liftFormula env g
-      pure (InfixE (Just f') (ConE con) (Just g'))
+      pure [||$$con $$f' $$g'||]
 
-liftContext :: LiftEnv -> Multiset (Formula SchemaName) -> L Exp
+liftContext :: LiftEnv -> Multiset (Formula SchemaName) -> LCode (Multiset (Formula W))
 liftContext env g = do
   need NeedsHashable
   let (ctxMetas, formulas) = foldr classify ([], []) g
   tails <- traverse (metaParam env R.CtxS) ctxMetas
-  base <- case tails of
-    [] -> lift [|MS.empty|]
-    t : ts -> lift (foldl (\acc u -> [|$acc <> $(pure u)|]) (pure t) ts)
+  let base = case tails of
+        [] -> [||MS.empty||]
+        t : ts -> foldl (\acc u -> [||$$acc <> $$u||]) t ts
   fs <- traverse (liftFormula env) formulas
-  lift (foldr (\f acc -> [|MS.insertOne $(pure f) $acc|]) (pure base) fs)
+  pure (foldr (\f acc -> [||MS.insertOne $$f $$acc||]) base fs)
   where
     classify f (ms, fs) = case f of
       Atm p | Just (R.CtxS, n) <- decodeMeta p -> (n : ms, fs)
@@ -448,18 +460,18 @@ liftContext env g = do
 
 liftArg :: LiftEnv -> Arg SchemaName -> L Exp
 liftArg env = \case
-  ArgVar v -> liftName env v
-  ArgTerm t -> liftTerm env t
-  ArgAtom p -> liftAtom env p
-  ArgForm f -> liftFormula env f
-  ArgCtx g -> liftContext env g
+  ArgVar v -> liftName env v >>= lift . unTypeCode
+  ArgTerm t -> liftTerm env t >>= lift . unTypeCode
+  ArgAtom p -> liftAtom env p >>= lift . unTypeCode
+  ArgForm f -> liftFormula env f >>= lift . unTypeCode
+  ArgCtx g -> liftContext env g >>= lift . unTypeCode
 
 liftProof :: LiftEnv -> Free (ProofF SchemaName) String -> L Exp
 liftProof env proof = do
   cons <- lift proofConstructors
   let go = \case
         Pure d -> case Map.lookup d (lePremise env) of
-          Just p -> pure (VarE p)
+          Just p -> lift (varE p)
           Nothing -> failL ("no parameter for the premise " <> d)
         Free step -> do
           con <- case Map.lookup (R.ruleLabel (ruleSpec (ruleName step))) cons of
@@ -468,5 +480,5 @@ liftProof env proof = do
           let (args, subs) = stepFields step
           args' <- traverse (liftArg env) args
           subs' <- traverse go subs
-          pure (foldl AppE (ConE con) (args' <> subs'))
+          lift (foldl (\f x -> [|$f $(pure x)|]) (conE con) (args' <> subs'))
   go proof

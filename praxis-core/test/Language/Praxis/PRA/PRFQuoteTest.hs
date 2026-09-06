@@ -9,6 +9,7 @@ import Data.Either (isLeft)
 import Data.Hashable (hash)
 import Data.Sized qualified as SV
 import Data.Text qualified as T
+import Data.Type.Ordinal (Ordinal)
 import Language.Haskell.TH (recover)
 import Language.Haskell.TH.Quote (quoteDec, quoteExp, quotePat, quoteType)
 import Language.Haskell.TH.Syntax (lift, liftTyped)
@@ -55,6 +56,13 @@ import Test.Tasty.HUnit
 [arithPRF|
   environment imported
   cube n = pow n 3
+|]
+
+[rawPRF|
+  environment lifted
+  liftedPower n m = rawPower n m
+  liftedZero = rawZero
+  liftedIdentity n = rawIdentity n
 |]
 
 [arithProof|
@@ -108,6 +116,18 @@ prfQuoteTests =
     , testCase "derived Lift retains nullary and hidden composition arities" $ do
         $$(liftTyped (PR.Comp (PR.Zero :: PR.PRFCode 0) SV.Nil :: PR.PRFCode 3))
           @?= (PR.Comp (PR.Zero :: PR.PRFCode 0) SV.Nil :: PR.PRFCode 3)
+    , testCase "typed Lift preserves ordinal bounds and sized vector lengths" $ do
+        show $(lift (6 :: Ordinal 7)) @?= show (6 :: Ordinal 7)
+        $(lift (6 :: Ordinal 7)) @?= (6 :: Ordinal 7)
+        $$(liftTyped (6 :: Ordinal 7)) @?= (6 :: Ordinal 7)
+        $(lift (SV.Nil :: PR.V 0 Int)) @?= (SV.Nil :: PR.V 0 Int)
+        $$(liftTyped (SV.Nil :: PR.V 0 Int)) @?= (SV.Nil :: PR.V 0 Int)
+        $$(liftTyped (3 SV.:< SV.Nil :: PR.V 1 Int)) @?= (3 SV.:< SV.Nil :: PR.V 1 Int)
+    , testCase "quoted signatures preserve named raw codes and unnamed arities" $ do
+        env <- expectRight (Sig.signatureKernelEnv lifted)
+        F.evalFunction env liftedPower (3 SV.:< 4 SV.:< SV.Nil) @?= Right 81
+        F.evalFunction env liftedZero SV.Nil @?= Right 0
+        F.evalFunction env liftedIdentity (7 SV.:< SV.Nil) @?= Right 7
     , testCase "incremental environments evaluate arithmetic" $ do
         env <- expectRight (Sig.signatureKernelEnv extended)
         forM_ [0 .. 4] $ \n -> forM_ [0 .. 4] $ \m -> do
