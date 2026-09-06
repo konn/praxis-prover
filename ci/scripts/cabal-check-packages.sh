@@ -2,13 +2,16 @@
 
 COUNT=0
 FAILS=0
-declare GITHUB_STEP_SUMMARY
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  exec 3>>"${GITHUB_STEP_SUMMARY}"
+else
+  exec 3>&1
+fi
 declare -a invalid=()
 
 set -eux
 
-LOG_FILE=$(readlink -f ./cabal-check-log.log)
-touch "${LOG_FILE}"
+LOG_FILE=$(mktemp "${TMPDIR:-/tmp}/praxis-cabal-check.XXXXXX")
 
 trap 'rm -f "${LOG_FILE}"' EXIT
 
@@ -49,7 +52,7 @@ if [ "${FAILS}" -gt 0 ]; then
     echo "## Messages"
     echo ""
     cat "${LOG_FILE}"
-  } >> "${GITHUB_STEP_SUMMARY}"
+  } >&3
   exit 1
 else
   { 
@@ -59,5 +62,5 @@ else
     echo "## Messages"
     echo ""
     cat "${LOG_FILE}"
-  } >> "${GITHUB_STEP_SUMMARY}"
+  } >&3
 fi

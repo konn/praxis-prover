@@ -12,7 +12,7 @@ Praxis is a Cabal multi-package Haskell project. `praxis-core/` contains primiti
 - `fourmolu --mode inplace <file.hs>` formats changed Haskell files using `fourmolu.yaml`.
 - `bash ci/scripts/cabal-check-packages.sh` performs the package checks used by CI.
 
-Use the root `cabal.project`; CI currently exercises GHC 9.10.3 with Cabal 3.10.x.
+Use the root `cabal.project`; CI currently exercises GHC 9.12.4 with Cabal 3.14.2.0.
 
 ## Coding Style & Naming Conventions
 

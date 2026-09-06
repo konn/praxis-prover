@@ -7,21 +7,26 @@ module.exports = async ({ os, plan, path, core, glob }) => {
 
     return { key: comps.join("-"), restore: fallbacks.join("\n") };
   }
-  const project_hash = await glob.hashFiles("cabal.project", path);
+  const project_hash = await glob.hashFiles(
+    ["cabal.project", "cabal.project.freeze", path, `${path}.freeze`].join("\n")
+  );
   core.setOutput("project", project_hash);
 
   const package_hash = await glob.hashFiles("**/*.cabal");
   core.setOutput("package", package_hash);
 
   const source_hash = await glob.hashFiles(
-    "**/*.hs",
-    "**/*.lhs",
-    "**/*.hsig",
-    "**/*.hs-boot",
-    "**/*.c",
-    "**/*.h",
-    "**/*.chs",
-    "**/*.hsc"
+    [
+      "**/*.hs",
+      "**/*.lhs",
+      "**/*.hsig",
+      "**/*.hs-boot",
+      "**/*.c",
+      "**/*.h",
+      "**/*.chs",
+      "**/*.hsc",
+      "!dist-newstyle/**",
+    ].join("\n")
   );
   core.setOutput("source", source_hash);
 
