@@ -11,7 +11,7 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   prd,
   lt,
   isZero,
-  cond,
+  ifte,
   triangle,
   pair,
   cons,
@@ -49,8 +49,8 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
   isZero 0 = 1
   isZero (S n) = 0
 
-  cond 0 t e = e
-  cond (S n) t e = t
+  ifte 0 t e = e
+  ifte (S n) t e = t
 
   triangle 0 = 0
   triangle (S n) = add (triangle n) (S n)
