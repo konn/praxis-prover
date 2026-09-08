@@ -24,6 +24,7 @@ import Numeric.Natural (Natural)
 
 data Equation name = Equation
   { name :: !name
+  , schemaParams :: ![name]
   , args :: ![Pattern name]
   , clause :: !(EqTerm name)
   }
@@ -39,6 +40,8 @@ data EqTerm name
   = LitET !Natural
   | NameET !name
   | EqTerm name :@ EqTerm name
+  | InfixET !(EqTerm name) !name !(EqTerm name)
+  | IfThenElseET !(EqTerm name) !(EqTerm name) !(EqTerm name)
   deriving (Show, Eq, Ord, Generic)
   deriving anyclass (Hashable)
 
@@ -49,9 +52,24 @@ data Function n = Defined !T.Text | Primitive !(PRFCode n) | Bound !(F.Function 
 
 deriving instance (KnownNat n) => Show (Function n)
 
-data SomeFunction = forall n. (KnownNat n) => SomeFunction !(Function n)
+data SomeFunction
+  = forall n. (KnownNat n) => SomeFunction !(Function n)
+  | SchemaDef !T.Text ![T.Text] !Natural !Natural
 
-deriving instance Show SomeFunction
+instance Show SomeFunction where
+  showsPrec d (SomeFunction f) = showParen (d > 10) (showString "SomeFunction " . showsPrec 11 f)
+  showsPrec d (SchemaDef n ps pa fa) =
+    showParen
+      (d > 10)
+      ( showString "SchemaDef "
+          . showsPrec 11 n
+          . showString " "
+          . showsPrec 11 ps
+          . showString " "
+          . showsPrec 11 pa
+          . showString " "
+          . showsPrec 11 fa
+      )
 
 type Env = Map T.Text SomeFunction
 

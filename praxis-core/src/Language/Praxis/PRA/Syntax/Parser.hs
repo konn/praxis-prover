@@ -80,8 +80,12 @@ import Control.Monad (void, when)
 import Data.Char (isAlphaNum, isLetter)
 import Data.Hashable (Hashable)
 import Data.Multiset qualified as MS
+import Data.Proxy (Proxy (..))
+import Data.Sized qualified as SV
 import Data.Void (Void)
+import GHC.TypeNats (KnownNat, natVal)
 import Language.Praxis.PRA.Pattern
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural (Natural)
@@ -176,7 +180,7 @@ identifierP sc = lexeme (try (ident >>= check)) <?> "identifier"
   where
     ident = (:) <$> satisfy isLetter <*> many identChar
     check w
-      | w == "S" || w `elem` scopeReserved sc = fail ("reserved word " <> show w)
+      | w `elem` ["S", "if", "then", "else"] || w `elem` scopeReserved sc = fail ("reserved word " <> show w)
       | otherwise = pure w
 
 wildcardP :: Parser ()
@@ -212,31 +216,159 @@ closedP p = do
 
 -- * Terms
 
-termP :: Scope a -> Parser (Term (Hole a))
-termP sc =
-  choice
-    [ Var Wild <$ wildcardP
-    , Lit <$> naturalP
-    , parens (termP sc)
-    , suc <$> (keywordP "S" *> parens (termP sc))
-    , applicationP
-    ]
-    <?> "term"
+chainl1 :: Parser a -> Parser (a -> a -> a) -> Parser a
+chainl1 p op = do
+  x <- p
+  rest x
   where
+    rest x =
+      ( do
+          f <- op
+          y <- p
+          rest (f x y)
+      )
+        <|> pure x
+
+termP :: Scope a -> Parser (Term (Hole a))
+termP sc = ifP <|> cmpP
+  where
+    ifP = do
+      o <- getOffset
+      keywordP "if"
+      c <- termP sc
+      keywordP "then"
+      t <- termP sc
+      keywordP "else"
+      e <- termP sc
+      case lookupSymbol "ifte" (scopeSignature sc) of
+        Just sym
+          | symbolArity sym == 3 ->
+              maybe (fail "arity") pure (applySymbol sym [c, t, e])
+        _ -> region (setErrorOffset o) (fail "'if ... then ... else ...' requires ternary 'ifte' to be in scope")
+
+    cmpP = do
+      l <- addP
+      option
+        l
+        ( do
+            o <- getOffset
+            op <-
+              (symbolP "<=" *> pure "<=")
+                <|> (lexeme (try (string "<" <* notFollowedBy (satisfy (== '=')))) *> pure "<")
+                <|> (lexeme (try (string "==" <* notFollowedBy (satisfy (== '>')))) *> pure "==")
+            r <- addP
+            case op of
+              "<" -> applyBinary o ["lt"] "Operator '<' requires binary 'lt' to be in scope" l r
+              "<=" -> applyBinary o ["le", "lte"] "Operator '<=' requires binary 'le' or 'lte' to be in scope" l r
+              "==" -> applyBinary o ["eq"] "Operator '==' requires binary 'eq' to be in scope" l r
+              _ -> fail ("Unknown operator: " <> op)
+        )
+
+    addP = chainl1 mulP addOp
+      where
+        addOp =
+          ( do
+              o <- getOffset
+              symbolP "+"
+              sym <- case findBinary ["add", "plus"] of
+                Just s -> pure s
+                Nothing -> region (setErrorOffset o) (fail "Operator '+' requires binary 'add' or 'plus' to be in scope")
+              pure (\l r -> maybe (error "arity") id (applySymbol sym [l, r]))
+          )
+            <|> ( do
+                    o <- getOffset
+                    lexeme (try (string "-" <* notFollowedBy (satisfy (== '-'))))
+                    sym <- case findBinary ["sub"] of
+                      Just s -> pure s
+                      Nothing -> region (setErrorOffset o) (fail "Operator '-' requires binary 'sub' to be in scope")
+                    pure (\l r -> maybe (error "arity") id (applySymbol sym [l, r]))
+                )
+
+    mulP = chainl1 expP mulOp
+      where
+        mulOp = do
+          o <- getOffset
+          symbolP "*"
+          sym <- case findBinary ["mul", "times"] of
+            Just s -> pure s
+            Nothing -> region (setErrorOffset o) (fail "Operator '*' requires binary 'mul' or 'times' to be in scope")
+          pure (\l r -> maybe (error "arity") id (applySymbol sym [l, r]))
+
+    expP = do
+      l <- atomP
+      option
+        l
+        ( do
+            o <- getOffset
+            symbolP "^"
+            r <- expP
+            applyBinary o ["pow"] "Operator '^' requires binary 'pow' to be in scope" l r
+        )
+
+    applyBinary o candidates errMsg l r =
+      case findBinary candidates of
+        Just sym -> maybe (fail "arity") pure (applySymbol sym [l, r])
+        Nothing -> region (setErrorOffset o) (fail errMsg)
+
+    findBinary [] = Nothing
+    findBinary (c : cs) = case lookupSymbol c (scopeSignature sc) of
+      Just sym | symbolArity sym == 2 -> Just sym
+      _ -> findBinary cs
+
+    atomP =
+      choice
+        [ Var Wild <$ wildcardP
+        , Lit <$> naturalP
+        , parens (termP sc)
+        , suc <$> (keywordP "S" *> parens (termP sc))
+        , applicationP
+        ]
+        <?> "term"
+
     applicationP = do
       o <- getOffset
       name <- identifierP sc
-      case lookupSymbol name (scopeSignature sc) of
-        Just sym -> do
-          args <- option [] (parens (termP sc `sepBy` commaP))
-          let arity = symbolArity sym
+      case lookupSchema name (scopeSignature sc) of
+        Just sch -> schemaAppP o name sch
+        Nothing -> case lookupSymbol name (scopeSignature sc) of
+          Just sym -> do
+            args <- option [] (parens (termP sc `sepBy` commaP))
+            let arity = symbolArity sym
+            when (fromIntegral (length args) /= arity) $
+              region (setErrorOffset o) $
+                fail (name <> " takes " <> show arity <> " arguments, given " <> show (length args))
+            maybe (fail "arity") pure (applySymbol sym args)
+          Nothing -> case scopeTerm sc name of
+            Right t -> pure (fmap Named t)
+            Left err -> region (setErrorOffset o) (fail err)
+
+    schemaAppP o name sch = do
+      (pSym, args) <- bracedCall <|> parensCall
+      case applySchemaSymbol sch (symbolFunction pSym) of
+        Left err -> region (setErrorOffset o) (fail err)
+        Right (F.SomeFunction (instFun :: F.Function n)) -> do
+          let arity = natVal (Proxy @n)
           when (fromIntegral (length args) /= arity) $
             region (setErrorOffset o) $
               fail (name <> " takes " <> show arity <> " arguments, given " <> show (length args))
-          maybe (fail "arity") pure (applySymbol sym args)
-        Nothing -> case scopeTerm sc name of
-          Right t -> pure (fmap Named t)
-          Left err -> region (setErrorOffset o) (fail err)
+          case SV.fromList' args of
+            Just xs -> pure (App instFun xs)
+            Nothing -> region (setErrorOffset o) (fail "arity vector mismatch")
+      where
+        bracedCall = do
+          pName <- braces (identifierP sc)
+          pSym <- case lookupSymbol pName (scopeSignature sc) of
+            Just s -> pure s
+            Nothing -> region (setErrorOffset o) (fail ("Unknown symbol: " <> pName))
+          args <- option [] (parens (termP sc `sepBy` commaP))
+          pure (pSym, args)
+        parensCall = parens do
+          pName <- try (identifierP sc <* commaP)
+          pSym <- case lookupSymbol pName (scopeSignature sc) of
+            Just s -> pure s
+            Nothing -> region (setErrorOffset o) (fail ("Unknown symbol: " <> pName))
+          args <- termP sc `sepBy` commaP
+          pure (pSym, args)
 
 -- * Formulae
 

@@ -26,11 +26,13 @@ import Control.Monad (unless, void, when)
 import Data.Char (isAlphaNum, isLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import GHC.TypeNats (KnownNat)
+import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal)
 import Language.Haskell.TH qualified as TH
+import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift, getQ, liftTyped, mkNameG_v, putQ, unTypeCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
@@ -127,13 +129,17 @@ compileQuote initial source = do
   extended <- either fail pure (extendEnvironment parent block)
   let hsName ident = mkNameG_v (TH.loc_package loc) (TH.loc_module loc) (T.unpack ident)
       newSymbols =
-        Sig.signature
+        Sig.signatureWithSchemas
           [ sym {Sig.symbolHaskellName = Just (hsName (T.pack (Sig.symbolName sym)))}
           | sym <- Sig.symbols (blockSignature block)
+          ]
+          [ sch {Sig.schemaSymbolHaskellName = Just (hsName (T.pack (Sig.schemaSymbolName sch)))}
+          | sch <- Sig.schemas (blockSignature block)
           ]
   kernel <- either fail pure (Sig.signatureKernelEnv (environmentSignature extended))
   let fullSig = Sig.withKernelEnv kernel (newSymbols <> parentSig)
   declarations <- concat <$> traverse (emitDefinition qualify) (Map.elems (blockDefinitions block))
+  schemaDeclarations <- concat <$> traverse (emitSchema qualify) (Map.elems (blockSchemas block))
   signatureDeclarations <- case header of
     Nothing | null equations -> pure []
     Nothing -> do
@@ -147,7 +153,7 @@ compileQuote initial source = do
         Nothing -> snapshots registry
         Just (Header ident _) -> Map.insert ident (extended, fullSig) (snapshots registry)
   putQ (Registry registered (names <> generatedNames registry))
-  pure (declarations <> signatureDeclarations)
+  pure (declarations <> schemaDeclarations <> signatureDeclarations)
 
 withLocations :: [LocatedEquation] -> String -> String
 withLocations equations err = "prf: " <> err <> concatMap location equations
@@ -168,6 +174,19 @@ emitDefinition qualify (ElaboratedDefinition ident (_ :: F.Program n) _ _ _) =
     (TH.mkName (T.unpack ident))
     [t|F.Function $(arityType @n)|]
     (unTypeCode (liftTyped (F.Defined (F.DefId (qualify ident)) :: F.Function n)))
+
+emitSchema :: (T.Text -> T.Text) -> ElaboratedSchema -> TH.Q [TH.Dec]
+emitSchema _ (ElaboratedSchema ident params pArity (ElaboratedDefinition _ (code :: F.Program n) _ _ _)) =
+  case someNatVal pArity of
+    SomeNat (_ :: Proxy k) -> do
+      let name = TH.mkName (T.unpack ident)
+          paramName = TH.mkName "p"
+          targetParam = case params of (p : _) -> p; [] -> "P"
+          ty = [t|F.Function $(arityType @k) -> F.Function $(arityType @n)|]
+          body = [|F.Inline (substProgram (F.DefId targetParam) (F.functionProgram $(TH.varE paramName)) $(unTypeCode (liftAtArity [t|F.Program|] code)))|]
+      sigDec <- QTH.signature name ty
+      funDec <- QTH.function name [([D.DVarP paramName], body)]
+      pure [sigDec, funDec]
 
 -- Declaration quotes permit a generated binding pattern, but not a generated
 -- name on the left of a type signature. Keep that boundary in th-desugar.
@@ -192,7 +211,10 @@ liftSignature sig = TH.joinCode do
     [||
     Sig.withKernelEnv
       (either error id (F.extendKernelEnv F.emptyKernelEnv $$(listCode (map definition (F.definitions env)))))
-      (Sig.signature $$(listCode (map entry (Sig.symbols sig))))
+      ( Sig.signatureWithSchemas
+          $$(listCode (map entry (Sig.symbols sig)))
+          $$(listCode (map schemaEntry (Sig.schemas sig)))
+      )
     ||]
   where
     definition (F.Definition ident code) = [||F.Definition $$(liftTyped ident) $$(liftAtArity [t|F.Program|] code)||]
@@ -201,10 +223,15 @@ liftSignature sig = TH.joinCode do
         (F.Primitive _, Just binding) -> [||Sig.symbolNamed $$(liftTyped (Sig.symbolName sym)) $$(liftTyped binding) $$(reference binding (F.Primitive @n))||]
         (_, Just binding) -> [||Sig.functionSymbolNamed $$(liftTyped (Sig.symbolName sym)) $$(liftTyped binding) $$(reference binding (id @(F.Function n)))||]
         (_, Nothing) -> [||Sig.functionSymbol $$(liftTyped (Sig.symbolName sym)) $$(liftAtArity [t|F.Function|] fun)||]
+    schemaEntry (Sig.SchemaSymbol name (inst :: F.Function k -> F.Function n) hs) = case hs of
+      Just binding -> [||Sig.schemaSymbolNamed $$(liftTyped name) $$(liftTyped binding) $$(referenceSchema binding (id @(F.Function k -> F.Function n)))||]
+      Nothing -> [||Sig.schemaSymbol @k @n $$(liftTyped name) $$(referenceSchema (TH.mkName name) (id @(F.Function k -> F.Function n)))||]
     -- The signature records each referenced binding's type. The witness fixes
     -- its arity here; the splice site checks the actual Haskell binding again.
     reference :: TH.Name -> (a -> F.Function n) -> TH.Code TH.Q a
     reference binding _ = TH.unsafeCodeCoerce (QTH.varE binding)
+    referenceSchema :: TH.Name -> (a -> (F.Function k -> F.Function n)) -> TH.Code TH.Q a
+    referenceSchema binding _ = TH.unsafeCodeCoerce (QTH.varE binding)
 
 listCode :: [TH.Code TH.Q a] -> TH.Code TH.Q [a]
 listCode = foldr (\x xs -> [||$$x : $$xs||]) [||[]||]

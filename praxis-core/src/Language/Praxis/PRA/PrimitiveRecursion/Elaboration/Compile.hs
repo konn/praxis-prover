@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.Presburger #-}
 
@@ -6,8 +7,14 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile (
   ElaboratedDefinition (..),
   definitionCode,
   SomeProgram (..),
+  ElaboratedSchema (..),
+  ElaboratedFamily (..),
+  substProgram,
+  instantiateSchemaFunction,
   elaborateDefinition,
   elaborateRenamedEquations,
+  elaborateRenamedEquationsWith,
+  elaborateFamilyWith,
   elaborateEquations,
   elaborateEquationsWith,
 ) where
@@ -28,7 +35,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Code (V)
 import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.CaseTree
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Internal
-import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (renameEquations)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (equationEnv, renameEquation)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Program)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
@@ -47,6 +54,46 @@ data ElaboratedDefinition = forall n. (KnownNat n) => ElaboratedDefinition
   }
 
 deriving instance Show ElaboratedDefinition
+
+data ElaboratedSchema = ElaboratedSchema
+  { compiledSchemaName :: !T.Text
+  , compiledSchemaParams :: ![T.Text]
+  , compiledSchemaParamArity :: !Natural
+  , compiledSchemaDefinition :: !ElaboratedDefinition
+  }
+
+deriving instance Show ElaboratedSchema
+
+data ElaboratedFamily = ElaboratedFamily
+  { familyDefinitions :: !(Map T.Text ElaboratedDefinition)
+  , familySchemas :: !(Map T.Text ElaboratedSchema)
+  }
+
+substProgram :: forall k m. (KnownNat k, KnownNat m) => F.DefId k -> F.Program k -> F.Program m -> F.Program m
+substProgram target replacement = go
+  where
+    go :: forall j. (KnownNat j) => F.Program j -> F.Program j
+    go (F.Base code) = F.Base code
+    go (F.Call (ident :: F.DefId j))
+      | F.definitionName ident == F.definitionName target =
+          case testEquality (sNat @j) (sNat @k) of
+            Just Refl -> replacement
+            Nothing -> F.Call ident
+      | otherwise = F.Call ident
+    go (F.Comp f xs) = F.Comp (go f) (fmap go xs)
+    go (F.Rec b s) = F.Rec (go b) (go s)
+
+instantiateSchemaFunction :: ElaboratedSchema -> F.SomeFunction -> Either String F.SomeFunction
+instantiateSchemaFunction (ElaboratedSchema _ params pArity (ElaboratedDefinition _ (code :: F.Program n) _ _ _)) (F.SomeFunction (p :: F.Function k)) =
+  case someNatVal pArity of
+    SomeNat (_ :: Proxy expectedP) ->
+      case testEquality (sNat @k) (sNat @expectedP) of
+        Just Refl ->
+          let targetId = F.DefId (case params of (pName : _) -> pName; [] -> "P") :: F.DefId k
+              instProgram = substProgram targetId (F.functionProgram p) code
+           in Right (F.SomeFunction (F.Inline instProgram :: F.Function n))
+        Nothing ->
+          Left ("Schema parameter arity mismatch: expected " <> show pArity <> ", given " <> show (natVal (Proxy @k)))
 
 data SomeProgram = forall n. (KnownNat n) => SomeProgram !(Program n)
 
@@ -200,14 +247,36 @@ elaborateRenamedEquationsWith qualify initial equations = foldM (visit Set.empty
 to every definition. Unresolved environmental names must be supplied as code
 before use. Coverage and overlap checks precede recursive-call compilation.
 -}
-elaborateEquations :: Env -> [Equation T.Text] -> Either String (Map T.Text ElaboratedDefinition)
-elaborateEquations = elaborateEquationsWith id
-
-elaborateEquationsWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either String (Map T.Text ElaboratedDefinition)
-elaborateEquationsWith qualify env equations = do
-  renamed <- renameEquations env equations
-  elaborateRenamedEquationsWith qualify (Map.mapMaybe primitive env) renamed
+elaborateFamilyWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either String ElaboratedFamily
+elaborateFamilyWith qualify env equations = do
+  env' <- equationEnv env equations
+  renamed <- traverse (renameEquation env') equations
+  let schemaParamsInitial =
+        Map.fromList
+          [ (pName, case someNatVal pArity of SomeNat (_ :: Proxy p) -> SomeProgram (F.Call (F.DefId pName :: F.DefId p)))
+          | eq <- equations
+          , pName <- schemaParams eq
+          , let pArity = case Map.lookup (name eq) env' of
+                  Just (SchemaDef _ _ a _) -> a
+                  _ -> 0
+          ]
+      initialCodes = schemaParamsInitial <> Map.mapMaybe primitive env'
+  defs <- elaborateRenamedEquationsWith qualify initialCodes renamed
+  let schemaNames = Set.fromList [name eq | eq <- equations, not (null (schemaParams eq))]
+      (schemaDefs, regularDefs) = Map.partitionWithKey (\k _ -> Set.member k schemaNames) defs
+      toSchema ident def = case Map.lookup ident env' of
+        Just (SchemaDef _ params pArity _) ->
+          Just (ElaboratedSchema ident params pArity def)
+        _ -> Nothing
+      schemas = Map.mapMaybeWithKey toSchema schemaDefs
+  pure (ElaboratedFamily regularDefs schemas)
   where
     primitive (SomeFunction (Primitive code)) = Just (SomeProgram (F.Base code))
     primitive (SomeFunction (Bound fun)) = Just (SomeProgram (F.functionProgram fun))
     primitive _ = Nothing
+
+elaborateEquations :: Env -> [Equation T.Text] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateEquations = elaborateEquationsWith id
+
+elaborateEquationsWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateEquationsWith qualify env equations = familyDefinitions <$> elaborateFamilyWith qualify env equations

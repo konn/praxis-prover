@@ -7,6 +7,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   lexeme,
   symbol,
   parens,
+  braces,
   decimal,
   reserved,
   anySymbol,
@@ -26,7 +27,7 @@ import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 import Numeric.Natural (Natural)
-import Text.Megaparsec (Parsec, Pos, SourcePos (..), between, eof, errorBundlePretty, getSourcePos, label, many, notFollowedBy, parse, sepEndBy, try, (<|>))
+import Text.Megaparsec (Parsec, Pos, SourcePos (..), between, eof, errorBundlePretty, getSourcePos, label, many, notFollowedBy, option, parse, sepBy1, sepEndBy, try, (<|>))
 import Text.Megaparsec.Char qualified as CP
 import Text.Megaparsec.Char.Lexer qualified as L
 
@@ -44,6 +45,9 @@ symbol = L.symbol spaceConsumer
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
 
+braces :: Parser a -> Parser a
+braces = between (symbol "{") (symbol "}")
+
 identRest :: Parser Char
 identRest = CP.alphaNumChar <|> CP.char '_' <|> CP.char '\''
 
@@ -54,7 +58,11 @@ reserved :: T.Text -> Parser ()
 reserved op = lexeme (try (void (CP.string op) <* notFollowedBy identRest))
 
 anySymbol :: Parser T.Text
-anySymbol = lexeme (T.pack <$> ((:) <$> CP.letterChar <*> many identRest))
+anySymbol = lexeme $ try do
+  s <- T.pack <$> ((:) <$> CP.letterChar <*> many identRest)
+  if s `elem` ["if", "then", "else"]
+    then fail ("reserved word: " <> T.unpack s)
+    else pure s
 
 patternP :: Parser (Pattern T.Text)
 patternP = patternWith (pure ())
@@ -71,10 +79,77 @@ patternWith next =
 eqTermP :: Parser (EqTerm T.Text)
 eqTermP = termWith (pure ())
 
-termWith :: Parser () -> Parser (EqTerm T.Text)
-termWith next = foldl (:@) <$> atom <*> many atom
+chainl1 :: Parser a -> Parser (a -> a -> a) -> Parser a
+chainl1 p op = do
+  x <- p
+  rest x
   where
-    atom = next *> ((LitET <$> decimal) <|> parens eqTermP <|> (NameET <$> anySymbol))
+    rest x =
+      ( do
+          f <- op
+          y <- p
+          rest (f x y)
+      )
+        <|> pure x
+
+termWith :: Parser () -> Parser (EqTerm T.Text)
+termWith next = expr
+  where
+    expr = ifExpr <|> cmpExpr
+
+    ifExpr = do
+      reserved "if"
+      c <- expr
+      reserved "then"
+      t <- expr
+      reserved "else"
+      e <- expr
+      pure (IfThenElseET c t e)
+
+    cmpExpr = do
+      l <- addExpr
+      option
+        l
+        ( do
+            op <-
+              (symbol "<=" *> pure "<=")
+                <|> try (symbol "<" <* notFollowedBy (CP.char '='))
+                *> pure "<"
+                  <|> (symbol "==" *> pure "==")
+            r <- addExpr
+            pure (InfixET l op r)
+        )
+
+    addExpr = chainl1 mulExpr addOp
+      where
+        addOp =
+          (symbol "+" *> pure (\l r -> InfixET l "+" r))
+            <|> try (symbol "-" <* notFollowedBy (CP.char '-'))
+            *> pure (\l r -> InfixET l "-" r)
+
+    mulExpr = chainl1 expExpr mulOp
+      where
+        mulOp = symbol "*" *> pure (\l r -> InfixET l "*" r)
+
+    expExpr = do
+      l <- appExpr
+      option
+        l
+        ( do
+            _ <- symbol "^"
+            r <- expExpr
+            pure (InfixET l "^" r)
+        )
+
+    appExpr = foldl (:@) <$> atom <*> many atom
+
+    atom =
+      next
+        *> ( (LitET <$> decimal)
+               <|> parens eqTermP
+               <|> braces (NameET <$> anySymbol)
+               <|> (NameET <$> anySymbol)
+           )
 
 equationP :: Parser (Equation T.Text)
 equationP = do
@@ -82,7 +157,13 @@ equationP = do
   equationWith (continuation (sourceColumn start) start)
 
 equationWith :: Parser () -> Parser (Equation T.Text)
-equationWith next = Equation <$> anySymbol <*> many (patternWith next) <* (next *> symbol "=") <*> label "right-hand side (indent continuation lines)" (termWith next)
+equationWith next = do
+  ident <- anySymbol
+  params <- option [] (braces (anySymbol `sepBy1` symbol ","))
+  pats <- many (patternWith next)
+  _ <- next *> symbol "="
+  rhs <- label "right-hand side (indent continuation lines)" (termWith next)
+  pure (Equation ident params pats rhs)
 
 -- Whitespace retains source positions even though lexemes consume newlines.
 -- Only tokens outside parentheses are subject to the equation's offside rule.

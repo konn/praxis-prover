@@ -58,6 +58,15 @@ import Test.Tasty.HUnit
   cube n = pow n 3
 |]
 
+[arithPRF|
+  environment schemaEnv
+  mu {P} 0 x = 0
+  mu {P} (S n) x = if mu P n x < n then mu P n x else if P n x then n else S n
+
+  opExpr a b c = a + b * c
+  condExpr a b = if a < b then a else b
+|]
+
 [rawPRF|
   environment lifted
   liftedPower n m = rawPower n m
@@ -146,6 +155,14 @@ prfQuoteTests =
         env <- expectRight (Sig.signatureKernelEnv imported)
         F.evalFunction env cube (4 SV.:< SV.Nil) @?= Right 64
         F.evalFunction env PR.mul (4 SV.:< 5 SV.:< SV.Nil) @?= Right 20
+    , testCase "function schema and operator desugaring in prf quasiquotes" $ do
+        env <- expectRight (Sig.signatureKernelEnv schemaEnv)
+        F.evalFunction env opExpr (2 SV.:< 3 SV.:< 4 SV.:< SV.Nil) @?= Right 14
+        F.evalFunction env condExpr (2 SV.:< 5 SV.:< SV.Nil) @?= Right 2
+        F.evalFunction env condExpr (5 SV.:< 2 SV.:< SV.Nil) @?= Right 2
+        let muLt = mu PR.lt
+        F.evalFunction env muLt (3 SV.:< 2 SV.:< SV.Nil) @?= Right 0
+        F.evalFunction env muLt (3 SV.:< 0 SV.:< SV.Nil) @?= Right 3
     , testCase "term parsing stores a name, not expanded code" $ do
         t <- expectRight (parseTerm (plainScope extended) "times(3, 4)")
         t @?= App times (Lit 3 SV.:< Lit 4 SV.:< SV.Nil)

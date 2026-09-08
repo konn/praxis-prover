@@ -405,13 +405,12 @@ liftTerm env = go . canonicalise
         t <- go (SV.sIndex [od|0|] args)
         pure [||suc $$t||]
       App f args -> do
-        hs <- case symbolOfFunction f (leSig env) of
-          Nothing -> failL ("the code " <> show f <> " has no symbol in the signature")
+        applied <- case symbolOfFunction f (leSig env) of
           Just sym -> case symbolHaskellName sym of
             Nothing -> failL ("the symbol " <> symbolName sym <> " records no Haskell name; declare it with symbolNamed")
-            Just hs -> pure hs
+            Just hs -> pure (case f of F.Primitive _ -> [||F.Primitive $$(boundName hs)||]; _ -> boundName hs)
+          Nothing -> pure [||f||]
         as <- traverse go args
-        let applied = case f of F.Primitive _ -> [||F.Primitive $$(boundName hs)||]; _ -> boundName hs
         pure [||App $$applied $$(liftSizedWith id as)||]
 
 liftAtom :: LiftEnv -> Atomic SchemaName -> LCode (Atomic W)

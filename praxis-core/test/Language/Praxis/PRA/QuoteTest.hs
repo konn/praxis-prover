@@ -13,7 +13,8 @@ import Data.Multiset qualified as MS
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.PRA.Proof
-import Language.Praxis.PRA.QuoteSignature (pra, testSignature)
+import Language.Praxis.PRA.QuoteSignature (arithWithMu, muPra, pra, testSignature)
+import Language.Praxis.PRA.Signature qualified as Sig
 import Language.Praxis.PRA.Syntax
 import Language.Praxis.PRA.Syntax.Parser
 import Test.Tasty
@@ -64,6 +65,23 @@ rule plusZeroRightAt (t : term) (Γ : ctx) : Γ |- plus(t, 0) = t
 by Ind n (plus(n, 0) = n) t
    { refl }
    { Defeq plus(S(n), 0) S(plus(n, 0)); rewrite (plus(n, 0) = n) in (plus(S(n), 0) = _); Id }
+|]
+
+[muPra|
+theorem desugaredAddMul : |- 2 + 3 * 4 = 14
+by refl
+
+theorem desugaredIfTrue : |- (if 0 < 1 then 10 else 20) = 10
+by refl
+
+theorem desugaredIfFalse : |- (if 1 < 0 then 10 else 20) = 20
+by refl
+
+theorem muSchemaApp1 : |- mu(lt, 3, 2) = 0
+by refl
+
+theorem muSchemaApp2 : |- mu {lt} (3, 0) = 3
+by refl
 |]
 
 quoteTests :: TestTree
@@ -125,10 +143,19 @@ quoteTests =
     , testCase "the eigenvariable of a rule avoids the arguments" $
         inferConclusion (plusZeroRightAt (Var "n") (ctx ["n = 0"]))
           @?= Right (sequent "n = 0 |- plus(n, 0) = n")
+    , testCase "desugared operators, ifte, and schema application in pra quotes" $ do
+        kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv arithWithMu)
+        inferConclusionIn kenv desugaredAddMul @?= Right (sequentMu "|- 2 + 3 * 4 = 14")
+        inferConclusionIn kenv desugaredIfTrue @?= Right (sequentMu "|- (if 0 < 1 then 10 else 20) = 10")
+        inferConclusionIn kenv desugaredIfFalse @?= Right (sequentMu "|- (if 1 < 0 then 10 else 20) = 20")
+        inferConclusionIn kenv muSchemaApp1 @?= Right (sequentMu "|- mu(lt, 3, 2) = 0")
+        inferConclusionIn kenv muSchemaApp2 @?= Right (sequentMu "|- mu {lt} (3, 0) = 3")
     ]
   where
     sc = plainScope testSignature
     sequent = either error id . parseSequent sc
+    scMu = plainScope arithWithMu
+    sequentMu = either error id . parseSequent scMu
     atom = either error id . parseFormula sc
     ctx :: [String] -> Multiset (Formula String)
     ctx = foldr (MS.insertOne . atom) MS.empty

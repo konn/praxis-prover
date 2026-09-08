@@ -10,6 +10,8 @@ import Data.List (isInfixOf)
 import Data.Map.Strict qualified as Map
 import Data.Sized qualified as SV
 import Data.Text qualified as T
+import Data.Type.Equality (testEquality, (:~:) (Refl))
+import Data.Type.Natural (sNat)
 import Data.Type.Ordinal (Ordinal, ordToNatural)
 import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration
@@ -36,10 +38,10 @@ elaborationTests =
             _ -> assertFailure (show xs)
           _ -> assertFailure (show result)
     , testCase "identifiers and constructor prefixes" $
-        parseEquation "f x' Suffix = x'" @?= Right (Equation "f" [VarP "x'", VarP "Suffix"] (NameET "x'"))
+        parseEquation "f x' Suffix = x'" @?= Right (Equation "f" [] [VarP "x'", VarP "Suffix"] (NameET "x'"))
     , testCase "successor patterns and nested comments" $
         parseEquation " {- a {- b -} -} f (Succ (S x)) 0 = S x -- end"
-          @?= Right (Equation "f" [SuccP (SuccP (VarP "x")), ZeroP] (NameET "S" :@ NameET "x"))
+          @?= Right (Equation "f" [] [SuccP (SuccP (VarP "x")), ZeroP] (NameET "S" :@ NameET "x"))
     , testCase "reject trailing input and malformed numerals" $
         map (isLeft . parseEqTerm) ["x )", "12x", "(f x", ""] @?= replicate 4 True
     , testCase "resolve self and forward references with fixed vectors" $ do
@@ -227,6 +229,47 @@ compilerTests =
         defs <- compileProgram ""
         Map.size defs @?= 0
         assertBool "empty definition" (isLeft (elaborateDefinition Map.empty []))
+    , testCase "infix operators and conditionals parse and respect precedence" $ do
+        parseEqTerm "x + y * z" @?= Right (InfixET (NameET "x") "+" (InfixET (NameET "y") "*" (NameET "z")))
+        parseEqTerm "x * y + z" @?= Right (InfixET (InfixET (NameET "x") "*" (NameET "y")) "+" (NameET "z"))
+        parseEqTerm "x < y + 1" @?= Right (InfixET (NameET "x") "<" (InfixET (NameET "y") "+" (LitET 1)))
+        parseEqTerm "if x < y then x else y"
+          @?= Right (IfThenElseET (InfixET (NameET "x") "<" (NameET "y")) (NameET "x") (NameET "y"))
+    , testCase "scope-based desugaring of operators and ifte" $ do
+        let arithEnv = signatureEnv PR.arithmetic
+            locals = Map.fromList [("x", 0 :: Ordinal 2), ("y", 1 :: Ordinal 2)]
+        term1 <- expectRight (parseEqTerm "if x < y then x + y else x * y")
+        renamed1 <- expectRight (renameTerm @2 arithEnv locals term1)
+        case renamed1 of
+          AppFT (Bound _) _ -> pure ()
+          _ -> assertFailure ("unexpected renamed term: " <> show renamed1)
+        let noIfteEnv = Map.delete "ifte" arithEnv
+        assertBool "missing ifte rejected" (isLeft (renameTerm @2 noIfteEnv locals term1))
+        term2 <- expectRight (parseEqTerm "x + y")
+        let noAddEnv = Map.delete "plus" (Map.delete "add" arithEnv)
+        assertBool "missing add rejected" (isLeft (renameTerm @2 noAddEnv locals term2))
+    , testCase "function schema parsing, elaboration, and instantiation" $ do
+        eqs <-
+          expectRight
+            ( parseEquations
+                "mu {P} 0 x = 0; mu {P} (S n) x = if mu P n x < n then mu P n x else if P n x then n else S n"
+            )
+        fam <- expectRight (elaborateFamilyWith id (signatureEnv PR.arithmetic) eqs)
+        case Map.lookup "mu" (familySchemas fam) of
+          Nothing -> assertFailure "schema 'mu' not found in familySchemas"
+          Just muSchema -> do
+            inst <- expectRight (instantiateSchemaFunction muSchema (F.SomeFunction PR.lt))
+            case inst of
+              F.SomeFunction (muLt :: F.Function n) -> case testEquality (sNat @n) (sNat @2) of
+                Just Refl -> do
+                  kernel <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
+                  case SV.fromList' [3, 2] of
+                    Nothing -> assertFailure "bad vector"
+                    Just vec -> F.evalFunction kernel muLt vec @?= Right 0
+                  case SV.fromList' [3, 0] of
+                    Nothing -> assertFailure "bad vector"
+                    Just vec -> F.evalFunction kernel muLt vec @?= Right 3
+                Nothing -> assertFailure "unexpected instantiated function arity"
     ]
   where
     range = [0 .. 4] :: [Natural]
