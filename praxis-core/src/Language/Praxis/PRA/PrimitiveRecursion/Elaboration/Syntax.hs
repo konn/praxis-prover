@@ -48,13 +48,18 @@ data EqTerm name
 infixl 9 :@
 
 -- | A reference to a top-level definition, or an existing primitive code.
-data Function n = Defined !T.Text | Primitive !(PRFCode n) | Bound !(F.Function n)
+data Function n
+  = Defined !T.Text
+  | Primitive !(PRFCode n)
+  | Bound !(F.Function n)
+  | SchemaApp !T.Text ![T.Text]
 
 deriving instance (KnownNat n) => Show (Function n)
 
 data SomeFunction
   = forall n. (KnownNat n) => SomeFunction !(Function n)
   | SchemaDef !T.Text ![T.Text] !Natural !Natural
+  | ImportedSchema !T.Text !Natural !Natural !(F.SomeFunction -> Either String F.SomeFunction)
 
 instance Show SomeFunction where
   showsPrec d (SomeFunction f) = showParen (d > 10) (showString "SomeFunction " . showsPrec 11 f)
@@ -65,6 +70,16 @@ instance Show SomeFunction where
           . showsPrec 11 n
           . showString " "
           . showsPrec 11 ps
+          . showString " "
+          . showsPrec 11 pa
+          . showString " "
+          . showsPrec 11 fa
+      )
+  showsPrec d (ImportedSchema n pa fa _) =
+    showParen
+      (d > 10)
+      ( showString "ImportedSchema "
+          . showsPrec 11 n
           . showString " "
           . showsPrec 11 pa
           . showString " "

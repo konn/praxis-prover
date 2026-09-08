@@ -15,6 +15,7 @@ import Language.Haskell.TH.Quote (quoteDec, quoteExp, quotePat, quoteType)
 import Language.Haskell.TH.Syntax (lift, liftTyped)
 import Language.Praxis.PRA.Equality
 import Language.Praxis.PRA.PRFQuoteSupport
+import Language.Praxis.PRA.PrimitiveRecursion (mu)
 import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration
 import Language.Praxis.PRA.PrimitiveRecursion.Environment
@@ -60,8 +61,6 @@ import Test.Tasty.HUnit
 
 [arithPRF|
   environment schemaEnv
-  mu {P} 0 x = 0
-  mu {P} (S n) x = if mu P n x < n then mu P n x else if P n x then n else S n
 
   opExpr a b c = a + b * c
   condExpr a b = if a < b then a else b
@@ -163,6 +162,14 @@ prfQuoteTests =
         let muLt = mu PR.lt
         F.evalFunction env muLt (3 SV.:< 2 SV.:< SV.Nil) @?= Right 0
         F.evalFunction env muLt (3 SV.:< 0 SV.:< SV.Nil) @?= Right 3
+        arithKernel <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
+        F.evalFunction arithKernel PR.projW (0 SV.:< SV.Nil) @?= Right 0
+        F.evalFunction arithKernel PR.projW (1 SV.:< SV.Nil) @?= Right 1
+        F.evalFunction arithKernel PR.projW (2 SV.:< SV.Nil) @?= Right 1
+        F.evalFunction arithKernel PR.projW (3 SV.:< SV.Nil) @?= Right 2
+        F.evalFunction arithKernel PR.projW (4 SV.:< SV.Nil) @?= Right 2
+        F.evalFunction arithKernel PR.projW (5 SV.:< SV.Nil) @?= Right 2
+        F.evalFunction arithKernel PR.projW (6 SV.:< SV.Nil) @?= Right 3
     , testCase "term parsing stores a name, not expanded code" $ do
         t <- expectRight (parseTerm (plainScope extended) "times(3, 4)")
         t @?= App times (Lit 3 SV.:< Lit 4 SV.:< SV.Nil)

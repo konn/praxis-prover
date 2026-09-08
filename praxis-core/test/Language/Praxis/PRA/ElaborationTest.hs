@@ -252,11 +252,11 @@ compilerTests =
         eqs <-
           expectRight
             ( parseEquations
-                "mu {P} 0 x = 0; mu {P} (S n) x = if mu P n x < n then mu P n x else if P n x then n else S n"
+                "myMu {P} 0 x = 0; myMu {P} (S n) x = if myMu P n x < n then myMu P n x else if P n x then n else S n"
             )
         fam <- expectRight (elaborateFamilyWith id (signatureEnv PR.arithmetic) eqs)
-        case Map.lookup "mu" (familySchemas fam) of
-          Nothing -> assertFailure "schema 'mu' not found in familySchemas"
+        case Map.lookup "myMu" (familySchemas fam) of
+          Nothing -> assertFailure "schema 'myMu' not found in familySchemas"
           Just muSchema -> do
             inst <- expectRight (instantiateSchemaFunction muSchema (F.SomeFunction PR.lt))
             case inst of
@@ -270,6 +270,24 @@ compilerTests =
                     Nothing -> assertFailure "bad vector"
                     Just vec -> F.evalFunction kernel muLt vec @?= Right 3
                 Nothing -> assertFailure "unexpected instantiated function arity"
+        appEqs <-
+          expectRight
+            ( parseEquations
+                "testW z = mu projAuxP z z"
+            )
+        appFam <- expectRight (elaborateFamilyWith id (signatureEnv PR.arithmetic) appEqs)
+        case Map.lookup "testW" (familyDefinitions appFam) of
+          Nothing -> assertFailure "function 'testW' not found in familyDefinitions"
+          Just def -> do
+            kernel <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
+            case SV.fromList' [3] of
+              Nothing -> assertFailure "bad vector"
+              Just vec -> do
+                case definitionCode def of
+                  SomeProgram (code :: F.Program n) ->
+                    case testEquality (sNat @n) (sNat @1) of
+                      Just Refl -> F.evalFunction kernel (F.Inline code) vec @?= Right 2
+                      Nothing -> assertFailure "bad arity"
     ]
   where
     range = [0 .. 4] :: [Natural]

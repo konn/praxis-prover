@@ -61,6 +61,7 @@ sameTerm a b = case (canonical a, canonical b) of
     sameFunction (Defined x) (Defined y) = x == y
     sameFunction (Primitive x) (Primitive y) = x == y
     sameFunction (Bound x) (Bound y) = x == y
+    sameFunction (SchemaApp s1 ps1) (SchemaApp s2 ps2) = s1 == s2 && ps1 == ps2
     sameFunction _ _ = False
     canonical (AppFT (Primitive PR.Succ) xs) = successorTerm (canonical (SV.head xs))
     canonical t = t
@@ -71,4 +72,5 @@ functionCalls (AppFT f xs) = headCall f <> foldMap functionCalls xs
     headCall (Defined ident) = Set.singleton ident
     headCall (Primitive _) = Set.empty
     headCall (Bound _) = Set.empty
+    headCall (SchemaApp sName pArgs) = Set.fromList (sName : pArgs)
 functionCalls _ = Set.empty

@@ -10,7 +10,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (
 ) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (foldM)
+import Control.Monad (foldM, forM_)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
@@ -31,11 +31,22 @@ import Numeric.Natural (Natural)
 Explicit signature entries take precedence over the aliases.
 -}
 signatureEnv :: Sig.Signature -> Env
-signatureEnv sig = Map.fromList (map entry (Sig.symbols sig)) <> builtins
+signatureEnv sig =
+  Map.fromList (map entry (Sig.symbols sig))
+    <> Map.fromList (map schemaEntry (Sig.schemas sig))
+    <> builtins
   where
     entry sym = case Sig.symbolFunction sym of
       F.SomeFunction (F.Primitive code) -> (T.pack (Sig.symbolName sym), SomeFunction (Primitive code))
       F.SomeFunction fun -> (T.pack (Sig.symbolName sym), SomeFunction (Bound fun))
+    schemaEntry sch =
+      ( T.pack (Sig.schemaSymbolName sch)
+      , ImportedSchema
+          (T.pack (Sig.schemaSymbolName sch))
+          (Sig.schemaSymbolParamArity sch)
+          (Sig.schemaSymbolArity sch)
+          (Sig.applySchemaSymbol sch)
+      )
     builtins = Map.fromList [("S", SomeFunction (Primitive PR.Succ)), ("Succ", SomeFunction (Primitive PR.Succ))]
 
 findSchemaParamArity :: T.Text -> [Equation T.Text] -> Natural -> Natural
@@ -149,16 +160,51 @@ renameTermIn env locals schemaCtx term = case term of
                         Just xs -> Right (AppFT (Defined sName :: Function n) xs)
                         Nothing -> Left ("Invalid argument vector for " <> T.unpack ident)
             _ -> Left ("Schema " <> T.unpack sName <> " must be applied to its parameter " <> T.unpack (T.intercalate ", " sParams))
-      | Just (SomeFunction (fun :: Function m)) <- Map.lookup ident env -> do
-          let expected = natVal (Proxy @m)
-          if fromIntegral (length arguments) /= expected
-            then Left (T.unpack ident <> " takes " <> show expected <> " arguments, given " <> show (length arguments))
-            else do
-              renamed <- traverse (renameTermIn env locals schemaCtx) arguments
-              case SV.fromList' renamed of
-                Just xs -> Right (AppFT fun xs)
-                Nothing -> Left ("Invalid argument vector for " <> T.unpack ident)
+      | Just someFun <- Map.lookup ident env -> case someFun of
+          SomeFunction (fun :: Function m) -> do
+            let expected = natVal (Proxy @m)
+            if fromIntegral (length arguments) /= expected
+              then Left (T.unpack ident <> " takes " <> show expected <> " arguments, given " <> show (length arguments))
+              else do
+                renamed <- traverse (renameTermIn env locals schemaCtx) arguments
+                case SV.fromList' renamed of
+                  Just xs -> Right (AppFT fun xs)
+                  Nothing -> Left ("Invalid argument vector for " <> T.unpack ident)
+          SchemaDef sName sParams pArity sArity ->
+            renameSchemaApp sName sParams pArity sArity
+          ImportedSchema sName pArity sArity _ ->
+            renameSchemaApp sName ["P"] pArity sArity
       | otherwise -> Left ("Unknown name: " <> T.unpack ident)
+      where
+        renameSchemaApp sName sParams pArity sArity = do
+          let numParams = length sParams
+          if length arguments < numParams
+            then Left ("Schema " <> T.unpack sName <> " requires " <> show numParams <> " schema argument(s)")
+            else do
+              let (paramArgs, realArgs) = splitAt numParams arguments
+              pNames <- traverse extractParamName paramArgs
+              forM_ pNames $ \pName -> case Map.lookup pName env of
+                Just (SomeFunction (_ :: Function k)) ->
+                  let actualArity = natVal (Proxy @k)
+                   in if actualArity /= pArity
+                        then Left ("Schema argument '" <> T.unpack pName <> "' arity mismatch: expected " <> show pArity <> ", given " <> show actualArity)
+                        else Right ()
+                Just _ -> Left ("Schema argument '" <> T.unpack pName <> "' is a schema, not a function")
+                Nothing -> Left ("Unknown function for schema argument: " <> T.unpack pName)
+              let expectedArgs = sArity
+              if fromIntegral (length realArgs) /= expectedArgs
+                then Left (T.unpack sName <> " takes " <> show expectedArgs <> " arguments, given " <> show (length realArgs))
+                else do
+                  renamed <- traverse (renameTermIn env locals schemaCtx) realArgs
+                  case someNatVal sArity of
+                    SomeNat (_ :: Proxy m) ->
+                      case SV.fromList' renamed of
+                        Just xs -> Right (AppFT (SchemaApp sName pNames :: Function m) xs)
+                        Nothing -> Left ("Invalid argument vector for " <> T.unpack sName)
+
+        extractParamName = \case
+          NameET p -> Right p
+          other -> Left ("Schema parameter must be a function name, given: " <> show other)
     _ -> Left "Only named functions can be applied"
   where
     spine (f :@ x) xs = spine f (x : xs)
@@ -171,6 +217,7 @@ across all arguments, including beneath successor patterns.
 renameEquation :: Env -> Equation T.Text -> Either String RenamedEquation
 renameEquation env eq = case Map.lookup (name eq) env of
   Nothing -> Left ("Unknown function: " <> T.unpack (name eq))
+  Just (ImportedSchema sName _ _ _) -> Left ("Schema already defined: " <> T.unpack sName)
   Just (SomeFunction (_ :: Function n)) -> renameWithArity (Proxy @n) env Nothing
   Just (SchemaDef sName sParams pArity sArity) ->
     case someNatVal sArity of
