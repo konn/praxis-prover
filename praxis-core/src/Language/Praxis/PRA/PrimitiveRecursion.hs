@@ -6,6 +6,15 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   add,
   mul,
   pow,
+  sgn,
+  sub,
+  prd,
+  lt,
+  isZero,
+  cond,
+  triangle,
+  pair,
+  cons,
   arithmetic,
 ) where
 
@@ -29,11 +38,11 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
   sgn (S n) = 1
   sgn 0 = 0
 
-  pred 0 = 0
-  pred (S n) = n
+  prd 0 = 0
+  prd (S n) = n
 
   sub n 0 = n
-  sub n (S m) = pred (sub n m)
+  sub n (S m) = prd (sub n m)
 
   lt n m = sgn (sub m n)
 
