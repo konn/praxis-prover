@@ -25,4 +25,28 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
 
   pow n 0 = 1
   pow n (S m) = mul n (pow n m)
+
+  sgn (S n) = 1
+  sgn 0 = 0
+
+  pred 0 = 0
+  pred (S n) = n
+
+  sub n 0 = n
+  sub n (S m) = pred (sub n m)
+
+  lt n m = sgn (sub m n)
+
+  isZero 0 = 1
+  isZero (S n) = 0
+
+  cond 0 t e = e
+  cond (S n) t e = t
+
+  triangle 0 = 0
+  triangle (S n) = add (triangle n) (S n)
+
+  pair x y = add (triangle (add x y)) y
+
+  cons x y = S (pair x y)
 |]
