@@ -16,8 +16,11 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   pair,
   cons,
   mu,
-  projAuxP,
   projW,
+  godelPi1,
+  godelPi2,
+  lft,
+  rgt,
   arithmetic,
 ) where
 
@@ -68,5 +71,10 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
   
   projAuxP k z = z < triangle (k + 1)
 
-  projW z = mu projAuxP z z
+  projW z = mu {projAuxP} (S z) z
+  godelPi2 z = z - triangle (projW z)
+  godelPi1 z = projW z - godelPi2 z
+
+  lft p = godelPi1 (prd p)
+  rgt p = godelPi2 (prd p)
 |]
