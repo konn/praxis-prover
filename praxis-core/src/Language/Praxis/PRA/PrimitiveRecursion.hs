@@ -16,6 +16,7 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   pair,
   cons,
   mu,
+  projAuxP,
   projW,
   godelPi1,
   godelPi2,
