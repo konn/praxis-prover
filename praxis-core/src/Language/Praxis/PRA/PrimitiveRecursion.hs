@@ -21,7 +21,6 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   pair,
   cons,
   mu,
-  projAuxP,
   projW,
   godelPi1,
   godelPi2,
@@ -75,9 +74,8 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
       then mu {P} n $[xs]
       else if P n $[xs] then n else S n
 
-  projAuxP k z = z < triangle (k + 1)
 
-  projW z = mu {projAuxP} (S z) z
+  projW z = μ k < S z. z < triangle (k + 1)
   godelPi2 z = z - triangle (projW z)
   godelPi1 z = projW z - godelPi2 z
 

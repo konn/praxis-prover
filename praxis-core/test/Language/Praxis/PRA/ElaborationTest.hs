@@ -270,24 +270,6 @@ compilerTests =
                     Nothing -> assertFailure "bad vector"
                     Just vec -> F.evalFunction kernel muLt vec @?= Right 3
                 Nothing -> assertFailure "unexpected instantiated function arity"
-        appEqs <-
-          expectRight
-            ( parseEquations
-                "testW z = mu projAuxP z z"
-            )
-        appFam <- expectRight (elaborateFamilyWith id (signatureEnv PR.arithmetic) appEqs)
-        case Map.lookup "testW" (familyDefinitions appFam) of
-          Nothing -> assertFailure "function 'testW' not found in familyDefinitions"
-          Just def -> do
-            kernel <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
-            case SV.fromList' [3] of
-              Nothing -> assertFailure "bad vector"
-              Just vec -> do
-                case definitionCode def of
-                  SomeProgram (code :: F.Program n) ->
-                    case testEquality (sNat @n) (sNat @1) of
-                      Just Refl -> F.evalFunction kernel (F.Inline code) vec @?= Right 2
-                      Nothing -> assertFailure "bad arity"
     ]
   where
     range = [0 .. 4] :: [Natural]
