@@ -53,7 +53,7 @@ import Data.Functor.Foldable (embed)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.Hashable (Hashable)
-import Data.List (intercalate)
+import Data.List (intercalate, sort)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
@@ -739,7 +739,12 @@ renderTacticError sig name = intercalate "\n" . render
   where
     render (TacticError loc goal failure) =
       (maybe "" (\(Loc l col) -> show l <> ":" <> show col <> ": ") loc <> headline failure)
-        : map ("  " <>) (details failure <> ["goal: " <> rs goal])
+        : map ("  " <>) (details failure <> state failure goal)
+
+    -- A proof abandoned by sorry shows its state: the assumptions, then the succedent.
+    state :: Failure a -> Sequent a -> [String]
+    state Unfinished (ctx :|- c) = sort (map rf (toList ctx)) <> ["|- " <> rf c]
+    state _ goal = ["goal: " <> rs goal]
 
     headline :: Failure a -> String
     headline = \case

@@ -33,7 +33,7 @@ compile error naming the tactic which failed and the goal it faced.  The
 spliced value is the checked proof.
 
 While a proof is being written, a script may end in @sorry@: the quote then
-fails, and the compile error shows the goal left open at that point.
+fails, and the compile error lists the assumptions and the goal left at that point.
 
 A rule is checked once, with its metavariables opaque, and is valid for every
 instantiation by the substitution property of the rules: a metavariable of

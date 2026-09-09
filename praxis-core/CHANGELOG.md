@@ -21,9 +21,10 @@ and this project adheres to the
   `Language.Praxis.PRA.Pattern` adds wildcards.
 - `Language.Praxis.PRA.Proof`: the generic step view `Arg`, `stepFields` and
   `mkStep`, and `inferConclusionOpen` for proofs with assumed leaves.
-- A `sorry` tactic, which abandons the proof at its goal; the error reports
-  that goal, and `|`, `try` and `repeat` do not catch it, so a script under
-  construction may end in `sorry` to see where it stands.
+- A `sorry` tactic, which abandons the proof at its goal; the error lists the
+  assumptions and the goal of that branch, and `|`, `try` and `repeat` do not
+  catch it, so a script under construction may end in `sorry` to see where it
+  stands.
 
 ### Changed
 

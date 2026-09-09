@@ -434,5 +434,10 @@ sorryTests =
         (goal, tac) <- parsed (parseGoal sc "|- 2 = 2 /\\ 3 = 3 by ConjR { sorry } { refl }")
         case prove goal tac of
           Right _ -> assertFailure "proved"
-          Left err -> renderTacticError sig id err @?= "1:30: sorry: the proof stops here\n  goal: |- 2 = 2"
+          Left err -> renderTacticError sig id err @?= "1:30: sorry: the proof stops here\n  |- 2 = 2"
+    , testCase "the report lists the assumptions of the branch, one per line" $ do
+        (goal, tac) <- parsed (parseGoal sc "a = 0, b = 0 /\\ c = 0 |- c = 0 by ConjL; sorry")
+        case prove goal tac of
+          Right _ -> assertFailure "proved"
+          Left err -> renderTacticError sig id err @?= "1:42: sorry: the proof stops here\n  a = 0\n  b = 0\n  c = 0\n  |- c = 0"
     ]
