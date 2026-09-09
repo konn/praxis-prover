@@ -265,7 +265,7 @@ instance Exception ElaborationError where
         <> ": "
         <> intercalate "; " ["argument " <> show index <> ": " <> displayException err | (index, err) <- failures]
     RecursiveCallInBaseCase clause -> "recursive call in base case, in clause " <> show clause
-    InvalidRecursionPattern clause -> "recursion column must contain only 0 and S(variable), in clause " <> show clause
+    InvalidRecursionPattern clause -> "recursion column must contain only 0 and S x, in clause " <> show clause
     InvalidRecursiveCall clause ->
       "recursive call changes a parameter or does not use the immediate predecessor in clause " <> show clause
     RecursiveCallInLambda self -> "recursive call to " <> T.unpack self <> " inside a lambda"

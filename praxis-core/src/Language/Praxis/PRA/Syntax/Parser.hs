@@ -1,24 +1,36 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {- |
 Concrete syntax for terms, formulae and sequents.
 
-> term    ::= ident                          -- a variable, or a 0-ary symbol
+Terms are written in the applicative syntax of the equation language,
+"Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser":
+
+> term    ::= arg {arg}                      -- an application, of a symbol of the signature or of S
+>           | term op term                   -- + - * ^ < <= ==, through the symbols the signature names
+>           | if term then term else term    -- through ifte
+>           | μ ident < term . term          -- a bounded search, through the schema mu
+> arg     ::= ident                          -- a variable, or a 0-ary symbol
 >           | numeral
->           | S ( term )                     -- successor; S(3) is the numeral 4
->           | ident ( term {, term} )        -- a symbol of the signature, arity-checked
 >           | _                              -- a wildcard, in patterns only
 >           | ( term )
+>           | { term }                       -- a schema parameter, within an application only
 > atom    ::= term = term
 > formula ::= atom | _|_ | ~ formula
 >           | formula /\ formula | formula \/ formula | formula ==> formula
 >           | ( formula )
 > sequent ::= [formula {, formula}] |- formula
 
+A schema is applied to its parameter first, a symbol name or a lambda
+@λ x. body@ closed over its binders, then to its arguments: @mu {lt} 3 0@,
+@mu sgn 5@, @mu {λ i. 3 < i} 10@.  The successor is @S@ or @Succ@: @S (S x)@.
+
 The fixities are those of "Language.Praxis.PRA.Syntax": @=@ binds tightest,
 then conjunction, disjunction and implication, all of them associating to the
 right.  @~A@ is sugar for @A ==> _|_@ and binds tighter than the binary
 connectives.  The Unicode spellings @∧ ∨ → ⊥ ⊢ ¬@ are accepted for the ASCII
 connectives, absurdity, turnstile and negation.  Comments run from @--@ to
-the end of the line.
+the end of the line, or between @{-@ and @-}@.
 
 Identifiers start with a letter and continue with letters, digits, @_@ and
 @'@.  An identifier the signature names is a symbol; how any other identifier
@@ -33,11 +45,11 @@ both closed sequents and the schematic ones of a derived rule.
 >>> import Language.Praxis.PRA.Syntax.Pretty
 >>> plus = Rec (Proj [od|0|]) (Comp Succ (Proj [od|1|] :< Nil)) :: PRFCode 2
 >>> sc = plainScope (signature [symbol "plus" plus])
->>> renderFormula (scopeSignature sc) id <$> parseFormula sc "a = 0 ∧ ¬ plus(x, S(y)) = 2 → b = 1"
-Right "a = 0 /\\ ~plus(x, S(y)) = 2 ==> b = 1"
+>>> renderFormula (scopeSignature sc) id <$> parseFormula sc "a = 0 ∧ ¬ plus x (S y) = 2 → b = 1"
+Right "a = 0 /\\ ~plus x (S y) = 2 ==> b = 1"
 >>> renderSequent (scopeSignature sc) id <$> parseSequent sc "a = 0, a = 0 |- a = 0"
 Right "a = 0, a = 0 |- a = 0"
->>> either (const "no") (const "yes") (parseTerm sc "plus(x)")
+>>> either (const "no") (const "yes") (parseTerm sc "plus x")
 "no"
 -}
 module Language.Praxis.PRA.Syntax.Parser (
@@ -59,6 +71,7 @@ module Language.Praxis.PRA.Syntax.Parser (
   Parser,
   runParserFully,
   termP,
+  termAtomP,
   atomicP,
   formulaP,
   sequentP,
@@ -78,22 +91,35 @@ module Language.Praxis.PRA.Syntax.Parser (
 ) where
 
 import Control.Exception (Exception (..))
-import Control.Monad (void, when)
-import Data.Char (isAlphaNum, isLetter)
+import Control.Monad (unless, void)
+import Data.Bifunctor (first)
 import Data.Hashable (Hashable)
+import Data.List (nub)
+import Data.Map.Strict qualified as Map
 import Data.Multiset qualified as MS
 import Data.Proxy (Proxy (..))
 import Data.Sized qualified as SV
+import Data.Text qualified as T
+import Data.Type.Equality (testEquality, (:~:) (Refl))
+import Data.Type.Natural (sNat)
 import Data.Void (Void)
-import GHC.TypeNats (natVal)
+import GHC.TypeNats (KnownNat, natVal)
 import Language.Praxis.PRA.Pattern
+import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile (SomeProgram (..), definitionCode, elaborateEquations)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Env qualified as E
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error (ElaborationError (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (Parser, TermSyntax (..), eqAtomWith, eqTermWith, identifier, spaceConsumer, wildcard)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser qualified as EP
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (signatureEnv)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax qualified as E
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic (expandTerm)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
-import Language.Praxis.PRA.Signature
+import Language.Praxis.PRA.Signature (Signature)
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural (Natural)
-import Text.Megaparsec
-import Text.Megaparsec.Char
-import Text.Megaparsec.Char.Lexer qualified as L
+import Text.Megaparsec (ParseErrorBundle, choice, eof, errorBundlePretty, getOffset, notFollowedBy, oneOf, option, parse, region, sepBy1, setErrorOffset, try, (<?>), (<|>))
+import Text.Megaparsec.Char qualified as CP
 
 {- |
 How the identifiers which are not symbols of the signature are read.  The
@@ -130,10 +156,8 @@ plainScope sig =
     , scopeContext = const Nothing
     }
 
-type Parser = Parsec Void String
-
 -- | A syntax error. Render it for a human with @displayException@.
-newtype SyntaxError = SyntaxError (ParseErrorBundle String Void)
+newtype SyntaxError = SyntaxError (ParseErrorBundle T.Text Void)
   deriving (Show, Eq)
 
 instance Exception SyntaxError where
@@ -141,7 +165,7 @@ instance Exception SyntaxError where
 
 -- | Run a parser on a whole input.
 runParserFully :: Parser x -> String -> Either SyntaxError x
-runParserFully p = either (Left . SyntaxError) Right . parse (spaceP *> p <* eof) ""
+runParserFully p = either (Left . SyntaxError) Right . parse (spaceP *> p <* eof) "" . T.pack
 
 parseTerm :: Scope a -> String -> Either SyntaxError (Term a)
 parseTerm sc = runParserFully (closedP (termP sc))
@@ -166,53 +190,46 @@ parseFormulaPattern sc = runParserFully (formulaP sc)
 
 -- * Lexemes
 
+-- | Whitespace and comments, those of the equation language.
 spaceP :: Parser ()
-spaceP = L.space space1 (L.skipLineComment "--") empty
+spaceP = spaceConsumer
 
 lexeme :: Parser x -> Parser x
-lexeme = L.lexeme spaceP
+lexeme = EP.lexeme
 
 -- | A punctuation token.
 symbolP :: String -> Parser ()
-symbolP = void . L.symbol spaceP
-
-identChar :: Parser Char
-identChar = satisfy (\c -> isAlphaNum c || c == '_' || c == '\'')
+symbolP = void . EP.symbol . T.pack
 
 -- | A word which must not run on into an identifier.
 keywordP :: String -> Parser ()
-keywordP w = lexeme (try (string w *> notFollowedBy identChar)) <?> show w
+keywordP w = EP.reserved (T.pack w) <?> show w
 
 -- | An identifier which is neither @S@ nor a reserved word of the scope.
 identifierP :: Scope a -> Parser String
-identifierP sc = lexeme (try (ident >>= check)) <?> "identifier"
-  where
-    ident = (:) <$> satisfy isLetter <*> many identChar
-    check w
-      | w `elem` ["S", "if", "then", "else"] || w `elem` scopeReserved sc = fail ("reserved word " <> show w)
-      | otherwise = pure w
+identifierP sc = T.unpack <$> identifier ("S" : reservedWords sc) <?> "identifier"
+
+reservedWords :: Scope a -> [T.Text]
+reservedWords = map T.pack . scopeReserved
 
 wildcardP :: Parser ()
-wildcardP = lexeme (try (char '_' *> notFollowedBy (identChar <|> char '|'))) <?> "wildcard"
-
-naturalP :: Parser Natural
-naturalP = lexeme L.decimal <?> "numeral"
+wildcardP = wildcard
 
 parens :: Parser x -> Parser x
-parens = between (symbolP "(") (symbolP ")")
+parens = EP.parens
 
 braces :: Parser x -> Parser x
-braces = between (symbolP "{") (symbolP "}")
+braces = EP.braces
 
 commaP :: Parser ()
 commaP = symbolP ","
 
 -- | @=@, but not the start of @==>@.
 equalsP :: Parser ()
-equalsP = lexeme (try (char '=' *> notFollowedBy (oneOf "=>"))) <?> "\"=\""
+equalsP = lexeme (try (CP.char '=' *> notFollowedBy (oneOf ("=>" :: String)))) <?> "\"=\""
 
 turnstileP :: Parser ()
-turnstileP = lexeme (try (void (string "|-") <|> void (char '\8866'))) <?> "\"|-\""
+turnstileP = lexeme (try (void (CP.string "|-") <|> void (CP.char '\8866'))) <?> "\"|-\""
 
 -- | Reject the wildcards of a pattern.
 closedP :: (Traversable t) => Parser (t (Hole a)) -> Parser (t a)
@@ -225,180 +242,199 @@ closedP p = do
 
 -- * Terms
 
-chainl1 :: Parser a -> Parser (a -> a -> a) -> Parser a
-chainl1 p op = do
-  x <- p
-  rest x
-  where
-    rest x =
-      ( do
-          f <- op
-          y <- p
-          rest (f x y)
-      )
-        <|> pure x
+-- | The term grammar of the equation language, with the scope's reserved words and wildcards.
+termSyntax :: Scope a -> TermSyntax
+termSyntax sc = TermSyntax {syntaxReserved = reservedWords sc, syntaxWildcard = True}
 
+-- | A term: an application, an operator expression, a conditional or a bounded search.
 termP :: Scope a -> Parser (Term (Hole a))
-termP sc = ifP <|> cmpP
+termP sc = resolvedP sc (eqTermWith (termSyntax sc))
+
+-- | A term in argument position: a name, a numeral, a wildcard, or a parenthesized term.
+termAtomP :: Scope a -> Parser (Term (Hole a))
+termAtomP sc = resolvedP sc (eqAtomWith (termSyntax sc))
+
+-- A term which cannot be resolved is reported at its start.
+resolvedP :: Scope a -> Parser (E.EqTerm T.Text) -> Parser (Term (Hole a))
+resolvedP sc p = do
+  o <- getOffset
+  raw <- p
+  either (region (setErrorOffset o) . fail) pure (resolveTerm sc raw)
+
+{- | Resolve a term against the signature and the scope. The symbols and
+schemas of the signature, with @S@ and @Succ@ for the successor, take
+precedence over the scope, which reads every other identifier. A schema takes
+its parameter first, a symbol name or a lambda; a bounded search is desugared
+into the schema @mu@ over the variables it captures, and a lambda, which must
+be closed, is compiled as a definition of its own.
+-}
+resolveTerm :: forall a. Scope a -> E.EqTerm T.Text -> Either String (Term (Hole a))
+resolveTerm sc raw = do
+  let initial = signatureEnv (scopeSignature sc)
+      variables = nub [n | n <- names raw, Map.notMember n initial, n /= "_"]
+  (env, term) <- elaboration (expandTerm initial variables raw)
+  go env term
   where
-    ifP = do
-      o <- getOffset
-      keywordP "if"
-      c <- termP sc
-      keywordP "then"
-      t <- termP sc
-      keywordP "else"
-      e <- termP sc
-      case lookupSymbol "ifte" (scopeSignature sc) of
-        Just sym
-          | symbolArity sym == 3 ->
-              maybe (fail "arity") pure (applySymbol sym [c, t, e])
-        _ -> region (setErrorOffset o) (fail "'if ... then ... else ...' requires ternary 'ifte' to be in scope")
+    elaboration :: Either ElaborationError x -> Either String x
+    elaboration = first displayException
 
-    cmpP = do
-      l <- addP
-      option
-        l
-        ( do
-            o <- getOffset
-            op <-
-              (symbolP "<=" *> pure "<=")
-                <|> (lexeme (try (string "<" <* notFollowedBy (satisfy (== '=')))) *> pure "<")
-                <|> (lexeme (try (string "==" <* notFollowedBy (satisfy (== '>')))) *> pure "==")
-            r <- addP
-            case op of
-              "<" -> applyBinary o ["lt"] "Operator '<' requires binary 'lt' to be in scope" l r
-              "<=" -> applyBinary o ["le", "lte"] "Operator '<=' requires binary 'le' or 'lte' to be in scope" l r
-              "==" -> applyBinary o ["eq"] "Operator '==' requires binary 'eq' to be in scope" l r
-              _ -> fail ("Unknown operator: " <> op)
-        )
+    go :: E.Env -> E.EqTerm T.Text -> Either String (Term (Hole a))
+    go env = \case
+      E.LitET n -> Right (Lit n)
+      E.NameET "_" -> Right (Var Wild)
+      E.IfThenElseET c t e -> case Map.lookup "ifte" env of
+        Just (E.SomeFunction (fun :: E.Function m)) -> case testEquality (sNat @m) (sNat @3) of
+          Just Refl -> do
+            f <- function fun
+            c' <- go env c
+            t' <- go env t
+            e' <- go env e
+            pure (App f (c' SV.:< t' SV.:< e' SV.:< SV.Nil))
+          Nothing -> elaboration (Left (ConditionalArityMismatch (natVal (Proxy @m))))
+        _ -> elaboration (Left ConditionalOutOfScope)
+      E.InfixET l op r -> do
+        f <- binary env op
+        l' <- go env l
+        r' <- go env r
+        pure (App f (l' SV.:< r' SV.:< SV.Nil))
+      E.LamET {} -> elaboration (Left LambdaOutsideSchemaParameter)
+      E.MuET {} -> elaboration (Left BoundedSearchOutOfScope)
+      E.SplatET xs -> elaboration (Left (SplatOutsideVariadicSchema xs))
+      E.BoundET {} -> elaboration (Left BinderOutsideLambda)
+      term@(_ E.:@ _) -> application env (spine term)
+      term@(E.NameET _) -> application env (term, [])
 
-    addP = chainl1 mulP addOp
+    application :: E.Env -> (E.EqTerm T.Text, [E.EqTerm T.Text]) -> Either String (Term (Hole a))
+    application env (E.NameET n, arguments) = case Map.lookup n env of
+      Just (E.SomeFunction (fun :: E.Function m)) -> do
+        checkArity n (natVal (Proxy @m)) arguments
+        f <- function fun
+        args <- traverse (go env) arguments
+        applied f args
+      Just (E.ImportedSchema sName pArity sArity inst) -> case arguments of
+        [] -> elaboration (Left (SchemaArgumentCountMismatch sName 1 0))
+        param : rest -> do
+          checkArity sName sArity rest
+          pFun <- parameter env sName pArity param
+          instantiated <- elaboration (first SchemaFailure (inst pFun))
+          args <- traverse (go env) rest
+          case instantiated of
+            F.SomeFunction instFun -> applied instFun args
+      Just (E.ImportedVariadic sName fixed _ _) -> elaboration (Left (UnexpandedVariadicApplication sName fixed))
+      Just (E.SchemaDef sName _ _ _) -> Left ("internal: a schema definition " <> T.unpack sName <> " in a signature")
+      Just (E.VariadicDef tmpl) -> Left ("internal: a template " <> T.unpack (E.templateName tmpl) <> " in a signature")
+      Nothing
+        | n == "_" -> Left "a wildcard cannot be applied"
+        | null arguments -> fmap Named <$> scopeTerm sc (T.unpack n)
+        | otherwise -> elaboration (Left (AppliedVariable n))
+    application _ (hd, _) = elaboration (Left (InvalidApplicationHead hd))
+
+    checkArity :: T.Text -> Natural -> [x] -> Either String ()
+    checkArity n expected arguments =
+      unless (fromIntegral (length arguments) == expected) $
+        elaboration (Left (ArityMismatch n expected (fromIntegral (length arguments))))
+
+    -- The successor of a numeral is the next numeral.
+    applied :: (KnownNat n) => F.Function n -> [Term (Hole a)] -> Either String (Term (Hole a))
+    applied fun args = case (fun, args) of
+      (F.Primitive PR.Succ, [x]) -> Right (suc x)
+      _ -> case SV.fromList' args of
+        Just xs -> Right (App fun xs)
+        Nothing -> Left "internal: an argument vector of the wrong length"
+
+    -- The binary symbol an operator stands for.
+    binary :: E.Env -> T.Text -> Either String (F.Function 2)
+    binary env op = search candidates
       where
-        addOp =
-          ( do
-              o <- getOffset
-              symbolP "+"
-              sym <- case findBinary ["add", "plus"] of
-                Just s -> pure s
-                Nothing -> region (setErrorOffset o) (fail "Operator '+' requires binary 'add' or 'plus' to be in scope")
-              pure (\l r -> maybe (error "arity") id (applySymbol sym [l, r]))
-          )
-            <|> ( do
-                    o <- getOffset
-                    lexeme (try (string "-" <* notFollowedBy (satisfy (== '-'))))
-                    sym <- case findBinary ["sub"] of
-                      Just s -> pure s
-                      Nothing -> region (setErrorOffset o) (fail "Operator '-' requires binary 'sub' to be in scope")
-                    pure (\l r -> maybe (error "arity") id (applySymbol sym [l, r]))
-                )
+        candidates = case op of
+          "+" -> ["add", "plus"]
+          "*" -> ["mul", "times"]
+          "<" -> ["lt"]
+          "-" -> ["sub"]
+          "<=" -> ["le", "lte"]
+          "==" -> ["eq"]
+          "^" -> ["pow"]
+          _ -> []
+        search [] = elaboration (Left (if null candidates then UnknownOperator op else OperatorOutOfScope op candidates))
+        search (c : cs) = case Map.lookup c env of
+          Just (E.SomeFunction (fun :: E.Function m)) | Just Refl <- testEquality (sNat @m) (sNat @2) -> function fun
+          _ -> search cs
 
-    mulP = chainl1 expP mulOp
+    -- A schema parameter: a symbol of the parameter arity, or a lambda of it.
+    parameter :: E.Env -> T.Text -> Natural -> E.EqTerm T.Text -> Either String F.SomeFunction
+    parameter env sName pArity = \case
+      E.NameET p -> case Map.lookup p env of
+        Just (E.SomeFunction (fun :: E.Function k)) -> do
+          unless (natVal (Proxy @k) == pArity) $
+            elaboration (Left (SchemaArgumentArityMismatch p pArity (natVal (Proxy @k))))
+          F.SomeFunction <$> function fun
+        Just _ -> elaboration (Left (SchemaArgumentIsSchema p))
+        Nothing -> elaboration (Left (UnknownName p))
+      E.LamET hints body -> do
+        unless (fromIntegral (length hints) == pArity) $
+          elaboration (Left (LambdaArityMismatch sName pArity (fromIntegral (length hints))))
+        compileLambda env hints body
+      other -> elaboration (Left (InvalidSchemaArgument other))
+
+    -- A closed lambda is compiled as a definition over its binders.
+    compileLambda :: E.Env -> [E.IrrelevantName] -> E.EqTerm T.Text -> Either String F.SomeFunction
+    compileLambda env hints body = do
+      let hinted = map E.rawName hints
+          params
+            | nub hinted == hinted = hinted
+            | otherwise = ["λ" <> T.pack (show i) | i <- [0 .. length hints - 1]]
+          equation =
+            E.Equation
+              { E.name = lambdaName
+              , E.schemaParams = []
+              , E.args = map E.VarP params
+              , E.variadic = Nothing
+              , E.clause = openLambda params 0 body
+              }
+      definitions <- elaboration (elaborateEquations env [equation])
+      case definitionCode <$> Map.lookup lambdaName definitions of
+        Just (SomeProgram code) -> Right (F.SomeFunction (F.Inline code))
+        Nothing -> Left "internal: the lambda was not compiled"
+
+    lambdaName :: T.Text
+    lambdaName = "λ"
+
+    -- Replace the occurrences of a lambda's own binders by pattern variables.
+    openLambda :: [T.Text] -> Int -> E.EqTerm T.Text -> E.EqTerm T.Text
+    openLambda params = open
       where
-        mulOp = do
-          o <- getOffset
-          symbolP "*"
-          sym <- case findBinary ["mul", "times"] of
-            Just s -> pure s
-            Nothing -> region (setErrorOffset o) (fail "Operator '*' requires binary 'mul' or 'times' to be in scope")
-          pure (\l r -> maybe (error "arity") id (applySymbol sym [l, r]))
+        open depth = \case
+          E.BoundET d i | d == depth, i < length params -> E.NameET (params !! i)
+          E.LamET hs b -> E.LamET hs (open (depth + 1) b)
+          E.MuET h bound b -> E.MuET h (open depth bound) (open (depth + 1) b)
+          f E.:@ x -> open depth f E.:@ open depth x
+          E.InfixET l op r -> E.InfixET (open depth l) op (open depth r)
+          E.IfThenElseET c t e -> E.IfThenElseET (open depth c) (open depth t) (open depth e)
+          t -> t
 
-    expP = do
-      l <- atomP
-      option
-        l
-        ( do
-            o <- getOffset
-            symbolP "^"
-            r <- expP
-            applyBinary o ["pow"] "Operator '^' requires binary 'pow' to be in scope" l r
-        )
+    function :: E.Function n -> Either String (F.Function n)
+    function = \case
+      E.Primitive code -> Right (F.Primitive code)
+      E.Bound fun -> Right fun
+      E.Defined ident -> Left ("internal: an unbound definition " <> T.unpack ident)
+      E.SchemaApp sName _ -> Left ("internal: an uninstantiated application of the schema " <> T.unpack sName)
 
-    applyBinary o candidates errMsg l r =
-      case findBinary candidates of
-        Just sym -> maybe (fail "arity") pure (applySymbol sym [l, r])
-        Nothing -> region (setErrorOffset o) (fail errMsg)
+    -- The free names of a term, in order of occurrence.
+    names :: E.EqTerm T.Text -> [T.Text]
+    names = \case
+      E.NameET n -> [n]
+      f E.:@ x -> names f <> names x
+      E.InfixET l _ r -> names l <> names r
+      E.IfThenElseET c t e -> names c <> names t <> names e
+      E.LamET _ b -> names b
+      E.MuET _ bound b -> names bound <> names b
+      _ -> []
 
-    findBinary [] = Nothing
-    findBinary (c : cs) = case lookupSymbol c (scopeSignature sc) of
-      Just sym | symbolArity sym == 2 -> Just sym
-      _ -> findBinary cs
-
-    atomP =
-      choice
-        [ Var Wild <$ wildcardP
-        , Lit <$> naturalP
-        , parens (termP sc)
-        , suc <$> (keywordP "S" *> parens (termP sc))
-        , applicationP
-        ]
-        <?> "term"
-
-    applicationP = do
-      o <- getOffset
-      name <- identifierP sc
-      case lookupVariadicSchema name (scopeSignature sc) of
-        Just sch -> variadicAppP o name sch
-        Nothing -> case lookupSchema name (scopeSignature sc) of
-          Just sch -> schemaAppP o name sch
-          Nothing -> symbolAppP o name
-
-    symbolAppP o name =
-      case lookupSymbol name (scopeSignature sc) of
-        Just sym -> do
-          args <- option [] (parens (termP sc `sepBy` commaP))
-          let arity = symbolArity sym
-          when (fromIntegral (length args) /= arity) $
-            region (setErrorOffset o) $
-              fail (name <> " takes " <> show arity <> " arguments, given " <> show (length args))
-          maybe (fail "arity") pure (applySymbol sym args)
-        Nothing -> case scopeTerm sc name of
-          Right t -> pure (fmap Named t)
-          Left err -> region (setErrorOffset o) (fail err)
-
-    schemaAppP o name sch = do
-      (pSym, args) <- schemaCallP o
-      instantiateP o name sch pSym args
-
-    -- The argument count determines the number of variadic arguments.
-    variadicAppP o name sch = do
-      (pSym, args) <- schemaCallP o
-      let fixed = variadicSchemaFixedArity sch
-      when (fromIntegral (length args) < fixed) $
-        region (setErrorOffset o) $
-          fail (name <> " takes at least " <> show fixed <> " arguments, given " <> show (length args))
-      case instantiateVariadicSchemaSymbol sch (fromIntegral (length args) - fixed) of
-        Left err -> region (setErrorOffset o) (fail (displayException err))
-        Right inst -> instantiateP o name inst pSym args
-
-    instantiateP o name sch pSym args =
-      case applySchemaSymbol sch (symbolFunction pSym) of
-        Left err -> region (setErrorOffset o) (fail (displayException err))
-        Right (F.SomeFunction (instFun :: F.Function n)) -> do
-          let arity = natVal (Proxy @n)
-          when (fromIntegral (length args) /= arity) $
-            region (setErrorOffset o) $
-              fail (name <> " takes " <> show arity <> " arguments, given " <> show (length args))
-          case SV.fromList' args of
-            Just xs -> pure (App instFun xs)
-            Nothing -> region (setErrorOffset o) (fail "arity vector mismatch")
-
-    schemaCallP o = bracedCall <|> parensCall
+    spine :: E.EqTerm T.Text -> (E.EqTerm T.Text, [E.EqTerm T.Text])
+    spine = collect []
       where
-        bracedCall = do
-          pName <- braces (identifierP sc)
-          pSym <- case lookupSymbol pName (scopeSignature sc) of
-            Just s -> pure s
-            Nothing -> region (setErrorOffset o) (fail ("Unknown symbol: " <> pName))
-          args <- option [] (parens (termP sc `sepBy` commaP))
-          pure (pSym, args)
-        parensCall = parens do
-          pName <- try (identifierP sc <* commaP)
-          pSym <- case lookupSymbol pName (scopeSignature sc) of
-            Just s -> pure s
-            Nothing -> region (setErrorOffset o) (fail ("Unknown symbol: " <> pName))
-          args <- termP sc `sepBy` commaP
-          pure (pSym, args)
+        collect xs (f E.:@ x) = collect (x : xs) f
+        collect xs f = (f, xs)
 
 -- * Formulae
 
@@ -431,11 +467,11 @@ formulaP sc = implP
     metaFormulaP = try do
       name <- identifierP sc
       maybe (fail "not a formula") (pure . fmap Named) (scopeFormula sc name)
-    andOp = lexeme (try (void (string "/\\") <|> void (char '\8743'))) <?> "\"/\\\""
-    orOp = lexeme (try (void (string "\\/") <|> void (char '\8744'))) <?> "\"\\/\""
-    implOp = lexeme (try (void (string "==>") <|> void (char '\8594'))) <?> "\"==>\""
-    negOp = lexeme (void (char '~') <|> void (char '\172')) <?> "\"~\""
-    botP = lexeme (try (void (string "_|_") <|> void (char '\8869'))) <?> "\"_|_\""
+    andOp = lexeme (try (void (CP.string "/\\") <|> void (CP.char '\8743'))) <?> "\"/\\\""
+    orOp = lexeme (try (void (CP.string "\\/") <|> void (CP.char '\8744'))) <?> "\"\\/\""
+    implOp = lexeme (try (void (CP.string "==>") <|> void (CP.char '\8594'))) <?> "\"==>\""
+    negOp = lexeme (void (CP.char '~') <|> void (CP.char '\172')) <?> "\"~\""
+    botP = lexeme (try (void (CP.string "_|_") <|> void (CP.char '\8869'))) <?> "\"_|_\""
 
 -- * Sequents
 

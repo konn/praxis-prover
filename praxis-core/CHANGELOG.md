@@ -34,5 +34,13 @@ and this project adheres to the
   in `Language.Praxis.PRA.Syntax.Parser`. `DefinitionResolutionFailed` carries
   a `KernelError`. The renaming environment `Env` and its entries `SomeFunction`
   moved to `Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Env`.
+- PRA terms are written in the applicative syntax of the equation language,
+  whose grammar `Language.Praxis.PRA.Syntax.Parser` now shares with
+  `Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser`: `plus x (S y)`
+  for `plus(x, S(y))` and `mu {lt} 3 0` for `mu {lt} (3, 0)`, with lambdas
+  as schema parameters and the bounded search `μ i < b. body`. A term
+  argument of a tactic is a name, a numeral or a parenthesized term, as in
+  `Defeq (S t) (S t)`. `Language.Praxis.PRA.Syntax.Pretty` renders terms the
+  same way, and `{- -}` comments are accepted throughout.
 
 ## 0.1.0.0 - YYYY-MM-DD

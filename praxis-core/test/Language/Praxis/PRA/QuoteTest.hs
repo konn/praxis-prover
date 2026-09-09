@@ -9,6 +9,7 @@ module Language.Praxis.PRA.QuoteTest (quoteTests) where
 
 import Control.Exception (displayException)
 import Control.Monad (forM_)
+import Data.Foldable (toList)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Text (Text)
@@ -23,14 +24,14 @@ import Test.Tasty.HUnit
 
 [pra|
 -- The left identity is definitional.
-theorem plusZeroLeft : |- plus(0, y) = y
+theorem plusZeroLeft : |- plus 0 y = y
 by refl
 
-theorem plusZeroRight : |- plus(y, 0) = y
+theorem plusZeroRight : |- plus y 0 = y
 by induction y as n
    { refl }
-   { Defeq plus(S(n), 0) S(plus(n, 0))
-   ; rewrite (plus(n, 0) = n) in (plus(S(n), 0) = _)
+   { Defeq (plus (S n) 0) (S (plus n 0))
+   ; rewrite (plus n 0 = n) in (plus (S n) 0 = _)
    ; Id }
 
 rule symm (t s : term) (Γ : ctx) : t = s, Γ |- s = t
@@ -52,8 +53,8 @@ by Subst x t s (P); Id (P)
 rule trans (t s u : term) (Γ : ctx) : t = s, s = u, Γ |- t = u
 by Subst x s u (t = x); Id
 
-rule congS (t s : term) (Γ : ctx) : t = s, Γ |- S(t) = S(s)
-by Defeq S(t) S(t); Subst x t s (S(t) = S(x)); Id
+rule congS (t s : term) (Γ : ctx) : t = s, Γ |- S t = S s
+by Defeq (S t) (S t); Subst x t s (S t = S x); Id
 
 rule conjSwap (A B : formula) (Γ : ctx) (D1 : A, B, Γ |- B) (D2 : A, B, Γ |- A)
   : A /\ B, Γ |- B /\ A
@@ -62,10 +63,10 @@ by ConjL; ConjR { exact D1 } { exact D2 }
 rule swapAtoms (P Q : atom) (Γ : ctx) : P /\ Q, Γ |- Q /\ P
 by ConjL; ConjR { Id } { Id }
 
-rule plusZeroRightAt (t : term) (Γ : ctx) : Γ |- plus(t, 0) = t
-by Ind n (plus(n, 0) = n) t
+rule plusZeroRightAt (t : term) (Γ : ctx) : Γ |- plus t 0 = t
+by Ind n (plus n 0 = n) t
    { refl }
-   { Defeq plus(S(n), 0) S(plus(n, 0)); rewrite (plus(n, 0) = n) in (plus(S(n), 0) = _); Id }
+   { Defeq (plus (S n) 0) (S (plus n 0)); rewrite (plus n 0 = n) in (plus (S n) 0 = _); Id }
 |]
 
 [muPra|
@@ -78,13 +79,19 @@ by refl
 theorem desugaredIfFalse : |- (if 1 < 0 then 10 else 20) = 20
 by refl
 
-theorem muSchemaApp1 : |- mu(lt, 3, 2) = 0
+theorem muSchemaApp1 : |- mu lt 3 2 = 0
 by refl
 
-theorem muSchemaApp2 : |- mu {lt} (3, 0) = 3
+theorem muSchemaApp2 : |- mu {lt} 3 0 = 3
 by refl
 
-theorem muUnaryApp : |- mu(sgn, 5) = 1
+theorem muUnaryApp : |- mu sgn 5 = 1
+by refl
+
+theorem muLambda : |- mu {λ i. 3 < i} 10 = 4
+by refl
+
+theorem muSugar : |- (μ i < 10. 3 < i) = 4
 by refl
 |]
 
@@ -93,14 +100,14 @@ quoteTests =
   testGroup
     "quasiquoter"
     [ testCase "a theorem is the proof of its sequent" $
-        inferConclusion plusZeroLeft @?= Right (sequent "|- plus(0, y) = y")
+        inferConclusion plusZeroLeft @?= Right (sequent "|- plus 0 y = y")
     , testCase "typed quotation witnesses do not specialize generated proofs" $ do
         inferConclusion (plusZeroLeft :: Proof Text)
-          @?= Right (asText (sequent "|- plus(0, y) = y"))
+          @?= Right (asText (sequent "|- plus 0 y = y"))
         inferConclusion (identityAtom (Var (T.pack "a") :=== Lit 0))
           @?= Right (asText (sequent "a = 0 |- a = 0"))
     , testCase "a theorem by induction" $
-        inferConclusion plusZeroRight @?= Right (sequent "|- plus(y, 0) = y")
+        inferConclusion plusZeroRight @?= Right (sequent "|- plus y 0 = y")
     , testCase "an expression quote is a proof" $
         inferConclusion [pra| a = 0 |- a = 0 /\ 2 = 2 by ConjR { Id } { refl } |]
           @?= Right (sequent "a = 0 |- a = 0 /\\ 2 = 2")
@@ -130,7 +137,7 @@ quoteTests =
           @?= Right (sequent "a = b, b = 1 |- a = 1")
     , testCase "congruence canonicalises the successor of a numeral" $
         inferConclusion (congS (Var "a") (Lit 2) MS.empty)
-          @?= Right (sequent "a = 2 |- S(a) = 3")
+          @?= Right (sequent "a = 2 |- S a = 3")
     , testCase "a rule with formula metavariables and premises" $
         inferConclusion
           ( conjSwap
@@ -146,15 +153,20 @@ quoteTests =
           @?= Right (sequent "a = 0 /\\ b = 0 |- b = 0 /\\ a = 0")
     , testCase "the eigenvariable of a rule avoids the arguments" $
         inferConclusion (plusZeroRightAt (Var "n") (ctx ["n = 0"]))
-          @?= Right (sequent "n = 0 |- plus(n, 0) = n")
+          @?= Right (sequent "n = 0 |- plus n 0 = n")
     , testCase "desugared operators, ifte, and schema application in pra quotes" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv arithWithMu)
         inferConclusionIn kenv desugaredAddMul @?= Right (sequentMu "|- 2 + 3 * 4 = 14")
         inferConclusionIn kenv desugaredIfTrue @?= Right (sequentMu "|- (if 0 < 1 then 10 else 20) = 10")
         inferConclusionIn kenv desugaredIfFalse @?= Right (sequentMu "|- (if 1 < 0 then 10 else 20) = 20")
-        inferConclusionIn kenv muSchemaApp1 @?= Right (sequentMu "|- mu(lt, 3, 2) = 0")
-        inferConclusionIn kenv muSchemaApp2 @?= Right (sequentMu "|- mu {lt} (3, 0) = 3")
-        inferConclusionIn kenv muUnaryApp @?= Right (sequentMu "|- mu(sgn, 5) = 1")
+        inferConclusionIn kenv muSchemaApp1 @?= Right (sequentMu "|- mu lt 3 2 = 0")
+        inferConclusionIn kenv muSchemaApp2 @?= Right (sequentMu "|- mu {lt} 3 0 = 3")
+        inferConclusionIn kenv muUnaryApp @?= Right (sequentMu "|- mu sgn 5 = 1")
+        inferConclusionIn kenv muLambda @?= Right (sequentMu "|- mu {λ i. 3 < i} 10 = 4")
+        inferConclusionIn kenv muSugar @?= Right (sequentMu "|- mu {λ i. 3 < i} 10 = 4")
+        case parseTerm scMu "μ i < 10. y < i" of
+          Right (App _ args) -> toList args @?= [Lit 10, Var "y"]
+          other -> assertFailure ("a bounded search over a variable: " <> show other)
     ]
   where
     sc = plainScope testSignature

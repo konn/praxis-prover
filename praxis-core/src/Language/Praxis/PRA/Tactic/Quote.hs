@@ -14,7 +14,7 @@ pra = praQuoter (signature [symbolNamed "plus" \'plus plus])
 
 -- Lemmas.hs
 [pra|
-theorem plus_zero_left : |- plus(0, y) = y
+theorem plus_zero_left : |- plus 0 y = y
 by refl
 
 rule symm (t s : term) (Γ : ctx) : t = s, Γ |- s = t

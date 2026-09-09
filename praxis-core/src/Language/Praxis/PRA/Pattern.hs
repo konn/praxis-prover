@@ -46,7 +46,7 @@ closed = traverse \case
 
 {- |
 Whether a term matches a pattern.  Numerals are compared up to the two
-spellings 'canonicalise' identifies, so @S(_)@ matches @4@.
+spellings 'canonicalise' identifies, so @S _@ matches @4@.
 -}
 matchTerm :: (Eq a) => Term (Hole a) -> Term a -> Bool
 matchTerm pat = go (canonicalise pat) . canonicalise

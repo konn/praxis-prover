@@ -374,7 +374,7 @@ renderTermPat :: TermPat -> String
 renderTermPat (TMeta (TermM n)) = n
 renderTermPat (TOfVar (VarM x)) = x
 renderTermPat (TLit n) = show n
-renderTermPat (TSuc t) = "Succ " <> atomic t
+renderTermPat (TSuc t) = "S " <> atomic t
   where
     atomic u@(TSuc _) = "(" <> renderTermPat u <> ")"
     atomic u = renderTermPat u

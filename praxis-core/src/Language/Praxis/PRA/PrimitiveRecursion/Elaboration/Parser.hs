@@ -8,6 +8,10 @@ lambda @λ x y. body@ (also @\\x y -> body@), a bounded search
 schema. Binder occurrences are resolved to locally nameless indices while
 parsing, so a name bound by an enclosing lambda or @μ@ never leaks out as a
 free identifier.
+
+The term grammar also serves the concrete syntax of PRA terms, in
+"Language.Praxis.PRA.Syntax.Parser": a host language adapts it through a
+t'TermSyntax', reserving its own words and admitting wildcards.
 -}
 module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   Parser,
@@ -18,9 +22,15 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   braces,
   decimal,
   reserved,
+  identifier,
   anySymbol,
+  wildcard,
+  TermSyntax (..),
+  defaultTermSyntax,
   patternP,
   eqTermP,
+  eqTermWith,
+  eqAtomWith,
   equationP,
   LocatedEquation (..),
   equationsP,
@@ -31,6 +41,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   EquationSyntaxError,
 ) where
 
+import Control.Applicative (empty)
 import Control.Exception (Exception (..))
 import Control.Monad (void)
 import Data.Either (lefts, rights)
@@ -76,12 +87,37 @@ decimal = lexeme (L.decimal <* notFollowedBy identRest)
 reserved :: T.Text -> Parser ()
 reserved op = lexeme (try (void (CP.string op) <* notFollowedBy identRest))
 
-anySymbol :: Parser T.Text
-anySymbol = lexeme $ try do
+-- | The words which are never identifiers.
+keywords :: [T.Text]
+keywords = ["if", "then", "else"]
+
+-- | An identifier which is neither a keyword nor one of the given reserved words.
+identifier :: [T.Text] -> Parser T.Text
+identifier reservedWords = lexeme $ try do
   s <- T.pack <$> ((:) <$> CP.letterChar <*> many identRest)
-  if s `elem` ["if", "then", "else"]
+  if s `elem` keywords || s `elem` reservedWords
     then fail ("reserved word: " <> T.unpack s)
     else pure s
+
+anySymbol :: Parser T.Text
+anySymbol = identifier []
+
+-- | A wildcard @_@, which is neither an identifier nor the start of @_|_@.
+wildcard :: Parser ()
+wildcard = lexeme (try (CP.char '_' *> notFollowedBy (identRest <|> CP.char '|'))) <?> "wildcard"
+
+{- | How a host language adapts the term grammar: its own reserved words,
+which are not identifiers, and whether a wildcard @_@ is an atom, read as
+the name @_@.
+-}
+data TermSyntax = TermSyntax
+  { syntaxReserved :: ![T.Text]
+  , syntaxWildcard :: !Bool
+  }
+
+-- | The equation language itself: no further reserved words, no wildcards.
+defaultTermSyntax :: TermSyntax
+defaultTermSyntax = TermSyntax [] False
 
 -- | The variadic argument group @$[xs]@.
 splatP :: Parser T.Text
@@ -100,7 +136,17 @@ patternWith next =
        )
 
 eqTermP :: Parser (EqTerm T.Text)
-eqTermP = termWith (pure ()) []
+eqTermP = eqTermWith defaultTermSyntax
+
+-- | A term, in the grammar adapted to a host language.
+eqTermWith :: TermSyntax -> Parser (EqTerm T.Text)
+eqTermWith syntax = termWith syntax (pure ()) []
+
+{- | A term in argument position: a name, a numeral, a wildcard, or a
+parenthesized term. A braced term is an argument only within an application.
+-}
+eqAtomWith :: TermSyntax -> Parser (EqTerm T.Text)
+eqAtomWith syntax = atomWith syntax (pure ()) []
 
 chainl1 :: Parser a -> Parser (a -> a -> a) -> Parser a
 chainl1 p op = do
@@ -125,10 +171,12 @@ resolveName binders ident =
     [] -> NameET ident
 
 -- Lambdas and bounded searches extend as far right as a conditional does.
-termWith :: Parser () -> Binders -> Parser (EqTerm T.Text)
-termWith next binders = expr
+termWith :: TermSyntax -> Parser () -> Binders -> Parser (EqTerm T.Text)
+termWith syntax next binders = expr
   where
     expr = ifExpr <|> lamExpr <|> muExpr <|> cmpExpr
+
+    name = identifier (syntaxReserved syntax)
 
     ifExpr = do
       next *> reserved "if"
@@ -141,24 +189,25 @@ termWith next binders = expr
 
     lamExpr = do
       next *> lambdaP
-      names <- some anySymbol
+      names <- some name
       binderDot
-      body <- termWith next (names : binders)
+      body <- termWith syntax next (names : binders)
       pure (LamET (map IrrelevantName names) body)
 
     muExpr = do
       next *> muP
-      ident <- anySymbol
+      ident <- name
       _ <- lexeme (try (CP.char '<' <* notFollowedBy (CP.char '=')))
       bound <- addExpr
       binderDot
-      body <- termWith next ([ident] : binders)
+      body <- termWith syntax next ([ident] : binders)
       pure (MuET (IrrelevantName ident) bound body)
 
     lambdaP = void (symbol "λ" <|> symbol "\\") <?> "lambda"
     muP = void (symbol "μ") <?> "bounded search"
     binderDot = void (symbol "." <|> symbol "->")
 
+    -- @==@ is not the start of an implication @==>@ of a host language.
     cmpExpr = do
       l <- addExpr
       option
@@ -168,7 +217,7 @@ termWith next binders = expr
               (symbol "<=" *> pure "<=")
                 <|> try (symbol "<" <* notFollowedBy (CP.char '='))
                 *> pure "<"
-                  <|> (symbol "==" *> pure "==")
+                  <|> (lexeme (try (CP.string "==" <* notFollowedBy (CP.char '>'))) *> pure "==")
             r <- addExpr
             pure (InfixET l op r)
         )
@@ -194,17 +243,25 @@ termWith next binders = expr
             pure (InfixET l "^" r)
         )
 
-    appExpr = foldl (:@) <$> atom <*> many atom
+    appExpr = foldl (:@) <$> atomWith syntax next binders <*> many (argumentWith syntax next binders)
 
-    -- Parentheses and braces suspend layout, like nested equations.
-    atom =
-      next
-        *> ( (LitET <$> decimal)
-               <|> parens (termWith (pure ()) binders)
-               <|> braces (termWith (pure ()) binders)
-               <|> (SplatET <$> splatP)
-               <|> (resolveName binders <$> anySymbol)
-           )
+-- Parentheses and braces suspend layout, like nested equations.
+atomWith :: TermSyntax -> Parser () -> Binders -> Parser (EqTerm T.Text)
+atomWith syntax next binders =
+  next
+    *> ( (LitET <$> decimal)
+           <|> (NameET "_" <$ wildcardAtom)
+           <|> parens (termWith syntax (pure ()) binders)
+           <|> (SplatET <$> splatP)
+           <|> (resolveName binders <$> identifier (syntaxReserved syntax))
+       )
+  where
+    wildcardAtom = if syntaxWildcard syntax then wildcard else empty
+
+-- A schema parameter may be braced, as in the head of a schema's equations.
+argumentWith :: TermSyntax -> Parser () -> Binders -> Parser (EqTerm T.Text)
+argumentWith syntax next binders =
+  atomWith syntax next binders <|> next *> braces (termWith syntax (pure ()) binders)
 
 equationP :: Parser (Equation T.Text)
 equationP = do
@@ -224,7 +281,7 @@ equationWith next = do
       _ -> fail "a variadic argument $[..] must be the first or the last argument"
     _ -> fail "at most one variadic argument $[..] is allowed"
   _ <- next *> symbol "="
-  rhs <- label "right-hand side (indent continuation lines)" (termWith next [])
+  rhs <- label "right-hand side (indent continuation lines)" (termWith defaultTermSyntax next [])
   pure (Equation ident params (rights items) (Splat <$> firstSplat items <*> splat) rhs)
   where
     firstSplat items = case lefts items of

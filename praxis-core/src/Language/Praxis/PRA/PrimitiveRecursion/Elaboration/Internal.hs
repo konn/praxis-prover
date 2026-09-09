@@ -47,7 +47,7 @@ patternTerm i (VarP _) = VarFT i
 patternTerm _ ZeroP = LitFT 0
 patternTerm i (SuccP p) = successorTerm (patternTerm i p)
 
--- S(0) and the literal 1 must compare alike when checking unchanged arguments.
+-- S 0 and the literal 1 must compare alike when checking unchanged arguments.
 -- No arbitrary evaluation or definitional-equality search is performed.
 sameTerm :: FunctionalTerm n -> FunctionalTerm n -> Bool
 sameTerm a b = case (canonical a, canonical b) of

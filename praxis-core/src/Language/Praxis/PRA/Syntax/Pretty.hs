@@ -15,7 +15,7 @@ be shown as the user would have written it.
 >>> plus = Rec (Proj [od|0|]) (Comp Succ (Proj [od|1|] :< Nil)) :: PRFCode 2
 >>> sig = signature [symbol "plus" plus]
 >>> renderTerm sig id (plus :$ (Var "y" :< suc (Var "x") :< Nil))
-"plus(y, S(x))"
+"plus y (S x)"
 >>> renderFormula sig id ((Var "a" === Lit 0) ==> Bot)
 "~a = 0"
 >>> renderSequent sig id (MS.insertOne (Var "a" === Lit 0) MS.empty |- Var "a" === Lit 0 \/ Bot)
@@ -42,8 +42,10 @@ import Language.Praxis.PRA.Syntax
 
 {- |
 Render a term.  Symbols are named through the signature; a code the signature
-does not name is shown raw, between angle brackets.  The term is canonicalised
-first, so a successor of a numeral is shown as the next numeral.
+does not name is shown raw, between angle brackets.  Arguments are juxtaposed
+and an application among them is parenthesized, as the parser reads them.  The
+term is canonicalised first, so a successor of a numeral is shown as the next
+numeral.
 -}
 renderTerm :: forall a. Signature -> (a -> String) -> Term a -> String
 renderTerm sig name = go . canonicalise
@@ -51,15 +53,15 @@ renderTerm sig name = go . canonicalise
     go :: Term a -> String
     go (Var x) = name x
     go (Lit n) = show n
-    go (Succ :$ args) = "S(" <> go (SV.sIndex [od|0|] args) <> ")"
-    go (App f args) = head' <> argList
+    go (Succ :$ args) = "S " <> argument (SV.sIndex [od|0|] args)
+    go (App f args) = unwords (head' : map argument (SV.toList args))
       where
         head' = case symbolOfFunction f sig of
           Just sym -> symbolName sym
           Nothing -> "<" <> show f <> ">"
-        argList = case SV.toList args of
-          [] -> ""
-          as -> "(" <> intercalate ", " (map go as) <> ")"
+    argument t = case t of
+      App _ args | not (null args) -> "(" <> go t <> ")"
+      _ -> go t
 
 renderAtomic :: Signature -> (a -> String) -> Atomic a -> String
 renderAtomic sig name (s :=== t) = renderTerm sig name s <> " = " <> renderTerm sig name t

@@ -8,7 +8,7 @@ The textual syntax of tactics, and of the declarations which use them.
 >           | refl | symmetry atom | rewrite atom in atom
 >           | induction ident [as ident] | assumption | exact ident
 >           | skip | try basic | repeat basic | ( tactic )
-> arg     ::= _ | ident | term | ( atom ) | ( formula )   -- by the sort of the parameter
+> arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
 >
 > decl    ::= theorem ident : sequent by tactic
 >           | rule ident {binder} : sequent by tactic
@@ -19,9 +19,10 @@ The textual syntax of tactics, and of the declarations which use them.
 The primitive tactics are the rule labels of "Language.Praxis.PRA.Rule.G3i",
 verbatim: @ConjL@, @ImplR@, @Ind@ and so on.  Their arguments follow the
 parameters of the rule in order; trailing arguments may be omitted and any
-argument may be @_@, in which case it is inferred from the goal.  Term and
-variable arguments are written bare, atom and formula arguments in
-parentheses.  Context parameters are never written.  A metavariable must be
+argument may be @_@, in which case it is inferred from the goal.  A variable
+argument is bare; a term argument is a name, a numeral or a parenthesized
+term; atom and formula arguments are parenthesized.  Context parameters are
+never written.  A metavariable must be
 declared before the premises which mention it.
 
 The words above, the rule labels and @S@ are reserved.
@@ -233,7 +234,7 @@ tacticP sc0 = seqP
         <|> Just
         <$> case p of
           R.PVar _ -> ArgVar . Named <$> variableP
-          R.PTerm _ -> ArgTerm <$> termP sc
+          R.PTerm _ -> ArgTerm <$> termAtomP sc
           R.PAtom _ -> ArgAtom <$> parens (atomicP sc)
           R.PForm _ -> ArgForm <$> parens (formulaP sc)
           R.PCtx _ -> empty

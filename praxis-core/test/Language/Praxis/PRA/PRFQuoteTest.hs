@@ -75,10 +75,10 @@ import Test.Tasty.HUnit
 |]
 
 [arithProof|
-  theorem productExample : |- mul(3, 4) = 12
+  theorem productExample : |- mul 3 4 = 12
   by refl
 
-  theorem additionZero : |- add(n, 0) = n
+  theorem additionZero : |- add n 0 = n
   by refl
 |]
 
@@ -172,9 +172,9 @@ prfQuoteTests =
         F.evalFunction arithKernel PR.projW (5 SV.:< SV.Nil) @?= Right 2
         F.evalFunction arithKernel PR.projW (6 SV.:< SV.Nil) @?= Right 3
     , testCase "term parsing stores a name, not expanded code" $ do
-        t <- expectRight (parseTerm (plainScope extended) "times(3, 4)")
+        t <- expectRight (parseTerm (plainScope extended) "times 3 4")
         t @?= App times (Lit 3 SV.:< Lit 4 SV.:< SV.Nil)
-        renderTerm extended id t @?= "times(3, 4)"
+        renderTerm extended id t @?= "times 3 4"
         env <- expectRight (Sig.signatureKernelEnv extended)
         evalTermIn env (const 0) t @?= Right 12
         normalizeIn env (Limited 0) t @?= Right t

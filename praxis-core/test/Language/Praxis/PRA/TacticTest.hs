@@ -93,7 +93,7 @@ syntaxTests =
   testGroup
     "concrete syntax"
     [ testCase "renders what it parsed" $
-        roundTrip "a = 0 /\\ (b = 0 \\/ c = 0) ==> ~plus(x, S(y)) = 2"
+        roundTrip "a = 0 /\\ (b = 0 \\/ c = 0) ==> ~plus x (S y) = 2"
     , testCase "the connectives associate to the right" $
         roundTrip "a = 0 ==> b = 0 ==> c = 0"
     , testCase "left-nested connectives are parenthesised" $
@@ -104,13 +104,13 @@ syntaxTests =
         f <- parsed (parseFormula sc "a = 0 ∧ b = 0 ∨ ¬c = 0 → ⊥")
         f @?= either (error . displayException) id (parseFormula sc "a = 0 /\\ b = 0 \\/ ~c = 0 ==> _|_")
     , testCase "a successor of a numeral is the next numeral" $ do
-        t <- parsed (parseTerm sc "S(S(3))")
+        t <- parsed (parseTerm sc "S (S 3)")
         t @?= Lit 5
     , testCase "a 0-ary symbol is written bare" $ do
         t <- parsed (parseTerm (plainScope (signature [symbol "c" (Zero :: PRFCode 0)])) "c")
         t @?= Lit 0
     , testCase "an application is arity-checked" $
-        either (const (pure ())) (const (assertFailure "accepted")) (parseTerm sc "plus(x)")
+        either (const (pure ())) (const (assertFailure "accepted")) (parseTerm sc "plus x")
     , testCase "the antecedent is a multiset" $
         sequent "a = 0, a = 0 |- a = 0" @?= sequent "a = 0, a = 0 |- a = 0"
     , testCase "a wildcard is refused in a sequent" $
@@ -143,12 +143,16 @@ tacticParserTests =
         "ConjL _ (a = 0)" `parsesTo` Apply ConjLRule [Nothing, Just (ArgForm a)]
     , testCase "trailing arguments may be omitted" $
         "ConjL" `parsesTo` Apply ConjLRule [Nothing, Nothing]
+    , testCase "term arguments are atoms, so applications are parenthesized" $ do
+        t <- parsed (parseTermPattern sc "S t")
+        "Defeq (S t) (S t)" `parsesTo` Apply DefeqRule [Just (ArgTerm t), Just (ArgTerm t)]
+        either (const (pure ())) (const (assertFailure "accepted")) (parseTactic sc "Defeq S t S t")
     , testCase "context parameters are skipped" $ do
         t <- parsed (parseTermPattern sc "x")
         a <- parsed (parseFormulaPattern sc "a = 0")
         "SuccNonZero x (a = 0)" `parsesTo` Apply SuccNonZeroRule [Just (ArgTerm t), Nothing, Just (ArgForm a)]
     , testCase "a term argument may contain wildcards" $ do
-        t <- parsed (parseTermPattern sc "plus(_, 0)")
+        t <- parsed (parseTermPattern sc "plus _ 0")
         t @?= plus :$ (Var Wild :< Lit 0 :< Nil)
     , testCase "a reserved word is not a variable" $
         either (const (pure ())) (const (assertFailure "accepted")) (parseTactic sc "Subst Id t s (x = t)")
@@ -158,8 +162,8 @@ tacticParserTests =
         "try repeat ConjL" `parsesTo` Try (Repeat (applyWith ConjLRule []))
     , testCase "the atomic pattern of rewrite may be parenthesised" $ do
         e <- parsed (parseAtomicPattern sc "t = s")
-        h <- parsed (parseAtomicPattern sc "plus(t, 0) = _")
-        "rewrite (t = s) in plus(t, 0) = _" `parsesTo` Rewrite e h
+        h <- parsed (parseAtomicPattern sc "plus t 0 = _")
+        "rewrite (t = s) in plus t 0 = _" `parsesTo` Rewrite e h
     , testCase "induction takes an optional eigenvariable" $
         "induction y as n" `parsesTo` Induction "y" (Just "n")
     , testCase "errors carry the position of the tactic" $ do
@@ -186,11 +190,11 @@ provingTests =
         proves "t = s, s = u |- t = u by Subst x s u (t = x); Id"
     , testCase "Subst infers the equation from the substituted formula" $
         proves "t = s, s = u |- t = u by Subst x _ _ (t = x); Id"
-    , testCase "SuccNonZero" $ proves "S(x) = 0 |- _|_ by SuccNonZero"
-    , testCase "SuccInj" $ proves "S(x) = S(y) |- x = y by SuccInj; Id"
+    , testCase "SuccNonZero" $ proves "S x = 0 |- _|_ by SuccNonZero"
+    , testCase "SuccInj" $ proves "S x = S y |- x = y by SuccInj; Id"
     , testCase "Ind with the motive given and the term inferred" $
         proves
-          "|- plus(y, 0) = y by Ind n (plus(n, 0) = n) { refl } { Defeq plus(S(n), 0) S(plus(n, 0)); rewrite (plus(n, 0) = n) in (plus(S(n), 0) = _); Id }"
+          "|- plus y 0 = y by Ind n (plus n 0 = n) { refl } { Defeq (plus (S n) 0) (S (plus n 0)); rewrite (plus n 0 = n) in (plus (S n) 0 = _); Id }"
     , testCase "an argument pattern constrains the inference" $
         proves "a = 0 ==> b = 0, c = 0 ==> b = 0, c = 0 |- b = 0 by ImplL (c = 0) _ { Id } { Id }"
     , testCase "a closed argument is checked against the goal" $
@@ -201,22 +205,22 @@ derivedTests :: TestTree
 derivedTests =
   testGroup
     "derived tactics"
-    [ testCase "refl closes a definitional equation" $ proves "|- plus(0, y) = y by refl"
-    , testCase "refl evaluates closed terms" $ proves "|- mult(3, 4) = 12 by refl"
+    [ testCase "refl closes a definitional equation" $ proves "|- plus 0 y = y by refl"
+    , testCase "refl evaluates closed terms" $ proves "|- mult 3 4 = 12 by refl"
     , testCase "symmetry" $ proves "t = s |- s = t by symmetry (t = s); Id"
     , testCase "symmetry selects by pattern" $ proves "t = s, u = 0 |- s = t by symmetry (_ = s); Id"
     , testCase "rewrite" $
-        proves "t = s, plus(t, 0) = 3 |- plus(s, 0) = 3 by rewrite (t = s) in (plus(t, 0) = 3); Id"
+        proves "t = s, plus t 0 = 3 |- plus s 0 = 3 by rewrite (t = s) in (plus t 0 = 3); Id"
     , testCase "rewrite replaces every occurrence" $
-        proves "t = s, plus(t, t) = t |- plus(s, s) = s by rewrite (t = s) in (plus(t, t) = _); Id"
+        proves "t = s, plus t t = t |- plus s s = s by rewrite (t = s) in (plus t t = _); Id"
     , testCase "induction with a fresh eigenvariable" $
         proves
-          "|- plus(y, 0) = y by induction y { refl } { Defeq plus(S(y'), 0) S(plus(y', 0)); rewrite (plus(y', 0) = y') in (plus(S(y'), 0) = _); Id }"
+          "|- plus y 0 = y by induction y { refl } { Defeq (plus (S y') 0) (S (plus y' 0)); rewrite (plus y' 0 = y') in (plus (S y') 0 = _); Id }"
     , testCase "induction with a named eigenvariable" $
         proves
-          "|- plus(y, 0) = y by induction y as n { refl } { Defeq plus(S(n), 0) S(plus(n, 0)); rewrite (plus(n, 0) = n) in (plus(S(n), 0) = _); Id }"
+          "|- plus y 0 = y by induction y as n { refl } { Defeq (plus (S n) 0) (S (plus n 0)); rewrite (plus n 0 = n) in (plus (S n) 0 = _); Id }"
     , testCase "induction leaves the context alone" $
-        proves "z = 0 |- plus(y, 0) = y by induction y as n { refl } { Defeq plus(S(n), 0) S(plus(n, 0)); rewrite (plus(n, 0) = n) in (plus(S(n), 0) = _); Id }"
+        proves "z = 0 |- plus y 0 = y by induction y as n { refl } { Defeq (plus (S n) 0) (S (plus n 0)); rewrite (plus n 0 = n) in (plus (S n) 0 = _); Id }"
     , testCase "assumption on an atom" $ proves "a = 0 |- a = 0 by assumption"
     , testCase "assumption on absurdity" $ proves "_|_ |- _|_ by assumption"
     , testCase "assumption expands the identity through the connectives" $
@@ -269,15 +273,15 @@ failureTests =
           SideCondition DefeqRule (EqualityCheckFailed (Lit 2) (Lit 3)) -> True
           _ -> False
     , testCase "an eigenvariable in the induction term" $
-        "|- plus(y, 0) = y by Ind y (plus(y, 0) = y) y" `failsWith` \case
+        "|- plus y 0 = y by Ind y (plus y 0 = y) y" `failsWith` \case
           SideCondition IndRule (TermEigenVariableViolation "y" (Var "y")) -> True
           _ -> False
     , testCase "an eigenvariable in the context" $
-        "n = 0 |- plus(y, 0) = y by Ind n (plus(n, 0) = n) y" `failsWith` \case
+        "n = 0 |- plus y 0 = y by Ind n (plus n 0 = n) y" `failsWith` \case
           SideCondition IndRule (AssumptionEigenVariableViolation "n" _) -> True
           _ -> False
     , testCase "an eigenvariable which is not fresh" $
-        "|- plus(y, 0) = y by induction y as y" `failsWith` \case
+        "|- plus y 0 = y by induction y as y" `failsWith` \case
           NotFresh "y" -> True
           _ -> False
     , testCase "the wrong number of blocks" $
@@ -368,7 +372,7 @@ declarationTests =
     source =
       unlines
         [ "-- The left identity is definitional."
-        , "theorem plus_zero_left : |- plus(0, y) = y"
+        , "theorem plus_zero_left : |- plus 0 y = y"
         , "by refl"
         , ""
         , "rule swap (a b : term) (D1 : a = 0, b = 0 |- b = 0) (D2 : a = 0, b = 0 |- a = 0)"

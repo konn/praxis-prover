@@ -22,6 +22,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic (
   ExpandedFamily (..),
   expandedEquations,
   expandFamily,
+  expandTerm,
   instanceName,
 ) where
 
@@ -117,6 +118,25 @@ expandFamily checkTemplates env demands equations = do
       , expandedTemplates = templates
       , expandedInstances = stInstances final
       }
+
+{- | Desugar the binder sugar of one term and redirect its applications of
+variadic schemas to their instances, as for a clause whose pattern variables
+are the given names. The instances of imported variadic schemas are added to
+the environment returned.
+-}
+expandTerm :: Env -> [T.Text] -> EqTerm T.Text -> Either ElaborationError (Env, EqTerm T.Text)
+expandTerm env vars term = do
+  (rewritten, final) <-
+    runStateT
+      (rewrite (Ctx vars [] Nothing) term)
+      St
+        { stEnv = env
+        , stTemplates = Map.empty
+        , stDone = Map.empty
+        , stActive = Map.empty
+        , stInstances = Set.empty
+        }
+  pure (stEnv final, rewritten)
 
 -- | Templates are the definitions with a variadic group in every clause.
 collectTemplates :: Env -> [Equation T.Text] -> Either ElaborationError (Map T.Text VariadicTemplate)

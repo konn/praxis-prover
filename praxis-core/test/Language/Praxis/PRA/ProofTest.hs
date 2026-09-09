@@ -228,19 +228,19 @@ defeqUnfoldingTests :: TestTree
 defeqUnfoldingTests =
   testGroup
     "Defeq unfolds a PRFCode by its defining equation"
-    [ testCase "Zero(x) = 0" $
+    [ testCase "Zero x = 0" $
         (Zero :$ (x :< Nil)) `unfoldsTo` Lit 0
-    , testCase "Succ(t) = S(t), for t itself a redex" $
+    , testCase "Succ t = S t, for t itself a redex" $
         (Succ :$ ((plus :$ ((Succ :$ (y :< Nil)) :< x :< Nil)) :< Nil))
           `unfoldsTo` suc (suc (plus :$ (y :< x :< Nil)))
-    , testCase "Proj_1(x, y) = y" $
+    , testCase "Proj_1 x y = y" $
         (Proj [od|1|] :$ (x :< y :< Nil)) `unfoldsTo` y
-    , testCase "Comp f (g_0, g_1) (x, y) = f(g_0(x, y), g_1(x, y))" $
+    , testCase "Comp f (g_0, g_1) x y = f (g_0 x y) (g_1 x y)" $
         (Comp plus (Proj [od|1|] :< Proj [od|0|] :< Nil) :$ (x :< y :< Nil))
           `unfoldsTo` (plus :$ (y :< x :< Nil))
-    , testCase "Rec g h (0, x) = g(x)" $
+    , testCase "Rec g h 0 x = g x" $
         (plus :$ (Lit 0 :< x :< Nil)) `unfoldsTo` x
-    , testCase "Rec g h (S y, x) = h(y, Rec g h (y, x), x)" $
+    , testCase "Rec g h (S y) x = h y (Rec g h y x) x" $
         (plus :$ ((Succ :$ (y :< Nil)) :< x :< Nil))
           `unfoldsTo` (Succ :$ ((plus :$ (y :< x :< Nil)) :< Nil))
     , testCase "the recursive call may be left residual inside the step code" $
