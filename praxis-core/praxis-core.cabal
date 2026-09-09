@@ -87,6 +87,8 @@ library
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.CaseTree
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Env
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax

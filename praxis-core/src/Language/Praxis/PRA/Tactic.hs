@@ -41,6 +41,7 @@ module Language.Praxis.PRA.Tactic (
 ) where
 
 import Control.Applicative ((<|>))
+import Control.Exception (displayException)
 import Control.Lens ((^?))
 import Control.Monad (foldM, join, unless, when)
 import Control.Monad.Free (Free (..), iter)
@@ -785,7 +786,7 @@ renderTacticError sig name = intercalate "\n" . render
 
     side = \case
       EqualityCheckFailed s t -> rt s <> " and " <> rt t <> " are not definitionally equal"
-      DefinitionResolutionFailed err -> err
+      DefinitionResolutionFailed err -> displayException err
       TermEigenVariableViolation x t -> name x <> " occurs in " <> rt t
       AssumptionEigenVariableViolation x g -> name x <> " occurs in the context " <> rc g
       MissingAssumption f g -> rf f <> " is not among " <> rc g

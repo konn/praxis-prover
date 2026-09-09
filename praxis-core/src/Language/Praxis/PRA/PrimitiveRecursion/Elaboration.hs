@@ -25,6 +25,8 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration (
   SomeFunction (..),
   VariadicTemplate (..),
   Env,
+  ElaborationError (..),
+  SchemaError (..),
   FunctionalTerm (..),
   RenamedEquation (..),
   ExpandedFamily (..),
@@ -68,10 +70,13 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration (
   LocatedEquation (..),
   equationsP,
   parseLocatedEquations,
+  EquationSyntaxError,
 ) where
 
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.CaseTree
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Env
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax

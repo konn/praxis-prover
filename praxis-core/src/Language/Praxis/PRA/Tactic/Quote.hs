@@ -58,6 +58,7 @@ module Language.Praxis.PRA.Tactic.Quote (
   schemaScope,
 ) where
 
+import Control.Exception (displayException)
 import Control.Monad (unless)
 import Control.Monad.Free (Free (..), iter)
 import Control.Monad.Trans.Class (lift)
@@ -178,13 +179,13 @@ praQuoter :: Signature -> QuasiQuoter
 praQuoter sig =
   QuasiQuoter
     { quoteExp = \src -> do
-        env <- either fail pure (signatureKernelEnv sig)
-        (goal, tac) <- either fail pure (parseGoal (schemaScope sig []) src)
+        env <- either (fail . displayException) pure (signatureKernelEnv sig)
+        (goal, tac) <- either (fail . displayException) pure (parseGoal (schemaScope sig []) src)
         proof <- either (fail . renderTacticError sig renderSchemaName) pure (proveOpenIn env Map.empty goal tac)
         (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty) proof)
         pure body
     , quoteDec = \src -> do
-        decls <- either fail pure (parseDecls (schemaScope sig) src)
+        decls <- either (fail . displayException) pure (parseDecls (schemaScope sig) src)
         concat <$> traverse (compileDecl sig) decls
     , quotePat = const (fail "pra: a proof is not a pattern")
     , quoteType = const (fail "pra: a proof is not a type")
@@ -198,7 +199,7 @@ proofConstructors = do
 
 compileDecl :: Signature -> Decl SchemaName -> Q [Dec]
 compileDecl sig decl = do
-  kernel <- either fail pure (signatureKernelEnv sig)
+  kernel <- either (fail . displayException) pure (signatureKernelEnv sig)
   let dname = declName decl
       binders = declBinders decl
       metas = binderMetas binders

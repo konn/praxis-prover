@@ -26,6 +26,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Quote (
   prfQuoter,
 ) where
 
+import Control.Exception (displayException)
 import Control.Monad (unless, void, when)
 import Data.Char (isAlphaNum, isLower)
 import Data.Map.Strict (Map)
@@ -130,17 +131,17 @@ compileQuote initial source = do
     fail ("prf: Haskell binding already generated: " <> show (Set.toList (names `Set.intersection` generatedNames registry)))
   -- Locate name/arity errors at the individual clause before compilation. An
   -- instance clause is attributed to the template clause it expands.
-  expanded <- either fail pure (expandFamily True (signatureEnv parentSig) [] raw)
-  renamingEnv <- either fail pure (equationEnv (expandedEnv expanded) (expandedEquations expanded))
+  expanded <- either (fail . displayException) pure (expandFamily True (signatureEnv parentSig) [] raw)
+  renamingEnv <- either (fail . displayException) pure (equationEnv (expandedEnv expanded) (expandedEquations expanded))
   let concreteLocated = [eq | eq <- equations, isNothing (variadic (locatedEquation eq))]
       templateLocated ident = [eq | eq <- equations, name (locatedEquation eq) == ident]
       attributed =
         zip concreteLocated (expandedConcrete expanded)
           <> concat [zip (templateLocated ident) clauses | ((ident, _), clauses) <- expandedInstanceClauses expanded]
-  mapM_ (\(located, eq) -> either (at located) (const (pure ())) (renameEquation renamingEnv eq)) attributed
+  mapM_ (\(located, eq) -> either (at located . displayException) (const (pure ())) (renameEquation renamingEnv eq)) attributed
   let qualify ident = T.pack (TH.loc_package loc <> ":" <> TH.loc_module loc <> ".") <> ident
-  block <- either (fail . withLocations equations) pure (compileDefinitionsWith qualify parent raw)
-  extended <- either fail pure (extendEnvironment parent block)
+  block <- either (fail . withLocations equations . displayException) pure (compileDefinitionsWith qualify parent raw)
+  extended <- either (fail . displayException) pure (extendEnvironment parent block)
   let hsName ident = mkNameG_v (TH.loc_package loc) (TH.loc_module loc) (T.unpack ident)
       newSymbols =
         Sig.signatureWithVariadicSchemas
@@ -153,7 +154,7 @@ compileQuote initial source = do
           [ sch {Sig.variadicSchemaHaskellName = Just (hsName (T.pack (Sig.variadicSchemaName sch)))}
           | sch <- Sig.variadicSchemas (blockSignature block)
           ]
-  kernel <- either fail pure (Sig.signatureKernelEnv (environmentSignature extended))
+  kernel <- either (fail . displayException) pure (Sig.signatureKernelEnv (environmentSignature extended))
   let fullSig = Sig.withKernelEnv kernel (newSymbols <> parentSig)
   signatureName <- case header of
     Just (Header ident _) -> pure (TH.mkName (T.unpack ident))
@@ -267,11 +268,11 @@ liftAtArity constructor value =
 
 liftSignature :: Sig.Signature -> TH.Code TH.Q Sig.Signature
 liftSignature sig = TH.joinCode do
-  env <- either fail pure (Sig.signatureKernelEnv sig)
+  env <- either (fail . displayException) pure (Sig.signatureKernelEnv sig)
   pure
     [||
     Sig.withKernelEnv
-      (either error id (F.extendKernelEnv F.emptyKernelEnv $$(listCode (map definition (F.definitions env)))))
+      (either (error . displayException) id (F.extendKernelEnv F.emptyKernelEnv $$(listCode (map definition (F.definitions env)))))
       ( Sig.signatureWithVariadicSchemas
           $$(listCode (map entry (Sig.symbols sig)))
           $$(listCode (map schemaEntry (Sig.schemas sig)))

@@ -36,6 +36,8 @@ import Data.Maybe (isJust)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Env
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 import Numeric.Natural (Natural)
 
@@ -79,16 +81,16 @@ data St = St
   , stInstances :: !(Set T.Text)
   }
 
-type M = StateT St (Either String)
+type M = StateT St (Either ElaborationError)
 
-throw :: String -> M a
+throw :: ElaborationError -> M a
 throw = lift . Left
 
 {- | Expand a family. The demands are instances required besides those the
 equations apply; when checking, every local template is also instantiated at
 zero and at one variadic argument.
 -}
-expandFamily :: Bool -> Env -> [(T.Text, Natural)] -> [Equation T.Text] -> Either String ExpandedFamily
+expandFamily :: Bool -> Env -> [(T.Text, Natural)] -> [Equation T.Text] -> Either ElaborationError ExpandedFamily
 expandFamily checkTemplates env demands equations = do
   templates <- collectTemplates env equations
   let concrete = filter (\eq -> Map.notMember (name eq) templates) equations
@@ -117,31 +119,30 @@ expandFamily checkTemplates env demands equations = do
       }
 
 -- | Templates are the definitions with a variadic group in every clause.
-collectTemplates :: Env -> [Equation T.Text] -> Either String (Map T.Text VariadicTemplate)
+collectTemplates :: Env -> [Equation T.Text] -> Either ElaborationError (Map T.Text VariadicTemplate)
 collectTemplates env equations = foldM add Map.empty (nub (map name (filter (isJust . variadic) equations)))
   where
     add acc ident = do
       let clauses = filter ((== ident) . name) equations
-          shown = T.unpack ident
-      when (Map.member ident env) (Left ("Function already defined: " <> shown))
-      splats <- maybe (Left ("Every clause of " <> shown <> " must declare its variadic argument $[..]")) Right (traverse variadic clauses)
+      when (Map.member ident env) (Left (FunctionAlreadyDefined ident))
+      splats <- maybe (Left (MissingVariadicGroup ident)) Right (traverse variadic clauses)
       splat <- case splats of
         s : rest
           | all (\r -> splatPosition r == splatPosition s && splatName r == splatName s) rest -> Right s
-          | otherwise -> Left ("Clauses of " <> shown <> " must agree on the name and position of their variadic argument")
-        [] -> Left ("No clauses for " <> shown)
+          | otherwise -> Left (InconsistentVariadicGroup ident)
+        [] -> Left (InternalError ("collectTemplates: no clauses for " <> T.unpack ident))
       param <- case nub (map schemaParams clauses) of
         [[p]] -> Right p
-        [[]] -> Left ("Variadic arguments require a schema parameter: " <> shown)
-        [_] -> Left ("A variadic schema takes exactly one schema parameter: " <> shown)
-        _ -> Left ("Inconsistent schema definition for " <> shown)
+        [[]] -> Left (VariadicWithoutParameter ident)
+        [_] -> Left (TooManyVariadicParameters ident)
+        _ -> Left (InconsistentSchemaDefinition ident)
       fixed <- case nub (map (length . args) clauses) of
         [n] -> Right (fromIntegral n)
-        _ -> Left ("Inconsistent arity for " <> shown)
+        _ -> Left (InconsistentArity ident)
       pArity <- case paramShape param clauses of
         Just (a, 1) -> Right a
-        Just _ -> Left ("The parameter " <> T.unpack param <> " of " <> shown <> " must take the variadic arguments $[" <> T.unpack (splatName splat) <> "] exactly once")
-        Nothing -> Left ("The parameter " <> T.unpack param <> " of " <> shown <> " must be applied to the variadic arguments $[" <> T.unpack (splatName splat) <> "]")
+        Just (_, times) -> Left (VariadicParameterGroupMismatch ident param (splatName splat) times)
+        Nothing -> Left (VariadicParameterUnapplied ident param (splatName splat))
       pure
         ( Map.insert
             ident
@@ -196,7 +197,7 @@ rewriteEquation Nothing eq = do
   body <- rewrite (Ctx (patternVariables (args eq)) [] Nothing) (clause eq)
   pure eq {clause = body}
 rewriteEquation (Just (tmpl, k)) eq = do
-  splat <- maybe (throw "Internal: template clause without a variadic argument") pure (variadic eq)
+  splat <- maybe (throw (InternalError "rewriteEquation: a template clause without a variadic argument")) pure (variadic eq)
   let vars = [splatName splat <> "$" <> T.pack (show i) | i <- take (fromIntegral k) [0 :: Int ..]]
       expanded = case splatPosition splat of
         SplatFirst -> map VarP vars <> args eq
@@ -221,7 +222,7 @@ rewrite ctx term = case term of
   IfThenElseET c t e -> IfThenElseET <$> rewrite ctx c <*> rewrite ctx t <*> rewrite ctx e
   LamET hints body -> LamET hints <$> rewrite ctx {ctxBinders = hints : ctxBinders ctx} body
   MuET hint bound body -> desugarMu ctx hint bound body
-  SplatET xs -> throw ("The variadic arguments $[" <> T.unpack xs <> "] may only be passed as arguments")
+  SplatET xs -> throw (SplatOutsideArgument xs)
 
 rewriteApp :: Ctx -> EqTerm T.Text -> M (EqTerm T.Text)
 rewriteApp ctx term = do
@@ -234,8 +235,8 @@ rewriteApp ctx term = do
   where
     expand (SplatET xs) = case ctxSplat ctx of
       Just (group, vars) | group == xs -> pure (map NameET vars)
-      Just (group, _) -> throw ("Unknown variadic argument $[" <> T.unpack xs <> "]; the enclosing schema declares $[" <> T.unpack group <> "]")
-      Nothing -> throw ("The variadic arguments $[" <> T.unpack xs <> "] are only available inside a variadic schema")
+      Just (group, _) -> throw (UnknownVariadicGroup xs group)
+      Nothing -> throw (SplatOutsideVariadicSchema xs)
     expand t = (: []) <$> rewrite ctx t
 
 -- | An application of a variadic schema is redirected to its instance.
@@ -252,9 +253,8 @@ rewriteHead ctx hd count = case hd of
   _ -> pure hd
   where
     instanceHead ident fixed = do
-      let least = 1 + fixed
-      when (fromIntegral count < least) $
-        throw (T.unpack ident <> " takes at least " <> show least <> " arguments (its parameter and " <> show fixed <> " fixed ones), given " <> show count)
+      when (fromIntegral count < 1 + fixed) $
+        throw (TooFewVariadicArguments ident fixed count)
       let k = fromIntegral count - 1 - fixed
       instantiate ident k
       pure (NameET (instanceName ident k))
@@ -266,16 +266,7 @@ instantiate ident k = do
   case active of
     Just k'
       | k' == k -> pure ()
-      | otherwise ->
-          throw
-            ( "Variadic schema "
-                <> T.unpack ident
-                <> " applies itself with "
-                <> show k
-                <> " variadic arguments while being instantiated with "
-                <> show k'
-                <> "; recursion must preserve the number of variadic arguments"
-            )
+      | otherwise -> throw (VariadicRecursionChangesArity ident k' k)
     Nothing -> unless done do
       entry <- gets (Map.lookup ident . stEnv)
       case entry of
@@ -289,7 +280,7 @@ instantiate ident k = do
               , stInstances = Set.insert (instanceName ident k) (stInstances s)
               }
         Just (ImportedVariadic _ fixed pArity instantiation) -> do
-          inst <- either throw pure (instantiation k)
+          inst <- either (throw . SchemaFailure) pure (instantiation k)
           let instName = instanceName ident k
           modify' \s ->
             s
@@ -297,7 +288,7 @@ instantiate ident k = do
               , stDone = Map.insert (ident, k) [] (stDone s)
               , stInstances = Set.insert instName (stInstances s)
               }
-        _ -> throw ("Unknown variadic schema: " <> T.unpack ident)
+        _ -> throw (UnknownVariadicSchema ident)
 
 {- | Inner searches are desugared first, so afterwards only closed lambdas
 remain beneath the body and every capture is visible at its top level.
@@ -312,7 +303,7 @@ desugarMu ctx hint bound body = do
       arguments = map captureArgument captured
   env <- gets stEnv
   unless (Map.member "mu" env) $
-    throw "A bounded search 'μ i < b. body' requires a schema 'mu' to be in scope"
+    throw BoundedSearchOutOfScope
   hd <- rewriteHead ctx (NameET "mu") (2 + length captured)
   pure (foldl (:@) hd (LamET binders closed : bound' : arguments))
   where

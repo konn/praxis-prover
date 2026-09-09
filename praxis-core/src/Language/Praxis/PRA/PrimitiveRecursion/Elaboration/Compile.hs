@@ -25,6 +25,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile (
 ) where
 
 import Control.Monad (foldM, unless)
+import Data.Bifunctor (first)
 import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -39,6 +40,8 @@ import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal, type (+))
 import Language.Praxis.PRA.PrimitiveRecursion.Code (V)
 import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.CaseTree
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Env
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Internal
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (equationEnv, renameEquation)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
@@ -84,7 +87,7 @@ data CompiledSchema = CompiledSchema
   { cSchemaParams :: ![T.Text]
   , cSchemaParamArity :: !Natural
   , cSchemaArity :: !Natural
-  , cSchemaInstantiate :: !([F.SomeFunction] -> Either String F.SomeFunction)
+  , cSchemaInstantiate :: !([F.SomeFunction] -> Either SchemaError F.SomeFunction)
   }
 
 substProgram :: forall k m. (KnownNat k, KnownNat m) => F.DefId k -> F.Program k -> F.Program m -> F.Program m
@@ -101,33 +104,28 @@ substProgram target replacement = go
     go (F.Comp f xs) = F.Comp (go f) (fmap go xs)
     go (F.Rec b s) = F.Rec (go b) (go s)
 
+-- | Instantiate a compiled schema by substituting its parameter placeholders.
 instantiateLocal ::
   [T.Text] ->
   Natural ->
   ElaboratedDefinition ->
   [F.SomeFunction] ->
-  Either String F.SomeFunction
-instantiateLocal params pArity (ElaboratedDefinition _ (code :: F.Program sArity) _ _ _) pFuns =
-  case someNatVal pArity of
-    SomeNat (_ :: Proxy p) -> do
-      unless (length params == length pFuns) (Left "Schema parameter count mismatch")
-      instCode <- foldM subst (SomeProgram code) (zip params pFuns)
-      case instCode of
-        SomeProgram (finalCode :: F.Program m) ->
-          case testEquality (sNat @m) (sNat @sArity) of
-            Just Refl -> Right (F.SomeFunction (F.Inline finalCode :: F.Function sArity))
-            Nothing -> Left "Instantiated schema arity mismatch"
+  Either SchemaError F.SomeFunction
+instantiateLocal params pArity (ElaboratedDefinition self (code :: F.Program sArity) _ _ _) pFuns = do
+  unless (length params == length pFuns) (Left (SchemaParameterCountMismatch self (length params) (length pFuns)))
+  instCode <- foldM subst code (zip params pFuns)
+  pure (F.SomeFunction (F.Inline instCode :: F.Function sArity))
   where
-    subst (SomeProgram (curr :: F.Program m)) (paramName, F.SomeFunction (pFun :: F.Function k)) =
+    subst curr (paramName, F.SomeFunction (pFun :: F.Function k)) =
       case someNatVal pArity of
         SomeNat (_ :: Proxy expectedP) ->
           case testEquality (sNat @k) (sNat @expectedP) of
             Just Refl ->
-              Right (SomeProgram (substProgram (F.DefId paramName :: F.DefId k) (F.functionProgram pFun) curr))
+              Right (substProgram (F.DefId paramName :: F.DefId k) (F.functionProgram pFun) curr)
             Nothing ->
-              Left ("Schema parameter arity mismatch for " <> T.unpack paramName <> ": expected " <> show pArity <> ", given " <> show (natVal (Proxy @k)))
+              Left (SchemaParameterArityMismatch self pArity (natVal (Proxy @k)))
 
-instantiateSchemaFunction :: ElaboratedSchema -> F.SomeFunction -> Either String F.SomeFunction
+instantiateSchemaFunction :: ElaboratedSchema -> F.SomeFunction -> Either SchemaError F.SomeFunction
 instantiateSchemaFunction (ElaboratedSchema _ params pArity def) p =
   instantiateLocal params pArity def [p]
 
@@ -142,17 +140,17 @@ definitionCode :: ElaboratedDefinition -> SomeProgram
 definitionCode (ElaboratedDefinition _ code _ _ _) = SomeProgram code
 
 -- Check against the original patterns, before case-tree substitutions.
-checkCandidate :: (KnownNat n) => T.Text -> Ordinal n -> [EquationRow n] -> Either String ()
+checkCandidate :: (KnownNat n) => T.Text -> Ordinal n -> [EquationRow n] -> Either ElaborationError ()
 checkCandidate self index = mapM_ checkRow
   where
     checkRow row = case SV.sIndex index (rowPatterns row) of
-      ZeroP -> unless (Set.notMember self (functionCalls (rowBody row))) (Left "recursive call in base case")
+      ZeroP -> unless (Set.notMember self (functionCalls (rowBody row))) (Left (RecursiveCallInBaseCase (rowId row)))
       SuccP VarP {} -> checkCalls row (rowBody row)
-      _ -> Left "recursion column must contain only 0 and S(variable)"
+      _ -> Left (InvalidRecursionPattern (rowId row))
     checkCalls row (AppFT (Defined ident) xs) | ident == self = do
       let expected = fmap (\i -> if i == index then VarFT i else patternTerm i (SV.sIndex i (rowPatterns row))) slotIndices
       unless (length xs == length expected && and (zipWith sameTerm (toList xs) (toList expected))) $
-        Left ("recursive call changes a parameter or does not use the immediate predecessor in clause " <> show (rowId row))
+        Left (InvalidRecursiveCall (rowId row))
     checkCalls row (AppFT _ xs) = mapM_ (checkCalls row) xs
     checkCalls _ _ = Right ()
 
@@ -160,16 +158,16 @@ literalCode :: Natural -> Program n
 literalCode 0 = (F.Base PR.Zero)
 literalCode n = F.Comp (F.Base PR.Succ) (literalCode (n - 1) SV.:< SV.Nil)
 
-lookupCode :: forall n. (KnownNat n) => Map T.Text SomeProgram -> T.Text -> Either String (Program n)
+lookupCode :: forall n. (KnownNat n) => Map T.Text SomeProgram -> T.Text -> Either ElaborationError (Program n)
 lookupCode env ident = case Map.lookup ident env of
-  Nothing -> Left ("No compiled code for " <> T.unpack ident)
+  Nothing -> Left (NoCompiledCode ident)
   Just (SomeProgram (code :: Program m)) -> case testEquality (sNat @n) (sNat @m) of
     Just Refl -> Right code
-    Nothing -> Left ("Compiled arity mismatch for " <> T.unpack ident)
+    Nothing -> Left (CompiledArityMismatch ident (natVal (Proxy @n)) (natVal (Proxy @m)))
 
-lookupFunctionAsSomeFunction :: Map T.Text SomeProgram -> T.Text -> Either String F.SomeFunction
+lookupFunctionAsSomeFunction :: Map T.Text SomeProgram -> T.Text -> Either ElaborationError F.SomeFunction
 lookupFunctionAsSomeFunction env ident = case Map.lookup ident env of
-  Nothing -> Left ("No compiled code for schema argument: " <> T.unpack ident)
+  Nothing -> Left (NoCompiledCode ident)
   Just (SomeProgram (code :: Program k)) -> Right (F.SomeFunction (F.Inline code :: F.Function k))
 
 -- The recursive-result code is separate from the source slot vector, and is
@@ -183,28 +181,38 @@ compileBody ::
   Maybe (Program k) ->
   V n (Program k) ->
   FunctionalTerm n ->
-  Either String (Program k)
+  Either ElaborationError (Program k)
 compileBody schemas env self previous slots = go
   where
     go (LitFT n) = Right (literalCode n)
     go (VarFT i) = Right (SV.sIndex i slots)
     go (AppFT (Defined ident) _)
       | ident == self =
-          maybe (Left "Unexpected recursive call") Right previous
+          maybe (Left (UnexpectedRecursiveCall self)) Right previous
     go (AppFT (SchemaApp sName pArgs :: Function m) xs) = do
       case Map.lookup sName schemas of
-        Nothing -> Left ("Unknown schema: " <> T.unpack sName)
+        Nothing -> Left (UnknownSchema sName)
         Just sch -> do
           unless (length pArgs == length (cSchemaParams sch)) $
-            Left ("Schema " <> T.unpack sName <> " expects " <> show (length (cSchemaParams sch)) <> " parameters, given " <> show (length pArgs))
+            Left (SchemaArgumentCountMismatch sName (length (cSchemaParams sch)) (length pArgs))
           pFuns <- traverse parameter pArgs
-          instSome <- cSchemaInstantiate sch pFuns
+          instSome <- first SchemaFailure (cSchemaInstantiate sch pFuns)
           args <- traverse go xs
           case instSome of
             F.SomeFunction (instFun :: F.Function instM) ->
               case testEquality (sNat @instM) (sNat @m) of
                 Just Refl -> pure (F.Comp (F.functionProgram instFun) args)
-                Nothing -> Left ("Schema application arity mismatch for " <> T.unpack sName)
+                Nothing ->
+                  Left
+                    ( InternalError
+                        ( "compileBody: the instance of "
+                            <> T.unpack sName
+                            <> " has arity "
+                            <> show (natVal (Proxy @instM))
+                            <> ", applied at "
+                            <> show (natVal (Proxy @m))
+                        )
+                    )
     go (AppFT fun xs) = do
       code <- case fun of
         Primitive code -> Right (F.Base code)
@@ -215,7 +223,7 @@ compileBody schemas env self previous slots = go
     parameter (NamedArg p) = lookupFunctionAsSomeFunction env p
     parameter (LambdaArg (_ :: V p IrrelevantName) body) = do
       unless (Set.notMember self (functionCalls body)) $
-        Left ("recursive call to " <> T.unpack self <> " inside a lambda")
+        Left (RecursiveCallInLambda self)
       code <- compileBody schemas env self Nothing (fmap projection (slotIndices @p)) body
       pure (F.SomeFunction (F.Inline code :: F.Function p))
 
@@ -230,7 +238,7 @@ compileTree ::
   Maybe (Program k) ->
   V n (Program k) ->
   CaseTree n ->
-  Either String (Program k)
+  Either ElaborationError (Program k)
 compileTree schemas env self previous slots = \case
   Leaf _ body -> compileBody schemas env self previous slots body
   Split index z s -> do
@@ -255,15 +263,15 @@ shallow; other columns may contain arbitrarily nested successor patterns.
 elaborateDefinition ::
   Map T.Text SomeProgram ->
   [RenamedEquation] ->
-  Either String ElaboratedDefinition
+  Either ElaborationError ElaboratedDefinition
 elaborateDefinition = elaborateDefinitionWith Map.empty
 
 elaborateDefinitionWith ::
   Map T.Text CompiledSchema ->
   Map T.Text SomeProgram ->
   [RenamedEquation] ->
-  Either String ElaboratedDefinition
-elaborateDefinitionWith _ _ [] = Left "Empty function definition"
+  Either ElaborationError ElaboratedDefinition
+elaborateDefinitionWith _ _ [] = Left EmptyDefinition
 elaborateDefinitionWith schemas env equations@(RenamedEquation self (_ :: V n (Pattern IrrelevantName)) _ : _) = do
   rows <- traverse unpack (zip [0 ..] equations)
   tree <- buildCaseTree rows
@@ -274,13 +282,13 @@ elaborateDefinitionWith schemas env equations@(RenamedEquation self (_ :: V n (P
     else choose rows tree [] (toList (slotIndices @n))
   where
     unpack (ident, RenamedEquation other (ps :: V m (Pattern IrrelevantName)) body)
-      | other /= self = Left "Mixed function names in definition"
+      | other /= self = Left (MixedDefinitionNames self other)
       | otherwise = case testEquality (sNat @n) (sNat @m) of
           Just Refl -> Right (EquationRow ident ps body)
-          Nothing -> Left ("Inconsistent arity for " <> T.unpack self)
-    choose _ _ failures [] = Left ("No primitive recursion argument for " <> T.unpack self <> ": " <> unwords (reverse failures))
+          Nothing -> Left (InconsistentArity self)
+    choose _ _ failures [] = Left (NoRecursionArgument self (reverse failures))
     choose rows tree failures (index : rest) = case candidate rows index of
-      Left err -> choose rows tree (("argument " <> show (ordToNatural index) <> ": " <> err <> ";") : failures) rest
+      Left err -> choose rows tree ((ordToNatural index, err) : failures) rest
       Right code -> Right (ElaboratedDefinition self code rows tree (Just index))
     candidate rows index = do
       checkCandidate self index rows
@@ -303,17 +311,17 @@ elaborateDefinitionWith schemas env equations@(RenamedEquation self (_ :: V n (P
             _ -> pure (F.Comp (F.Rec base step) inputs)
     parameterSlot index i = fromIntegral (ordToNatural i - if i > index then 1 else 0)
 
-vector :: (KnownNat n) => [a] -> Either String (V n a)
-vector = maybe (Left "Internal elaborator vector arity mismatch") Right . SV.fromList'
+vector :: (KnownNat n) => [a] -> Either ElaborationError (V n a)
+vector = maybe (Left (InternalError "elaborateDefinition: a slot vector of the wrong length")) Right . SV.fromList'
 
 {- | Resolve definitions in dependency order, including forward references.
 Self recursion is handled by elaborateDefinition; other cycles are rejected.
 The result contains only newly elaborated definitions, not the initial codes.
 -}
-elaborateRenamedEquations :: Map T.Text SomeProgram -> [RenamedEquation] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateRenamedEquations :: Map T.Text SomeProgram -> [RenamedEquation] -> Either ElaborationError (Map T.Text ElaboratedDefinition)
 elaborateRenamedEquations = elaborateRenamedEquationsWith id
 
-elaborateRenamedEquationsWith :: (T.Text -> T.Text) -> Map T.Text SomeProgram -> [RenamedEquation] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateRenamedEquationsWith :: (T.Text -> T.Text) -> Map T.Text SomeProgram -> [RenamedEquation] -> Either ElaborationError (Map T.Text ElaboratedDefinition)
 elaborateRenamedEquationsWith qualify initial equations =
   fst <$> elaborateRenamedEquationsAndSchemasWith qualify Map.empty initial Set.empty Map.empty equations
 
@@ -326,7 +334,7 @@ elaborateRenamedEquationsAndSchemasWith ::
   Set.Set T.Text ->
   Map T.Text ([T.Text], Natural, Natural) ->
   [RenamedEquation] ->
-  Either String (Map T.Text ElaboratedDefinition, Map T.Text CompiledSchema)
+  Either ElaborationError (Map T.Text ElaboratedDefinition, Map T.Text CompiledSchema)
 elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNames schemaMeta equations =
   foldM (visit Set.empty) (Map.empty, externalSchemas) (Map.keys groups)
   where
@@ -337,10 +345,10 @@ elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNa
       Nothing -> Map.empty
     visit active (doneDefs, doneSchemas) ident
       | Map.member ident doneDefs = Right (doneDefs, doneSchemas)
-      | Set.member ident active = Left ("Mutual recursion is unsupported: " <> T.unpack ident)
-      | Map.member ident initial = Left ("Function already defined: " <> T.unpack ident)
+      | Set.member ident active = Left (MutualRecursion ident)
+      | Map.member ident initial = Left (FunctionAlreadyDefined ident)
       | otherwise = case Map.lookup ident groups of
-          Nothing -> Left ("No definition for " <> T.unpack ident)
+          Nothing -> Left (UnknownFunction ident)
           Just clauses -> do
             let parameters = parameterCodes ident
                 dependencies =
@@ -371,7 +379,7 @@ elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNa
       | Map.member ident groups = visit active (doneDefs, doneSchemas) ident
       | Map.member ident initial = Right (doneDefs, doneSchemas)
       | Map.member ident externalSchemas = Right (doneDefs, doneSchemas)
-      | otherwise = Left ("No compiled code for " <> T.unpack ident)
+      | otherwise = Left (NoCompiledCode ident)
 
 {- | Expand, rename and compile a program. Environmental primitive codes are
 available to every definition. Unresolved environmental names must be
@@ -379,7 +387,7 @@ supplied as code before use. Coverage and overlap checks precede
 recursive-call compilation. Variadic templates are checked at zero and one
 variadic argument besides the instances the program applies.
 -}
-elaborateFamilyWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either String ElaboratedFamily
+elaborateFamilyWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either ElaborationError ElaboratedFamily
 elaborateFamilyWith qualify env equations = do
   expanded <- expandFamily True env [] equations
   elaborateExpanded qualify [] expanded
@@ -388,12 +396,12 @@ elaborateFamilyWith qualify env equations = do
 compiled against an environment of existing codes; templates are not checked
 again, as at their definition site.
 -}
-elaborateInstances :: Env -> [(T.Text, Natural)] -> [Equation T.Text] -> Either String (Map T.Text ElaboratedSchema)
+elaborateInstances :: Env -> [(T.Text, Natural)] -> [Equation T.Text] -> Either ElaborationError (Map T.Text ElaboratedSchema)
 elaborateInstances env demands equations = do
   expanded <- expandFamily False env demands equations
   familyInstances <$> elaborateExpanded id demands expanded
 
-elaborateExpanded :: (T.Text -> T.Text) -> [(T.Text, Natural)] -> ExpandedFamily -> Either String ElaboratedFamily
+elaborateExpanded :: (T.Text -> T.Text) -> [(T.Text, Natural)] -> ExpandedFamily -> Either ElaborationError ElaboratedFamily
 elaborateExpanded qualify demands expanded = do
   let equations = expandedEquations expanded
   env' <- equationEnv (expandedEnv expanded) equations
@@ -408,7 +416,7 @@ elaborateExpanded qualify demands expanded = do
                 , cSchemaArity = sArity
                 , cSchemaInstantiate = \case
                     [pArg] -> instFun pArg
-                    _ -> Left ("Schema " <> T.unpack sName <> " expects 1 parameter")
+                    pArgs -> Left (SchemaParameterCountMismatch sName 1 (length pArgs))
                 }
             )
           | (_, ImportedSchema sName pArity sArity instFun) <- Map.toList env'
@@ -444,8 +452,8 @@ elaborateExpanded qualify demands expanded = do
     primitive (SomeFunction (Bound fun)) = Just (SomeProgram (F.functionProgram fun))
     primitive _ = Nothing
 
-elaborateEquations :: Env -> [Equation T.Text] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateEquations :: Env -> [Equation T.Text] -> Either ElaborationError (Map T.Text ElaboratedDefinition)
 elaborateEquations = elaborateEquationsWith id
 
-elaborateEquationsWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either String (Map T.Text ElaboratedDefinition)
+elaborateEquationsWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either ElaborationError (Map T.Text ElaboratedDefinition)
 elaborateEquationsWith qualify env equations = familyDefinitions <$> elaborateFamilyWith qualify env equations

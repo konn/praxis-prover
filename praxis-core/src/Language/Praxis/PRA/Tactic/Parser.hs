@@ -34,6 +34,7 @@ module Language.Praxis.PRA.Tactic.Parser (
   parseDecls,
   parseGoal,
   parseTactic,
+  SyntaxError,
 
   -- * The parsers
   declsP,
@@ -122,14 +123,14 @@ Parse declarations.  The function builds the scope in which the sequents and
 the tactic of a declaration are read, from the metavariables it declares;
 'plainMetaScope' serves for plain names.
 -}
-parseDecls :: (Hashable a) => ([(String, R.Sort)] -> Scope a) -> String -> Either String [Decl a]
+parseDecls :: (Hashable a) => ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
 parseDecls mkScope = runParserFully (declsP mkScope)
 
 -- | Parse @sequent by tactic@.
-parseGoal :: (Hashable a) => Scope a -> String -> Either String (Sequent a, Tactic a)
+parseGoal :: (Hashable a) => Scope a -> String -> Either SyntaxError (Sequent a, Tactic a)
 parseGoal sc = runParserFully (goalP sc)
 
-parseTactic :: Scope a -> String -> Either String (Tactic a)
+parseTactic :: Scope a -> String -> Either SyntaxError (Tactic a)
 parseTactic sc = runParserFully (tacticP sc)
 
 declsP :: (Hashable a) => ([(String, R.Sort)] -> Scope a) -> Parser [Decl a]

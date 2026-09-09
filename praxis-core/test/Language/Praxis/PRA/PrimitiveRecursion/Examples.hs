@@ -8,6 +8,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Examples (
   expo,
 ) where
 
+import Control.Exception (displayException)
 import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Function
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
@@ -29,9 +30,9 @@ import Language.Praxis.PRA.Signature (signatureKernelEnv)
 |]
 
 predC :: PRFCode 1
-predC = either error id (signatureKernelEnv examples >>= (`eraseFunction` predecessor))
+predC = either (error . displayException) id (signatureKernelEnv examples >>= (`eraseFunction` predecessor))
 
 plus, mult, expo :: PRFCode 2
-plus = either error id (signatureKernelEnv examples >>= (`eraseFunction` addition))
-mult = either error id (signatureKernelEnv examples >>= (`eraseFunction` multiplication))
-expo = either error id (signatureKernelEnv examples >>= (`eraseFunction` exponentiation))
+plus = either (error . displayException) id (signatureKernelEnv examples >>= (`eraseFunction` addition))
+mult = either (error . displayException) id (signatureKernelEnv examples >>= (`eraseFunction` multiplication))
+expo = either (error . displayException) id (signatureKernelEnv examples >>= (`eraseFunction` exponentiation))

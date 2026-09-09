@@ -44,6 +44,7 @@ module Language.Praxis.PRA.Equality (
   defaultFuel,
 ) where
 
+import Control.Exception (displayException)
 import Control.Monad.Trans.Except (ExceptT (..), runExceptT)
 import Control.Monad.Trans.State.Strict (State, evalState, state)
 import Data.Void (absurd)
@@ -122,7 +123,7 @@ normalizeWith fuel term = either (const term) id (normalizeIn F.emptyKernelEnv f
 {- | Normalize against a checked definition environment. Missing references and
 arity mismatches are errors; exhausted fuel retains shared residual calls.
 -}
-normalizeIn :: F.KernelEnv -> Fuel -> Term a -> Either String (Term a)
+normalizeIn :: F.KernelEnv -> Fuel -> Term a -> Either F.KernelError (Term a)
 normalizeIn env fuel = flip evalState fuel . runExceptT . go
   where
     go t@Var {} = pure t
@@ -132,7 +133,7 @@ normalizeIn env fuel = flip evalState fuel . runExceptT . go
       ExceptT (F.evalFunctionM spend App env f xs)
 
 -- | Environment-aware conversion. Only the PRA interpreter is consulted.
-defEqIn :: (Eq a) => F.KernelEnv -> Fuel -> Term a -> Term a -> Either String Bool
+defEqIn :: (Eq a) => F.KernelEnv -> Fuel -> Term a -> Term a -> Either F.KernelError Bool
 defEqIn env fuel s t
   | s == t = Right True
   | otherwise = (==) <$> normalizeIn env fuel s <*> normalizeIn env fuel t
@@ -194,10 +195,10 @@ unbudgeted.
 6
 -}
 evalTerm :: (a -> Natural) -> Term a -> Natural
-evalTerm vars = either error id . evalTermIn F.emptyKernelEnv vars
+evalTerm vars = either (error . displayException) id . evalTermIn F.emptyKernelEnv vars
 
 -- | Evaluate named or raw applications without erasing their definitions.
-evalTermIn :: F.KernelEnv -> (a -> Natural) -> Term a -> Either String Natural
+evalTermIn :: F.KernelEnv -> (a -> Natural) -> Term a -> Either F.KernelError Natural
 evalTermIn env vars = go
   where
     go (Var x) = Right (vars x)
@@ -216,5 +217,5 @@ toNatural :: Term a -> Maybe Natural
 toNatural = either (const Nothing) id . toNaturalIn F.emptyKernelEnv
 
 -- | Closed-term evaluation with explicit definition-resolution errors.
-toNaturalIn :: F.KernelEnv -> Term a -> Either String (Maybe Natural)
+toNaturalIn :: F.KernelEnv -> Term a -> Either F.KernelError (Maybe Natural)
 toNaturalIn env t = traverse (evalTermIn env absurd) (traverse (const Nothing) t)

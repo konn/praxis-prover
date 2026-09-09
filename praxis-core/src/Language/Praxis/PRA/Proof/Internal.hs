@@ -52,7 +52,7 @@ import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import GHC.Generics (Generic)
 import Language.Praxis.PRA.Equality (defEqIn, defaultFuel)
-import Language.Praxis.PRA.PrimitiveRecursion.Function (KernelEnv, emptyKernelEnv)
+import Language.Praxis.PRA.PrimitiveRecursion.Function (KernelEnv, KernelError, emptyKernelEnv)
 import Language.Praxis.PRA.Rule.G3i (allRules)
 import Language.Praxis.PRA.Rule.TH.Name (deriveRuleName)
 import Language.Praxis.PRA.Syntax
@@ -79,7 +79,7 @@ data Arg a
   deriving (Show, Eq, Generic)
 
 data ProofErrorReason a
-  = DefinitionResolutionFailed !String
+  = DefinitionResolutionFailed !KernelError
   | MissingAssumption
       -- | expected
       !(Formula a)

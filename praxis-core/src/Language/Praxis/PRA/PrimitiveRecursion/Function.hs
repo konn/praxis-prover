@@ -14,6 +14,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Function (
   SomeFunction (..),
   Definition (..),
   KernelEnv,
+  KernelError (..),
   emptyKernelEnv,
   definitions,
   extendKernelEnv,
@@ -26,6 +27,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Function (
   eraseFunction,
 ) where
 
+import Control.Exception (Exception (..))
 import Control.Lens ((^?))
 import Control.Lens.Extras (is)
 import Control.Monad (foldM, unless)
@@ -34,11 +36,13 @@ import Control.Monad.Trans.Except (ExceptT (..), runExceptT)
 import Data.Functor.Identity (runIdentity)
 import Data.Graph (SCC (..), stronglyConnComp)
 import Data.Hashable (Hashable (..))
+import Data.List (intercalate)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
 import Data.Sized qualified as SV
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Type.Equality (testEquality, (:~:) (Refl))
 import Data.Type.Natural (sNat)
 import GHC.Generics (Generic)
@@ -124,18 +128,45 @@ instance Eq Definition where
 newtype KernelEnv = KernelEnv (Map Text Definition)
   deriving (Show, Eq)
 
+{- | Why a definition table could not be built, or a reference could not be
+resolved in one. 'displayException' renders the reason for a human.
+-}
+data KernelError
+  = -- | no definition of this name
+    UnknownDefinition !Text
+  | {- | the definition has another arity: name, the arity expected at the
+    reference, the arity found
+    -}
+    DefinitionArityMismatch !Text !Natural !Natural
+  | -- | a definition of this name already exists
+    DuplicateDefinition !Text
+  | -- | the definitions on a call cycle
+    CyclicDefinitions ![Text]
+  | -- | names two tables bind to different definitions
+    ConflictingDefinitions ![Text]
+  deriving (Show, Eq, Generic)
+
+instance Exception KernelError where
+  displayException = \case
+    UnknownDefinition ident -> "Unknown definition: " <> T.unpack ident
+    DefinitionArityMismatch ident expected found ->
+      "Definition arity mismatch for " <> T.unpack ident <> ": expected " <> show expected <> ", found " <> show found
+    DuplicateDefinition ident -> "Definition already exists: " <> T.unpack ident
+    CyclicDefinitions names -> "Cyclic definitions: " <> intercalate ", " (map T.unpack names)
+    ConflictingDefinitions names -> "Conflicting definition identities: " <> intercalate ", " (map T.unpack names)
+
 emptyKernelEnv :: KernelEnv
 emptyKernelEnv = KernelEnv Map.empty
 
 definitions :: KernelEnv -> [Definition]
 definitions (KernelEnv env) = Map.elems env
 
-lookupDefinition :: forall n. (KnownNat n) => KernelEnv -> DefId n -> Either String (Program n)
+lookupDefinition :: forall n. (KnownNat n) => KernelEnv -> DefId n -> Either KernelError (Program n)
 lookupDefinition (KernelEnv env) (DefId ident) = case Map.lookup ident env of
-  Nothing -> Left ("Unknown definition: " <> show ident)
+  Nothing -> Left (UnknownDefinition ident)
   Just (Definition (_ :: DefId m) body) -> case testEquality (sNat @n) (sNat @m) of
     Just Refl -> Right body
-    Nothing -> Left ("Definition arity mismatch for " <> show ident <> ": expected " <> show (natVal (Proxy @n)) <> ", found " <> show (natVal (Proxy @m)))
+    Nothing -> Left (DefinitionArityMismatch ident (natVal (Proxy @n)) (natVal (Proxy @m)))
 
 references :: (KnownNat n) => Program n -> [(Text, Natural)]
 references = \case
@@ -148,25 +179,27 @@ references = \case
 already have been reconstructed as 'Rec'. Checks never follow a call edge
 while inspecting code, so a bad cycle cannot generate an infinite code.
 -}
-extendKernelEnv :: KernelEnv -> [Definition] -> Either String KernelEnv
+extendKernelEnv :: KernelEnv -> [Definition] -> Either KernelError KernelEnv
 extendKernelEnv (KernelEnv old) new = do
   env <- foldM insert old new
   let graph = [(ident, ident, map fst (references code)) | (ident, Definition _ code) <- Map.toList env]
-  mapM_ (\case AcyclicSCC _ -> Right (); CyclicSCC names -> Left ("Cyclic definitions: " <> show names)) (stronglyConnComp graph)
+  mapM_ (\case AcyclicSCC _ -> Right (); CyclicSCC names -> Left (CyclicDefinitions names)) (stronglyConnComp graph)
   mapM_ (\(Definition _ code) -> mapM_ (check env) (references code)) (Map.elems env)
   pure (KernelEnv env)
   where
     insert env def@(Definition (DefId ident) _) = do
-      unless (Map.notMember ident env) (Left ("Definition already exists: " <> show ident))
+      unless (Map.notMember ident env) (Left (DuplicateDefinition ident))
       pure (Map.insert ident def env)
     check env (ident, arity) = case Map.lookup ident env of
-      Nothing -> Left ("Unknown definition: " <> show ident)
-      Just (Definition (_ :: DefId n) _) -> unless (arity == natVal (Proxy @n)) (Left ("Definition arity mismatch: " <> show ident))
+      Nothing -> Left (UnknownDefinition ident)
+      Just (Definition (_ :: DefId n) _) ->
+        unless (arity == natVal (Proxy @n)) (Left (DefinitionArityMismatch ident arity (natVal (Proxy @n))))
 
 -- | Shared ancestors must agree exactly; conflicting identities are errors.
-unionKernelEnv :: KernelEnv -> KernelEnv -> Either String KernelEnv
+unionKernelEnv :: KernelEnv -> KernelEnv -> Either KernelError KernelEnv
 unionKernelEnv (KernelEnv l) (KernelEnv r) = do
-  unless (and (Map.intersectionWith (==) l r)) (Left "Conflicting definition identities")
+  let conflicts = Map.keys (Map.filter not (Map.intersectionWith (==) l r))
+  unless (null conflicts) (Left (ConflictingDefinitions conflicts))
   extendKernelEnv emptyKernelEnv (Map.elems (l <> r))
 
 functionProgram :: Function n -> Program n
@@ -184,10 +217,10 @@ programFunction = \case
 {- | Explicit erasure to the unchanged bare PRA language. Ordinary evaluation
 and term construction do not perform this expansion.
 -}
-eraseFunction :: (KnownNat n) => KernelEnv -> Function n -> Either String (PRFCode n)
+eraseFunction :: (KnownNat n) => KernelEnv -> Function n -> Either KernelError (PRFCode n)
 eraseFunction env = go . functionProgram
   where
-    go :: (KnownNat k) => Program k -> Either String (PRFCode k)
+    go :: (KnownNat k) => Program k -> Either KernelError (PRFCode k)
     go (Base code) = Right code
     go (Call ident) = lookupDefinition env ident >>= go
     go (Comp f xs) = PR.Comp <$> go f <*> traverse go xs
@@ -196,10 +229,10 @@ eraseFunction env = go . functionProgram
 {- | Environment-aware evaluation with a residual constructor supplied by the
 syntactic domain. Named calls and residual programs retain their references.
 -}
-evalFunctionM :: forall m n a. (Monad m, KnownNat n, Evalable a) => m Bool -> (forall k. (KnownNat k) => Function k -> V k a -> a) -> KernelEnv -> Function n -> V n a -> m (Either String a)
+evalFunctionM :: forall m n a. (Monad m, KnownNat n, Evalable a) => m Bool -> (forall k. (KnownNat k) => Function k -> V k a -> a) -> KernelEnv -> Function n -> V n a -> m (Either KernelError a)
 evalFunctionM step stuckFunction env fun args = runExceptT (go (functionProgram fun) args)
   where
-    go :: (KnownNat k) => Program k -> V k a -> ExceptT String m a
+    go :: (KnownNat k) => Program k -> V k a -> ExceptT KernelError m a
     go (Base code) xs = lift (PR.evalPRFCodeM step code xs)
     go code xs =
       lift step >>= \case
@@ -208,7 +241,7 @@ evalFunctionM step stuckFunction env fun args = runExceptT (go (functionProgram 
           Call ident -> ExceptT (pure (lookupDefinition env ident)) >>= (`go` xs)
           Comp f gs -> traverse (`go` xs) gs >>= go f
           Rec b s -> recurse b s (SV.head xs) (SV.tail xs)
-    recurse :: (KnownNat k) => Program k -> Program (k + 2) -> a -> V k a -> ExceptT String m a
+    recurse :: (KnownNat k) => Program k -> Program (k + 2) -> a -> V k a -> ExceptT KernelError m a
     recurse b s y xs
       | is _Zero y = go b xs
       | Just y' <- y ^? _Succ =
@@ -221,5 +254,5 @@ evalFunctionM step stuckFunction env fun args = runExceptT (go (functionProgram 
       where
         stuck = stuckFunction (Inline (Rec b s)) (y SV.:< xs)
 
-evalFunction :: (KnownNat n) => KernelEnv -> Function n -> V n Natural -> Either String Natural
+evalFunction :: (KnownNat n) => KernelEnv -> Function n -> V n Natural -> Either KernelError Natural
 evalFunction env f xs = runIdentity (evalFunctionM (pure True) (\_ _ -> error "unreachable residual in total evaluation") env f xs)

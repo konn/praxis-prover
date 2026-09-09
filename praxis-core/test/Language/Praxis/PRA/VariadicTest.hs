@@ -7,7 +7,7 @@ module Language.Praxis.PRA.VariadicTest (variadicTests) where
 
 import Control.Monad (forM_, unless)
 import Data.Either (isLeft)
-import Data.List (find, isInfixOf)
+import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Sized qualified as SV
@@ -129,27 +129,29 @@ elaborationTests =
     , testCase "lambdas must be closed, non-recursive, and schema parameters of the right arity" $
         mapM_
           (uncurry rejectProgram)
-          [ ("w z = mu {λ i y. z < i} z z", "bound outside")
-          , ("w z = mu {λ i y. mu {λ j x. i < x} y y} z z", "enclosing lambda")
-          , ("f 0 = 0; f (S n) = mu {λ i. f 0 < i} n", "inside a lambda")
-          , ("g x = add (λ i. i) x", "only be passed as a schema parameter")
-          , ("h x = mu {λ i. i} x x", "given a lambda of arity 1")
-          , ("k x = (λ i. i) x", "Only named functions")
+          [ ("w z = mu {λ i y. z < i} z z", LambdaCapturesVariable "z")
+          , ("w z = mu {λ i y. mu {λ j x. i < x} y y} z z", LambdaCapturesBinder)
+          , ("f 0 = 0; f (S n) = mu {λ i. f 0 < i} n", NoRecursionArgument "f" [(0, RecursiveCallInLambda "f")])
+          , ("g x = add (λ i. i) x", LambdaOutsideSchemaParameter)
+          , ("h x = mu {λ i. i} x x", LambdaArityMismatch "mu@1" 2 1)
+          , ("k x = (λ i. i) x", InvalidApplicationHead (LamET ["i"] (BoundET 0 0)))
           ]
     , testCase "variadic templates are checked at every number of arguments" $ do
         mapM_
           (uncurry rejectProgram)
-          [ ("bad {P} n $[xs] = P n $[xs] + add $[xs]", "add takes 2 arguments")
-          , ("grow {P} n $[xs] = grow {P} n 0 $[xs] + P n $[xs]", "preserve the number of variadic arguments")
-          , ("noP {P} n $[xs] = P n", "exactly once")
-          , ("unused {P} n $[xs] = n", "must be applied to the variadic arguments")
-          , ("twice {P} n $[xs] = P $[xs] $[xs]", "exactly once")
-          , ("plain n $[xs] = n", "require a schema parameter")
-          , ("f x = $[xs]", "only be passed as arguments")
-          , ("f x = add x $[xs]", "only available inside a variadic schema")
-          , ("few {P} a b $[xs] = P a b $[xs]; use = few {sgn} 1", "takes at least 3 arguments")
+          [ ("bad {P} n $[xs] = P n $[xs] + add $[xs]", ArityMismatch "add" 2 0)
+          , ("grow {P} n $[xs] = grow {P} n 0 $[xs] + P n $[xs]", VariadicRecursionChangesArity "grow" 0 1)
+          , ("noP {P} n $[xs] = P n", VariadicParameterGroupMismatch "noP" "P" "xs" 0)
+          , ("unused {P} n $[xs] = n", VariadicParameterUnapplied "unused" "P" "xs")
+          , ("twice {P} n $[xs] = P $[xs] $[xs]", VariadicParameterGroupMismatch "twice" "P" "xs" 2)
+          , ("plain n $[xs] = n", VariadicWithoutParameter "plain")
+          , ("f x = $[xs]", SplatOutsideArgument "xs")
+          , ("f x = add x $[xs]", SplatOutsideVariadicSchema "xs")
+          , ("few {P} a b $[xs] = P a b $[xs]; use = few {sgn} 1", TooFewVariadicArguments "few" 2 2)
           ]
-        assertBool "μ without mu in scope" (isLeft (parseEquations "u = μ i < 10. i" >>= elaborateEquations (signatureEnv mempty)))
+        muless <- expectRight (parseEquations "u = μ i < 10. i")
+        noMu <- expectLeft (elaborateEquations (signatureEnv mempty) muless)
+        noMu @?= BoundedSearchOutOfScope
     , testCase "compiled variadic symbols instantiate at run time like the inlined instances" $ do
         eqs <- expectRight (parseEquations muNSource)
         let initial = compiledEnvironment PR.arithmetic
@@ -166,9 +168,10 @@ elaborationTests =
         p0 <- maybe (assertFailure "p0") pure (Sig.lookupSymbol "p0" (environmentSignature env))
         applied2 <- expectRight (Sig.applyVariadicSchemaSymbol sym (Sig.symbolFunction p2))
         applied0 <- expectRight (Sig.applyVariadicSchemaSymbol sym (Sig.symbolFunction p0))
-        evalSome kernel applied2 [10, 2, 3] @?= Right 6
-        evalSome kernel applied0 [10] @?= Right 4
-        assertBool "a parameter below the offset is rejected" (isLeft (Sig.applyVariadicSchemaSymbol sym (F.SomeFunction (F.Primitive (PR.Zero :: PR.PRFCode 0)))))
+        evalSome kernel applied2 [10, 2, 3] >>= (@?= Right 6)
+        evalSome kernel applied0 [10] >>= (@?= Right 4)
+        Sig.applyVariadicSchemaSymbol sym (F.SomeFunction (F.Primitive (PR.Zero :: PR.PRFCode 0)))
+          @?= Left (VariadicParameterTooSmall "muN" 1 0)
     ]
   where
     muNSource =
@@ -217,7 +220,7 @@ quoteTests =
         Sig.schemaSymbolArity inst @?= 4
         env <- expectRight (Sig.signatureKernelEnv searchEnv)
         applied <- expectRight (Sig.applyVariadicSchemaSymbol sym (F.SomeFunction PR.lt))
-        evalSome env applied [10, 4] @?= Right 4
+        evalSome env applied [10, 4] >>= (@?= Right 4)
     ]
 
 range :: [Natural]
@@ -230,10 +233,10 @@ triangle n = n * (n + 1) `div` 2
 search :: Natural -> (Natural -> Bool) -> Natural
 search b p = fromMaybe b (find p (takeWhile (< b) [0 ..]))
 
-evalSome :: F.KernelEnv -> F.SomeFunction -> [Natural] -> Either String Natural
+evalSome :: F.KernelEnv -> F.SomeFunction -> [Natural] -> IO (Either F.KernelError Natural)
 evalSome env (F.SomeFunction f) inputs = case SV.fromList' inputs of
-  Just xs -> F.evalFunction env f xs
-  Nothing -> Left "input arity mismatch"
+  Just xs -> pure (F.evalFunction env f xs)
+  Nothing -> assertFailure "input arity mismatch"
 
 checkValues :: Map.Map T.Text ElaboratedDefinition -> T.Text -> [([Natural], Natural)] -> Assertion
 checkValues defs ident examples = do
@@ -250,10 +253,15 @@ checkValues defs ident examples = do
           )
           examples
 
-rejectProgram :: T.Text -> String -> Assertion
-rejectProgram source message = case parseEquations source >>= elaborateEquations (signatureEnv PR.arithmetic) of
-  Left err -> assertBool (T.unpack source <> ": " <> err) (message `isInfixOf` err)
-  Right _ -> assertFailure ("accepted invalid definition: " <> T.unpack source)
+rejectProgram :: T.Text -> ElaborationError -> Assertion
+rejectProgram source expected = do
+  equations <- expectRight (parseEquations source)
+  case elaborateEquations (signatureEnv PR.arithmetic) equations of
+    Left err -> assertEqual (T.unpack source) expected err
+    Right _ -> assertFailure ("accepted invalid definition: " <> T.unpack source)
 
 expectRight :: (Show e) => Either e a -> IO a
 expectRight = either (\err -> assertFailure (show err) >> fail "unexpected Left") pure
+
+expectLeft :: (Show a) => Either e a -> IO e
+expectLeft = either pure (\value -> assertFailure ("unexpected Right: " <> show value) >> fail "unexpected Right")

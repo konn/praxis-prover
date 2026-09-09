@@ -3,10 +3,10 @@
 
 module Language.Praxis.PRA.ElaborationTest (elaborationTests) where
 
-import Data.Either (isLeft)
+import Control.Exception (displayException)
+import Control.Monad (forM_)
 import Data.Foldable (toList)
 import Data.Hashable (hash)
-import Data.List (isInfixOf)
 import Data.Map.Strict qualified as Map
 import Data.Sized qualified as SV
 import Data.Text qualified as T
@@ -43,7 +43,7 @@ elaborationTests =
         parseEquation " {- a {- b -} -} f (Succ (S x)) 0 = S x -- end"
           @?= Right (Equation "f" [] [SuccP (SuccP (VarP "x")), ZeroP] Nothing (NameET "S" :@ NameET "x"))
     , testCase "reject trailing input and malformed numerals" $
-        map (isLeft . parseEqTerm) ["x )", "12x", "(f x", ""] @?= replicate 4 True
+        map (either (const True) (const False) . parseEqTerm) ["x )", "12x", "(f x", ""] @?= replicate 4 True
     , testCase "resolve self and forward references with fixed vectors" $ do
         equations <- expectRight (parseEquations "f 0 y = g y; f (S x) y = f x (S y); g z = z;")
         renamed <- expectRight (renameEquations (signatureEnv mempty) equations)
@@ -96,30 +96,27 @@ elaborationTests =
           [RenamedEquation _ pats (LitFT 7)] -> length pats @?= 2
           _ -> assertFailure (show renamed)
         bad <- expectRight (parseEquations "f 0 = x")
-        assertBool "zero must not bind a name" (isLeft (renameEquations (signatureEnv mempty) bad))
-    , testCase "reject scope, arity, and binder errors" $
-        map
-          (isLeft . (parseEquations >=> renameEquations (signatureEnv mempty)))
-          [ "f x = missing"
-          , "f x = S"
-          , "f x = S x x"
-          , "f x = x x"
-          , "f x = 1 x"
-          , "f x x = x"
-          , "f x = x; f x y = x"
-          , "S x = x"
-          , "f x = (S x) x"
+        unbound <- expectLeft (renameEquations (signatureEnv mempty) bad)
+        unbound @?= UnknownName "x"
+    , testCase "reject scope, arity, and binder errors"
+        $ forM_
+          [ ("f x = missing", UnknownName "missing")
+          , ("f x = S", ArityMismatch "S" 1 0)
+          , ("f x = S x x", ArityMismatch "S" 1 2)
+          , ("f x = x x", AppliedVariable "x")
+          , ("f x = 1 x", InvalidApplicationHead (LitET 1))
+          , ("f x x = x", NonlinearPattern "x")
+          , ("f x = x; f x y = x", InconsistentArity "f")
+          , ("S x = x", FunctionAlreadyDefined "S")
+          , ("f x = (S x) x", ArityMismatch "S" 1 2)
           ]
-          @?= replicate 9 True
-    , testCase "nonlinear patterns report the repeated variable" $
-        map
-          (fmap (const ()) . (parseEquations >=> renameEquations (signatureEnv mempty)))
-          [ "f x x = x"
-          , "f (S x) x = x"
-          , "f x (Succ x) = x"
-          , "f (S (Succ x)) (S x) = x"
-          ]
-          @?= replicate 4 (Left "Nonlinear pattern: repeated variable x")
+        $ \(source, expected) -> do
+          equations <- expectRight (parseEquations source)
+          actual <- expectLeft (renameEquations (signatureEnv mempty) equations)
+          assertEqual (T.unpack source) expected actual
+    , testCase "nonlinear patterns report the repeated variable" $ do
+        parsed <- traverse (expectRight . parseEquations) ["f x x = x", "f (S x) x = x", "f x (Succ x) = x", "f (S (Succ x)) (S x) = x"]
+        map (fmap (const ()) . renameEquations (signatureEnv mempty)) parsed @?= replicate 4 (Left (NonlinearPattern "x"))
     , testCase "linearity is per clause and permits repeated body variables" $ do
         equations <- expectRight (parseEquations "f 0 x = plus x x; f (S n) x = plus x x")
         renamed <- expectRight (renameEquations (signatureEnv (Sig.signature [Sig.symbol "plus" plus])) equations)
@@ -134,11 +131,12 @@ elaborationTests =
           VarFT (ordToNatural -> 0) -> pure ()
           _ -> assertFailure (show result)
     ]
-  where
-    (>=>) f g x = f x >>= g
 
 expectRight :: (Show e) => Either e a -> IO a
 expectRight = either (\err -> assertFailure (show err) >> fail "unexpected Left") pure
+
+expectLeft :: (Show a) => Either e a -> IO e
+expectLeft = either pure (\value -> assertFailure ("unexpected Right: " <> show value) >> fail "unexpected Right")
 
 variableIndices :: FunctionalTerm n -> [Natural]
 variableIndices (LitFT _) = []
@@ -168,6 +166,11 @@ compilerTests =
               assertEqual (show ps) (totalDisjoint ps) (either (const False) (const True) actual)
           )
           matrices
+    , testCase "a hole is reported with the missing input, an overlap with both clauses" $ do
+        hole <- expectLeft (buildCaseTree [EquationRow 0 (ZeroP SV.:< VarP "y" SV.:< SV.Nil) (LitFT 0)])
+        hole @?= NonExhaustivePatterns [SuccP (VarP "_"), VarP "_"]
+        overlap <- expectLeft (buildCaseTree [EquationRow 0 (VarP "x" SV.:< SV.Nil) (LitFT 0), EquationRow 1 (ZeroP SV.:< SV.Nil) (LitFT 1)])
+        overlap @?= OverlappingClauses 0 1
     , testCase "nullary and composed environmental calls" $ do
         defs <- compileProgram "two = 2; double x = plus x x; answer = double two"
         checkValues defs "answer" [([], 4)]
@@ -206,29 +209,34 @@ compilerTests =
     , testCase "reject holes, overlaps, changed parameters, and cycles" $
         mapM_
           (uncurry rejectProgram)
-          [ ("f 0 = 0", "Non-exhaustive")
-          , ("f 0 x = 0; f (S x) 0 = 0", "Non-exhaustive")
-          , ("f (S (S x)) = x; f 0 = 0", "Non-exhaustive")
-          , ("f 0 = 0; f x = 1", "Overlapping")
-          , ("f 0 y = 0; f x 0 = 0; f (S x) (S y) = 0", "Overlapping")
-          , ("f = 0; f = 1", "Overlapping")
-          , ("f 0 x = x; f (S n) x = f n (S x)", "No primitive recursion argument")
-          , ("f 0 = 0; f (S n) = f (S n)", "No primitive recursion argument")
-          , ("f 0 = f 0; f (S n) = f n", "No primitive recursion argument")
-          , ("f 0 = 0; f (S 0) = 1; f (S (S n)) = f n", "No primitive recursion argument")
-          , ("f x = g x; g x = f x", "Mutual recursion")
-          , ("f = f", "No primitive recursion argument")
+          [ ("f 0 = 0", NonExhaustivePatterns [SuccP (VarP "_")])
+          , ("f 0 x = 0; f (S x) 0 = 0", NonExhaustivePatterns [SuccP (VarP "_"), SuccP (VarP "_")])
+          , ("f (S (S x)) = x; f 0 = 0", NonExhaustivePatterns [SuccP ZeroP])
+          , ("f 0 = 0; f x = 1", OverlappingClauses 1 0)
+          , ("f 0 y = 0; f x 0 = 0; f (S x) (S y) = 0", OverlappingClauses 0 1)
+          , ("f = 0; f = 1", OverlappingClauses 0 1)
+          , ("f 0 x = x; f (S n) x = f n (S x)", NoRecursionArgument "f" [(0, InvalidRecursiveCall 1), (1, InvalidRecursionPattern 0)])
+          , ("f 0 = 0; f (S n) = f (S n)", NoRecursionArgument "f" [(0, InvalidRecursiveCall 1)])
+          , ("f 0 = f 0; f (S n) = f n", NoRecursionArgument "f" [(0, RecursiveCallInBaseCase 0)])
+          , ("f 0 = 0; f (S 0) = 1; f (S (S n)) = f n", NoRecursionArgument "f" [(0, InvalidRecursionPattern 1)])
+          , ("f x = g x; g x = f x", MutualRecursion "f")
+          , ("f = f", NoRecursionArgument "f" [])
           ]
     , testCase "compiled dependency arities are checked" $ do
         eqs <- expectRight (parseEquations "f x = plus x x")
         renamed <- expectRight (renameEquations (Map.insert "plus" (SomeFunction (Defined "plus" :: Function 2)) compilerEnv) eqs)
-        case elaborateRenamedEquations (Map.singleton "plus" (SomeProgram (F.Base PR.Succ))) renamed of
-          Left err -> assertBool err ("arity mismatch" `isInfixOf` err)
-          Right _ -> assertFailure "accepted an environmental code of the wrong arity"
+        mismatch <- expectLeft (elaborateRenamedEquations (Map.singleton "plus" (SomeProgram (F.Base PR.Succ))) renamed)
+        mismatch @?= CompiledArityMismatch "plus" 2 1
     , testCase "empty programs are allowed, empty individual definitions are rejected" $ do
         defs <- compileProgram ""
         Map.size defs @?= 0
-        assertBool "empty definition" (isLeft (elaborateDefinition Map.empty []))
+        empty <- expectLeft (elaborateDefinition Map.empty [])
+        empty @?= EmptyDefinition
+    , testCase "errors render for a human" $ do
+        displayException (NonExhaustivePatterns [SuccP (SuccP (VarP "_")), ZeroP]) @?= "Non-exhaustive patterns: no clause matches (S (S _)) 0"
+        displayException (NoRecursionArgument "f" [(0, InvalidRecursiveCall 1)])
+          @?= "No primitive recursion argument for f: argument 0: recursive call changes a parameter or does not use the immediate predecessor in clause 1"
+        displayException (SchemaFailure (SchemaParameterArityMismatch "mu" 1 2)) @?= "Schema mu expects a parameter of arity 1, given 2"
     , testCase "infix operators and conditionals parse and respect precedence" $ do
         parseEqTerm "x + y * z" @?= Right (InfixET (NameET "x") "+" (InfixET (NameET "y") "*" (NameET "z")))
         parseEqTerm "x * y + z" @?= Right (InfixET (InfixET (NameET "x") "*" (NameET "y")) "+" (NameET "z"))
@@ -244,10 +252,12 @@ compilerTests =
           AppFT (Bound _) _ -> pure ()
           _ -> assertFailure ("unexpected renamed term: " <> show renamed1)
         let noIfteEnv = Map.delete "ifte" arithEnv
-        assertBool "missing ifte rejected" (isLeft (renameTerm @2 noIfteEnv locals term1))
+        missingIfte <- expectLeft (renameTerm @2 noIfteEnv locals term1)
+        missingIfte @?= ConditionalOutOfScope
         term2 <- expectRight (parseEqTerm "x + y")
         let noAddEnv = Map.delete "plus" (Map.delete "add" arithEnv)
-        assertBool "missing add rejected" (isLeft (renameTerm @2 noAddEnv locals term2))
+        missingAdd <- expectLeft (renameTerm @2 noAddEnv locals term2)
+        missingAdd @?= OperatorOutOfScope "+" ["add", "plus"]
     , testCase "function schema parsing, elaboration, and instantiation" $ do
         eqs <-
           expectRight
@@ -270,6 +280,8 @@ compilerTests =
                     Nothing -> assertFailure "bad vector"
                     Just vec -> F.evalFunction kernel muLt vec @?= Right 3
                 Nothing -> assertFailure "unexpected instantiated function arity"
+            wrongArity <- expectLeft (instantiateSchemaFunction muSchema (F.SomeFunction PR.sgn))
+            wrongArity @?= SchemaParameterArityMismatch "myMu" 2 1
     ]
   where
     range = [0 .. 4] :: [Natural]
@@ -278,7 +290,9 @@ compilerEnv :: Env
 compilerEnv = signatureEnv (Sig.signature [Sig.symbol "plus" plus])
 
 compileProgram :: T.Text -> IO (Map.Map T.Text ElaboratedDefinition)
-compileProgram source = expectRight (parseEquations source >>= elaborateEquations compilerEnv)
+compileProgram source = do
+  equations <- expectRight (parseEquations source)
+  expectRight (elaborateEquations compilerEnv equations)
 
 checkValues :: Map.Map T.Text ElaboratedDefinition -> T.Text -> [([Natural], Natural)] -> Assertion
 checkValues defs ident examples = case Map.lookup ident defs of
@@ -293,7 +307,7 @@ checkValues defs ident examples = case Map.lookup ident defs of
         examples
   where
     kernel =
-      either error id $
+      either (error . displayException) id $
         F.extendKernelEnv
           F.emptyKernelEnv
           [F.Definition (F.DefId name) code | (name, ElaboratedDefinition _ code _ _ _) <- Map.toList defs]
@@ -303,7 +317,9 @@ chosenArgument defs ident = case Map.lookup ident defs of
   Just (ElaboratedDefinition _ _ _ _ index) -> fmap ordToNatural index
   Nothing -> Nothing
 
-rejectProgram :: T.Text -> String -> Assertion
-rejectProgram source message = case parseEquations source >>= elaborateEquations compilerEnv of
-  Left err -> assertBool err (message `isInfixOf` err)
-  Right _ -> assertFailure ("accepted invalid definition: " <> T.unpack source)
+rejectProgram :: T.Text -> ElaborationError -> Assertion
+rejectProgram source expected = do
+  equations <- expectRight (parseEquations source)
+  case elaborateEquations compilerEnv equations of
+    Left err -> assertEqual (T.unpack source) expected err
+    Right _ -> assertFailure ("accepted invalid definition: " <> T.unpack source)

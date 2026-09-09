@@ -10,6 +10,7 @@ proof fails here as a rejected proof rather than a wrong theorem.
 -}
 module Language.Praxis.PRA.TacticTest (tacticTests) where
 
+import Control.Exception (displayException)
 import Data.Foldable (toList)
 import Data.Map.Strict qualified as Map
 import Data.Sized (pattern Nil, pattern (:<))
@@ -48,12 +49,12 @@ sc :: Scope String
 sc = plainScope sig
 
 -- | Parse, or fail the test.
-parsed :: Either String x -> IO x
-parsed = either assertFailure pure
+parsed :: Either SyntaxError x -> IO x
+parsed = either (assertFailure . displayException) pure
 
 -- | A sequent from its concrete syntax.
 sequent :: String -> Sequent String
-sequent = either error id . parseSequent sc
+sequent = either (error . displayException) id . parseSequent sc
 
 -- | Prove the script @sequent by tactic@ and check the proof.
 proves :: String -> Assertion
@@ -101,7 +102,7 @@ syntaxTests =
         roundTrip "~a = 0 /\\ b = 0"
     , testCase "Unicode spellings are accepted" $ do
         f <- parsed (parseFormula sc "a = 0 ∧ b = 0 ∨ ¬c = 0 → ⊥")
-        f @?= either error id (parseFormula sc "a = 0 /\\ b = 0 \\/ ~c = 0 ==> _|_")
+        f @?= either (error . displayException) id (parseFormula sc "a = 0 /\\ b = 0 \\/ ~c = 0 ==> _|_")
     , testCase "a successor of a numeral is the next numeral" $ do
         t <- parsed (parseTerm sc "S(S(3))")
         t @?= Lit 5

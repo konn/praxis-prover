@@ -10,15 +10,12 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (
   EqTerm (..),
   Function (..),
   SchemaArg (..),
-  SomeFunction (..),
   VariadicTemplate (..),
-  Env,
   FunctionalTerm (..),
   RenamedEquation (..),
 ) where
 
 import Data.Hashable (Hashable (..))
-import Data.Map.Strict (Map)
 import Data.String (IsString)
 import Data.Text qualified as T
 import Data.Type.Ordinal (Ordinal)
@@ -113,54 +110,6 @@ data VariadicTemplate = VariadicTemplate
   , templateEquations :: ![Equation T.Text]
   }
   deriving (Show, Eq, Generic, Lift)
-
-data SomeFunction
-  = forall n. (KnownNat n) => SomeFunction !(Function n)
-  | SchemaDef !T.Text ![T.Text] !Natural !Natural
-  | ImportedSchema !T.Text !Natural !Natural !(F.SomeFunction -> Either String F.SomeFunction)
-  | VariadicDef !VariadicTemplate
-  | {- | Name, fixed arity, parameter arity at zero variadic arguments, and
-    the instantiation at a number of variadic arguments.
-    -}
-    ImportedVariadic !T.Text !Natural !Natural !(Natural -> Either String (F.SomeFunction -> Either String F.SomeFunction))
-
-instance Show SomeFunction where
-  showsPrec d (SomeFunction f) = showParen (d > 10) (showString "SomeFunction " . showsPrec 11 f)
-  showsPrec d (SchemaDef n ps pa fa) =
-    showParen
-      (d > 10)
-      ( showString "SchemaDef "
-          . showsPrec 11 n
-          . showString " "
-          . showsPrec 11 ps
-          . showString " "
-          . showsPrec 11 pa
-          . showString " "
-          . showsPrec 11 fa
-      )
-  showsPrec d (ImportedSchema n pa fa _) =
-    showParen
-      (d > 10)
-      ( showString "ImportedSchema "
-          . showsPrec 11 n
-          . showString " "
-          . showsPrec 11 pa
-          . showString " "
-          . showsPrec 11 fa
-      )
-  showsPrec d (VariadicDef tmpl) = showParen (d > 10) (showString "VariadicDef " . showsPrec 11 tmpl)
-  showsPrec d (ImportedVariadic n fa pa _) =
-    showParen
-      (d > 10)
-      ( showString "ImportedVariadic "
-          . showsPrec 11 n
-          . showString " "
-          . showsPrec 11 fa
-          . showString " "
-          . showsPrec 11 pa
-      )
-
-type Env = Map T.Text SomeFunction
 
 {- | A term in a context of @n@ argument slots. Variables use zero-based
 indices in left-to-right argument order. A variable beneath 'SuccP' refers

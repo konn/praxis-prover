@@ -35,6 +35,7 @@ module Language.Praxis.PRA.Signature (
   schemaSymbolParamArity,
   schemaSymbolArity,
   applySchemaSymbol,
+  SchemaError (..),
 
   -- * Variadic schema symbols
   VariadicSchemaSymbol (..),
@@ -66,17 +67,20 @@ module Language.Praxis.PRA.Signature (
   withKernelEnv,
 ) where
 
+import Control.Exception (displayException)
 import Control.Monad (when)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
 import Data.Sized qualified as SV
+import Data.Text qualified as T
 import Data.Type.Equality (testEquality, (:~:) (Refl))
 import Data.Type.Natural (SBool (..), sNat, (%<=?))
 import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal, type (+), type (-), type (<=))
 import Language.Haskell.TH.Syntax (Name)
 import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error (SchemaError (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Syntax (Term (..))
 import Numeric.Natural (Natural)
@@ -162,11 +166,12 @@ schemaSymbolParamArity (SchemaSymbol _ (_ :: F.Function k -> F.Function n) _) = 
 schemaSymbolArity :: SchemaSymbol -> Natural
 schemaSymbolArity (SchemaSymbol _ (_ :: F.Function k -> F.Function n) _) = natVal (Proxy @n)
 
-applySchemaSymbol :: SchemaSymbol -> F.SomeFunction -> Either String F.SomeFunction
-applySchemaSymbol (SchemaSymbol _ (inst :: F.Function k -> F.Function n) _) (F.SomeFunction (f :: F.Function m)) =
+-- | Instantiate at a parameter, which must have the schema's parameter arity.
+applySchemaSymbol :: SchemaSymbol -> F.SomeFunction -> Either SchemaError F.SomeFunction
+applySchemaSymbol (SchemaSymbol name (inst :: F.Function k -> F.Function n) _) (F.SomeFunction (f :: F.Function m)) =
   case testEquality (sNat @m) (sNat @k) of
     Just Refl -> Right (F.SomeFunction (inst f))
-    Nothing -> Left ("Schema parameter arity mismatch: expected " <> show (natVal (Proxy @k)) <> ", given " <> show (natVal (Proxy @m)))
+    Nothing -> Left (SchemaParameterArityMismatch (T.pack name) (natVal (Proxy @k)) (natVal (Proxy @m)))
 
 {- | A schema with a variadic argument group. With @k@ variadic arguments its
 parameter has arity @paramArity + k@ and the instance has arity
@@ -178,7 +183,7 @@ data VariadicSchemaSymbol = VariadicSchemaSymbol
   -- ^ the number of non-variadic arguments
   , variadicSchemaParamArity :: !Natural
   -- ^ the parameter's arity with no variadic arguments
-  , variadicSchemaInstance :: Natural -> Either String SchemaSymbol
+  , variadicSchemaInstance :: Natural -> Either SchemaError SchemaSymbol
   {- ^ the instance at a number of variadic arguments; lazy, as the
   instantiation of a spliced schema refers back to its own signature
   -}
@@ -204,37 +209,35 @@ instance Eq VariadicSchemaSymbol where
       && variadicSchemaParamArity s1 == variadicSchemaParamArity s2
       && variadicSchemaHaskellName s1 == variadicSchemaHaskellName s2
 
-variadicSchemaSymbol :: String -> Natural -> Natural -> (Natural -> Either String SchemaSymbol) -> VariadicSchemaSymbol
+variadicSchemaSymbol :: String -> Natural -> Natural -> (Natural -> Either SchemaError SchemaSymbol) -> VariadicSchemaSymbol
 variadicSchemaSymbol n fixed pArity inst = VariadicSchemaSymbol n fixed pArity inst Nothing
 
-variadicSchemaSymbolNamed :: String -> Name -> Natural -> Natural -> (Natural -> Either String SchemaSymbol) -> VariadicSchemaSymbol
+variadicSchemaSymbolNamed :: String -> Name -> Natural -> Natural -> (Natural -> Either SchemaError SchemaSymbol) -> VariadicSchemaSymbol
 variadicSchemaSymbolNamed n hs fixed pArity inst = VariadicSchemaSymbol n fixed pArity inst (Just hs)
 
 -- | The instance at a number of variadic arguments, checked for its arities.
-instantiateVariadicSchemaSymbol :: VariadicSchemaSymbol -> Natural -> Either String SchemaSymbol
+instantiateVariadicSchemaSymbol :: VariadicSchemaSymbol -> Natural -> Either SchemaError SchemaSymbol
 instantiateVariadicSchemaSymbol sym k = do
   inst <- variadicSchemaInstance sym k
   let expectedParam = variadicSchemaParamArity sym + k
       expectedArity = variadicSchemaFixedArity sym + k
   when (schemaSymbolParamArity inst /= expectedParam || schemaSymbolArity inst /= expectedArity) $
     Left
-      ( variadicSchemaName sym
-          <> ": instance at "
-          <> show k
-          <> " variadic arguments has arities "
-          <> show (schemaSymbolParamArity inst, schemaSymbolArity inst)
-          <> ", expected "
-          <> show (expectedParam, expectedArity)
+      ( VariadicInstanceArityMismatch
+          (T.pack (variadicSchemaName sym))
+          k
+          (schemaSymbolParamArity inst, schemaSymbolArity inst)
+          (expectedParam, expectedArity)
       )
   pure inst
 
 -- | Apply at the number of variadic arguments the parameter's arity determines.
-applyVariadicSchemaSymbol :: VariadicSchemaSymbol -> F.SomeFunction -> Either String F.SomeFunction
+applyVariadicSchemaSymbol :: VariadicSchemaSymbol -> F.SomeFunction -> Either SchemaError F.SomeFunction
 applyVariadicSchemaSymbol sym f@(F.SomeFunction (_ :: F.Function m)) = do
   let arity = natVal (Proxy @m)
       least = variadicSchemaParamArity sym
   when (arity < least) $
-    Left (variadicSchemaName sym <> " expects a parameter of arity at least " <> show least <> ", given " <> show arity)
+    Left (VariadicParameterTooSmall (T.pack (variadicSchemaName sym)) least arity)
   inst <- instantiateVariadicSchemaSymbol sym (arity - least)
   applySchemaSymbol inst f
 
@@ -243,7 +246,7 @@ compiler; the instance's arities are rechecked here and cannot disagree.
 -}
 applyVariadicAt :: forall m r. (KnownNat m, KnownNat r) => VariadicSchemaSymbol -> F.Function m -> F.Function r
 applyVariadicAt sym f = case applyVariadicSchemaSymbol sym (F.SomeFunction f) of
-  Left err -> error (variadicSchemaName sym <> ": " <> err)
+  Left err -> error (variadicSchemaName sym <> ": " <> displayException err)
   Right (F.SomeFunction (g :: F.Function n)) -> case testEquality (sNat @n) (sNat @r) of
     Just Refl -> g
     Nothing ->
@@ -277,7 +280,7 @@ variadicInstanceSame ::
   Natural ->
   (forall m. (KnownNat m) => F.Function m -> F.Function m) ->
   Natural ->
-  Either String SchemaSymbol
+  Either SchemaError SchemaSymbol
 variadicInstanceSame n pArity f k = withArity (pArity + k) \(_ :: Proxy m) -> Right (SchemaSymbol n (f @m) Nothing)
 
 variadicInstancePlus ::
@@ -287,7 +290,7 @@ variadicInstancePlus ::
   Natural ->
   (forall m. (KnownNat m) => F.Function m -> F.Function (m + d)) ->
   Natural ->
-  Either String SchemaSymbol
+  Either SchemaError SchemaSymbol
 variadicInstancePlus n pArity f k = withArity (pArity + k) \(_ :: Proxy m) -> Right (SchemaSymbol n (f @m) Nothing)
 
 variadicInstanceMinus ::
@@ -297,18 +300,18 @@ variadicInstanceMinus ::
   Natural ->
   (forall m. (KnownNat m, d <= m) => F.Function m -> F.Function (m - d)) ->
   Natural ->
-  Either String SchemaSymbol
+  Either SchemaError SchemaSymbol
 variadicInstanceMinus n pArity f k = withArity (pArity + k) \(_ :: Proxy m) ->
   case sNat @d %<=? sNat @m of
     STrue -> Right (SchemaSymbol n (f @m) Nothing)
-    SFalse -> Left (n <> ": parameter arity " <> show (pArity + k) <> " is below " <> show (natVal (Proxy @d)))
+    SFalse -> Left (VariadicParameterBelowOffset (T.pack n) (pArity + k) (natVal (Proxy @d)))
 
 -- | A table of symbols and schemas, keyed by name.
 data Signature = Signature
   { sigSymbols :: !(Map String Symbol)
   , sigSchemas :: !(Map String SchemaSymbol)
   , sigVariadics :: !(Map String VariadicSchemaSymbol)
-  , sigEnv :: !(Either String F.KernelEnv)
+  , sigEnv :: !(Either F.KernelError F.KernelEnv)
   }
   deriving (Show, Eq)
 
@@ -363,7 +366,7 @@ symbolOfFunction :: (KnownNat n) => F.Function n -> Signature -> Maybe Symbol
 symbolOfFunction f (Signature m _ _ _) = find ((== F.SomeFunction f) . symbolFunction) (Map.elems m)
 
 -- | Resolve the checked table, reporting any conflicting signature union.
-signatureKernelEnv :: Signature -> Either String F.KernelEnv
+signatureKernelEnv :: Signature -> Either F.KernelError F.KernelEnv
 signatureKernelEnv (Signature _ _ _ env) = env
 
 withKernelEnv :: F.KernelEnv -> Signature -> Signature

@@ -44,6 +44,7 @@ module Language.Praxis.PRA.Syntax.Parser (
   -- * Scopes
   Scope (..),
   plainScope,
+  SyntaxError,
 
   -- * Parsing
   parseTerm,
@@ -76,6 +77,7 @@ module Language.Praxis.PRA.Syntax.Parser (
   turnstileP,
 ) where
 
+import Control.Exception (Exception (..))
 import Control.Monad (void, when)
 import Data.Char (isAlphaNum, isLetter)
 import Data.Hashable (Hashable)
@@ -130,29 +132,36 @@ plainScope sig =
 
 type Parser = Parsec Void String
 
--- | Run a parser on a whole input, rendering the error for a human.
-runParserFully :: Parser x -> String -> Either String x
-runParserFully p = either (Left . errorBundlePretty) Right . parse (spaceP *> p <* eof) ""
+-- | A syntax error. Render it for a human with @displayException@.
+newtype SyntaxError = SyntaxError (ParseErrorBundle String Void)
+  deriving (Show, Eq)
 
-parseTerm :: Scope a -> String -> Either String (Term a)
+instance Exception SyntaxError where
+  displayException (SyntaxError bundle) = errorBundlePretty bundle
+
+-- | Run a parser on a whole input.
+runParserFully :: Parser x -> String -> Either SyntaxError x
+runParserFully p = either (Left . SyntaxError) Right . parse (spaceP *> p <* eof) ""
+
+parseTerm :: Scope a -> String -> Either SyntaxError (Term a)
 parseTerm sc = runParserFully (closedP (termP sc))
 
-parseAtomic :: Scope a -> String -> Either String (Atomic a)
+parseAtomic :: Scope a -> String -> Either SyntaxError (Atomic a)
 parseAtomic sc = runParserFully (closedP (atomicP sc))
 
-parseFormula :: Scope a -> String -> Either String (Formula a)
+parseFormula :: Scope a -> String -> Either SyntaxError (Formula a)
 parseFormula sc = runParserFully (closedP (formulaP sc))
 
-parseSequent :: (Hashable a) => Scope a -> String -> Either String (Sequent a)
+parseSequent :: (Hashable a) => Scope a -> String -> Either SyntaxError (Sequent a)
 parseSequent sc = runParserFully (sequentP sc)
 
-parseTermPattern :: Scope a -> String -> Either String (Term (Hole a))
+parseTermPattern :: Scope a -> String -> Either SyntaxError (Term (Hole a))
 parseTermPattern sc = runParserFully (termP sc)
 
-parseAtomicPattern :: Scope a -> String -> Either String (Atomic (Hole a))
+parseAtomicPattern :: Scope a -> String -> Either SyntaxError (Atomic (Hole a))
 parseAtomicPattern sc = runParserFully (atomicP sc)
 
-parseFormulaPattern :: Scope a -> String -> Either String (Formula (Hole a))
+parseFormulaPattern :: Scope a -> String -> Either SyntaxError (Formula (Hole a))
 parseFormulaPattern sc = runParserFully (formulaP sc)
 
 -- * Lexemes
@@ -359,12 +368,12 @@ termP sc = ifP <|> cmpP
         region (setErrorOffset o) $
           fail (name <> " takes at least " <> show fixed <> " arguments, given " <> show (length args))
       case instantiateVariadicSchemaSymbol sch (fromIntegral (length args) - fixed) of
-        Left err -> region (setErrorOffset o) (fail err)
+        Left err -> region (setErrorOffset o) (fail (displayException err))
         Right inst -> instantiateP o name inst pSym args
 
     instantiateP o name sch pSym args =
       case applySchemaSymbol sch (symbolFunction pSym) of
-        Left err -> region (setErrorOffset o) (fail err)
+        Left err -> region (setErrorOffset o) (fail (displayException err))
         Right (F.SomeFunction (instFun :: F.Function n)) -> do
           let arity = natVal (Proxy @n)
           when (fromIntegral (length args) /= arity) $

@@ -2,6 +2,7 @@
 
 module Language.Praxis.PRA.PRFQuoteSupport (arithPRF, arithProof, rawPRF, rawLiftFixture, sharedLiftFixture) where
 
+import Control.Exception (displayException)
 import Language.Haskell.TH.Quote (QuasiQuoter)
 import Language.Praxis.PRA.PrimitiveRecursion (arithmetic)
 import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
@@ -28,11 +29,11 @@ rawPRF =
 
 -- Imported fixtures can be consumed by both typed and untyped TH splices.
 rawLiftFixture :: PR.PRFCode 2
-rawLiftFixture = either error id (signatureKernelEnv arithmetic >>= (`F.eraseFunction` PR.pow))
+rawLiftFixture = either (error . displayException) id (signatureKernelEnv arithmetic >>= (`F.eraseFunction` PR.pow))
 
 sharedLiftFixture :: F.Program 2
-sharedLiftFixture = either error id $ do
+sharedLiftFixture = either (error . displayException) id $ do
   env <- signatureKernelEnv arithmetic
   case PR.pow of
     F.Defined ident -> F.lookupDefinition env ident
-    _ -> Left "expected a quote-defined function"
+    _ -> error "expected a quote-defined function"

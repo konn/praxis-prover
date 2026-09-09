@@ -55,7 +55,7 @@ import Language.Praxis.PRA.Signature
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural (Natural)
 
-example :: Either String Natural
+example :: Either KernelError Natural
 example = do
   env <- signatureKernelEnv arithmetic
   evalTermIn env (const 0) (App mul (Lit 3 :< Lit 4 :< Nil))

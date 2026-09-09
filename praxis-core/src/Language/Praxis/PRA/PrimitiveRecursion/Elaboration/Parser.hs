@@ -28,8 +28,10 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   parseEqTerm,
   parseEquation,
   parseEquations,
+  EquationSyntaxError,
 ) where
 
+import Control.Exception (Exception (..))
 import Control.Monad (void)
 import Data.Either (lefts, rights)
 import Data.List (elemIndex, findIndex)
@@ -37,11 +39,18 @@ import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 import Numeric.Natural (Natural)
-import Text.Megaparsec (Parsec, Pos, SourcePos (..), between, eof, errorBundlePretty, getSourcePos, label, many, notFollowedBy, option, parse, sepBy1, sepEndBy, some, try, (<?>), (<|>))
+import Text.Megaparsec (ParseErrorBundle, Parsec, Pos, SourcePos (..), between, eof, errorBundlePretty, getSourcePos, label, many, notFollowedBy, option, parse, sepBy1, sepEndBy, some, try, (<?>), (<|>))
 import Text.Megaparsec.Char qualified as CP
 import Text.Megaparsec.Char.Lexer qualified as L
 
 type Parser = Parsec Void T.Text
+
+-- | A syntax error. Render it for a human with @displayException@.
+newtype EquationSyntaxError = EquationSyntaxError (ParseErrorBundle T.Text Void)
+  deriving (Show, Eq)
+
+instance Exception EquationSyntaxError where
+  displayException (EquationSyntaxError bundle) = errorBundlePretty bundle
 
 spaceConsumer :: Parser ()
 spaceConsumer = L.space CP.space1 (L.skipLineComment "--") (L.skipBlockCommentNested "{-" "-}")
@@ -260,17 +269,17 @@ equationsP = explicit <|> layout
             go column
       pure (eq : rest)
 
-runFully :: Parser a -> T.Text -> Either String a
-runFully p = either (Left . errorBundlePretty) Right . parse (spaceConsumer *> p <* eof) "<equation>"
+runFully :: Parser a -> T.Text -> Either EquationSyntaxError a
+runFully p = either (Left . EquationSyntaxError) Right . parse (spaceConsumer *> p <* eof) "<equation>"
 
-parseEqTerm :: T.Text -> Either String (EqTerm T.Text)
+parseEqTerm :: T.Text -> Either EquationSyntaxError (EqTerm T.Text)
 parseEqTerm = runFully eqTermP
 
-parseEquation :: T.Text -> Either String (Equation T.Text)
+parseEquation :: T.Text -> Either EquationSyntaxError (Equation T.Text)
 parseEquation = runFully equationP
 
-parseEquations :: T.Text -> Either String [Equation T.Text]
+parseEquations :: T.Text -> Either EquationSyntaxError [Equation T.Text]
 parseEquations = fmap (map locatedEquation) . parseLocatedEquations
 
-parseLocatedEquations :: T.Text -> Either String [LocatedEquation]
+parseLocatedEquations :: T.Text -> Either EquationSyntaxError [LocatedEquation]
 parseLocatedEquations = runFully equationsP

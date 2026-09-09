@@ -7,6 +7,7 @@ module Language.Praxis.PRA.PRFQuoteTest (prfQuoteTests) where
 import Control.Monad (forM_, unless)
 import Data.Either (isLeft)
 import Data.Hashable (hash)
+import Data.List (sort)
 import Data.Sized qualified as SV
 import Data.Text qualified as T
 import Data.Type.Ordinal (Ordinal)
@@ -180,7 +181,9 @@ prfQuoteTests =
         forM_ [0 .. 30] $ \fuel -> do
           normalized <- expectRight (normalizeIn env (Limited fuel) t)
           evalTermIn env (const 0) normalized @?= Right 12
-        assertBool "missing environment" (isLeft (evalTermIn F.emptyKernelEnv (const 0) t))
+        case evalTermIn F.emptyKernelEnv (const 0) t of
+          Left (F.UnknownDefinition _) -> pure ()
+          other -> assertFailure ("missing environment: " <> show other)
     , testCase "compiled dependency calls remain references" $ do
         env <- expectRight (Sig.signatureKernelEnv extended)
         case times of
@@ -224,25 +227,18 @@ environmentTests =
     "checked environment"
     [ testCase "reject self, mutual, and longer call cycles without expansion" $
         forM_ [[("a", "a")], [("a", "b"), ("b", "a")], [("a", "b"), ("b", "c"), ("c", "a")]] $ \edges ->
-          assertBool "cyclic environment" $
-            isLeft $
-              F.extendKernelEnv
-                F.emptyKernelEnv
-                [F.Definition (F.DefId x :: F.DefId 1) (F.Call (F.DefId y)) | (x, y) <- edges]
+          case F.extendKernelEnv F.emptyKernelEnv [F.Definition (F.DefId x :: F.DefId 1) (F.Call (F.DefId y)) | (x, y) <- edges] of
+            Left (F.CyclicDefinitions names) -> sort names @?= sort (map fst edges)
+            other -> assertFailure ("cyclic environment: " <> show other)
     , testCase "reject missing references and inconsistent arities" $ do
-        assertBool "missing" (isLeft (F.extendKernelEnv F.emptyKernelEnv [F.Definition (F.DefId "f" :: F.DefId 1) (F.Call (F.DefId "missing"))]))
-        assertBool
-          "arity"
-          ( isLeft
-              ( F.extendKernelEnv
-                  F.emptyKernelEnv
-                  [F.Definition (F.DefId "f" :: F.DefId 1) (F.Call (F.DefId "g")), F.Definition (F.DefId "g" :: F.DefId 0) (F.Base PR.Zero)]
-              )
-          )
+        F.extendKernelEnv F.emptyKernelEnv [F.Definition (F.DefId "f" :: F.DefId 1) (F.Call (F.DefId "missing"))]
+          @?= Left (F.UnknownDefinition "missing")
+        F.extendKernelEnv F.emptyKernelEnv [F.Definition (F.DefId "f" :: F.DefId 1) (F.Call (F.DefId "g")), F.Definition (F.DefId "g" :: F.DefId 0) (F.Base PR.Zero)]
+          @?= Left (F.DefinitionArityMismatch "g" 1 0)
     , testCase "conflicting signatures cannot change definition meanings" $ do
         a <- expectRight (F.extendKernelEnv F.emptyKernelEnv [F.Definition (F.DefId "f" :: F.DefId 1) (F.Base PR.Zero)])
         b <- expectRight (F.extendKernelEnv F.emptyKernelEnv [F.Definition (F.DefId "f" :: F.DefId 1) (F.Base PR.Succ)])
-        assertBool "conflict" (isLeft (Sig.signatureKernelEnv (Sig.withKernelEnv a mempty <> Sig.withKernelEnv b mempty)))
+        Sig.signatureKernelEnv (Sig.withKernelEnv a mempty <> Sig.withKernelEnv b mempty) @?= Left (F.ConflictingDefinitions ["f"])
     , testCase "pure incremental compilation agrees with one family" $ do
         first <- expectRight (parseEquations "add n 0 = n; add n (S m) = S (add n m)")
         second <- expectRight (parseEquations "mul n 0 = 0; mul n (S m) = add n (mul n m)")
@@ -251,7 +247,8 @@ environmentTests =
         b <- expectRight (compileDefinitions a second >>= extendEnvironment a)
         both <- expectRight (compileDefinitions initial (first <> second) >>= extendEnvironment initial)
         environmentSignature b @?= environmentSignature both
-        assertBool "cannot add clauses to an existing definition" (isLeft (compileDefinitions a first))
+        redefinition <- expectLeft (compileDefinitions a first)
+        redefinition @?= ElaborationFailure (FunctionAlreadyDefined "add")
     , testCase "repeated calls do not expand the dependency tree" $ do
         let source = T.unlines ("d0 n = n" : ["d" <> T.pack (show i) <> " n = d" <> T.pack (show (i - 1)) <> " (d" <> T.pack (show (i - 1)) <> " n)" | i <- [1 .. 12 :: Int]])
         equations <- expectRight (parseEquations source)
@@ -287,3 +284,6 @@ layoutTests =
 
 expectRight :: (Show e) => Either e a -> IO a
 expectRight = either (\err -> assertFailure (show err) >> fail "unexpected Left") pure
+
+expectLeft :: Either e a -> IO e
+expectLeft = either pure (const (assertFailure "unexpected Right"))

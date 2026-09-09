@@ -7,6 +7,7 @@ results to the checker, which is what the certification promises will succeed.
 -}
 module Language.Praxis.PRA.QuoteTest (quoteTests) where
 
+import Control.Exception (displayException)
 import Control.Monad (forM_)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
@@ -157,10 +158,10 @@ quoteTests =
     ]
   where
     sc = plainScope testSignature
-    sequent = either error id . parseSequent sc
+    sequent = either (error . displayException) id . parseSequent sc
     scMu = plainScope arithWithMu
-    sequentMu = either error id . parseSequent scMu
-    atom = either error id . parseFormula sc
+    sequentMu = either (error . displayException) id . parseSequent scMu
+    atom = either (error . displayException) id . parseFormula sc
     ctx :: [String] -> Multiset (Formula String)
     ctx = foldr (MS.insertOne . atom) MS.empty
     asText :: Sequent String -> Sequent Text

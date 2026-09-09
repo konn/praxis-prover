@@ -15,6 +15,7 @@ import Data.Sized qualified as SV
 import Data.Type.Ordinal (Ordinal)
 import GHC.TypeNats (KnownNat)
 import Language.Praxis.PRA.PrimitiveRecursion.Code (V)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Internal
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 
@@ -48,25 +49,25 @@ specializeRows index successor = mapMaybe specialize
       (SuccP p, True) -> Just (EquationRow ident (replaceSlot index p ps) body)
       _ -> Nothing
 
-{- | Specialize the matrix, rejecting both holes and overlaps. Error messages
-contain a missing input pattern or the two source clause identifiers.
-Display names need no erasure: IrrelevantName already ignores them.
+{- | Specialize the matrix, rejecting both holes and overlaps. A hole is
+reported with a missing input pattern, an overlap with the two source clause
+identifiers. Display names need no erasure: IrrelevantName already ignores them.
 -}
-buildCaseTree :: forall n. (KnownNat n) => [EquationRow n] -> Either String (CaseTree n)
+buildCaseTree :: forall n. (KnownNat n) => [EquationRow n] -> Either ElaborationError (CaseTree n)
 buildCaseTree = go (fmap (const (VarP "_")) (slotIndices @n))
   where
-    go :: V n (Pattern IrrelevantName) -> [EquationRow n] -> Either String (CaseTree n)
-    go witness [] = Left ("Non-exhaustive patterns: " <> show (toList witness))
+    go :: V n (Pattern IrrelevantName) -> [EquationRow n] -> Either ElaborationError (CaseTree n)
+    go witness [] = Left (NonExhaustivePatterns (toList witness))
     go witness rows
       | (before, row : after) <- break (all isVariable . rowPatterns) rows =
           case before <> after of
-            other : _ -> Left ("Overlapping clauses: " <> show (rowId row) <> " and " <> show (rowId other))
+            other : _ -> Left (OverlappingClauses (rowId row) (rowId other))
             [] -> Right (Leaf (rowId row) (rowBody row))
       | Just index <- find (\i -> any (not . isVariable . SV.sIndex i . rowPatterns) rows) (toList (slotIndices @n)) =
           Split index
             <$> go (refine index ZeroP witness) (specializeRows index False rows)
             <*> go (refine index (SuccP (VarP "_")) witness) (specializeRows index True rows)
-      | otherwise = Left "Invalid clause matrix"
+      | otherwise = Left (InternalError "buildCaseTree: a clause matrix with neither a variable row nor a constructor column")
     isVariable VarP {} = True
     isVariable _ = False
     refine index p witness = replaceSlot index (replaceLeaf p (SV.sIndex index witness)) witness
