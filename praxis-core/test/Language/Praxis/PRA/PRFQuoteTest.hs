@@ -27,6 +27,7 @@ import Language.Praxis.PRA.Signature qualified as Sig
 import Language.Praxis.PRA.Syntax
 import Language.Praxis.PRA.Syntax.Parser (parseTerm, plainScope)
 import Language.Praxis.PRA.Syntax.Pretty (renderTerm)
+import Language.Praxis.PRA.Tactic.Quote (pra)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -55,12 +56,12 @@ import Test.Tasty.HUnit
   later n = n
 |]
 
-[arithPRF|
+[builtinPRF|
   environment imported
   cube n = pow n 3
 |]
 
-[arithPRF|
+[builtinPRF|
   environment schemaEnv
 
   opExpr a b c = a + b * c
@@ -74,7 +75,7 @@ import Test.Tasty.HUnit
   liftedIdentity n = rawIdentity n
 |]
 
-[arithProof|
+[pra|
   theorem productExample : |- mul 3 4 = 12
   by refl
 
@@ -163,14 +164,14 @@ prfQuoteTests =
         let muLt = mu PR.lt
         F.evalFunction env muLt (3 SV.:< 2 SV.:< SV.Nil) @?= Right 0
         F.evalFunction env muLt (3 SV.:< 0 SV.:< SV.Nil) @?= Right 3
-        arithKernel <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
-        F.evalFunction arithKernel PR.projW (0 SV.:< SV.Nil) @?= Right 0
-        F.evalFunction arithKernel PR.projW (1 SV.:< SV.Nil) @?= Right 1
-        F.evalFunction arithKernel PR.projW (2 SV.:< SV.Nil) @?= Right 1
-        F.evalFunction arithKernel PR.projW (3 SV.:< SV.Nil) @?= Right 2
-        F.evalFunction arithKernel PR.projW (4 SV.:< SV.Nil) @?= Right 2
-        F.evalFunction arithKernel PR.projW (5 SV.:< SV.Nil) @?= Right 2
-        F.evalFunction arithKernel PR.projW (6 SV.:< SV.Nil) @?= Right 3
+        builtinKernel <- expectRight (Sig.signatureKernelEnv PR.builtin)
+        F.evalFunction builtinKernel PR.projW (0 SV.:< SV.Nil) @?= Right 0
+        F.evalFunction builtinKernel PR.projW (1 SV.:< SV.Nil) @?= Right 1
+        F.evalFunction builtinKernel PR.projW (2 SV.:< SV.Nil) @?= Right 1
+        F.evalFunction builtinKernel PR.projW (3 SV.:< SV.Nil) @?= Right 2
+        F.evalFunction builtinKernel PR.projW (4 SV.:< SV.Nil) @?= Right 2
+        F.evalFunction builtinKernel PR.projW (5 SV.:< SV.Nil) @?= Right 2
+        F.evalFunction builtinKernel PR.projW (6 SV.:< SV.Nil) @?= Right 3
     , testCase "term parsing stores a name, not expanded code" $ do
         t <- expectRight (parseTerm (plainScope extended) "times 3 4")
         t @?= App times (Lit 3 SV.:< Lit 4 SV.:< SV.Nil)
@@ -193,12 +194,12 @@ prfQuoteTests =
             assertBool "source self recursion became Rec" (F.definitionName ident `notElem` calls body)
           _ -> assertFailure "quote generated an expanded function"
     , testCase "explicit erasure agrees with shared evaluation" $ do
-        env <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
+        env <- expectRight (Sig.signatureKernelEnv PR.builtin)
         bare <- expectRight (F.eraseFunction env PR.pow)
         forM_ [0 .. 3] $ \n -> forM_ [0 .. 3] $ \m ->
           F.evalFunction env PR.pow (n SV.:< m SV.:< SV.Nil) @?= Right (PR.evalPRFCode bare (n SV.:< m SV.:< SV.Nil))
     , testCase "named proof conversion uses the supplied PRA environment" $ do
-        env <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
+        env <- expectRight (Sig.signatureKernelEnv PR.builtin)
         inferConclusionIn env productExample @?= Right (mempty :|- (App PR.mul (Lit 3 SV.:< Lit 4 SV.:< SV.Nil) === Lit 12) :: Sequent String)
         inferConclusionIn env (additionZero :: Proof String) @?= Right (mempty :|- (App PR.add (Var "n" SV.:< Lit 0 SV.:< SV.Nil) === Var "n"))
         assertBool "the default checker cannot resolve named arithmetic" (isLeft (inferConclusion (productExample :: Proof String)))

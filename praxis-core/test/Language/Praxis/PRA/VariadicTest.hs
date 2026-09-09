@@ -14,7 +14,7 @@ import Data.Sized qualified as SV
 import Data.Text qualified as T
 import Language.Haskell.TH (recover)
 import Language.Haskell.TH.Quote (quoteDec)
-import Language.Praxis.PRA.PRFQuoteSupport (arithPRF)
+import Language.Praxis.PRA.PRFQuoteSupport (builtinPRF)
 import Language.Praxis.PRA.PrimitiveRecursion (mu)
 import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration
@@ -27,8 +27,8 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 -- A variadic schema of its own, lambda parameters, and the sugar, all in a
--- quote extending the arithmetic library.
-[arithPRF|
+-- quote extending the builtin signature.
+[builtinPRF|
   environment searchEnv
 
   count {P} 0 $[xs] = 0
@@ -40,7 +40,7 @@ import Test.Tasty.HUnit
   nestedSugar x = μ i < x. x < i + (μ j < x. 2 < j)
 |]
 
-[arithPRF|
+[builtinPRF|
   environment searchUse extends searchEnv
   countUse = count {λ i. 3 < i} 10
   muUse a b = mu {λ i a b. a + b < i} 10 a b
@@ -98,7 +98,7 @@ elaborationTests =
     "elaboration"
     [ testCase "a variadic schema is instantiated at each applied number of arguments" $ do
         eqs <- expectRight (parseEquations muNSource)
-        fam <- expectRight (elaborateFamilyWith id (signatureEnv PR.arithmetic) eqs)
+        fam <- expectRight (elaborateFamilyWith id (signatureEnv PR.builtin) eqs)
         Map.keys (familyVariadics fam) @?= ["muN"]
         Map.keys (familySchemas fam) @?= []
         let defs = familyDefinitions fam
@@ -111,7 +111,7 @@ elaborationTests =
             ( parseEquations
                 "w z = mu {λ i z. z < triangle (i + 1)} z z; u = mu {λ i. 3 < i} 10; v a b = mu {λ i a b. a + b < i} 10 a b"
             )
-        defs <- expectRight (elaborateEquations (signatureEnv PR.arithmetic) eqs)
+        defs <- expectRight (elaborateEquations (signatureEnv PR.builtin) eqs)
         checkValues defs "w" [([z], search z (\i -> z < triangle (i + 1))) | z <- range]
         checkValues defs "u" [([], 4)]
         checkValues defs "v" [([a, b], a + b + 1) | a <- range, b <- range]
@@ -121,7 +121,7 @@ elaborationTests =
             ( parseEquations
                 "w z = μ i < z. z < triangle (i + 1); u = μ i < 10. 3 < i; v a b = μ i < 10. a + b < i; t x = μ i < x. x < i + (μ j < x. 2 < j)"
             )
-        defs <- expectRight (elaborateEquations (signatureEnv PR.arithmetic) eqs)
+        defs <- expectRight (elaborateEquations (signatureEnv PR.builtin) eqs)
         checkValues defs "w" [([z], search z (\i -> z < triangle (i + 1))) | z <- range]
         checkValues defs "u" [([], 4)]
         checkValues defs "v" [([a, b], a + b + 1) | a <- range, b <- range]
@@ -154,7 +154,7 @@ elaborationTests =
         noMu @?= BoundedSearchOutOfScope
     , testCase "compiled variadic symbols instantiate at run time like the inlined instances" $ do
         eqs <- expectRight (parseEquations muNSource)
-        let initial = compiledEnvironment PR.arithmetic
+        let initial = compiledEnvironment PR.builtin
         block <- expectRight (compileDefinitions initial eqs)
         env <- expectRight (extendEnvironment initial block)
         kernel <- expectRight (Sig.signatureKernelEnv (environmentSignature env))
@@ -200,7 +200,7 @@ quoteTests =
         F.evalFunction env above3 SV.Nil @?= Right 6
         forM_ range $ \a -> F.evalFunction env belowArg (a SV.:< SV.Nil) @?= Right a
     , testCase "the library's mu is usable from Haskell at any arity" $ do
-        env <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
+        env <- expectRight (Sig.signatureKernelEnv PR.builtin)
         F.evalFunction env (mu PR.lt) (3 SV.:< 2 SV.:< SV.Nil) @?= Right 0
         F.evalFunction env (mu PR.sgn) (5 SV.:< SV.Nil) @?= Right 1
         F.evalFunction env (mu PR.sgn) (0 SV.:< SV.Nil) @?= Right 0
@@ -240,8 +240,8 @@ evalSome env (F.SomeFunction f) inputs = case SV.fromList' inputs of
 
 checkValues :: Map.Map T.Text ElaboratedDefinition -> T.Text -> [([Natural], Natural)] -> Assertion
 checkValues defs ident examples = do
-  arithmeticKernel <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
-  kernel <- expectRight (F.extendKernelEnv arithmeticKernel [F.Definition (F.DefId name) code | (name, ElaboratedDefinition _ code _ _ _) <- Map.toList defs])
+  builtinKernel <- expectRight (Sig.signatureKernelEnv PR.builtin)
+  kernel <- expectRight (F.extendKernelEnv builtinKernel [F.Definition (F.DefId name) code | (name, ElaboratedDefinition _ code _ _ _) <- Map.toList defs])
   case Map.lookup ident defs of
     Nothing -> assertFailure ("missing definition " <> T.unpack ident)
     Just def -> case definitionCode def of
@@ -256,7 +256,7 @@ checkValues defs ident examples = do
 rejectProgram :: T.Text -> ElaborationError -> Assertion
 rejectProgram source expected = do
   equations <- expectRight (parseEquations source)
-  case elaborateEquations (signatureEnv PR.arithmetic) equations of
+  case elaborateEquations (signatureEnv PR.builtin) equations of
     Left err -> assertEqual (T.unpack source) expected err
     Right _ -> assertFailure ("accepted invalid definition: " <> T.unpack source)
 

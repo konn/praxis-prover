@@ -130,6 +130,12 @@ staging restriction. They can use the exported functions without reconstructing
 their definitions from Haskell types. Generated function references record
 qualified Haskell names, so consumer imports need not be unqualified.
 
+The library's own signature is `builtin`, exported by
+`Language.Praxis.PRA.PrimitiveRecursion` together with `add`, `mul`, `pow`,
+`sub`, `lt`, `ifte`, the bounded search `mu` and the rest of its arithmetic.
+`Language.Praxis.PRA.Tactic.Quote` exports `pra = praQuoter builtin`, so proofs
+over that arithmetic need no support module of their own.
+
 For non-TH use, `PrimitiveRecursion.Environment` provides `compileDefinitions`,
 `compileDefinitionsWith` (qualified identities), and `extendEnvironment`.
 Compiled blocks retain equation rows, case trees, and the recursion argument

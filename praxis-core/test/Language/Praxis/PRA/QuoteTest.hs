@@ -14,15 +14,17 @@ import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Text (Text)
 import Data.Text qualified as T
+import Language.Praxis.PRA.PrimitiveRecursion (builtin)
 import Language.Praxis.PRA.Proof
-import Language.Praxis.PRA.QuoteSignature (arithWithMu, muPra, pra, testSignature)
+import Language.Praxis.PRA.QuoteSignature (testPra, testSignature)
 import Language.Praxis.PRA.Signature qualified as Sig
 import Language.Praxis.PRA.Syntax
 import Language.Praxis.PRA.Syntax.Parser
+import Language.Praxis.PRA.Tactic.Quote (pra)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-[pra|
+[testPra|
 -- The left identity is definitional.
 theorem plusZeroLeft : |- plus 0 y = y
 by refl
@@ -69,7 +71,7 @@ by Ind n (plus n 0 = n) t
    { Defeq (plus (S n) 0) (S (plus n 0)); rewrite (plus n 0 = n) in (plus (S n) 0 = _); Id }
 |]
 
-[muPra|
+[pra|
 theorem desugaredAddMul : |- 2 + 3 * 4 = 14
 by refl
 
@@ -155,7 +157,7 @@ quoteTests =
         inferConclusion (plusZeroRightAt (Var "n") (ctx ["n = 0"]))
           @?= Right (sequent "n = 0 |- plus n 0 = n")
     , testCase "desugared operators, ifte, and schema application in pra quotes" $ do
-        kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv arithWithMu)
+        kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         inferConclusionIn kenv desugaredAddMul @?= Right (sequentMu "|- 2 + 3 * 4 = 14")
         inferConclusionIn kenv desugaredIfTrue @?= Right (sequentMu "|- (if 0 < 1 then 10 else 20) = 10")
         inferConclusionIn kenv desugaredIfFalse @?= Right (sequentMu "|- (if 1 < 0 then 10 else 20) = 20")
@@ -171,7 +173,7 @@ quoteTests =
   where
     sc = plainScope testSignature
     sequent = either (error . displayException) id . parseSequent sc
-    scMu = plainScope arithWithMu
+    scMu = plainScope builtin
     sequentMu = either (error . displayException) id . parseSequent scMu
     atom = either (error . displayException) id . parseFormula sc
     ctx :: [String] -> Multiset (Formula String)

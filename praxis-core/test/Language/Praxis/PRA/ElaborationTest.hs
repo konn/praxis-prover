@@ -244,18 +244,18 @@ compilerTests =
         parseEqTerm "if x < y then x else y"
           @?= Right (IfThenElseET (InfixET (NameET "x") "<" (NameET "y")) (NameET "x") (NameET "y"))
     , testCase "scope-based desugaring of operators and ifte" $ do
-        let arithEnv = signatureEnv PR.arithmetic
+        let builtinEnv = signatureEnv PR.builtin
             locals = Map.fromList [("x", 0 :: Ordinal 2), ("y", 1 :: Ordinal 2)]
         term1 <- expectRight (parseEqTerm "if x < y then x + y else x * y")
-        renamed1 <- expectRight (renameTerm @2 arithEnv locals term1)
+        renamed1 <- expectRight (renameTerm @2 builtinEnv locals term1)
         case renamed1 of
           AppFT (Bound _) _ -> pure ()
           _ -> assertFailure ("unexpected renamed term: " <> show renamed1)
-        let noIfteEnv = Map.delete "ifte" arithEnv
+        let noIfteEnv = Map.delete "ifte" builtinEnv
         missingIfte <- expectLeft (renameTerm @2 noIfteEnv locals term1)
         missingIfte @?= ConditionalOutOfScope
         term2 <- expectRight (parseEqTerm "x + y")
-        let noAddEnv = Map.delete "plus" (Map.delete "add" arithEnv)
+        let noAddEnv = Map.delete "plus" (Map.delete "add" builtinEnv)
         missingAdd <- expectLeft (renameTerm @2 noAddEnv locals term2)
         missingAdd @?= OperatorOutOfScope "+" ["add", "plus"]
     , testCase "function schema parsing, elaboration, and instantiation" $ do
@@ -264,7 +264,7 @@ compilerTests =
             ( parseEquations
                 "myMu {P} 0 x = 0; myMu {P} (S n) x = if myMu P n x < n then myMu P n x else if P n x then n else S n"
             )
-        fam <- expectRight (elaborateFamilyWith id (signatureEnv PR.arithmetic) eqs)
+        fam <- expectRight (elaborateFamilyWith id (signatureEnv PR.builtin) eqs)
         case Map.lookup "myMu" (familySchemas fam) of
           Nothing -> assertFailure "schema 'myMu' not found in familySchemas"
           Just muSchema -> do
@@ -272,7 +272,7 @@ compilerTests =
             case inst of
               F.SomeFunction (muLt :: F.Function n) -> case testEquality (sNat @n) (sNat @2) of
                 Just Refl -> do
-                  kernel <- expectRight (Sig.signatureKernelEnv PR.arithmetic)
+                  kernel <- expectRight (Sig.signatureKernelEnv PR.builtin)
                   case SV.fromList' [3, 2] of
                     Nothing -> assertFailure "bad vector"
                     Just vec -> F.evalFunction kernel muLt vec @?= Right 0

@@ -8,13 +8,8 @@ A quasiquoter which runs the tactic language at compile time and splices the
 proofs it certifies.
 
 @
--- Sig.hs: a separate module, by the stage restriction
-pra :: QuasiQuoter
-pra = praQuoter (signature [symbolNamed "plus" \'plus plus])
-
--- Lemmas.hs
 [pra|
-theorem plus_zero_left : |- plus 0 y = y
+theorem add_zero_right : |- y + 0 = y
 by refl
 
 rule symm (t s : term) (Γ : ctx) : t = s, Γ |- s = t
@@ -27,8 +22,10 @@ every @rule@ a function from its binders, in order, to a @'Proof' a@: a
 @var@ is an @a@, a @term@ a @'Term' a@, an @atom@ an @'Atomic' a@, a
 @formula@ a @'Formula' a@, a @ctx@ a @'Multiset' ('Formula' a)@ and a premise
 a @'Proof' a@.  As an expression, @[pra| sequent by tactic |]@ is a @'Proof'
-a@.  Codes are referred to by the Haskell names the signature records, so the
-signature must be built with 'symbolNamed'.
+a@.  'pra' reads its terms over the 'builtin' signature; 'praQuoter' builds a
+quoter over another signature, which must be bound in a module of its own by
+the stage restriction, with its codes recorded by 'symbolNamed' so that the
+spliced proofs can refer to them.
 
 The script is parsed, run, and the proof it builds is checked by the core
 checker against the declared sequent, all at compile time; a failure is a
@@ -50,6 +47,7 @@ for the primitive @Ind@.  A @formula@ metavariable may not stand where the
 calculus demands an atom, as under @Id@; declare it an @atom@ instead.
 -}
 module Language.Praxis.PRA.Tactic.Quote (
+  pra,
   praQuoter,
 
   -- * Schematic names
@@ -84,7 +82,7 @@ import Language.Haskell.TH.Datatype (ConstructorInfo (..), DatatypeInfo (..), re
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (addModFinalizer)
-import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..))
+import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..), builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (liftSizedWith)
 import Language.Praxis.PRA.Proof
@@ -175,6 +173,11 @@ schemaScope sig metas =
 The quasiquoter over a signature.  It must be bound in a module of its own
 and imported where it is used, as any quasiquoter must.
 -}
+
+-- | The quasiquoter over the 'builtin' signature.
+pra :: QuasiQuoter
+pra = praQuoter builtin
+
 praQuoter :: Signature -> QuasiQuoter
 praQuoter sig =
   QuasiQuoter

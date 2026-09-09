@@ -1,6 +1,7 @@
 {-# LANGUAGE QuasiQuotes #-}
 
-{- | Arity-indexed primitive-recursive codes and a small arithmetic library.
+{- | Arity-indexed primitive-recursive codes and a small arithmetic library,
+the signature 'builtin'.
 
 @mu@ is the bounded search: @mu {P} b xs…@ is the least @i < b@ with
 @P i xs…@ nonzero, or @b@ when there is none. It is variadic in the
@@ -26,14 +27,14 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   godelPi2,
   lft,
   rgt,
-  arithmetic,
+  builtin,
 ) where
 
 import Language.Praxis.PRA.PrimitiveRecursion.Code
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
 
 [prf|
-  environment arithmetic
+  environment builtin
 
   add n 0 = n
   add n (S m) = S (add n m)

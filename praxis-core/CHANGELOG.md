@@ -42,5 +42,8 @@ and this project adheres to the
   argument of a tactic is a name, a numeral or a parenthesized term, as in
   `Defeq (S t) (S t)`. `Language.Praxis.PRA.Syntax.Pretty` renders terms the
   same way, and `{- -}` comments are accepted throughout.
+- The library signature `arithmetic` is now `builtin`, and
+  `Language.Praxis.PRA.Tactic.Quote` exports `pra`, the quasiquoter over it;
+  `praQuoter` remains for signatures of one's own.
 
 ## 0.1.0.0 - YYYY-MM-DD

@@ -1,20 +1,19 @@
 {-# LANGUAGE TemplateHaskellQuotes #-}
 
-module Language.Praxis.PRA.PRFQuoteSupport (arithPRF, arithProof, rawPRF, rawLiftFixture, sharedLiftFixture) where
+module Language.Praxis.PRA.PRFQuoteSupport (builtinPRF, rawPRF, rawLiftFixture, sharedLiftFixture) where
 
 import Control.Exception (displayException)
 import Language.Haskell.TH.Quote (QuasiQuoter)
-import Language.Praxis.PRA.PrimitiveRecursion (arithmetic)
+import Language.Praxis.PRA.PrimitiveRecursion (builtin)
 import Language.Praxis.PRA.PrimitiveRecursion qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (prfQuoter)
 import Language.Praxis.PRA.Signature (signatureKernelEnv)
 import Language.Praxis.PRA.Signature qualified as Sig
-import Language.Praxis.PRA.Tactic.Quote (praQuoter)
 
-arithPRF, arithProof :: QuasiQuoter
-arithPRF = prfQuoter arithmetic
-arithProof = praQuoter arithmetic
+-- | Equations extending the builtin signature.
+builtinPRF :: QuasiQuoter
+builtinPRF = prfQuoter builtin
 
 -- Exercise all signature-entry paths: a named bare code, an unnamed nullary
 -- code, and an unnamed inline program whose arity must survive lifting.
@@ -29,11 +28,11 @@ rawPRF =
 
 -- Imported fixtures can be consumed by both typed and untyped TH splices.
 rawLiftFixture :: PR.PRFCode 2
-rawLiftFixture = either (error . displayException) id (signatureKernelEnv arithmetic >>= (`F.eraseFunction` PR.pow))
+rawLiftFixture = either (error . displayException) id (signatureKernelEnv builtin >>= (`F.eraseFunction` PR.pow))
 
 sharedLiftFixture :: F.Program 2
 sharedLiftFixture = either (error . displayException) id $ do
-  env <- signatureKernelEnv arithmetic
+  env <- signatureKernelEnv builtin
   case PR.pow of
     F.Defined ident -> F.lookupDefinition env ident
     _ -> error "expected a quote-defined function"
