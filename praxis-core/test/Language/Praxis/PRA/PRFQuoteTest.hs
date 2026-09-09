@@ -175,7 +175,7 @@ prfQuoteTests =
     , testCase "term parsing stores a name, not expanded code" $ do
         t <- expectRight (parseTerm (plainScope extended) "times 3 4")
         t @?= App times (Lit 3 SV.:< Lit 4 SV.:< SV.Nil)
-        renderTerm extended id t @?= "times 3 4"
+        renderTerm extended id t @?= "3 * 4"
         env <- expectRight (Sig.signatureKernelEnv extended)
         evalTermIn env (const 0) t @?= Right 12
         normalizeIn env (Limited 0) t @?= Right t

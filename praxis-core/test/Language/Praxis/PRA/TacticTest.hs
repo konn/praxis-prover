@@ -15,7 +15,7 @@ import Data.Foldable (toList)
 import Data.Map.Strict qualified as Map
 import Data.Sized (pattern Nil, pattern (:<))
 import Language.Praxis.PRA.Pattern (Hole (..))
-import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..))
+import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..), builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Examples (mult, plus)
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Rule (Sort (..))
@@ -40,6 +40,8 @@ tacticTests =
     , combinatorTests
     , failureTests
     , declarationTests
+    , prettyTests
+    , sorryTests
     ]
 
 sig :: Signature
@@ -93,7 +95,7 @@ syntaxTests =
   testGroup
     "concrete syntax"
     [ testCase "renders what it parsed" $
-        roundTrip "a = 0 /\\ (b = 0 \\/ c = 0) ==> ~plus x (S y) = 2"
+        roundTrip "a = 0 /\\ (b = 0 \\/ c = 0) ==> ~x + S y = 2"
     , testCase "the connectives associate to the right" $
         roundTrip "a = 0 ==> b = 0 ==> c = 0"
     , testCase "left-nested connectives are parenthesised" $
@@ -379,3 +381,58 @@ declarationTests =
         , "  : a = 0 /\\ b = 0 |- b = 0 /\\ a = 0"
         , "by ConjL; ConjR { exact D1 } { exact D2 }"
         ]
+
+prettyTests :: TestTree
+prettyTests =
+  testGroup
+    "rendering"
+    [ testCase "operators, conditionals and bounded searches round-trip over the builtin signature" $
+        mapM_
+          (\src -> (renderSequent builtin id <$> parseSequent (plainScope builtin) src) @?= Right src)
+          [ "|- 2 + 3 * 4 = 14"
+          , "|- (2 + 3) * 4 = 20"
+          , "|- 2 ^ 3 ^ 2 = 512"
+          , "|- (2 ^ 3) ^ 2 = 64"
+          , "|- x - (y - z) = x - y - z"
+          , "|- (x < y) = 1"
+          , "|- S (x + 1) = y"
+          , "|- (if 0 < 1 then 10 else 20) = 10"
+          , "|- x + (if x < y then 1 else 2) = z"
+          , "|- x = if x < y then 1 else 2"
+          , "|- mu {lt} 3 0 = 3"
+          , "|- (μ i < 10. 3 < i) = 4"
+          , "|- (μ i < 10. y < i) + 1 = 4"
+          , "|- (μ i < 10. (μ j < i. 3 < j) < i) = 5"
+          , "a + 1 = 2 |- a = 1"
+          ]
+    , testCase "an operator is shown only for the symbol it reads as" $ do
+        renderTerm sig id (plus :$ (Var "x" :< Var "y" :< Nil)) @?= "x + y"
+        renderTerm sig id (mult :$ (Var "x" :< Var "y" :< Nil)) @?= "mult x y"
+        let shadowed = signature [symbol "plus" plus, symbol "add" mult]
+        renderTerm shadowed id (plus :$ (Var "x" :< Var "y" :< Nil)) @?= "plus x y"
+        renderTerm shadowed id (mult :$ (Var "x" :< Var "y" :< Nil)) @?= "x + y"
+    ]
+
+sorryTests :: TestTree
+sorryTests =
+  testGroup
+    "sorry"
+    [ testCase "sorry parses" $ "sorry" `parsesTo` Sorry
+    , testCase "sorry abandons the proof at its goal" $
+        "|- 2 = 2 by sorry" `failsWith` \case
+          Unfinished -> True
+          _ -> False
+    , testCase "neither |, try nor repeat catches sorry" $
+        mapM_
+          ( \src ->
+              src `failsWith` \case
+                Unfinished -> True
+                _ -> False
+          )
+          ["|- 2 = 2 by sorry | refl", "|- 2 = 2 by try sorry; refl", "|- 2 = 2 by repeat sorry"]
+    , testCase "the report shows the goal of the branch" $ do
+        (goal, tac) <- parsed (parseGoal sc "|- 2 = 2 /\\ 3 = 3 by ConjR { sorry } { refl }")
+        case prove goal tac of
+          Right _ -> assertFailure "proved"
+          Left err -> renderTacticError sig id err @?= "1:30: sorry: the proof stops here\n  goal: |- 2 = 2"
+    ]

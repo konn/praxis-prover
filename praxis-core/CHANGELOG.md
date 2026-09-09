@@ -21,6 +21,9 @@ and this project adheres to the
   `Language.Praxis.PRA.Pattern` adds wildcards.
 - `Language.Praxis.PRA.Proof`: the generic step view `Arg`, `stepFields` and
   `mkStep`, and `inferConclusionOpen` for proofs with assumed leaves.
+- A `sorry` tactic, which abandons the proof at its goal; the error reports
+  that goal, and `|`, `try` and `repeat` do not catch it, so a script under
+  construction may end in `sorry` to see where it stands.
 
 ### Changed
 
@@ -45,5 +48,9 @@ and this project adheres to the
 - The library signature `arithmetic` is now `builtin`, and
   `Language.Praxis.PRA.Tactic.Quote` exports `pra`, the quasiquoter over it;
   `praQuoter` remains for signatures of one's own.
+- `Language.Praxis.PRA.Syntax.Pretty` renders through the notations the parser
+  reads whenever the signature has their symbols: operators infix, `ifte` as a
+  conditional, a schema instance with its parameter in braces or as a lambda,
+  and an instance of `mu` at a lambda as the bounded search `μ i < b. body`.
 
 ## 0.1.0.0 - YYYY-MM-DD

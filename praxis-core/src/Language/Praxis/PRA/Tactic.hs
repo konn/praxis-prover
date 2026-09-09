@@ -141,6 +141,8 @@ data Tactic a
     Exact !String
   | -- | Leave the goal open.
     Skip
+  | -- | Abandon the whole proof, reporting the goal reached here.
+    Sorry
   | -- | @t; u@: run @u@ on every goal @t@ leaves.
     Then !(Tactic a) !(Tactic a)
   | -- | @t | u@: @u@ when @t@ fails; committed, so no backtracking into @t@.
@@ -215,6 +217,8 @@ data Failure a
   | -- | the goals left open at the end
     Unsolved ![Sequent a]
   | RepeatLimit
+  | -- | 'Sorry': the proof was abandoned at this goal
+    Unfinished
   | -- | the checker rejected the proof the tactic built: a bug in a tactic
     Rejected !(NonEmpty (ProofError a))
   | -- | the checker accepted the proof, but of another sequent: a bug in a tactic
@@ -284,9 +288,11 @@ runTacticIn env prems = go
     go tac goal@(ctx :|- c) = case tac of
       At loc t -> first (located loc) (go t goal)
       Skip -> Right (Pure (Open goal))
+      Sorry -> failWith Unfinished
       Then t u -> go t goal >>= continue (go u)
       OrElse t u -> case go t goal of
         Right p -> Right p
+        Left e1 | abandoned e1 -> Left e1
         Left e1 -> case go u goal of
           Right p -> Right p
           Left e2 -> failWith (Alternatives (alternatives e1 <> alternatives e2))
@@ -382,12 +388,15 @@ runTacticIn env prems = go
     repeatFrom n t goal
       | n >= repeatLimit = Left (TacticError Nothing goal RepeatLimit)
       | otherwise = case go t goal of
+          Left e | abandoned e -> Left e
           Left _ -> Right (Pure (Open goal))
           Right p -> continue (repeatFrom (n + 1) t) p
 
     located loc e = e {errorLoc = errorLoc e <|> Just loc}
     alternatives (TacticError _ _ (Alternatives es)) = es
     alternatives e = [e]
+    abandoned (TacticError _ _ Unfinished) = True
+    abandoned _ = False
 
     term = ArgTerm . fmap Named
     atom = ArgAtom . fmap Named
@@ -756,6 +765,7 @@ renderTacticError sig name = intercalate "\n" . render
       Alternatives _ -> "every alternative failed"
       Unsolved _ -> "goals left unsolved"
       RepeatLimit -> "repeat: no end after " <> show repeatLimit <> " iterations"
+      Unfinished -> "sorry: the proof stops here"
       Rejected _ -> "the checker rejected the proof a tactic built (a bug in the tactic)"
       WrongConclusion s -> "the proof a tactic built proves " <> rs s <> " instead (a bug in the tactic)"
       Malformed msg -> "malformed tactic: " <> msg

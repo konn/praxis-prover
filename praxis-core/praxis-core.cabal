@@ -81,6 +81,7 @@ library
     Data.Multiset
     Language.Praxis.Name
     Language.Praxis.PRA.Equality
+    Language.Praxis.PRA.Lemmas
     Language.Praxis.PRA.Pattern
     Language.Praxis.PRA.PrimitiveRecursion
     Language.Praxis.PRA.PrimitiveRecursion.Code

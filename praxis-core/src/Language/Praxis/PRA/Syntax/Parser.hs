@@ -46,7 +46,7 @@ both closed sequents and the schematic ones of a derived rule.
 >>> plus = Rec (Proj [od|0|]) (Comp Succ (Proj [od|1|] :< Nil)) :: PRFCode 2
 >>> sc = plainScope (signature [symbol "plus" plus])
 >>> renderFormula (scopeSignature sc) id <$> parseFormula sc "a = 0 ∧ ¬ plus x (S y) = 2 → b = 1"
-Right "a = 0 /\\ ~plus x (S y) = 2 ==> b = 1"
+Right "a = 0 /\\ ~x + S y = 2 ==> b = 1"
 >>> renderSequent (scopeSignature sc) id <$> parseSequent sc "a = 0, a = 0 |- a = 0"
 Right "a = 0, a = 0 |- a = 0"
 >>> either (const "no") (const "yes") (parseTerm sc "plus x")

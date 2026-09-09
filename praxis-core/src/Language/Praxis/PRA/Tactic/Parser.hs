@@ -7,7 +7,7 @@ The textual syntax of tactics, and of the declarations which use them.
 > basic   ::= Rule {arg}                   -- a rule of the calculus, applied backwards
 >           | refl | symmetry atom | rewrite atom in atom
 >           | induction ident [as ident] | assumption | exact ident
->           | skip | try basic | repeat basic | ( tactic )
+>           | skip | sorry | try basic | repeat basic | ( tactic )
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
 >
 > decl    ::= theorem ident : sequent by tactic
@@ -24,6 +24,10 @@ argument is bare; a term argument is a name, a numeral or a parenthesized
 term; atom and formula arguments are parenthesized.  Context parameters are
 never written.  A metavariable must be
 declared before the premises which mention it.
+
+@sorry@ abandons the proof at its goal, which the error then reports; neither
+@|@, @try@ nor @repeat@ catches it, so a script may end in @sorry@ to see
+where it stands.
 
 The words above, the rule labels and @S@ are reserved.
 -}
@@ -66,7 +70,7 @@ import Text.Megaparsec.Char (char)
 tacticKeywords :: [String]
 tacticKeywords =
   map (R.ruleLabel . ruleSpec) [minBound .. maxBound]
-    <> words "refl symmetry rewrite in induction as assumption exact skip try repeat"
+    <> words "refl symmetry rewrite in induction as assumption exact skip sorry try repeat"
     <> words "theorem rule by var term atom formula ctx"
 
 -- | Reserve the words of the tactic language in a scope.
@@ -206,6 +210,7 @@ tacticP sc0 = seqP
             , Assumption <$ keywordP "assumption"
             , Exact <$> (keywordP "exact" *> identifierP sc)
             , Skip <$ keywordP "skip"
+            , Sorry <$ keywordP "sorry"
             , Try <$> (keywordP "try" *> basicP)
             , Repeat <$> (keywordP "repeat" *> basicP)
             ]
