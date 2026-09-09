@@ -82,6 +82,9 @@ by refl
 
 theorem muSchemaApp2 : |- mu {lt} (3, 0) = 3
 by refl
+
+theorem muUnaryApp : |- mu(sgn, 5) = 1
+by refl
 |]
 
 quoteTests :: TestTree
@@ -150,6 +153,7 @@ quoteTests =
         inferConclusionIn kenv desugaredIfFalse @?= Right (sequentMu "|- (if 1 < 0 then 10 else 20) = 20")
         inferConclusionIn kenv muSchemaApp1 @?= Right (sequentMu "|- mu(lt, 3, 2) = 0")
         inferConclusionIn kenv muSchemaApp2 @?= Right (sequentMu "|- mu {lt} (3, 0) = 3")
+        inferConclusionIn kenv muUnaryApp @?= Right (sequentMu "|- mu(sgn, 5) = 1")
     ]
   where
     sc = plainScope testSignature

@@ -33,6 +33,7 @@ successorTerm (LitFT n) = LitFT (n + 1)
 successorTerm t = AppFT (Primitive PR.Succ) (t SV.:< SV.Nil)
 
 -- Substitution is simultaneous: do not traverse a replacement a second time.
+-- Lambda parameters are closed, so they contain no slot to substitute.
 substituteSlot :: Ordinal n -> FunctionalTerm n -> FunctionalTerm n -> FunctionalTerm n
 substituteSlot index replacement = go
   where
@@ -61,16 +62,26 @@ sameTerm a b = case (canonical a, canonical b) of
     sameFunction (Defined x) (Defined y) = x == y
     sameFunction (Primitive x) (Primitive y) = x == y
     sameFunction (Bound x) (Bound y) = x == y
-    sameFunction (SchemaApp s1 ps1) (SchemaApp s2 ps2) = s1 == s2 && ps1 == ps2
+    sameFunction (SchemaApp s1 ps1) (SchemaApp s2 ps2) =
+      s1 == s2 && length ps1 == length ps2 && and (zipWith sameArgument ps1 ps2)
     sameFunction _ _ = False
+    sameArgument (NamedArg x) (NamedArg y) = x == y
+    sameArgument (LambdaArg (_ :: V p IrrelevantName) x) (LambdaArg (_ :: V q IrrelevantName) y) =
+      case testEquality (sNat @p) (sNat @q) of
+        Just Refl -> sameTerm x y
+        Nothing -> False
+    sameArgument _ _ = False
     canonical (AppFT (Primitive PR.Succ) xs) = successorTerm (canonical (SV.head xs))
     canonical t = t
 
+-- | Every definition a term calls, including those inside lambda parameters.
 functionCalls :: FunctionalTerm n -> Set.Set T.Text
 functionCalls (AppFT f xs) = headCall f <> foldMap functionCalls xs
   where
     headCall (Defined ident) = Set.singleton ident
     headCall (Primitive _) = Set.empty
     headCall (Bound _) = Set.empty
-    headCall (SchemaApp sName pArgs) = Set.fromList (sName : pArgs)
+    headCall (SchemaApp sName pArgs) = Set.insert sName (foldMap argumentCalls pArgs)
+    argumentCalls (NamedArg p) = Set.singleton p
+    argumentCalls (LambdaArg _ body) = functionCalls body
 functionCalls _ = Set.empty

@@ -19,6 +19,7 @@ import Language.Praxis.PRA.ProofTest (proofTests)
 import Language.Praxis.PRA.QuoteTest (quoteTests)
 import Language.Praxis.PRA.Syntax
 import Language.Praxis.PRA.TacticTest (tacticTests)
+import Language.Praxis.PRA.VariadicTest (variadicTests)
 import Numeric.Natural
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -39,6 +40,7 @@ main =
       , proofTests
       , tacticTests
       , quoteTests
+      , variadicTests
       ]
 
 -- | Every term below is closed, so no environment is ever consulted.

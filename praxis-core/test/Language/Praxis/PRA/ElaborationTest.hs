@@ -38,10 +38,10 @@ elaborationTests =
             _ -> assertFailure (show xs)
           _ -> assertFailure (show result)
     , testCase "identifiers and constructor prefixes" $
-        parseEquation "f x' Suffix = x'" @?= Right (Equation "f" [] [VarP "x'", VarP "Suffix"] (NameET "x'"))
+        parseEquation "f x' Suffix = x'" @?= Right (Equation "f" [] [VarP "x'", VarP "Suffix"] Nothing (NameET "x'"))
     , testCase "successor patterns and nested comments" $
         parseEquation " {- a {- b -} -} f (Succ (S x)) 0 = S x -- end"
-          @?= Right (Equation "f" [] [SuccP (SuccP (VarP "x")), ZeroP] (NameET "S" :@ NameET "x"))
+          @?= Right (Equation "f" [] [SuccP (SuccP (VarP "x")), ZeroP] Nothing (NameET "S" :@ NameET "x"))
     , testCase "reject trailing input and malformed numerals" $
         map (isLeft . parseEqTerm) ["x )", "12x", "(f x", ""] @?= replicate 4 True
     , testCase "resolve self and forward references with fixed vectors" $ do

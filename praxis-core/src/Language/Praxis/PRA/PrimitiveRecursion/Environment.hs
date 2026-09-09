@@ -6,12 +6,16 @@ module Language.Praxis.PRA.PrimitiveRecursion.Environment (
   environmentSignature,
   environmentDefinitions,
   environmentSchemas,
+  environmentVariadics,
   blockDefinitions,
   blockSchemas,
+  blockVariadics,
   blockSignature,
   compileDefinitions,
   compileDefinitionsWith,
   extendEnvironment,
+  schemaSymbolOf,
+  templateSymbol,
 ) where
 
 import Control.Monad (unless)
@@ -24,7 +28,8 @@ import Data.Type.Natural (sNat)
 import GHC.TypeNats (SomeNat (..), someNatVal)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (signatureEnv)
-import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation, VariadicTemplate (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic (instanceName)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature qualified as Sig
 
@@ -35,6 +40,7 @@ data CompiledEnv = CompiledEnv
   { environmentSignature :: !Sig.Signature
   , environmentDefinitions :: !(Map T.Text ElaboratedDefinition)
   , environmentSchemas :: !(Map T.Text ElaboratedSchema)
+  , environmentVariadics :: !(Map T.Text VariadicTemplate)
   }
 
 {- | Only the newly compiled definitions. Construction validates the whole
@@ -43,11 +49,12 @@ dependency graph, so mutually recursive definitions cannot tie a code knot.
 data CompiledBlock = CompiledBlock
   { blockDefinitions :: !(Map T.Text ElaboratedDefinition)
   , blockSchemas :: !(Map T.Text ElaboratedSchema)
+  , blockVariadics :: !(Map T.Text VariadicTemplate)
   , blockSignature :: !Sig.Signature
   }
 
 compiledEnvironment :: Sig.Signature -> CompiledEnv
-compiledEnvironment sig = CompiledEnv sig Map.empty Map.empty
+compiledEnvironment sig = CompiledEnv sig Map.empty Map.empty Map.empty
 
 {- | Compile a complete family, permitting self recursion and forward calls,
 but rejecting all cycles involving two or more functions.
@@ -55,33 +62,56 @@ but rejecting all cycles involving two or more functions.
 compileDefinitions :: CompiledEnv -> [Equation T.Text] -> Either String CompiledBlock
 compileDefinitions = compileDefinitionsWith id
 
--- | Supply globally qualified identities for newly declared functions.
+{- | Supply globally qualified identities for newly declared functions. The
+instances of a variadic template are elaborated on demand against the
+extended signature, which the template's symbol refers to lazily.
+-}
 compileDefinitionsWith :: (T.Text -> T.Text) -> CompiledEnv -> [Equation T.Text] -> Either String CompiledBlock
 compileDefinitionsWith qualify env equations = do
   parent <- Sig.signatureKernelEnv (environmentSignature env)
-  ElaboratedFamily defs schs <- elaborateFamilyWith qualify (signatureEnv (environmentSignature env)) equations
+  ElaboratedFamily defs schs templates _ <- elaborateFamilyWith qualify (signatureEnv (environmentSignature env)) equations
   kernel <- F.extendKernelEnv parent [F.Definition (F.DefId (qualify name)) code | (name, ElaboratedDefinition _ code _ _ _) <- Map.toList defs]
   let entries = [Sig.functionSymbol (T.unpack name) (F.Defined (F.DefId (qualify name) `asIdOf` code)) | (name, ElaboratedDefinition _ code _ _ _) <- Map.toList defs]
-      schemaEntries = [toSchemaSymbol name sch | (name, sch) <- Map.toList schs]
-      blockSig = Sig.signatureWithSchemas entries schemaEntries
-  pure (CompiledBlock defs schs (Sig.withKernelEnv kernel blockSig))
+      schemaEntries = [schemaSymbolOf (T.unpack name) sch | (name, sch) <- Map.toList schs]
+      variadicEntries = [templateSymbol tmpl extended | tmpl <- Map.elems templates]
+      blockSig = Sig.withKernelEnv kernel (Sig.signatureWithVariadicSchemas entries schemaEntries variadicEntries)
+      extended = blockSig <> environmentSignature env
+  pure (CompiledBlock defs schs templates blockSig)
   where
     asIdOf :: F.DefId n -> F.Program n -> F.DefId n
     asIdOf ident _ = ident
 
-    toSchemaSymbol name sch@(ElaboratedSchema _ _ _ (ElaboratedDefinition _ (_ :: F.Program n) _ _ _)) =
-      case someNatVal (compiledSchemaParamArity sch) of
-        SomeNat (_ :: Proxy k) ->
-          Sig.schemaSymbol
-            (T.unpack name)
-            ( \(p :: F.Function k) ->
-                case instantiateSchemaFunction sch (F.SomeFunction p) of
-                  Right (F.SomeFunction (res :: F.Function m)) ->
-                    case testEquality (sNat @m) (sNat @n) of
-                      Just Refl -> res
-                      Nothing -> error "Instantiated schema arity mismatch"
-                  Left err -> error err
-            )
+-- | The symbol of a compiled schema, instantiating it by program substitution.
+schemaSymbolOf :: String -> ElaboratedSchema -> Sig.SchemaSymbol
+schemaSymbolOf name sch@(ElaboratedSchema _ _ _ (ElaboratedDefinition _ (_ :: F.Program n) _ _ _)) =
+  case someNatVal (compiledSchemaParamArity sch) of
+    SomeNat (_ :: Proxy k) ->
+      Sig.schemaSymbol
+        name
+        ( \(p :: F.Function k) ->
+            case instantiateSchemaFunction sch (F.SomeFunction p) of
+              Right (F.SomeFunction (res :: F.Function m)) ->
+                case testEquality (sNat @m) (sNat @n) of
+                  Just Refl -> res
+                  Nothing -> error "Instantiated schema arity mismatch"
+              Left err -> error err
+        )
+
+{- | The symbol of a variadic template, whose instances are elaborated on
+demand in the given signature. The template's own name is removed from the
+scope so that its self applications become the instance's recursion rather
+than a further instantiation.
+-}
+templateSymbol :: VariadicTemplate -> Sig.Signature -> Sig.VariadicSchemaSymbol
+templateSymbol tmpl sig =
+  Sig.variadicSchemaSymbol (T.unpack ident) (templateFixedArity tmpl) (templateParamArity tmpl) instanceAt
+  where
+    ident = templateName tmpl
+    instanceAt k = do
+      let scope = Map.delete ident (signatureEnv sig)
+      instances <- elaborateInstances scope [(ident, k)] (templateEquations tmpl)
+      sch <- maybe (Left ("No instance of " <> T.unpack ident <> " at " <> show k <> " variadic arguments")) Right (Map.lookup (instanceName ident k) instances)
+      pure (schemaSymbolOf (T.unpack ident) sch)
 
 {- | Extend without replacing symbols or changing the meaning of an existing
 definition identity. The block carries its dependency environment.
@@ -92,6 +122,13 @@ extendEnvironment env block = do
       additions = blockSignature block
   mapM_ (\s -> unless (Sig.lookupSymbol (Sig.symbolName s) sig == Nothing) (Left ("Function already defined: " <> Sig.symbolName s))) (Sig.symbols additions)
   mapM_ (\s -> unless (Sig.lookupSchema (Sig.schemaSymbolName s) sig == Nothing) (Left ("Schema already defined: " <> Sig.schemaSymbolName s))) (Sig.schemas additions)
+  mapM_ (\s -> unless (Sig.lookupVariadicSchema (Sig.variadicSchemaName s) sig == Nothing) (Left ("Schema already defined: " <> Sig.variadicSchemaName s))) (Sig.variadicSchemas additions)
   let combined = additions <> sig
   _ <- Sig.signatureKernelEnv combined
-  pure (CompiledEnv combined (blockDefinitions block <> environmentDefinitions env) (blockSchemas block <> environmentSchemas env))
+  pure
+    ( CompiledEnv
+        combined
+        (blockDefinitions block <> environmentDefinitions env)
+        (blockSchemas block <> environmentSchemas env)
+        (blockVariadics block <> environmentVariadics env)
+    )

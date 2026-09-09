@@ -1,6 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Applicative equations with indentation or explicit semicolon separators.
+{- | Applicative equations with indentation or explicit semicolon separators.
+
+Besides application, infix operators and conditionals, a term may be a
+lambda @λ x y. body@ (also @\\x y -> body@), a bounded search
+@μ i < bound. body@, or use the variadic arguments @$[xs]@ of the enclosing
+schema. Binder occurrences are resolved to locally nameless indices while
+parsing, so a name bound by an enclosing lambda or @μ@ never leaks out as a
+free identifier.
+-}
 module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   Parser,
   spaceConsumer,
@@ -23,11 +31,13 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
 ) where
 
 import Control.Monad (void)
+import Data.Either (lefts, rights)
+import Data.List (elemIndex, findIndex)
 import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
 import Numeric.Natural (Natural)
-import Text.Megaparsec (Parsec, Pos, SourcePos (..), between, eof, errorBundlePretty, getSourcePos, label, many, notFollowedBy, option, parse, sepBy1, sepEndBy, try, (<|>))
+import Text.Megaparsec (Parsec, Pos, SourcePos (..), between, eof, errorBundlePretty, getSourcePos, label, many, notFollowedBy, option, parse, sepBy1, sepEndBy, some, try, (<?>), (<|>))
 import Text.Megaparsec.Char qualified as CP
 import Text.Megaparsec.Char.Lexer qualified as L
 
@@ -64,6 +74,10 @@ anySymbol = lexeme $ try do
     then fail ("reserved word: " <> T.unpack s)
     else pure s
 
+-- | The variadic argument group @$[xs]@.
+splatP :: Parser T.Text
+splatP = (symbol "$[" *> anySymbol <* symbol "]") <?> "variadic argument $[..]"
+
 patternP :: Parser (Pattern T.Text)
 patternP = patternWith (pure ())
 
@@ -77,7 +91,7 @@ patternWith next =
        )
 
 eqTermP :: Parser (EqTerm T.Text)
-eqTermP = termWith (pure ())
+eqTermP = termWith (pure ()) []
 
 chainl1 :: Parser a -> Parser (a -> a -> a) -> Parser a
 chainl1 p op = do
@@ -92,19 +106,49 @@ chainl1 p op = do
       )
         <|> pure x
 
-termWith :: Parser () -> Parser (EqTerm T.Text)
-termWith next = expr
+-- | Binder groups in scope, innermost first, each in binding order.
+type Binders = [[T.Text]]
+
+resolveName :: Binders -> T.Text -> EqTerm T.Text
+resolveName binders ident =
+  case [(depth, position) | (depth, group) <- zip [0 ..] binders, Just position <- [elemIndex ident group]] of
+    (depth, position) : _ -> BoundET depth position
+    [] -> NameET ident
+
+-- Lambdas and bounded searches extend as far right as a conditional does.
+termWith :: Parser () -> Binders -> Parser (EqTerm T.Text)
+termWith next binders = expr
   where
-    expr = ifExpr <|> cmpExpr
+    expr = ifExpr <|> lamExpr <|> muExpr <|> cmpExpr
 
     ifExpr = do
-      reserved "if"
+      next *> reserved "if"
       c <- expr
       reserved "then"
       t <- expr
       reserved "else"
       e <- expr
       pure (IfThenElseET c t e)
+
+    lamExpr = do
+      next *> lambdaP
+      names <- some anySymbol
+      binderDot
+      body <- termWith next (names : binders)
+      pure (LamET (map IrrelevantName names) body)
+
+    muExpr = do
+      next *> muP
+      ident <- anySymbol
+      _ <- lexeme (try (CP.char '<' <* notFollowedBy (CP.char '=')))
+      bound <- addExpr
+      binderDot
+      body <- termWith next ([ident] : binders)
+      pure (MuET (IrrelevantName ident) bound body)
+
+    lambdaP = void (symbol "λ" <|> symbol "\\") <?> "lambda"
+    muP = void (symbol "μ") <?> "bounded search"
+    binderDot = void (symbol "." <|> symbol "->")
 
     cmpExpr = do
       l <- addExpr
@@ -124,7 +168,7 @@ termWith next = expr
       where
         addOp =
           (symbol "+" *> pure (\l r -> InfixET l "+" r))
-            <|> try (symbol "-" <* notFollowedBy (CP.char '-'))
+            <|> try (symbol "-" <* notFollowedBy (CP.char '-' <|> CP.char '>'))
             *> pure (\l r -> InfixET l "-" r)
 
     mulExpr = chainl1 expExpr mulOp
@@ -143,12 +187,14 @@ termWith next = expr
 
     appExpr = foldl (:@) <$> atom <*> many atom
 
+    -- Parentheses and braces suspend layout, like nested equations.
     atom =
       next
         *> ( (LitET <$> decimal)
-               <|> parens eqTermP
-               <|> braces (NameET <$> anySymbol)
-               <|> (NameET <$> anySymbol)
+               <|> parens (termWith (pure ()) binders)
+               <|> braces (termWith (pure ()) binders)
+               <|> (SplatET <$> splatP)
+               <|> (resolveName binders <$> anySymbol)
            )
 
 equationP :: Parser (Equation T.Text)
@@ -160,10 +206,21 @@ equationWith :: Parser () -> Parser (Equation T.Text)
 equationWith next = do
   ident <- anySymbol
   params <- option [] (braces (anySymbol `sepBy1` symbol ","))
-  pats <- many (patternWith next)
+  items <- many ((Left <$> (next *> splatP)) <|> (Right <$> patternWith next))
+  splat <- case lefts items of
+    [] -> pure Nothing
+    [_] -> case findIndex (either (const True) (const False)) items of
+      Just 0 -> pure (Just SplatFirst)
+      Just position | position == length items - 1 -> pure (Just SplatLast)
+      _ -> fail "a variadic argument $[..] must be the first or the last argument"
+    _ -> fail "at most one variadic argument $[..] is allowed"
   _ <- next *> symbol "="
-  rhs <- label "right-hand side (indent continuation lines)" (termWith next)
-  pure (Equation ident params pats rhs)
+  rhs <- label "right-hand side (indent continuation lines)" (termWith next [])
+  pure (Equation ident params (rights items) (Splat <$> firstSplat items <*> splat) rhs)
+  where
+    firstSplat items = case lefts items of
+      s : _ -> Just s
+      [] -> Nothing
 
 -- Whitespace retains source positions even though lexemes consume newlines.
 -- Only tokens outside parentheses are subject to the equation's offside rule.

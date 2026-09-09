@@ -9,6 +9,10 @@ A header such as
 and registers an immutable snapshot for subsequent declaration quotes in the
 same module. All clauses of a function must occur in one block.
 
+A schema @s {P} …@ becomes a function of its parameter, and a variadic schema
+@s {P} … $[xs]@ a function polymorphic in the parameter's arity, whose
+instances are elaborated on demand from the lifted template.
+
 To reuse an imported signature, define @prfQuoter importedSignature@ in a
 support module and import that quasiquoter where it is used, as for
 "Language.Praxis.PRA.Tactic.Quote". No module-local state crosses module
@@ -26,24 +30,27 @@ import Control.Monad (unless, void, when)
 import Data.Char (isAlphaNum, isLower)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
-import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal)
+import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal, type (+), type (-), type (<=))
 import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Language.Haskell.TH.Syntax (Lift, getQ, liftTyped, mkNameG_v, putQ, unTypeCode)
+import Language.Haskell.TH.Syntax (Lift, getQ, lift, liftTyped, mkNameG_v, putQ, unTypeCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename
-import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation (..), VariadicTemplate (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic
 import Language.Praxis.PRA.PrimitiveRecursion.Environment
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (arityType)
 import Language.Praxis.PRA.Signature qualified as Sig
 import Language.Praxis.TH.Internal qualified as QTH
+import Numeric.Natural (Natural)
 import Text.Megaparsec (SourcePos (..), eof, errorBundlePretty, getSourcePos, optional, parse, sourcePosPretty, try, (<|>))
 
 data Header = Header !T.Text !(Maybe T.Text)
@@ -121,39 +128,52 @@ compileQuote initial source = do
       when (Map.member ident (snapshots registry)) (fail ("prf: environment already defined: " <> T.unpack ident))
   unless (Set.null (names `Set.intersection` generatedNames registry)) $
     fail ("prf: Haskell binding already generated: " <> show (Set.toList (names `Set.intersection` generatedNames registry)))
-  -- Locate name/arity errors at the individual clause before compilation.
-  renamingEnv <- either fail pure (equationEnv (signatureEnv parentSig) raw)
-  mapM_ (\eq -> either (at eq) (const (pure ())) (renameEquation renamingEnv (locatedEquation eq))) equations
+  -- Locate name/arity errors at the individual clause before compilation. An
+  -- instance clause is attributed to the template clause it expands.
+  expanded <- either fail pure (expandFamily True (signatureEnv parentSig) [] raw)
+  renamingEnv <- either fail pure (equationEnv (expandedEnv expanded) (expandedEquations expanded))
+  let concreteLocated = [eq | eq <- equations, isNothing (variadic (locatedEquation eq))]
+      templateLocated ident = [eq | eq <- equations, name (locatedEquation eq) == ident]
+      attributed =
+        zip concreteLocated (expandedConcrete expanded)
+          <> concat [zip (templateLocated ident) clauses | ((ident, _), clauses) <- expandedInstanceClauses expanded]
+  mapM_ (\(located, eq) -> either (at located) (const (pure ())) (renameEquation renamingEnv eq)) attributed
   let qualify ident = T.pack (TH.loc_package loc <> ":" <> TH.loc_module loc <> ".") <> ident
   block <- either (fail . withLocations equations) pure (compileDefinitionsWith qualify parent raw)
   extended <- either fail pure (extendEnvironment parent block)
   let hsName ident = mkNameG_v (TH.loc_package loc) (TH.loc_module loc) (T.unpack ident)
       newSymbols =
-        Sig.signatureWithSchemas
+        Sig.signatureWithVariadicSchemas
           [ sym {Sig.symbolHaskellName = Just (hsName (T.pack (Sig.symbolName sym)))}
           | sym <- Sig.symbols (blockSignature block)
           ]
           [ sch {Sig.schemaSymbolHaskellName = Just (hsName (T.pack (Sig.schemaSymbolName sch)))}
           | sch <- Sig.schemas (blockSignature block)
           ]
+          [ sch {Sig.variadicSchemaHaskellName = Just (hsName (T.pack (Sig.variadicSchemaName sch)))}
+          | sch <- Sig.variadicSchemas (blockSignature block)
+          ]
   kernel <- either fail pure (Sig.signatureKernelEnv (environmentSignature extended))
   let fullSig = Sig.withKernelEnv kernel (newSymbols <> parentSig)
+  signatureName <- case header of
+    Just (Header ident _) -> pure (TH.mkName (T.unpack ident))
+    Nothing -> TH.newName "prfSignature"
   declarations <- concat <$> traverse (emitDefinition qualify) (Map.elems (blockDefinitions block))
   schemaDeclarations <- concat <$> traverse (emitSchema qualify) (Map.elems (blockSchemas block))
+  variadicDeclarations <- concat <$> traverse (emitVariadic signatureName) (Map.elems (blockVariadics block))
   signatureDeclarations <- case header of
     Nothing | null equations -> pure []
     Nothing -> do
-      shared <- TH.newName "prfSignature"
-      binding <- valueDeclaration shared [t|Sig.Signature|] (unTypeCode (liftSignature fullSig))
-      aliases <- concat <$> traverse (\ident -> valueDeclaration (TH.mkName (T.unpack ident)) [t|Sig.Signature|] (QTH.varE shared)) (Set.toList signatureNames)
+      binding <- valueDeclaration signatureName [t|Sig.Signature|] (unTypeCode (liftSignature fullSig))
+      aliases <- concat <$> traverse (\ident -> valueDeclaration (TH.mkName (T.unpack ident)) [t|Sig.Signature|] (QTH.varE signatureName)) (Set.toList signatureNames)
       pure (binding <> aliases)
-    Just (Header ident _) ->
-      valueDeclaration (TH.mkName (T.unpack ident)) [t|Sig.Signature|] (unTypeCode (liftSignature fullSig))
+    Just _ ->
+      valueDeclaration signatureName [t|Sig.Signature|] (unTypeCode (liftSignature fullSig))
   let registered = case header of
         Nothing -> snapshots registry
         Just (Header ident _) -> Map.insert ident (extended, fullSig) (snapshots registry)
   putQ (Registry registered (names <> generatedNames registry))
-  pure (declarations <> schemaDeclarations <> signatureDeclarations)
+  pure (declarations <> schemaDeclarations <> variadicDeclarations <> signatureDeclarations)
 
 withLocations :: [LocatedEquation] -> String -> String
 withLocations equations err = "prf: " <> err <> concatMap location equations
@@ -188,6 +208,47 @@ emitSchema _ (ElaboratedSchema ident params pArity (ElaboratedDefinition _ (code
       funDec <- QTH.function name [([D.DVarP paramName], body)]
       pure [sigDec, funDec]
 
+{- | A variadic schema is a function of its parameter, polymorphic in that
+parameter's arity @m@; an instance has arity @m@ shifted by the constant
+difference between the schema's fixed arguments and the parameter's. The
+template is lifted so that instances can be elaborated at run time, in the
+emitted signature.
+-}
+emitVariadic :: TH.Name -> VariadicTemplate -> TH.Q [TH.Dec]
+emitVariadic signatureName tmpl = do
+  m <- TH.newName "m"
+  let binding = TH.mkName (T.unpack (templateName tmpl))
+      fixed = templateFixedArity tmpl
+      pArity = templateParamArity tmpl
+      symbolE = [|templateSymbol $(lift tmpl) $(QTH.varE signatureName)|]
+      mT = QTH.varT m
+  (constraints, ty, body) <- case compare fixed pArity of
+    EQ ->
+      pure
+        ( [[t|KnownNat $mT|]]
+        , [t|F.Function $mT -> F.Function $mT|]
+        , [|Sig.applyVariadicSame $symbolE|]
+        )
+    GT -> do
+      let d = naturalType (fixed - pArity)
+      pure
+        ( [[t|KnownNat $mT|]]
+        , [t|F.Function $mT -> F.Function ($mT + $d)|]
+        , [|Sig.applyVariadicPlus @($d) $symbolE|]
+        )
+    LT -> do
+      let d = naturalType (pArity - fixed)
+      pure
+        ( [[t|KnownNat $mT|], [t|$d <= $mT|]]
+        , [t|F.Function $mT -> F.Function ($mT - $d)|]
+        , [|Sig.applyVariadicMinus @($d) $symbolE|]
+        )
+  valueDeclaration binding (QTH.forallType [m] constraints ty) body
+
+naturalType :: Natural -> TH.TypeQ
+naturalType n = case someNatVal n of
+  SomeNat (_ :: Proxy d) -> arityType @d
+
 -- Declaration quotes permit a generated binding pattern, but not a generated
 -- name on the left of a type signature. Keep that boundary in th-desugar.
 valueDeclaration :: TH.Name -> TH.TypeQ -> TH.ExpQ -> TH.Q [TH.Dec]
@@ -211,9 +272,10 @@ liftSignature sig = TH.joinCode do
     [||
     Sig.withKernelEnv
       (either error id (F.extendKernelEnv F.emptyKernelEnv $$(listCode (map definition (F.definitions env)))))
-      ( Sig.signatureWithSchemas
+      ( Sig.signatureWithVariadicSchemas
           $$(listCode (map entry (Sig.symbols sig)))
           $$(listCode (map schemaEntry (Sig.schemas sig)))
+          $$(listCode (map variadicEntry (Sig.variadicSchemas sig)))
       )
     ||]
   where
@@ -226,6 +288,21 @@ liftSignature sig = TH.joinCode do
     schemaEntry (Sig.SchemaSymbol name (inst :: F.Function k -> F.Function n) hs) = case hs of
       Just binding -> [||Sig.schemaSymbolNamed $$(liftTyped name) $$(liftTyped binding) $$(referenceSchema binding (id @(F.Function k -> F.Function n)))||]
       Nothing -> [||Sig.schemaSymbol @k @n $$(liftTyped name) $$(referenceSchema (TH.mkName name) (id @(F.Function k -> F.Function n)))||]
+    -- The instances of a variadic schema are recovered from its polymorphic
+    -- binding, whose type the splice site checks; the shape of that type is
+    -- determined by the recorded arities alone.
+    variadicEntry sym = TH.unsafeCodeCoerce do
+      let name = Sig.variadicSchemaName sym
+          fixed = Sig.variadicSchemaFixedArity sym
+          pArity = Sig.variadicSchemaParamArity sym
+          binding = fromMaybe (TH.mkName name) (Sig.variadicSchemaHaskellName sym)
+          instances = case compare fixed pArity of
+            EQ -> [|Sig.variadicInstanceSame $(lift name) $(lift pArity) $(QTH.varE binding)|]
+            GT -> [|Sig.variadicInstancePlus @($(naturalType (fixed - pArity))) $(lift name) $(lift pArity) $(QTH.varE binding)|]
+            LT -> [|Sig.variadicInstanceMinus @($(naturalType (pArity - fixed))) $(lift name) $(lift pArity) $(QTH.varE binding)|]
+      case Sig.variadicSchemaHaskellName sym of
+        Just hs -> [|Sig.variadicSchemaSymbolNamed $(lift name) $(lift hs) $(lift fixed) $(lift pArity) $instances|]
+        Nothing -> [|Sig.variadicSchemaSymbol $(lift name) $(lift fixed) $(lift pArity) $instances|]
     -- The signature records each referenced binding's type. The witness fixes
     -- its arity here; the splice site checks the actual Haskell binding again.
     reference :: TH.Name -> (a -> F.Function n) -> TH.Code TH.Q a

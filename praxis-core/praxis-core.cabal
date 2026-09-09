@@ -90,6 +90,7 @@ library
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename
     Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
+    Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic
     Language.Praxis.PRA.PrimitiveRecursion.Environment
     Language.Praxis.PRA.PrimitiveRecursion.Function
     Language.Praxis.PRA.PrimitiveRecursion.Quote
@@ -141,6 +142,7 @@ test-suite praxis-core-test
     Language.Praxis.PRA.QuoteSignature
     Language.Praxis.PRA.QuoteTest
     Language.Praxis.PRA.TacticTest
+    Language.Praxis.PRA.VariadicTest
 
   ghc-options:
     -threaded

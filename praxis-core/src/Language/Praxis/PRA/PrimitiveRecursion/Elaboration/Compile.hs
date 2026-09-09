@@ -19,6 +19,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile (
   elaborateRenamedEquationsWith,
   elaborateRenamedEquationsAndSchemasWith,
   elaborateFamilyWith,
+  elaborateInstances,
   elaborateEquations,
   elaborateEquationsWith,
 ) where
@@ -41,6 +42,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.CaseTree
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Internal
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (equationEnv, renameEquation)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Program)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Numeric.Natural (Natural)
@@ -68,9 +70,14 @@ data ElaboratedSchema = ElaboratedSchema
 
 deriving instance Show ElaboratedSchema
 
+{- | A compiled family. Instances of variadic templates are inlined where they
+are applied and are not retained, except those explicitly demanded.
+-}
 data ElaboratedFamily = ElaboratedFamily
   { familyDefinitions :: !(Map T.Text ElaboratedDefinition)
   , familySchemas :: !(Map T.Text ElaboratedSchema)
+  , familyVariadics :: !(Map T.Text VariadicTemplate)
+  , familyInstances :: !(Map T.Text ElaboratedSchema)
   }
 
 data CompiledSchema = CompiledSchema
@@ -166,7 +173,9 @@ lookupFunctionAsSomeFunction env ident = case Map.lookup ident env of
   Just (SomeProgram (code :: Program k)) -> Right (F.SomeFunction (F.Inline code :: F.Function k))
 
 -- The recursive-result code is separate from the source slot vector, and is
--- lifted along with it beneath parameter case splits.
+-- lifted along with it beneath parameter case splits. A lambda parameter is
+-- closed, so it is compiled in its own context of projections and may not
+-- recurse: its calls would escape the recursor being reconstructed.
 compileBody ::
   Map T.Text CompiledSchema ->
   Map T.Text SomeProgram ->
@@ -188,7 +197,7 @@ compileBody schemas env self previous slots = go
         Just sch -> do
           unless (length pArgs == length (cSchemaParams sch)) $
             Left ("Schema " <> T.unpack sName <> " expects " <> show (length (cSchemaParams sch)) <> " parameters, given " <> show (length pArgs))
-          pFuns <- traverse (lookupFunctionAsSomeFunction env) pArgs
+          pFuns <- traverse parameter pArgs
           instSome <- cSchemaInstantiate sch pFuns
           args <- traverse go xs
           case instSome of
@@ -203,6 +212,12 @@ compileBody schemas env self previous slots = go
         Defined ident -> lookupCode env ident
         SchemaApp {} -> error "impossible: handled above"
       F.Comp code <$> traverse go xs
+    parameter (NamedArg p) = lookupFunctionAsSomeFunction env p
+    parameter (LambdaArg (_ :: V p IrrelevantName) body) = do
+      unless (Set.notMember self (functionCalls body)) $
+        Left ("recursive call to " <> T.unpack self <> " inside a lambda")
+      code <- compileBody schemas env self Nothing (fmap projection (slotIndices @p)) body
+      pure (F.SomeFunction (F.Inline code :: F.Function p))
 
 -- Ordinary case analysis retains all current inputs as parameters. Its local
 -- recursor ignores its own recursive result; any outer result is passed through.
@@ -302,6 +317,8 @@ elaborateRenamedEquationsWith :: (T.Text -> T.Text) -> Map T.Text SomeProgram ->
 elaborateRenamedEquationsWith qualify initial equations =
   fst <$> elaborateRenamedEquationsAndSchemasWith qualify Map.empty initial Set.empty Map.empty equations
 
+-- A schema's parameters are placeholders bound only while compiling its own
+-- clauses, at its own parameter arity; other schemas may reuse the names.
 elaborateRenamedEquationsAndSchemasWith ::
   (T.Text -> T.Text) ->
   Map T.Text CompiledSchema ->
@@ -314,6 +331,10 @@ elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNa
   foldM (visit Set.empty) (Map.empty, externalSchemas) (Map.keys groups)
   where
     groups = foldr (\eq -> Map.insertWith (<>) (renamedName eq) [eq]) Map.empty equations
+    parameterCodes ident = case Map.lookup ident schemaMeta of
+      Just (params, pArity, _) -> case someNatVal pArity of
+        SomeNat (_ :: Proxy p) -> Map.fromList [(p, SomeProgram (F.Call (F.DefId p :: F.DefId p))) | p <- params]
+      Nothing -> Map.empty
     visit active (doneDefs, doneSchemas) ident
       | Map.member ident doneDefs = Right (doneDefs, doneSchemas)
       | Set.member ident active = Left ("Mutual recursion is unsupported: " <> T.unpack ident)
@@ -321,9 +342,12 @@ elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNa
       | otherwise = case Map.lookup ident groups of
           Nothing -> Left ("No definition for " <> T.unpack ident)
           Just clauses -> do
-            let dependencies = Set.delete ident (foldMap (\(RenamedEquation _ _ body) -> functionCalls body) clauses)
+            let parameters = parameterCodes ident
+                dependencies =
+                  Set.delete ident (foldMap (\(RenamedEquation _ _ body) -> functionCalls body) clauses)
+                    `Set.difference` Map.keysSet parameters
             (doneDefs', doneSchemas') <- foldM (dependency (Set.insert ident active)) (doneDefs, doneSchemas) (Set.toList dependencies)
-            let envCodes = Map.mapWithKey reference doneDefs' <> initial
+            let envCodes = parameters <> Map.mapWithKey reference doneDefs' <> initial
             result <- elaborateDefinitionWith doneSchemas' envCodes clauses
             let doneDefs'' = Map.insert ident result doneDefs'
                 doneSchemas'' = case Map.lookup ident schemaMeta of
@@ -349,24 +373,32 @@ elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNa
       | Map.member ident externalSchemas = Right (doneDefs, doneSchemas)
       | otherwise = Left ("No compiled code for " <> T.unpack ident)
 
-{- | Rename and compile a program. Environmental primitive codes are available
-to every definition. Unresolved environmental names must be supplied as code
-before use. Coverage and overlap checks precede recursive-call compilation.
+{- | Expand, rename and compile a program. Environmental primitive codes are
+available to every definition. Unresolved environmental names must be
+supplied as code before use. Coverage and overlap checks precede
+recursive-call compilation. Variadic templates are checked at zero and one
+variadic argument besides the instances the program applies.
 -}
 elaborateFamilyWith :: (T.Text -> T.Text) -> Env -> [Equation T.Text] -> Either String ElaboratedFamily
 elaborateFamilyWith qualify env equations = do
-  env' <- equationEnv env equations
+  expanded <- expandFamily True env [] equations
+  elaborateExpanded qualify [] expanded
+
+{- | The demanded instances of the variadic templates among the equations,
+compiled against an environment of existing codes; templates are not checked
+again, as at their definition site.
+-}
+elaborateInstances :: Env -> [(T.Text, Natural)] -> [Equation T.Text] -> Either String (Map T.Text ElaboratedSchema)
+elaborateInstances env demands equations = do
+  expanded <- expandFamily False env demands equations
+  familyInstances <$> elaborateExpanded id demands expanded
+
+elaborateExpanded :: (T.Text -> T.Text) -> [(T.Text, Natural)] -> ExpandedFamily -> Either String ElaboratedFamily
+elaborateExpanded qualify demands expanded = do
+  let equations = expandedEquations expanded
+  env' <- equationEnv (expandedEnv expanded) equations
   renamed <- traverse (renameEquation env') equations
-  let schemaParamsInitial =
-        Map.fromList
-          [ (pName, case someNatVal pArity of SomeNat (_ :: Proxy p) -> SomeProgram (F.Call (F.DefId pName :: F.DefId p)))
-          | eq <- equations
-          , pName <- schemaParams eq
-          , let pArity = case Map.lookup (name eq) env' of
-                  Just (SchemaDef _ _ a _) -> a
-                  _ -> 0
-          ]
-      initialCodes = schemaParamsInitial <> Map.mapMaybe primitive env'
+  let initialCodes = Map.mapMaybe primitive env'
       externalSchemas =
         Map.fromList
           [ ( sName
@@ -398,7 +430,15 @@ elaborateFamilyWith qualify env equations = do
           Just (ElaboratedSchema ident params pArity def)
         _ -> Nothing
       schemas = Map.mapMaybeWithKey toSchema schemaDefs
-  pure (ElaboratedFamily regularDefs schemas)
+      instances = expandedInstances expanded
+      demanded = Set.fromList [instanceName ident k | (ident, k) <- demands]
+  pure
+    ElaboratedFamily
+      { familyDefinitions = regularDefs
+      , familySchemas = Map.withoutKeys schemas instances
+      , familyVariadics = expandedTemplates expanded
+      , familyInstances = Map.restrictKeys schemas demanded
+      }
   where
     primitive (SomeFunction (Primitive code)) = Just (SomeProgram (F.Base code))
     primitive (SomeFunction (Bound fun)) = Just (SomeProgram (F.functionProgram fun))

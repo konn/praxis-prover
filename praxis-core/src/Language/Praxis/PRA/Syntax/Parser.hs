@@ -83,7 +83,7 @@ import Data.Multiset qualified as MS
 import Data.Proxy (Proxy (..))
 import Data.Sized qualified as SV
 import Data.Void (Void)
-import GHC.TypeNats (KnownNat, natVal)
+import GHC.TypeNats (natVal)
 import Language.Praxis.PRA.Pattern
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature
@@ -328,22 +328,41 @@ termP sc = ifP <|> cmpP
     applicationP = do
       o <- getOffset
       name <- identifierP sc
-      case lookupSchema name (scopeSignature sc) of
-        Just sch -> schemaAppP o name sch
-        Nothing -> case lookupSymbol name (scopeSignature sc) of
-          Just sym -> do
-            args <- option [] (parens (termP sc `sepBy` commaP))
-            let arity = symbolArity sym
-            when (fromIntegral (length args) /= arity) $
-              region (setErrorOffset o) $
-                fail (name <> " takes " <> show arity <> " arguments, given " <> show (length args))
-            maybe (fail "arity") pure (applySymbol sym args)
-          Nothing -> case scopeTerm sc name of
-            Right t -> pure (fmap Named t)
-            Left err -> region (setErrorOffset o) (fail err)
+      case lookupVariadicSchema name (scopeSignature sc) of
+        Just sch -> variadicAppP o name sch
+        Nothing -> case lookupSchema name (scopeSignature sc) of
+          Just sch -> schemaAppP o name sch
+          Nothing -> symbolAppP o name
+
+    symbolAppP o name =
+      case lookupSymbol name (scopeSignature sc) of
+        Just sym -> do
+          args <- option [] (parens (termP sc `sepBy` commaP))
+          let arity = symbolArity sym
+          when (fromIntegral (length args) /= arity) $
+            region (setErrorOffset o) $
+              fail (name <> " takes " <> show arity <> " arguments, given " <> show (length args))
+          maybe (fail "arity") pure (applySymbol sym args)
+        Nothing -> case scopeTerm sc name of
+          Right t -> pure (fmap Named t)
+          Left err -> region (setErrorOffset o) (fail err)
 
     schemaAppP o name sch = do
-      (pSym, args) <- bracedCall <|> parensCall
+      (pSym, args) <- schemaCallP o
+      instantiateP o name sch pSym args
+
+    -- The argument count determines the number of variadic arguments.
+    variadicAppP o name sch = do
+      (pSym, args) <- schemaCallP o
+      let fixed = variadicSchemaFixedArity sch
+      when (fromIntegral (length args) < fixed) $
+        region (setErrorOffset o) $
+          fail (name <> " takes at least " <> show fixed <> " arguments, given " <> show (length args))
+      case instantiateVariadicSchemaSymbol sch (fromIntegral (length args) - fixed) of
+        Left err -> region (setErrorOffset o) (fail err)
+        Right inst -> instantiateP o name inst pSym args
+
+    instantiateP o name sch pSym args =
       case applySchemaSymbol sch (symbolFunction pSym) of
         Left err -> region (setErrorOffset o) (fail err)
         Right (F.SomeFunction (instFun :: F.Function n)) -> do
@@ -354,6 +373,8 @@ termP sc = ifP <|> cmpP
           case SV.fromList' args of
             Just xs -> pure (App instFun xs)
             Nothing -> region (setErrorOffset o) (fail "arity vector mismatch")
+
+    schemaCallP o = bracedCall <|> parensCall
       where
         bracedCall = do
           pName <- braces (identifierP sc)

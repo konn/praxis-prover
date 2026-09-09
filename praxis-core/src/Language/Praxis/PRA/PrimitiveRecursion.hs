@@ -1,6 +1,11 @@
 {-# LANGUAGE QuasiQuotes #-}
 
--- | Arity-indexed primitive-recursive codes and a small arithmetic library.
+{- | Arity-indexed primitive-recursive codes and a small arithmetic library.
+
+@mu@ is the bounded search: @mu {P} b xs…@ is the least @i < b@ with
+@P i xs…@ nonzero, or @b@ when there is none. It is variadic in the
+parameters @xs@, so its Haskell binding is polymorphic in the arity of @P@.
+-}
 module Language.Praxis.PRA.PrimitiveRecursion (
   module Language.Praxis.PRA.PrimitiveRecursion.Code,
   add,
@@ -64,12 +69,12 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
 
   cons x y = S (pair x y)
 
-  mu {P} 0 xs = 0
-  mu {P} (S n) xs =
-    if mu P n xs < n
-      then mu P n xs
-      else if P n xs then n else S n
-  
+  mu {P} 0 $[xs] = 0
+  mu {P} (S n) $[xs] =
+    if mu {P} n $[xs] < n
+      then mu {P} n $[xs]
+      else if P n $[xs] then n else S n
+
   projAuxP k z = z < triangle (k + 1)
 
   projW z = mu {projAuxP} (S z) z
