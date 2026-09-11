@@ -32,6 +32,12 @@ checker against the declared sequent, all at compile time; a failure is a
 compile error naming the tactic which failed and the goal it faced.  The
 spliced value is the checked proof.
 
+A declaration is a lemma for those after it: @exact name@ appeals to it,
+instantiated to the goal as "Language.Praxis.PRA.Tactic" describes, and the
+spliced proof refers to its binding.  The lemmas of every quote in a module
+are in scope for the quotes after it, through a registry local to the module;
+a lemma from another module is out of reach for now.
+
 While a proof is being written, a script may end in @sorry@: the quote then
 fails, and the compile error lists the assumptions and the goal left at that point.
 
@@ -46,8 +52,11 @@ variables a rule's script introduces — the @x@ of a @Subst@, the eigenvariable
 of an @Ind@ — are chosen at run time, fresh for the names in the actual
 arguments, which is what keeps them valid.  A metavariable of sort @var@ is
 the caller's eigenvariable, and its freshness conditions are the caller's, as
-for the primitive @Ind@.  A @formula@ metavariable may not stand where the
-calculus demands an atom, as under @Id@; declare it an @atom@ instead.
+for the primitive @Ind@.  A @formula@ metavariable closed by @Id@, as
+@assumption@ does, is spliced as 'identityProof', the identity expanded
+through the connectives of the formula it is instantiated with; elsewhere the
+calculus demands an atom, and a @formula@ metavariable cannot stand there —
+declare it an @atom@ instead.
 -}
 module Language.Praxis.PRA.Tactic.Quote (
   pra,
@@ -61,7 +70,7 @@ module Language.Praxis.PRA.Tactic.Quote (
 ) where
 
 import Control.Exception (displayException)
-import Control.Monad (unless)
+import Control.Monad (foldM, unless)
 import Control.Monad.Free (Free (..), iter)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.Strict (WriterT, runWriterT, tell)
@@ -85,11 +94,12 @@ import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, Name, Q, Type, mkName, 
 import Language.Haskell.TH.Datatype (ConstructorInfo (..), DatatypeInfo (..), reifyDatatype)
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Language.Haskell.TH.Syntax (addModFinalizer)
+import Language.Haskell.TH.Syntax (addModFinalizer, getQ, putQ)
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..), builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (liftSizedWith)
 import Language.Praxis.PRA.Proof
+import Language.Praxis.PRA.Proof.Transform (argNames, identityProof, substProof, weakenProof)
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Signature
 import Language.Praxis.PRA.Syntax
@@ -128,6 +138,13 @@ instance Fresh SchemaName where
       spelling (Meta _ s) = s
   anyName = Obj "x"
 
+-- | In the statement of a lemma, its metavariables are the patterns; object variables are free.
+instance Schematic SchemaName where
+  metaName = \case
+    Meta s n -> Just (s, n)
+    Obj _ -> Nothing
+  metaAtom = decodeMeta
+
 sortName :: R.Sort -> String
 sortName = \case
   R.VarS -> "var"
@@ -137,8 +154,8 @@ sortName = \case
   R.CtxS -> "ctx"
 
 -- | The opaque atom standing for a metavariable of sort @atom@, @formula@ or @ctx@.
-metaAtom :: R.Sort -> String -> Atomic SchemaName
-metaAtom s n = Var (Meta s n) :=== Lit 0
+encodeMeta :: R.Sort -> String -> Atomic SchemaName
+encodeMeta s n = Var (Meta s n) :=== Lit 0
 
 decodeMeta :: Atomic SchemaName -> Maybe (R.Sort, String)
 decodeMeta (Var (Meta s n) :=== Lit 0)
@@ -165,13 +182,13 @@ schemaScope sig metas =
           | s `elem` [R.VarS, R.TermS] -> Right (Var (Meta s n))
           | otherwise -> Left (n <> " is a " <> sortName s <> " metavariable, not a term")
     , scopeAtomic = \n -> case lookup n metas of
-        Just R.AtomS -> Just (metaAtom R.AtomS n)
+        Just R.AtomS -> Just (encodeMeta R.AtomS n)
         _ -> Nothing
     , scopeFormula = \n -> case lookup n metas of
-        Just s | s `elem` [R.AtomS, R.FormS] -> Just (Atm (metaAtom s n))
+        Just s | s `elem` [R.AtomS, R.FormS] -> Just (Atm (encodeMeta s n))
         _ -> Nothing
     , scopeContext = \n -> case lookup n metas of
-        Just R.CtxS -> Just (Atm (metaAtom R.CtxS n))
+        Just R.CtxS -> Just (Atm (encodeMeta R.CtxS n))
         _ -> Nothing
     }
 
@@ -191,16 +208,43 @@ praQuoter sig =
   QuasiQuoter
     { quoteExp = \src -> do
         env <- either (fail . displayException) pure (signatureKernelEnv sig)
-        (goal, tac) <- either (fail . displayException) pure (parseGoal (schemaScope sig []) src)
-        proof <- either (fail . renderSchemaTacticError sig) pure (proveOpenIn env Map.empty goal tac)
-        (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty) proof)
+        lemmas <- registeredLemmas
+        (goal, tac) <- either (fail . displayException) pure (parseGoalIn (lemmaSorts lemmas) (schemaScope sig []) src)
+        proof <- either (fail . renderSchemaTacticError sig) pure (proveOpenWith env (fmap entryLemma lemmas) Map.empty goal tac)
+        (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty (fmap entryFlags lemmas)) proof)
         pure body
     , quoteDec = \src -> do
-        decls <- either (fail . displayException) pure (parseDecls (schemaScope sig) src)
-        concat <$> traverse (compileDecl sig) decls
+        lemmas <- registeredLemmas
+        decls <- either (fail . displayException) pure (parseDeclsIn (lemmaSorts lemmas) (schemaScope sig) src)
+        (decs, lemmas') <-
+          foldM
+            ( \(acc, known) decl -> do
+                (ds, entry) <- compileDecl sig known decl
+                pure (acc <> ds, Map.insert (declName decl) entry known)
+            )
+            ([], lemmas)
+            decls
+        putQ (LemmaRegistry lemmas')
+        pure decs
     , quotePat = const (fail "pra: a proof is not a pattern")
     , quoteType = const (fail "pra: a proof is not a type")
     }
+
+-- | The lemmas the quotes of the current module have certified so far; a private type keeps it apart from other state.
+newtype LemmaRegistry = LemmaRegistry (Map String LemmaEntry)
+
+-- | A certified lemma, with the constraints its binding carries, which an appeal to it inherits.
+data LemmaEntry = LemmaEntry
+  { entryLemma :: !(Lemma SchemaName)
+  , entryFlags :: !(Set Flag)
+  }
+
+registeredLemmas :: Q (Map String LemmaEntry)
+registeredLemmas = maybe Map.empty (\(LemmaRegistry m) -> m) <$> getQ
+
+-- | What the parser needs of the lemmas: the sorts of their arguments.
+lemmaSorts :: Map String LemmaEntry -> Lemmas
+lemmaSorts = Map.map (map snd . lemmaMetas . entryLemma)
 
 -- | The constructor of 'Proof' for each rule, by its label.
 proofConstructors :: Q (Map String Name)
@@ -208,8 +252,9 @@ proofConstructors = do
   info <- reifyDatatype ''Proof
   pure (Map.fromList [(nameBase n, n) | con <- datatypeCons info, let n = constructorName con])
 
-compileDecl :: Signature -> Decl SchemaName -> Q [Dec]
-compileDecl sig decl = do
+-- | Compile a declaration to its binding, given the lemmas it may appeal to; also the lemma it is for those after it.
+compileDecl :: Signature -> Map String LemmaEntry -> Decl SchemaName -> Q ([Dec], LemmaEntry)
+compileDecl sig lemmas decl = do
   kernel <- either (fail . displayException) pure (signatureKernelEnv sig)
   let dname = declName decl
       binders = declBinders decl
@@ -219,7 +264,8 @@ compileDecl sig decl = do
     fail ("pra: " <> dname <> " is not a Haskell variable name")
   checked <-
     either (fail . renderSchemaTacticError sig) pure $
-      proveOpenIn kernel prems (declGoal decl) (declTactic decl)
+      proveOpenWith kernel (fmap entryLemma lemmas) prems (declGoal decl) (declTactic decl)
+  let lemma = (declLemma decl) {lemmaBound = boundVarMetas checked}
 
   -- One parameter per binder, in order.
   params <- traverse (newName . stem . fst) (binderParams binders)
@@ -236,7 +282,7 @@ compileDecl sig decl = do
   let objParams
         | runtimeFresh = Map.fromList (zip internal internalNames)
         | otherwise = Map.empty
-      env = LiftEnv sig metaParams premParams objParams
+      env = LiftEnv sig metaParams premParams objParams (fmap entryFlags lemmas)
 
   (body, flags) <- runWriterT (liftProof env proof)
   usedName <- newName "used"
@@ -262,10 +308,12 @@ compileDecl sig decl = do
       name = mkName dname
 
   addModFinalizer $ putDoc (DeclDoc name) (figure sig decl)
-  sequence
-    [ QTH.signature name ty
-    , QTH.function name [(map D.DVarP params, body')]
-    ]
+  decs <-
+    sequence
+      [ QTH.signature name ty
+      , QTH.function name [(map D.DVarP params, body')]
+      ]
+  pure (decs, LemmaEntry lemma flags')
   where
     startsLower = \case
       c : _ -> isLower c || c == '_'
@@ -312,17 +360,33 @@ usedNames env binders fixed =
 schemaNames :: Sequent SchemaName -> HashSet SchemaName
 schemaNames = goalNames
 
--- | The names occurring in the arguments of a proof.
-proofNames :: Free (ProofF SchemaName) h -> HashSet SchemaName
+{- |
+The names occurring in the arguments of a proof, those of the appeals to
+lemmas included: their arguments, the terms substituted for the free
+variables of the lemma and the hypotheses weakened in, but not the free
+variables themselves, which are the lemma's.
+-}
+proofNames :: Free (Step SchemaName) h -> HashSet SchemaName
 proofNames = iter step . fmap (const HS.empty)
   where
-    step s = let (args, subs) = stepFields s in HS.unions (map argNames args <> subs)
-    argNames = \case
-      ArgVar v -> HS.singleton v
-      ArgTerm t -> HS.fromList (toList t)
-      ArgAtom p -> HS.fromList (toList p)
-      ArgForm f -> HS.fromList (toList f)
-      ArgCtx g -> HS.fromList (foldMap toList g)
+    step = \case
+      RuleStep s -> let (args, subs) = stepFields s in HS.unions (map argNames args <> subs)
+      LemmaStep appeal subs ->
+        HS.unions
+          ( map argNames (appealArgs appeal)
+              <> [HS.fromList (toList t) | (_, t) <- appealSubst appeal]
+              <> [argNames (ArgCtx (appealWeakening appeal))]
+              <> subs
+          )
+
+-- | The metavariables of sort @var@ a proof binds as eigenvariables.
+boundVarMetas :: Free (Step SchemaName) h -> [String]
+boundVarMetas = iter step . fmap (const [])
+  where
+    step = \case
+      RuleStep s@(IndF (Meta R.VarS x) _ _ _ _) -> x : concat (toList s)
+      RuleStep s -> concat (toList s)
+      LemmaStep _ subs -> concat subs
 
 {- |
 Alpha-rename the variable bound by each substitution template.  Renaming the
@@ -331,14 +395,14 @@ leaving the binder unchanged would let it capture names inside metavariables
 when those are instantiated.  The new names are internal, so the runtime
 freshening in 'compileDecl' also keeps them apart from the actual arguments.
 -}
-freshenSubstitutions :: HashSet SchemaName -> Free (ProofF SchemaName) h -> Free (ProofF SchemaName) h
+freshenSubstitutions :: HashSet SchemaName -> Free (Step SchemaName) h -> Free (Step SchemaName) h
 freshenSubstitutions stated proof = go proof
   where
     used = stated <> proofNames proof
     go (Pure h) = Pure h
-    go (Free (SubstF x t s p d)) =
+    go (Free (RuleStep (SubstF x t s p d))) =
       let x' = freshen used x
-       in Free (SubstF x' t s (subst x (Var x') p) (go d))
+       in Free (RuleStep (SubstF x' t s (subst x (Var x') p) (go d)))
     go (Free step) = Free (fmap go step)
 
 -- | The inference figure attached to a generated binding.
@@ -365,6 +429,8 @@ data LiftEnv = LiftEnv
   , lePremise :: Map String Name
   , leObj :: Map String Name
   -- ^ object variables bound at run time
+  , leLemmas :: Map String (Set Flag)
+  -- ^ the constraints the binding of each lemma carries
   }
 
 data Flag = NeedsHashable | NeedsIsString | NeedsFresh
@@ -454,8 +520,9 @@ liftFormula env = \case
 
 liftContext :: LiftEnv -> Multiset (Formula SchemaName) -> LCode (Multiset (Formula W))
 liftContext env g = do
-  need NeedsHashable
   let (ctxMetas, formulas) = foldr classify ([], []) g
+  -- A context which is one metavariable is passed along; anything else is assembled.
+  unless (null formulas && length ctxMetas == 1) (need NeedsHashable)
   tails <- traverse (metaParam env R.CtxS) ctxMetas
   let base = case tails of
         [] -> [||MS.empty||]
@@ -475,14 +542,24 @@ liftArg env = \case
   ArgForm f -> liftFormula env f >>= lift . unTypeCode
   ArgCtx g -> liftContext env g >>= lift . unTypeCode
 
-liftProof :: LiftEnv -> Free (ProofF SchemaName) String -> L Exp
+liftProof :: LiftEnv -> Free (Step SchemaName) String -> L Exp
 liftProof env proof = do
   cons <- lift proofConstructors
   let go = \case
         Pure d -> case Map.lookup d (lePremise env) of
           Just p -> lift (QTH.varE p)
           Nothing -> failL ("no parameter for the premise " <> d)
-        Free step -> do
+        -- The identity on a formula metavariable is expanded at run time,
+        -- through the connectives of the formula it is instantiated with.
+        Free (RuleStep step)
+          | IdRule <- ruleName step
+          , ([ArgAtom p, ArgCtx g], []) <- stepFields step
+          , Just (R.FormS, n) <- decodeMeta p -> do
+              need NeedsHashable
+              f <- metaParam env R.FormS n :: LCode (Formula W)
+              g' <- liftContext env g
+              lift [|identityProof $(unTypeCode g') $(unTypeCode f)|]
+        Free (RuleStep step) -> do
           con <- case Map.lookup (R.ruleLabel (ruleSpec (ruleName step))) cons of
             Just c -> pure c
             Nothing -> failL ("no constructor for " <> show (ruleName step))
@@ -490,4 +567,32 @@ liftProof env proof = do
           args' <- traverse (liftArg env) args
           subs' <- traverse go subs
           lift (foldl (\f x -> [|$f $(pure x)|]) (QTH.conE con) (args' <> subs'))
+        -- The lemma's binding at the arguments, then the free variables of
+        -- its statement substituted, then the weakening: what 'proveWith' does.
+        Free (LemmaStep appeal subs) -> do
+          mapM_ need (Set.toList (Map.findWithDefault Set.empty (appealName appeal) (leLemmas env)))
+          args' <- traverse (liftArg env) (appealArgs appeal)
+          subs' <- traverse go subs
+          let applied = foldl (\f x -> [|$f $(pure x)|]) (QTH.varE (mkName (appealName appeal))) (args' <> subs')
+          substituted <- case appealSubst appeal of
+            [] -> pure applied
+            pairs -> do
+              need NeedsFresh
+              pairs' <- traverse liftPair pairs
+              pure [|substProof $(QTH.listE pairs') $applied|]
+          if MS.population (appealWeakening appeal) == 0
+            then lift substituted
+            else do
+              need NeedsFresh
+              extra <- liftContext env (appealWeakening appeal)
+              lift [|weakenProof $(unTypeCode extra) $substituted|]
+      -- A free variable of the lemma is the name its proof spells it by, whatever the current proof calls its own.
+      liftPair (v, t) = do
+        v' <- case v of
+          Obj s -> do
+            need NeedsIsString
+            pure ([||fromString s||] :: Code Q W)
+          Meta s n -> failL (n <> " is a " <> sortName s <> " metavariable, but is substituted as a free variable")
+        t' <- liftTerm env t
+        pure [|($(unTypeCode v'), $(unTypeCode t'))|]
   go proof

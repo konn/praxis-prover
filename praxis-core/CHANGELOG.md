@@ -28,6 +28,26 @@ and this project adheres to the
 - The rule `Cut`, in `Language.Praxis.PRA.Rule.G3i`: admissible in pure G3i,
   it is not eliminable in the presence of `Ind`, which needs it to reason
   about hypotheses mentioning the induction term.
+- Appeals to lemmas: `exact name` refers to a theorem or derived rule
+  certified before, besides the premises of the rule being proved. The
+  metavariables of the lemma are inferred by matching its statement against
+  the goal or given as arguments, `exact symm a b`; its context metavariable
+  takes the hypotheses it does not mention, and otherwise they are weakened
+  in; the free variables of a theorem are instantiated by the goal; the
+  premises of a rule become goals, `exact conjSwap { Id } { Id }`. In the
+  engine, `Lemma`, `Certified`, `proveWith` and `proveOpenWith` carry the
+  lemmas, a partial proof is a `Free (Step a)` whose `LemmaStep` records the
+  `Appeal`, and `certify` checks an appeal against the lemma's statement
+  instantiated afresh. In the quasiquoter, a declaration is a lemma for the
+  declarations after it, across the quotes of a module.
+- `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
+  the substitution and weakening of a proof, renaming the variables its steps
+  bind apart; the spliced proof of an appeal to a theorem is built with them.
+  `identityProof` derives `Γ, A |- A` for any formula, and the quasiquoter
+  splices it where a script closes a goal by `Id` or `assumption` on a
+  `formula` metavariable, so `rule r (A : formula) (Γ : ctx) : A, Γ |- A by
+  assumption` certifies, as does generalized induction under a `formula`
+  metavariable.
 
 ### Changed
 
@@ -64,5 +84,11 @@ and this project adheres to the
 - The errors of schematic proofs render metavariables by name, through
   `renderSchemaTacticError` and the hooked renderers of
   `Language.Praxis.PRA.Syntax.Pretty`, so a `sorry` report reads `Γ |- A`.
+- `Fresh` lives in `Language.Praxis.Name`, re-exported by
+  `Language.Praxis.PRA.Tactic`, whose engine now runs over `Schematic` names,
+  which tell the metavariables of a lemma's statement apart from its free
+  variables. `Exact` carries the arguments of the appeal, `proveOpen` returns
+  a `Free (Step a) String`, and an opaque formula or context metavariable is
+  never selected by `symmetry`, `rewrite` or the atomic patterns of a rule.
 
 ## 0.1.0.0 - YYYY-MM-DD

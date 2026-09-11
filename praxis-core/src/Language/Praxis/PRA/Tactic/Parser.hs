@@ -6,7 +6,8 @@ The textual syntax of tactics, and of the declarations which use them.
 > simple  ::= basic {'{' tactic '}'}       -- t {u1} … {un}: t must leave n goals, ui gets goal i
 > basic   ::= Rule {arg}                   -- a rule of the calculus, applied backwards
 >           | refl | symmetry atom | rewrite atom in atom
->           | induction arg [as ident] | assumption | exact ident
+>           | induction arg [as ident] | assumption
+>           | exact ident {arg}            -- a premise, or a lemma with the arguments for its metavariables
 >           | skip | sorry | try basic | repeat basic | ( tactic )
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
 >
@@ -25,6 +26,12 @@ term; atom and formula arguments are parenthesized.  Context parameters are
 never written.  A metavariable must be
 declared before the premises which mention it.
 
+@exact@ names a premise of the rule being proved, or a lemma: a theorem or
+rule declared earlier, whose metavariables take arguments the same way, in
+the order of its binders.  The lemmas in scope, with the sorts of their
+metavariables, are the 'Lemmas' the parsers are given; a declaration is in
+scope for the declarations after it.
+
 @sorry@ abandons the proof at its goal, which the error then reports; neither
 @|@, @try@ nor @repeat@ catches it, so a script may end in @sorry@ to see
 where it stands.
@@ -36,9 +43,14 @@ module Language.Praxis.PRA.Tactic.Parser (
   Decl (..),
   Binder (..),
   binderMetas,
+  declLemma,
+  Lemmas,
   parseDecls,
+  parseDeclsIn,
   parseGoal,
+  parseGoalIn,
   parseTactic,
+  parseTacticIn,
   SyntaxError,
 
   -- * The parsers
@@ -54,6 +66,8 @@ module Language.Praxis.PRA.Tactic.Parser (
 ) where
 
 import Data.Hashable (Hashable)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Language.Praxis.PRA.Pattern (Hole (..))
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Rule qualified as R
@@ -123,38 +137,67 @@ data Decl a = Decl
   }
   deriving (Show, Eq)
 
+-- | The lemma a declaration states, once proved; it binds no metavariable, as far as the statement tells.
+declLemma :: Decl a -> Lemma a
+declLemma d =
+  Lemma
+    { lemmaMetas = binderMetas (declBinders d)
+    , lemmaPremises = [(n, s) | PremiseBinder n s <- declBinders d]
+    , lemmaGoal = declGoal d
+    , lemmaBound = []
+    }
+
+-- | The lemmas a script may appeal to, each with the sorts of its metavariables in the order of its binders.
+type Lemmas = Map String [R.Sort]
+
 {- |
 Parse declarations.  The function builds the scope in which the sequents and
 the tactic of a declaration are read, from the metavariables it declares;
-'plainMetaScope' serves for plain names.
+'plainMetaScope' serves for plain names.  Each declaration is a lemma for
+those after it.
 -}
 parseDecls :: (Hashable a) => ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
-parseDecls mkScope = runParserFully (declsP mkScope)
+parseDecls = parseDeclsIn Map.empty
+
+-- | 'parseDecls', with lemmas in scope from the start.
+parseDeclsIn :: (Hashable a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
+parseDeclsIn lemmas mkScope = runParserFully (declsP lemmas mkScope)
 
 -- | Parse @sequent by tactic@.
 parseGoal :: (Hashable a) => Scope a -> String -> Either SyntaxError (Sequent a, Tactic a)
-parseGoal sc = runParserFully (goalP sc)
+parseGoal = parseGoalIn Map.empty
+
+parseGoalIn :: (Hashable a) => Lemmas -> Scope a -> String -> Either SyntaxError (Sequent a, Tactic a)
+parseGoalIn lemmas sc = runParserFully (goalP lemmas sc)
 
 parseTactic :: Scope a -> String -> Either SyntaxError (Tactic a)
-parseTactic sc = runParserFully (tacticP sc)
+parseTactic = parseTacticIn Map.empty
 
-declsP :: (Hashable a) => ([(String, R.Sort)] -> Scope a) -> Parser [Decl a]
-declsP mkScope = many (declP mkScope)
+parseTacticIn :: Lemmas -> Scope a -> String -> Either SyntaxError (Tactic a)
+parseTacticIn lemmas sc = runParserFully (tacticP lemmas sc)
 
-declP :: forall a. (Hashable a) => ([(String, R.Sort)] -> Scope a) -> Parser (Decl a)
-declP mkScope = theoremP <|> ruleP
+declsP :: (Hashable a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> Parser [Decl a]
+declsP lemmas0 mkScope = go lemmas0
+  where
+    go lemmas =
+      optional (declP lemmas mkScope) >>= \case
+        Nothing -> pure []
+        Just d -> (d :) <$> go (Map.insert (declName d) (map snd (binderMetas (declBinders d))) lemmas)
+
+declP :: forall a. (Hashable a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> Parser (Decl a)
+declP lemmas mkScope = theoremP <|> ruleP
   where
     theoremP = do
       keywordP "theorem"
       name <- nameP
       symbolP ":"
-      uncurry (Decl name []) <$> goalP (mkScope [])
+      uncurry (Decl name []) <$> goalP lemmas (mkScope [])
     ruleP = do
       keywordP "rule"
       name <- nameP
       binders <- bindersP []
       symbolP ":"
-      uncurry (Decl name binders) <$> goalP (mkScope (binderMetas binders))
+      uncurry (Decl name binders) <$> goalP lemmas (mkScope (binderMetas binders))
     nameP = identifierP (withTacticScope (mkScope []))
 
     bindersP :: [Binder a] -> Parser [Binder a]
@@ -176,15 +219,15 @@ declP mkScope = theoremP <|> ruleP
         <?> "sort"
 
 -- | @sequent by tactic@.
-goalP :: (Hashable a) => Scope a -> Parser (Sequent a, Tactic a)
-goalP sc0 = (,) <$> sequentP sc <* keywordP "by" <*> tacticP sc
+goalP :: (Hashable a) => Lemmas -> Scope a -> Parser (Sequent a, Tactic a)
+goalP lemmas sc0 = (,) <$> sequentP sc <* keywordP "by" <*> tacticP lemmas sc
   where
     sc = withTacticScope sc0
 
 -- * Tactics
 
-tacticP :: forall a. Scope a -> Parser (Tactic a)
-tacticP sc0 = seqP
+tacticP :: forall a. Lemmas -> Scope a -> Parser (Tactic a)
+tacticP lemmas sc0 = seqP
   where
     sc = withTacticScope sc0
 
@@ -208,7 +251,7 @@ tacticP sc0 = seqP
             , Rewrite <$> (keywordP "rewrite" *> atomArgP) <*> (keywordP "in" *> atomArgP)
             , Induction <$> (keywordP "induction" *> closedP (termAtomP sc)) <*> optional (keywordP "as" *> variableP)
             , Assumption <$ keywordP "assumption"
-            , Exact <$> (keywordP "exact" *> identifierP sc)
+            , exactP
             , Skip <$ keywordP "skip"
             , Sorry <$ keywordP "sorry"
             , Try <$> (keywordP "try" *> basicP)
@@ -218,31 +261,37 @@ tacticP sc0 = seqP
           )
         <?> "tactic"
 
+    -- A premise takes no arguments; a lemma takes those of its metavariables.
+    exactP = do
+      keywordP "exact"
+      name <- identifierP sc
+      Exact name <$> argsP (Map.findWithDefault [] name lemmas)
+
     rule :: RuleName -> Parser (Tactic a)
-    rule r = Apply r <$> (keywordP (R.ruleLabel spec) *> argsP (R.ruleParams spec))
+    rule r = Apply r <$> (keywordP (R.ruleLabel spec) *> argsP (map R.paramSort (R.ruleParams spec)))
       where
         spec = ruleSpec r
 
     -- Arguments are taken in order; the first one missing ends them.
-    argsP :: [R.Param] -> Parser [Maybe (Arg (Hole a))]
+    argsP :: [R.Sort] -> Parser [Maybe (Arg (Hole a))]
     argsP [] = pure []
-    argsP (p : ps) = case p of
-      R.PCtx _ -> (Nothing :) <$> argsP ps
+    argsP (s : ss) = case s of
+      R.CtxS -> (Nothing :) <$> argsP ss
       _ ->
-        optional (argP p) >>= \case
-          Nothing -> pure (map (const Nothing) (p : ps))
-          Just arg -> (arg :) <$> argsP ps
+        optional (argP s) >>= \case
+          Nothing -> pure (map (const Nothing) (s : ss))
+          Just arg -> (arg :) <$> argsP ss
 
-    argP :: R.Param -> Parser (Maybe (Arg (Hole a)))
-    argP p =
+    argP :: R.Sort -> Parser (Maybe (Arg (Hole a)))
+    argP s =
       (Nothing <$ wildcardP)
         <|> Just
-        <$> case p of
-          R.PVar _ -> ArgVar . Named <$> variableP
-          R.PTerm _ -> ArgTerm <$> termAtomP sc
-          R.PAtom _ -> ArgAtom <$> parens (atomicP sc)
-          R.PForm _ -> ArgForm <$> parens (formulaP sc)
-          R.PCtx _ -> empty
+        <$> case s of
+          R.VarS -> ArgVar . Named <$> variableP
+          R.TermS -> ArgTerm <$> termAtomP sc
+          R.AtomS -> ArgAtom <$> parens (atomicP sc)
+          R.FormS -> ArgForm <$> parens (formulaP sc)
+          R.CtxS -> empty
 
     -- An atomic pattern, with or without parentheses.
     atomArgP = try (parens atomArgP) <|> atomicP sc

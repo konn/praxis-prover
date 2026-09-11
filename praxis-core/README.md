@@ -136,6 +136,28 @@ The library's own signature is `builtin`, exported by
 `Language.Praxis.PRA.Tactic.Quote` exports `pra = praQuoter builtin`, so proofs
 over that arithmetic need no support module of their own.
 
+A declaration is a lemma for the declarations after it, in the same quote or
+in a later quote of the same module: `exact name` appeals to it, with its
+metavariables inferred from the goal or given as arguments, its free variables
+instantiated, the hypotheses it does not mention weakened in, and its premises
+left as goals for the blocks which follow.
+
+```haskell
+[pra|
+theorem succSubSucc : |- S n - S m = n - m
+by induction m
+   { Defeq (S n - 1) (n - 0); Id }
+   { Defeq (S n - S (S m')) (prd (S n - S m'))
+   ; rewrite (S n - S m' = n - m') in (S n - S (S m') = prd (S n - S m'))
+   ; Defeq (prd (n - m')) (n - S m')
+   ; rewrite (prd (n - m') = n - S m') in (S n - S (S m') = prd (n - m'))
+   ; Id }
+
+theorem succSubSuccAt : x = 0 |- S 3 - S x = 3 - x
+by exact succSubSucc
+|]
+```
+
 For non-TH use, `PrimitiveRecursion.Environment` provides `compileDefinitions`,
 `compileDefinitionsWith` (qualified identities), and `extendEnvironment`.
 Compiled blocks retain equation rows, case trees, and the recursion argument

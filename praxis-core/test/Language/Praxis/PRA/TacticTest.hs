@@ -17,6 +17,7 @@ import Data.Sized (pattern Nil, pattern (:<))
 import Language.Praxis.PRA.Pattern (Hole (..))
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..), builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Examples (mult, plus)
+import Language.Praxis.PRA.PrimitiveRecursion.Function (emptyKernelEnv)
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Rule (Sort (..))
 import Language.Praxis.PRA.Signature
@@ -25,7 +26,7 @@ import Language.Praxis.PRA.Syntax.Parser
 import Language.Praxis.PRA.Syntax.Pretty
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
-import Language.Praxis.PRA.Tactic.Quote (renderSchemaTacticError, schemaScope)
+import Language.Praxis.PRA.Tactic.Quote (SchemaName (..), renderSchemaTacticError, schemaScope)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -43,6 +44,7 @@ tacticTests =
     , prettyTests
     , sorryTests
     , inductionTests
+    , lemmaTests
     ]
 
 sig :: Signature
@@ -481,3 +483,108 @@ inductionTests =
           Left err -> renderTacticError sig id err @?= "1:51: sorry: the proof stops here\n  S n + 0 = z\n  n + 0 = z ==> n = z\n  y + 0 = z\n  |- S n = z"
           Right _ -> assertFailure "proved"
     ]
+
+lemmaTests :: TestTree
+lemmaTests =
+  testGroup
+    "lemmas"
+    [ testCase "exact takes arguments for the metavariables of a lemma" $ do
+        t <- parsed (parseTermPattern sc "S x")
+        f <- parsed (parseFormulaPattern sc "a = 0")
+        let lemmas = Map.fromList [("foo", [TermS, CtxS, FormS])]
+        tac <- parsed (parseTacticIn lemmas sc "exact foo (S x) (a = 0)")
+        stripLoc tac @?= Exact "foo" [Just (ArgTerm t), Nothing, Just (ArgForm f)]
+        bare <- parsed (parseTacticIn lemmas sc "exact foo")
+        stripLoc bare @?= Exact "foo" [Nothing, Nothing, Nothing]
+    , testCase "a premise takes no arguments" $ "exact D" `parsesTo` Exact "D" []
+    , testCase "a declaration is a lemma for those after it" $ do
+        decls <- parsed (parseDecls (plainMetaScope sig) "theorem two : |- 2 = 2 by refl\ntheorem again : |- 2 = 2 by exact two")
+        map (stripLoc . declTactic) decls @?= [Refl, Exact "two" []]
+    , testCase "a theorem is appealed to at an instance of its free variables" $ do
+        lemmas <- plusZero
+        provesWith lemmas "|- plus (S x) 0 = S x by exact plusZero"
+        provesWith lemmas "|- plus 3 0 = 3 by exact plusZero"
+    , testCase "a theorem is weakened to the hypotheses of the goal" $ do
+        lemmas <- plusZero
+        provesWith lemmas "z = 0, plus x 0 = 3 |- plus x 0 = x by exact plusZero"
+    , testCase "the eigenvariable of the lemma is renamed apart from the goal" $ do
+        lemmas <- plusZero
+        provesWith lemmas "n = 0 |- plus n 0 = n by exact plusZero"
+        provesWith lemmas "|- plus (S n) 0 = S n by exact plusZero"
+    , testCase "a goal which is not an instance" $ do
+        lemmas <- plusZero
+        failsWithIn lemmas "|- plus 0 y = y by exact plusZero" \case
+          NotAnInstance "plusZero" _ -> True
+          _ -> False
+    , testCase "the premises of a lemma are left as goals" $
+        provesWith both "2 = 2 |- 2 = 2 /\\ 2 = 2 by exact both { Id }"
+    , testCase "a lemma with premises but no context metavariable is not weakened" $
+        failsWithIn both "2 = 2, c = 0 |- 2 = 2 /\\ 2 = 2 by exact both { Id }" \case
+          CannotWeaken "both" _ -> True
+          _ -> False
+    , testCase "a lemma with premises must be closed but for its metavariables" $
+        failsWithIn bothOpen "a = 0 |- a = 0 /\\ a = 0 by exact bothOpen { Id }" \case
+          NotClosed "bothOpen" ["a"] -> True
+          _ -> False
+    , testCase "an unknown lemma" $
+        "|- 2 = 2 by exact nothing" `failsWith` \case
+          UnknownPremise "nothing" -> True
+          _ -> False
+    , testCase "a bound variable metavariable must be instantiated apart from the goal" $ do
+        let scope = schemaScope builtin [("x", VarS), ("t", TermS), ("Γ", CtxS)]
+        statement <- parsed (parseSequent scope "Γ |- t + 0 = t")
+        let indAt = Lemma [("x", VarS), ("t", TermS), ("Γ", CtxS)] [] statement ["x"]
+            lemmas = Map.fromList [("indAt", indAt)]
+            run src = do
+              (goal, tac) <- parsed (parseGoalIn (Map.map (map snd . lemmaMetas) lemmas) (schemaScope builtin []) src)
+              pure (proveOpenWith emptyKernelEnv lemmas Map.empty goal tac)
+        either (assertFailure . renderSchemaTacticError builtin) (const (pure ())) =<< run "m = 0 |- n + 0 = n by exact indAt k"
+        run "m = 0 |- n + 0 = n by exact indAt n" >>= \case
+          Left (TacticError _ _ (NotEigen "indAt" "x" (Obj "n"))) -> pure ()
+          Left err -> assertFailure (renderSchemaTacticError builtin err)
+          Right _ -> assertFailure "proved"
+        run "m = 0 |- n + 0 = n by exact indAt" >>= \case
+          Left (TacticError _ _ (CannotInstantiate "indAt" _)) -> pure ()
+          Left err -> assertFailure (renderSchemaTacticError builtin err)
+          Right _ -> assertFailure "proved"
+    ]
+  where
+    plusZero = do
+      thm <- certified "|- plus y 0 = y by induction y as n { refl } { Defeq (plus (S n) 0) (S (plus n 0)); rewrite (plus n 0 = n) in (plus (S n) 0 = _); Id }"
+      pure (Map.fromList [("plusZero", thm)])
+    -- A rule with a premise and no context metavariable: from the premise, the conjunction.
+    both = conjoining "both" "2 = 2"
+    bothOpen = conjoining "bothOpen" "a = 0"
+    conjoining name p =
+      Map.fromList
+        [
+          ( name
+          , Certified
+              (Lemma [] [("D", sequent (p <> " |- " <> p))] (sequent (p <> " |- " <> p <> " /\\ " <> p)) [])
+              (\_ ds -> case ds of [d] -> ConjR d d; _ -> error (name <> " takes one premise"))
+          )
+        ]
+
+-- | A theorem proved by a script, as a lemma for others.
+certified :: String -> IO (Certified String)
+certified src = do
+  (goal, tac) <- parsed (parseGoal sc src)
+  either (assertFailure . renderTacticError sig id) (pure . theorem goal) (prove goal tac)
+
+lemmaSortsOf :: Map.Map String (Certified String) -> Lemmas
+lemmaSortsOf = Map.map (map snd . lemmaMetas . certifiedLemma)
+
+-- | Prove the script with lemmas to appeal to, and check the proof.
+provesWith :: Map.Map String (Certified String) -> String -> Assertion
+provesWith lemmas src = do
+  (goal, tac) <- parsed (parseGoalIn (lemmaSortsOf lemmas) sc src)
+  case proveWith emptyKernelEnv lemmas goal tac of
+    Left err -> assertFailure (renderTacticError sig id err)
+    Right p -> inferConclusion p @?= Right goal
+
+failsWithIn :: Map.Map String (Certified String) -> String -> (Failure String -> Bool) -> Assertion
+failsWithIn lemmas src ok = do
+  (goal, tac) <- parsed (parseGoalIn (lemmaSortsOf lemmas) sc src)
+  case proveWith emptyKernelEnv lemmas goal tac of
+    Right _ -> assertFailure "the script was not expected to succeed"
+    Left err -> assertBool (renderTacticError sig id err) (ok (errorFailure err))

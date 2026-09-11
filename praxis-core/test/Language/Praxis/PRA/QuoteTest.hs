@@ -69,6 +69,42 @@ rule plusZeroRightAt (t : term) (Γ : ctx) : Γ |- plus t 0 = t
 by Ind n (plus n 0 = n) t
    { refl }
    { Defeq (plus (S n) 0) (S (plus n 0)); rewrite (plus n 0 = n) in (plus (S n) 0 = _); Id }
+
+-- Appeals to the lemmas above: a theorem at an instance of its free variable,
+-- under hypotheses, and rules with their metavariables inferred or given.
+theorem plusZeroRightAtS : |- plus (S x) 0 = S x
+by exact plusZeroRight
+
+rule plusZeroRightUnder (Γ : ctx) : Γ |- plus y 0 = y
+by exact plusZeroRight
+
+rule transP (t s u : term) (Γ : ctx) (D1 : Γ |- t = s) (D2 : t = s, Γ |- s = u) : Γ |- t = u
+by Cut (t = s) { exact D1 } { Cut (s = u) { exact D2 } { Subst x s u (t = x); Id } }
+
+theorem plusZeroRightTwice : |- plus (plus y 0) 0 = y
+by exact transP _ (plus y 0) { exact plusZeroRight } { exact plusZeroRight }
+
+rule symmUse (a b : term) (Δ : ctx) : a = b, Δ |- b = a
+by exact symm
+
+rule symmGiven (a b : term) (Δ : ctx) : a = b, Δ |- b = a
+by exact symm a b
+
+theorem transAt : a = b, b = c |- a = c
+by exact trans
+
+theorem conjSwapAt : a = 0 /\ b = 0, c = 0 |- b = 0 /\ a = 0
+by exact conjSwap { Id } { Id }
+
+rule conjSwapMeta (A B : formula) (Γ : ctx) (D1 : A, B, Γ |- B) (D2 : A, B, Γ |- A)
+  : A /\ B, Γ |- B /\ A
+by exact conjSwap { exact D1 } { exact D2 }
+|]
+
+-- A quote later in the module sees the lemmas of the quotes before it.
+[testPra|
+theorem plusTwoZero : |- plus 2 0 = 2
+by exact plusZeroRight
 |]
 
 [pra|
@@ -95,6 +131,41 @@ by refl
 
 theorem muSugar : |- (μ i < 10. 3 < i) = 4
 by refl
+
+theorem succSubSucc : |- S n - S m = n - m
+by induction m
+   { Defeq (S n - 1) (n - 0); Id }
+   { Defeq (S n - S (S m')) (prd (S n - S m'))
+   ; rewrite (S n - S m' = n - m') in (S n - S (S m') = prd (S n - S m'))
+   ; Defeq (prd (n - m')) (n - S m')
+   ; rewrite (prd (n - m') = n - S m') in (S n - S (S m') = prd (n - m'))
+   ; Id }
+
+-- The theorem at other terms, under a hypothesis, and with its own eigenvariable in the instance.
+theorem succSubSuccAt : x = 0 |- S 3 - S x = 3 - x
+by exact succSubSucc
+
+theorem succSubSuccEigen : |- S m' - S (S m') = m' - S m'
+by exact succSubSucc
+
+-- A formula metavariable closed by assumption: the identity is expanded at the instance.
+rule assumeAny (A : formula) (Γ : ctx) : A, Γ |- A
+by assumption
+
+-- Generalized induction on a term metavariable, discharging a formula metavariable.
+rule ltZero (t : term) (Γ : ctx) (A : formula) : (t < 0) = 1, Γ |- A
+by induction t as n
+   { Defeq (0 < 0) 0; Subst x (0 < 0) 0 (x = 1); symmetry (0 = 1); SuccNonZero }
+   { Defeq (S n < 0) (sgn (prd (0 - n)))
+   ; Subst x (S n < 0) (sgn (prd (0 - n))) (x = 1)
+   ; Defeq (n < 0) (sgn (0 - n))
+   ; ImplL ((n < 0) = 1) (A)
+     { induction (0 - n) as y
+       { Defeq (sgn (prd 0)) 0; Subst x (sgn (prd 0)) 0 (x = 1); symmetry (0 = 1); SuccNonZero }
+       { Defeq (sgn (S y)) 1; Subst x (sgn (S y)) 1 ((n < 0) = x); Id }
+     }
+     { assumption }
+   }
 |]
 
 quoteTests :: TestTree
@@ -156,6 +227,30 @@ quoteTests =
     , testCase "the eigenvariable of a rule avoids the arguments" $
         inferConclusion (plusZeroRightAt (Var "n") (ctx ["n = 0"]))
           @?= Right (sequent "n = 0 |- plus n 0 = n")
+    , testCase "an appeal to a theorem instantiates its free variables" $ do
+        inferConclusion plusZeroRightAtS @?= Right (sequent "|- plus (S x) 0 = S x")
+        inferConclusion plusTwoZero @?= Right (sequent "|- plus 2 0 = 2")
+    , testCase "an appeal to a theorem is weakened, renaming its eigenvariable apart from the hypotheses" $
+        inferConclusion (plusZeroRightUnder (ctx ["n = 0", "y = 1"]))
+          @?= Right (sequent "n = 0, y = 1 |- plus y 0 = y")
+    , testCase "an appeal to a rule instantiates its metavariables" $ do
+        inferConclusion (symmUse (Var "a") (Lit 3) (ctx ["b = 0"]))
+          @?= Right (sequent "a = 3, b = 0 |- 3 = a")
+        inferConclusion (symmGiven (Var "x") (Var "x'") (ctx ["x = x'"]))
+          @?= Right (sequent "x = x', x = x' |- x' = x")
+        inferConclusion transAt @?= Right (sequent "a = b, b = c |- a = c")
+    , testCase "the premises of an appeal are proved by the blocks" $ do
+        inferConclusion plusZeroRightTwice @?= Right (sequent "|- plus (plus y 0) 0 = y")
+        inferConclusion conjSwapAt @?= Right (sequent "a = 0 /\\ b = 0, c = 0 |- b = 0 /\\ a = 0")
+        inferConclusion
+          ( conjSwapMeta
+              (atom "a = 0")
+              (atom "b = 0")
+              (ctx ["c = 0"])
+              (Id (Var "b" :=== Lit 0) (ctx ["a = 0", "c = 0"]))
+              (Id (Var "a" :=== Lit 0) (ctx ["b = 0", "c = 0"]))
+          )
+          @?= Right (sequent "a = 0 /\\ b = 0, c = 0 |- b = 0 /\\ a = 0")
     , testCase "desugared operators, ifte, and schema application in pra quotes" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         inferConclusionIn kenv desugaredAddMul @?= Right (sequentMu "|- 2 + 3 * 4 = 14")
@@ -166,6 +261,15 @@ quoteTests =
         inferConclusionIn kenv muUnaryApp @?= Right (sequentMu "|- mu sgn 5 = 1")
         inferConclusionIn kenv muLambda @?= Right (sequentMu "|- mu {λ i. 3 < i} 10 = 4")
         inferConclusionIn kenv muSugar @?= Right (sequentMu "|- mu {λ i. 3 < i} 10 = 4")
+        inferConclusionIn kenv succSubSuccAt @?= Right (sequentMu "x = 0 |- S 3 - S x = 3 - x")
+        inferConclusionIn kenv succSubSuccEigen @?= Right (sequentMu "|- S m' - S (S m') = m' - S m'")
+    , testCase "a formula metavariable under Id is the identity expanded at the instance" $ do
+        kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
+        let compound = atomMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)"
+        inferConclusionIn kenv (assumeAny compound (ctxMu ["d = 0"]))
+          @?= Right (sequentMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_), d = 0 |- a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)")
+        inferConclusionIn kenv (ltZero (Lit 5) (ctxMu ["n = 0", "x = 1"]) compound)
+          @?= Right (sequentMu "(5 < 0) = 1, n = 0, x = 1 |- a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)")
         case parseTerm scMu "μ i < 10. y < i" of
           Right (App _ args) -> toList args @?= [Lit 10, Var "y"]
           other -> assertFailure ("a bounded search over a variable: " <> show other)
@@ -175,6 +279,9 @@ quoteTests =
     sequent = either (error . displayException) id . parseSequent sc
     scMu = plainScope builtin
     sequentMu = either (error . displayException) id . parseSequent scMu
+    atomMu = either (error . displayException) id . parseFormula scMu
+    ctxMu :: [String] -> Multiset (Formula String)
+    ctxMu = foldr (MS.insertOne . atomMu) MS.empty
     atom = either (error . displayException) id . parseFormula sc
     ctx :: [String] -> Multiset (Formula String)
     ctx = foldr (MS.insertOne . atom) MS.empty

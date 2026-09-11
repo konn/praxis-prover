@@ -98,6 +98,7 @@ library
     Language.Praxis.PRA.PrimitiveRecursion.Function
     Language.Praxis.PRA.PrimitiveRecursion.Quote
     Language.Praxis.PRA.Proof
+    Language.Praxis.PRA.Proof.Transform
     Language.Praxis.PRA.Rule
     Language.Praxis.PRA.Rule.G3i
     Language.Praxis.PRA.Rule.TH

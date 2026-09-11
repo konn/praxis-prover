@@ -9,12 +9,15 @@ partial proof: a proof tree whose leaves are the goals left open, or the
 premises a derived rule may appeal to.  The primitive tactics are the rules of
 the calculus applied backwards — one per rule, read off 'ruleSpec', so a rule
 added to "Language.Praxis.PRA.Rule.G3i" is a tactic without further ado.  A
-handful of derived tactics compute the arguments a rule needs from the goal.
+handful of derived tactics compute the arguments a rule needs from the goal,
+and 'Exact' appeals to a 'Lemma' certified before: a theorem, or a derived
+rule, instantiated to the goal.
 
-Nothing here is trusted.  'prove' hands the proof it built to
-'inferConclusionOpen' and compares the sequent the checker infers with the
-goal, so a tactic which produced the wrong proof is an error, not an unsound
-theorem.  See "Language.Praxis.PRA.Tactic.Parser" for the textual syntax.
+Nothing here is trusted.  'prove' hands the proof it built to the checker
+and compares the sequent it infers with the goal, so a tactic which produced
+the wrong proof is an error, not an unsound theorem; an appeal to a lemma is
+checked against the lemma's statement, instantiated afresh.  See
+"Language.Praxis.PRA.Tactic.Parser" for the textual syntax.
 -}
 module Language.Praxis.PRA.Tactic (
   -- * Tactics
@@ -22,13 +25,26 @@ module Language.Praxis.PRA.Tactic (
   Loc (..),
   applyWith,
 
+  -- * Lemmas
+  Lemma (..),
+  Schematic (..),
+  Certified (..),
+  theorem,
+
   -- * Running
   prove,
+  proveWith,
   proveOpen,
   proveOpenIn,
+  proveOpenWith,
   runTactic,
+  runTacticWith,
   Leaf (..),
+  Step (..),
+  Appeal (..),
   Partial,
+  instantiateLemma,
+  certify,
 
   -- * Errors
   TacticError (..),
@@ -44,13 +60,16 @@ module Language.Praxis.PRA.Tactic (
 import Control.Applicative ((<|>))
 import Control.Exception (displayException)
 import Control.Lens ((^?))
-import Control.Monad (foldM, join, unless, when, (>=>))
-import Control.Monad.Free (Free (..), iter)
+import Control.Monad (foldM, forM_, join, unless, when, (>=>))
+import Control.Monad.Free (Free (..))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (evalStateT, get, put)
 import Data.Bifunctor (first)
+import Data.Either (partitionEithers)
 import Data.Foldable (toList)
 import Data.Functor.Foldable (embed)
+import Data.HashMap.Strict (HashMap)
+import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.Hashable (Hashable)
@@ -59,6 +78,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust, isNothing)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Set qualified as Set
@@ -68,11 +88,13 @@ import Data.Type.Equality qualified as TE
 import Data.Type.Natural (sNat)
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
+import Language.Praxis.Name (Fresh (..))
 import Language.Praxis.PRA.Equality (defEqIn, defaultFuel)
 import Language.Praxis.PRA.Pattern
 import Language.Praxis.PRA.PrimitiveRecursion (Evalable (..), PRFCode (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Function, KernelEnv, emptyKernelEnv)
 import Language.Praxis.PRA.Proof
+import Language.Praxis.PRA.Proof.Transform (argNames, substProof, weakenProof)
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Signature (Signature)
 import Language.Praxis.PRA.Syntax
@@ -80,26 +102,26 @@ import Language.Praxis.PRA.Syntax.Pretty
 
 -- * Names
 
--- | Names which can be chosen apart from any finite set of others.
-class (Hashable a) => Fresh a where
-  -- | A name not in the set, derived from the hint.
-  freshen :: HashSet a -> a -> a
-
-  -- | The hint to start from when nothing suggests one.
-  anyName :: a
-
--- | Primes are appended until the name is new: @x@, @x'@, @x''@, and so on.
-instance Fresh String where
-  freshen used = go
-    where
-      go n
-        | n `HS.member` used = go (n <> "'")
-        | otherwise = n
-  anyName = "x"
-
 -- | Every name occurring in a sequent.
 goalNames :: (Hashable a) => Sequent a -> HashSet a
 goalNames (ctx :|- c) = HS.fromList (foldMap toList ctx <> toList c)
+
+{- |
+Names some of which stand for metavariables, as in the statement of a derived
+rule.  The engine reads a name of the goal as itself, whatever it stands for;
+in the statement of a 'Lemma', a metavariable is a pattern to be instantiated.
+Plain names stand for nothing.
+-}
+class (Fresh a) => Schematic a where
+  -- | The metavariable a name stands for, with its sort.
+  metaName :: a -> Maybe (R.Sort, String)
+
+  -- | The metavariable of sort @atom@, @formula@ or @ctx@ an atom stands for.
+  metaAtom :: Atomic a -> Maybe (R.Sort, String)
+
+instance Schematic String where
+  metaName _ = Nothing
+  metaAtom _ = Nothing
 
 -- * Tactics
 
@@ -141,8 +163,12 @@ data Tactic a
     through the connectives down to 'Id'.
     -}
     Assumption
-  | -- | Close a goal which is exactly the sequent of the named premise.
-    Exact !String
+  | {- | @Exact name args@: close the goal by the named premise, whose sequent
+    it must be, or appeal to the named 'Lemma', which leaves the premises of
+    the lemma as goals.  The arguments are for the metavariables of the
+    lemma, in the order of its binders, as for 'Apply'.
+    -}
+    Exact !String ![Maybe (Arg (Hole a))]
   | -- | Leave the goal open.
     Skip
   | -- | Abandon the whole proof, reporting the goal reached here.
@@ -167,6 +193,51 @@ applyWith :: RuleName -> [Arg (Hole a)] -> Tactic a
 applyWith name args =
   Apply name (map Just args <> replicate (length (R.ruleParams (ruleSpec name)) - length args) Nothing)
 
+-- * Lemmas
+
+{- |
+A certified statement a script may appeal to by name, through 'Exact': a
+theorem, or a derived rule with its binders.
+
+An appeal instantiates the lemma to the goal.  The metavariables of a rule
+are inferred by matching its statement against the goal, or given as
+arguments; its context metavariable, if any, takes the hypotheses of the goal
+the statement does not mention, and otherwise those are weakened in.  The free
+variables of a theorem are instantiated by whatever the goal has in their
+place.  The premises of a rule become goals.
+
+Two shapes are refused, because instantiating them is not a matter of
+applying the rule: a rule which has metavariables or premises besides free
+variables in its statement — declare the variables as @term@ metavariables —
+and a rule with premises but no context metavariable, under hypotheses it does
+not mention.
+-}
+data Lemma a = Lemma
+  { lemmaMetas :: ![(String, R.Sort)]
+  -- ^ the metavariables, in the order of the binders
+  , lemmaPremises :: ![(String, Sequent a)]
+  -- ^ the premises, in the order of the binders
+  , lemmaGoal :: !(Sequent a)
+  , lemmaBound :: ![String]
+  {- ^ the metavariables of sort @var@ the proof binds, as eigenvariables;
+  their instantiation must not occur in the goal or the other arguments
+  -}
+  }
+  deriving (Show, Eq, Generic)
+
+{- |
+A lemma with its proof: given the arguments for its metavariables, in order,
+and the proofs of its premises, in order, the proof of the instance.
+-}
+data Certified a = Certified
+  { certifiedLemma :: !(Lemma a)
+  , certifiedProof :: [Arg a] -> [Proof a] -> Proof a
+  }
+
+-- | A closed proof, as the lemma it certifies.
+theorem :: Sequent a -> Proof a -> Certified a
+theorem s p = Certified (Lemma [] [] s []) (\_ _ -> p)
+
 -- * Partial proofs
 
 -- | What a partial proof may end in.
@@ -177,7 +248,30 @@ data Leaf a
     Premise !String !(Sequent a)
   deriving (Show, Eq, Generic)
 
-type Partial a = Free (ProofF a) (Leaf a)
+{- |
+An appeal to a lemma, instantiated: the arguments for its metavariables, the
+terms for the free variables of its statement, and the hypotheses weakened
+in.  The proof of the instance is the lemma's proof at the arguments, under
+'substProof' and then 'weakenProof'.
+-}
+data Appeal a = Appeal
+  { appealName :: !String
+  , appealArgs :: ![Arg a]
+  -- ^ one per metavariable, in the order of the binders
+  , appealSubst :: ![(a, Term a)]
+  -- ^ every free variable of the statement, and the term in its place
+  , appealWeakening :: !(Multiset (Formula a))
+  -- ^ the hypotheses added to every sequent of the instance
+  }
+  deriving (Show, Eq, Generic)
+
+-- | A step of a partial proof: a rule of the calculus, or a lemma with the proofs of its premises.
+data Step a x
+  = RuleStep !(ProofF a x)
+  | LemmaStep !(Appeal a) ![x]
+  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+
+type Partial a = Free (Step a) (Leaf a)
 
 -- * Errors
 
@@ -211,9 +305,22 @@ data Failure a
     NotFresh !a
   | -- | 'Assumption' on a succedent absent from the context
     NotInContext !(Formula a)
-  | UnknownPremise !String
+  | -- | 'Exact' on a name which is neither a premise nor a lemma
+    UnknownPremise !String
   | -- | the goal is not the declared sequent of the premise
     PremiseMismatch !String !(Sequent a)
+  | -- | the goal is not an instance of the statement of the lemma
+    NotAnInstance !String !(Sequent a)
+  | -- | more than one hypothesis instantiates a hypothesis of the lemma
+    AmbiguousInstance !String !(Formula a) ![Formula a]
+  | -- | metavariables of the lemma neither given nor determined by the goal
+    CannotInstantiate !String ![R.MetaRef]
+  | -- | the lemma has premises but no context metavariable to take the hypotheses
+    CannotWeaken !String !(Multiset (Formula a))
+  | -- | the lemma has metavariables or premises, so its free variables cannot be instantiated
+    NotClosed !String ![a]
+  | -- | a metavariable the lemma binds, instantiated by a name occurring in the goal
+    NotEigen !String !String !a
   | -- | 'Dispatch' with the wrong number of blocks: expected, actual
     WrongGoalCount !Int !Int
   | -- | every alternative of an 'OrElse' failed
@@ -225,6 +332,8 @@ data Failure a
     Unfinished
   | -- | the checker rejected the proof the tactic built: a bug in a tactic
     Rejected !(NonEmpty (ProofError a))
+  | -- | a premise of a lemma was proved with the wrong sequent: expected, actual; a bug in a tactic
+    WrongPremise !String !(Sequent a) !(Sequent a)
   | -- | the checker accepted the proof, but of another sequent: a bug in a tactic
     WrongConclusion !(Sequent a)
   | -- | a malformed tactic, such as an ill-sorted argument
@@ -234,12 +343,42 @@ data Failure a
 -- * Running
 
 -- | Prove a closed sequent.
-prove :: (Fresh a) => Sequent a -> Tactic a -> Either (TacticError a) (Proof a)
-prove goal t = do
-  p <- proveOpen Map.empty goal t
-  closeProof <$> traverse (const (Left (TacticError Nothing goal (Malformed "premise in a closed proof")))) p
+prove :: (Schematic a) => Sequent a -> Tactic a -> Either (TacticError a) (Proof a)
+prove = proveWith emptyKernelEnv Map.empty
+
+{- |
+Prove a closed sequent, appealing to lemmas.  The proof is closed with the
+proofs of the lemmas, and checked once more when it appealed to any, since
+instantiating them is a transformation of their proofs.
+-}
+proveWith :: forall a. (Schematic a) => KernelEnv -> Map String (Certified a) -> Sequent a -> Tactic a -> Either (TacticError a) (Proof a)
+proveWith env certified goal t = do
+  p <- proveOpenWith env (fmap certifiedLemma certified) Map.empty goal t
+  proof <- close p
+  when (appeals p) case inferConclusionIn env proof of
+    Left errs -> failWith (Rejected errs)
+    Right s
+      | s /= goal -> failWith (WrongConclusion s)
+      | otherwise -> pure ()
+  pure proof
   where
-    closeProof = iter embed
+    failWith :: forall x. Failure a -> Either (TacticError a) x
+    failWith = Left . TacticError Nothing goal
+
+    close :: Free (Step a) String -> Either (TacticError a) (Proof a)
+    close = \case
+      Pure d -> failWith (Malformed ("the premise " <> d <> " in a closed proof"))
+      Free (RuleStep step) -> embed <$> traverse close step
+      Free (LemmaStep appeal subs) -> do
+        c <- maybe (failWith (UnknownPremise (appealName appeal))) Right (Map.lookup (appealName appeal) certified)
+        subs' <- traverse close subs
+        pure (weakenProof (appealWeakening appeal) (substProof (appealSubst appeal) (certifiedProof c (appealArgs appeal) subs')))
+
+    appeals :: Free (Step a) String -> Bool
+    appeals = \case
+      Pure _ -> False
+      Free (RuleStep step) -> any appeals step
+      Free (LemmaStep _ _) -> True
 
 {- |
 Prove a sequent from declared premises, as a derived rule does.  Every open
@@ -247,29 +386,60 @@ leaf of the result is one of the premises.  The proof is checked before it is
 returned.
 -}
 proveOpen ::
-  (Fresh a) =>
+  (Schematic a) =>
   -- | the premises, with the sequents they are declared to establish
   Map String (Sequent a) ->
   Sequent a ->
   Tactic a ->
-  Either (TacticError a) (Free (ProofF a) String)
+  Either (TacticError a) (Free (Step a) String)
 proveOpen = proveOpenIn emptyKernelEnv
 
 -- | Run and certify a tactic against checked, shared PRF definitions.
-proveOpenIn :: (Fresh a) => KernelEnv -> Map String (Sequent a) -> Sequent a -> Tactic a -> Either (TacticError a) (Free (ProofF a) String)
-proveOpenIn env prems goal t = do
-  p <- runTacticIn env prems t goal
+proveOpenIn :: (Schematic a) => KernelEnv -> Map String (Sequent a) -> Sequent a -> Tactic a -> Either (TacticError a) (Free (Step a) String)
+proveOpenIn env = proveOpenWith env Map.empty
+
+-- | 'proveOpenIn', with lemmas to appeal to.
+proveOpenWith :: (Schematic a) => KernelEnv -> Map String (Lemma a) -> Map String (Sequent a) -> Sequent a -> Tactic a -> Either (TacticError a) (Free (Step a) String)
+proveOpenWith env lemmas prems goal t = do
+  p <- runTacticWith env lemmas prems t goal
   let opens = [g | Open g <- toList p]
   unless (null opens) $ Left (TacticError Nothing goal (Unsolved opens))
   let p' =
         p >>= \case
           Open g -> Pure ("", g)
           Premise d g -> Pure (d, g)
-  case inferConclusionOpenIn env snd p' of
-    Left errs -> Left (TacticError Nothing goal (Rejected errs))
-    Right s
-      | s == goal -> Right (fmap fst p')
-      | otherwise -> Left (TacticError Nothing goal (WrongConclusion s))
+  s <- first (TacticError Nothing goal) (certify env lemmas snd p')
+  if s == goal
+    then Right (fmap fst p')
+    else Left (TacticError Nothing goal (WrongConclusion s))
+
+{- |
+Check a partial proof: the steps of the calculus by the checker, and an
+appeal to a lemma against the lemma's statement instantiated at the
+appeal, once the proofs of its premises are checked.  The leaves are assumed
+to establish the sequents the function assigns them.
+-}
+certify :: forall a h. (Schematic a) => KernelEnv -> Map String (Lemma a) -> (h -> Sequent a) -> Free (Step a) h -> Either (Failure a) (Sequent a)
+certify env lemmas leaf = check
+  where
+    check :: Free (Step a) h -> Either (Failure a) (Sequent a)
+    check p = collapse p >>= first Rejected . inferConclusionOpenIn env id
+
+    -- An appeal becomes a leaf with its conclusion, once its premises are checked.
+    collapse :: Free (Step a) h -> Either (Failure a) (Free (ProofF a) (Sequent a))
+    collapse = \case
+      Pure h -> Right (Pure (leaf h))
+      Free (RuleStep step) -> Free <$> traverse collapse step
+      Free (LemmaStep appeal subs) -> do
+        let name = appealName appeal
+        lemma <- maybe (Left (UnknownPremise name)) Right (Map.lookup name lemmas)
+        (premises, conclusion) <- instantiateLemma lemma appeal
+        when (length premises /= length subs) $
+          Left (Malformed (name <> " has " <> show (length premises) <> " premises"))
+        proved <- traverse check subs
+        forM_ (zip premises proved) \(expected, actual) ->
+          unless (expected == actual) $ Left (WrongPremise name expected actual)
+        pure (Pure conclusion)
 
 -- | The limit on the iterations of 'Repeat' along any branch.
 repeatLimit :: Int
@@ -277,16 +447,16 @@ repeatLimit = 1000
 
 -- | Run a tactic on a goal, without checking what it built.
 runTactic ::
-  forall a.
-  (Fresh a) =>
+  (Schematic a) =>
   Map String (Sequent a) ->
   Tactic a ->
   Sequent a ->
   Either (TacticError a) (Partial a)
-runTactic = runTacticIn emptyKernelEnv
+runTactic = runTacticWith emptyKernelEnv Map.empty
 
-runTacticIn :: forall a. (Fresh a) => KernelEnv -> Map String (Sequent a) -> Tactic a -> Sequent a -> Either (TacticError a) (Partial a)
-runTacticIn env prems = go
+-- | 'runTactic', with definitions and lemmas.
+runTacticWith :: forall a. (Schematic a) => KernelEnv -> Map String (Lemma a) -> Map String (Sequent a) -> Tactic a -> Sequent a -> Either (TacticError a) (Partial a)
+runTacticWith env lemmas prems = go
   where
     go :: Tactic a -> Sequent a -> Either (TacticError a) (Partial a)
     go tac goal@(ctx :|- c) = case tac of
@@ -312,11 +482,13 @@ runTacticIn env prems = go
               u : rest -> put rest *> lift (go u g)
               [] -> lift (Left (TacticError Nothing goal (WrongGoalCount (length us) opens)))
           leaf -> pure (Pure leaf)
-      Exact d -> case Map.lookup d prems of
-        Nothing -> failWith (UnknownPremise d)
-        Just s
+      Exact d args -> case (Map.lookup d prems, Map.lookup d lemmas) of
+        (Just s, _)
+          | any isJust args -> failWith (Malformed ("the premise " <> d <> " takes no arguments"))
           | s == goal -> Right (Pure (Premise d s))
           | otherwise -> failWith (PremiseMismatch d s)
+        (Nothing, Just lemma) -> first (TacticError Nothing goal) (useLemma d lemma args goal)
+        (Nothing, Nothing) -> failWith (UnknownPremise d)
       Apply name args -> first (TacticError Nothing goal) (applyRule env name args goal)
       Refl -> case c of
         Atm (s :=== t) ->
@@ -386,9 +558,10 @@ runTacticIn env prems = go
         failWith :: forall x. Failure a -> Either (TacticError a) x
         failWith = Left . TacticError Nothing goal
 
-        -- The unique hypothesis matching an atomic pattern.
+        -- The unique hypothesis matching an atomic pattern.  A formula or
+        -- context metavariable, opaque, is never selected.
         select :: Atomic (Hole a) -> Either (TacticError a) (Atomic a)
-        select pat = case [p | Atm p <- HS.toList (MS.toHashSet ctx), matchAtomic pat p] of
+        select pat = case [p | Atm p <- HS.toList (MS.toHashSet ctx), isAtom p, matchAtomic pat p] of
           [p] -> Right p
           [] -> failWith (NoMatch pat)
           ps -> failWith (AmbiguousMatch pat (map Atm ps))
@@ -416,6 +589,10 @@ runTacticIn env prems = go
     atom = ArgAtom . fmap Named
     form = ArgForm . fmap Named
 
+-- | Whether an atom is one, rather than an opaque formula or context metavariable.
+isAtom :: (Schematic a) => Atomic a -> Bool
+isAtom p = maybe True ((== R.AtomS) . fst) (metaAtom p)
+
 -- * Rule application
 
 data Bindings a = Bindings
@@ -424,10 +601,12 @@ data Bindings a = Bindings
   , bAtoms :: !(Map String (Atomic a))
   , bForms :: !(Map String (Formula a))
   , bCtxs :: !(Map String (Multiset (Formula a)))
+  , bFree :: !(HashMap a (Term a))
+  -- ^ the free variables of a lemma
   }
 
 emptyBindings :: Bindings a
-emptyBindings = Bindings Map.empty Map.empty Map.empty Map.empty Map.empty
+emptyBindings = Bindings Map.empty Map.empty Map.empty Map.empty Map.empty HM.empty
 
 isBound :: R.MetaRef -> Bindings a -> Bool
 isBound (R.MetaRef s n) b = case s of
@@ -444,14 +623,36 @@ data Constraints a = Constraints
   , cForms :: !(Map String (Formula (Hole a)))
   }
 
+noConstraints :: Constraints a
+noConstraints = Constraints Map.empty Map.empty Map.empty
+
 data Match a = Matched !(Bindings a) | Deferred | Mismatch
 
 -- | A discharge of a principal formula, or the matching of the succedent.
 data Obligation = MatchSuccedent !R.FormPat | Discharge !R.FormPat
 
+-- | Record an argument the user gave for a metavariable: a closed one binds it, a pattern constrains it.
+seedArg :: (String, R.Sort) -> Maybe (Arg (Hole a)) -> (Bindings a, Constraints a) -> Either (Failure a) (Bindings a, Constraints a)
+seedArg (n, s) arg (b, cons) = case (s, arg) of
+  (_, Nothing) -> Right (b, cons)
+  (R.VarS, Just (ArgVar h)) -> case h of
+    Wild -> Right (b, cons)
+    Named v -> Right (b {bVars = Map.insert n v (bVars b)}, cons)
+  (R.TermS, Just (ArgTerm p)) -> case closed p of
+    Just t -> Right (b {bTerms = Map.insert n t (bTerms b)}, cons)
+    Nothing -> Right (b, cons {cTerms = Map.insert n p (cTerms cons)})
+  (R.AtomS, Just (ArgAtom p)) -> case closed p of
+    Just t -> Right (b {bAtoms = Map.insert n t (bAtoms b)}, cons)
+    Nothing -> Right (b, cons {cAtoms = Map.insert n p (cAtoms cons)})
+  (R.FormS, Just (ArgForm p)) -> case closed p of
+    Just t -> Right (b {bForms = Map.insert n t (bForms b)}, cons)
+    Nothing -> Right (b, cons {cForms = Map.insert n p (cForms cons)})
+  (R.CtxS, Just _) -> Left (Malformed "a context parameter cannot be given")
+  _ -> Left (Malformed ("ill-sorted argument for " <> n))
+
 applyRule ::
   forall a.
-  (Fresh a) =>
+  (Schematic a) =>
   KernelEnv ->
   RuleName ->
   [Maybe (Arg (Hole a))] ->
@@ -460,7 +661,7 @@ applyRule ::
 applyRule env name userArgs (ctx :|- c) = do
   when (length userArgs /= length params) $
     Left (Malformed (show name <> " takes " <> show (length params) <> " arguments"))
-  (b0, cons) <- foldM seed (emptyBindings, Constraints Map.empty Map.empty Map.empty) (zip params userArgs)
+  (b0, cons) <- foldM (\acc (p, arg) -> seedArg (R.refName (R.paramRef p), R.paramSort p) arg acc) (emptyBindings, noConstraints) (zip params userArgs)
   let fs R.:+ R.CtxM g R.:|- cpat = R.ruleConclusion rule
   (b1, rest) <- resolve cons b0 ctx (MatchSuccedent cpat : map Discharge fs)
   let b2 = b1 {bCtxs = Map.insert g rest (bCtxs b1)}
@@ -469,27 +670,10 @@ applyRule env name userArgs (ctx :|- c) = do
   mapM_ (checkSide b2) (R.ruleSides rule)
   args <- traverse (argOf b2) params
   premises <- traverse (instSeq b2) (R.rulePremises rule)
-  maybe (Left (Malformed "mkStep")) (Right . Free) (mkStep name args (map (Pure . Open) premises))
+  maybe (Left (Malformed "mkStep")) (Right . Free . RuleStep) (mkStep name args (map (Pure . Open) premises))
   where
     rule = ruleSpec name
     params = R.ruleParams rule
-
-    seed (b, cons) (param, arg) = case (param, arg) of
-      (_, Nothing) -> Right (b, cons)
-      (R.PVar (R.VarM x), Just (ArgVar h)) -> case h of
-        Wild -> Right (b, cons)
-        Named v -> Right (b {bVars = Map.insert x v (bVars b)}, cons)
-      (R.PTerm (R.TermM n), Just (ArgTerm p)) -> case closed p of
-        Just t -> Right (b {bTerms = Map.insert n t (bTerms b)}, cons)
-        Nothing -> Right (b, cons {cTerms = Map.insert n p (cTerms cons)})
-      (R.PAtom (R.AtomM n), Just (ArgAtom p)) -> case closed p of
-        Just t -> Right (b {bAtoms = Map.insert n t (bAtoms b)}, cons)
-        Nothing -> Right (b, cons {cAtoms = Map.insert n p (cAtoms cons)})
-      (R.PForm (R.FormM n), Just (ArgForm p)) -> case closed p of
-        Just t -> Right (b {bForms = Map.insert n t (bForms b)}, cons)
-        Nothing -> Right (b, cons {cForms = Map.insert n p (cForms cons)})
-      (R.PCtx _, Just _) -> Left (Malformed "a context parameter cannot be given")
-      _ -> Left (Malformed ("ill-sorted argument for " <> R.refName (R.paramRef param)))
 
     -- Resolve the obligations to a fixpoint: each pass commits every
     -- obligation which is decided, and stops when a pass decides nothing.
@@ -620,14 +804,22 @@ matchTermPat cons b pat t = case pat of
     Just t' -> matchTermPat cons b p t'
     Nothing -> Mismatch
 
-matchAtomPat :: (Eq a) => Constraints a -> Bindings a -> R.AtomPat -> Atomic a -> Match a
-matchAtomPat cons b pat p@(s :=== t) = case pat of
-  R.AMeta (R.AtomM n) -> bindAtom cons b n p
-  sp R.:=== tp -> case matchTermPat cons b sp s of
+{- |
+An opaque metavariable has no structure, so only an atom metavariable of the
+rule matches it: a formula metavariable under @Id@ is expanded into the
+identity through its connectives once instantiated, and a context
+metavariable is never an atom.
+-}
+matchAtomPat :: (Schematic a) => Constraints a -> Bindings a -> R.AtomPat -> Atomic a -> Match a
+matchAtomPat cons b pat p@(s :=== t) = case (pat, metaAtom p) of
+  (R.AMeta _, Just (R.CtxS, _)) -> Mismatch
+  (R.AMeta (R.AtomM n), _) -> bindAtom cons b n p
+  (_, Just _) -> Mismatch
+  (sp R.:=== tp, Nothing) -> case matchTermPat cons b sp s of
     Matched b' -> matchTermPat cons b' tp t
     other -> other
 
-matchForm :: (Eq a) => Constraints a -> Bindings a -> R.FormPat -> Formula a -> Match a
+matchForm :: (Schematic a) => Constraints a -> Bindings a -> R.FormPat -> Formula a -> Match a
 matchForm cons b pat f = case (pat, f) of
   (R.FMeta (R.FormM n), _) -> bindForm cons b n f
   (R.FAtm ap, Atm p) -> matchAtomPat cons b ap p
@@ -724,6 +916,226 @@ instForm b = \case
   p R.:==> q -> (:==>) <$> instForm b p <*> instForm b q
   R.FSubst (R.VarM x) t p -> subst <$> Map.lookup x (bVars b) <*> instTerm b t <*> instForm b p
 
+-- * Appeals to lemmas
+
+-- | The free variables of a lemma: the names of its statement which are not metavariables.
+freeVariables :: (Schematic a) => Lemma a -> HashSet a
+freeVariables lemma =
+  HS.filter (isNothing . metaName) (HS.unions (map goalNames (lemmaGoal lemma : map snd (lemmaPremises lemma))))
+
+{- |
+Appeal to a lemma at a goal: match its statement against the goal, binding
+its metavariables and free variables, and leave its premises open.
+-}
+useLemma :: forall a. (Schematic a) => String -> Lemma a -> [Maybe (Arg (Hole a))] -> Sequent a -> Either (Failure a) (Partial a)
+useLemma name lemma userArgs goal@(ctx :|- c) = do
+  when (length userArgs /= length metas) $
+    Left (Malformed (name <> " takes " <> show (length metas) <> " arguments"))
+  unless (null metas && null premises || HS.null free) $
+    Left (NotClosed name (HS.toList free))
+  (b0, cons) <- foldM (\acc (m, arg) -> seedArg m arg acc) (emptyBindings, noConstraints) (zip metas userArgs)
+  b1 <- case matchFormL cons b0 lemmaSucc c of
+    Matched b -> Right b
+    _ -> Left (NotAnInstance name (lemmaGoal lemma))
+  let (ctxMetas, hyps) = partitionEithers [maybe (Right f) Left (contextMeta f) | f <- toList lemmaCtx]
+  (b2, rest) <- discharge cons b1 ctx hyps
+  -- The first context metavariable takes what is left; without one, it is weakened in.
+  let (b3, weakening) = case ctxMetas of
+        [] -> (b2, rest)
+        n : ns -> (b2 {bCtxs = Map.insert n rest (foldr (\m -> Map.insert m MS.empty) (bCtxs b2) ns)}, MS.empty)
+  unless (MS.population weakening == 0 || null premises) $ Left (CannotWeaken name weakening)
+  let unbound = [ref | (n, s) <- metas, let ref = R.MetaRef s n, not (isBound ref b3)]
+  unless (null unbound) $ Left (CannotInstantiate name unbound)
+  args <- traverse (argOfSort b3) metas
+  forM_ (lemmaBound lemma) \x -> case Map.lookup x (bVars b3) of
+    Just v
+      | v `HS.member` goalNames goal || or [v `HS.member` argNames arg | ((n, _), arg) <- zip metas args, n /= x] ->
+          Left (NotEigen name x v)
+    _ -> pure ()
+  let sigma = [(v, HM.lookupDefault (Var v) v (bFree b3)) | v <- HS.toList free]
+      appeal = Appeal name args sigma weakening
+  (goals, conclusion) <- instantiateLemma lemma appeal
+  when (conclusion /= goal) $ Left (Malformed ("the instance of " <> name <> " is not the goal"))
+  pure (Free (LemmaStep appeal (map (Pure . Open) goals)))
+  where
+    metas = lemmaMetas lemma
+    premises = lemmaPremises lemma
+    lemmaCtx :|- lemmaSucc = lemmaGoal lemma
+    free = freeVariables lemma
+
+    contextMeta = \case
+      Atm p | Just (R.CtxS, n) <- metaAtom p -> Just n
+      _ -> Nothing
+
+    -- Each hypothesis of the lemma instantiates to a distinct hypothesis of
+    -- the goal; the ones decided are committed pass by pass, as in 'applyRule'.
+    discharge _ b hyps [] = Right (b, hyps)
+    discharge cons b hyps pending = do
+      (b', hyps', pending', progressed) <- foldM (step cons) (b, hyps, [], False) pending
+      case reverse pending' of
+        [] -> Right (b', hyps')
+        again@(f : _)
+          | progressed -> discharge cons b' hyps' again
+          | otherwise -> Left (AmbiguousInstance name f (map fst (instances cons b' hyps' f)))
+
+    step cons (b, hyps, pending, progressed) f = case instances cons b hyps f of
+      [(h, b')] -> case MS.removeOne h hyps of
+        Just hyps' -> Right (b', hyps', pending, True)
+        Nothing -> Left (NotAnInstance name (lemmaGoal lemma))
+      [] -> Left (NotAnInstance name (lemmaGoal lemma))
+      _ -> Right (b, hyps, f : pending, progressed)
+
+    instances cons b hyps f = [(h, b') | h <- HS.toList (MS.toHashSet hyps), Matched b' <- [matchFormL cons b f h]]
+
+    argOfSort b (n, s) = case s of
+      R.VarS -> ArgVar <$> look s n (bVars b)
+      R.TermS -> ArgTerm <$> look s n (bTerms b)
+      R.AtomS -> ArgAtom <$> look s n (bAtoms b)
+      R.FormS -> ArgForm <$> look s n (bForms b)
+      R.CtxS -> ArgCtx <$> look s n (bCtxs b)
+
+    look :: forall v. R.Sort -> String -> Map String v -> Either (Failure a) v
+    look s n = maybe (Left (CannotInstantiate name [R.MetaRef s n])) Right . Map.lookup n
+
+-- ** Matching the statement of a lemma against the goal
+
+bindFree :: (Hashable a) => Bindings a -> a -> Term a -> Match a
+bindFree b v t = case HM.lookup v (bFree b) of
+  Just t'
+    | t' == t -> Matched b
+    | otherwise -> Mismatch
+  Nothing -> Matched b {bFree = HM.insert v t (bFree b)}
+
+matchTermL :: forall a. (Schematic a) => Constraints a -> Bindings a -> Term a -> Term a -> Match a
+matchTermL cons b pat t = case canonicalise pat of
+  Var v -> case metaName v of
+    Just (R.TermS, n) -> bindTerm cons b n t
+    Just (R.VarS, n) -> case canonicalise t of
+      Var w | maybe True ((/= R.TermS) . fst) (metaName w) -> bindVar b n w
+      _ -> Mismatch
+    Just _ -> Mismatch
+    Nothing -> bindFree b v t
+  Lit n
+    | t == Lit n -> Matched b
+    | otherwise -> Mismatch
+  Succ :$ ps -> case t ^? _Succ of
+    Just t' -> matchTermL cons b (SV.sIndex [od|0|] ps) t'
+    Nothing -> Mismatch
+  App (f :: Function n) ps -> case canonicalise t of
+    App (g :: Function m) us -> case TE.testEquality (sNat @n) (sNat @m) of
+      Just TE.Refl
+        | f == g -> matchAll (matchTermL cons) b (zip (SV.toList ps) (SV.toList us))
+      _ -> Mismatch
+    _ -> Mismatch
+
+matchAll :: (Bindings a -> x -> y -> Match a) -> Bindings a -> [(x, y)] -> Match a
+matchAll m = foldM' \b (x, y) -> m b x y
+  where
+    foldM' _ b [] = Matched b
+    foldM' k b ((x, y) : rest) = case k b (x, y) of
+      Matched b' -> foldM' k b' rest
+      other -> other
+
+matchAtomL :: (Schematic a) => Constraints a -> Bindings a -> Atomic a -> Atomic a -> Match a
+matchAtomL cons b pat@(ps :=== pt) q@(s :=== t) = case metaAtom pat of
+  Just (R.AtomS, n)
+    | isAtom q -> bindAtom cons b n q
+  Just _ -> Mismatch
+  Nothing -> case metaAtom q of
+    Just _ -> Mismatch
+    Nothing -> case matchTermL cons b ps s of
+      Matched b' -> matchTermL cons b' pt t
+      other -> other
+
+matchFormL :: (Schematic a) => Constraints a -> Bindings a -> Formula a -> Formula a -> Match a
+matchFormL cons b pat f = case (pat, f) of
+  -- A context metavariable of the goal is opaque; it is never an instance of anything.
+  (_, Atm q) | Just (R.CtxS, _) <- metaAtom q -> Mismatch
+  (Atm p, _) | Just (R.FormS, n) <- metaAtom p -> bindForm cons b n f
+  (Atm p, _) | Just (R.CtxS, _) <- metaAtom p -> Mismatch
+  (Atm p, Atm q) -> matchAtomL cons b p q
+  (Atm _, _) -> Mismatch
+  (Bot, Bot) -> Matched b
+  (Bot, _) -> Mismatch
+  (p :/\ q, g :/\ h) -> both p g q h
+  ((:/\) {}, _) -> Mismatch
+  (p :\/ q, g :\/ h) -> both p g q h
+  ((:\/) {}, _) -> Mismatch
+  (p :==> q, g :==> h) -> both p g q h
+  ((:==>) {}, _) -> Mismatch
+  where
+    both p g q h = case matchFormL cons b p g of
+      Matched b' -> matchFormL cons b' q h
+      other -> other
+
+-- ** Instantiating the statement of a lemma
+
+{- |
+The sequents an appeal to a lemma establishes: the premises it leaves, and
+its conclusion, both with the weakening.  What 'useLemma' computed is not
+trusted; the certifier instantiates the statement again from the appeal.
+-}
+instantiateLemma :: forall a. (Schematic a) => Lemma a -> Appeal a -> Either (Failure a) ([Sequent a], Sequent a)
+instantiateLemma lemma appeal = do
+  when (length args /= length metas) $
+    Left (Malformed (name <> " takes " <> show (length metas) <> " arguments"))
+  -- The proofs of the premises cannot be weakened after the fact.
+  unless (null (lemmaPremises lemma) || MS.population extra == 0) $ Left (CannotWeaken name extra)
+  b <- foldM bind emptyBindings (zip metas args)
+  premises <- traverse (instSequent b . snd) (lemmaPremises lemma)
+  conclusion <- instSequent b (lemmaGoal lemma)
+  pure (premises, conclusion)
+  where
+    name = appealName appeal
+    args = appealArgs appeal
+    metas = lemmaMetas lemma
+    sigma = HM.fromList (appealSubst appeal)
+    extra = appealWeakening appeal
+
+    bind b ((n, s), arg) = case (s, arg) of
+      (R.VarS, ArgVar v) -> Right b {bVars = Map.insert n v (bVars b)}
+      (R.TermS, ArgTerm t) -> Right b {bTerms = Map.insert n t (bTerms b)}
+      (R.AtomS, ArgAtom p) -> Right b {bAtoms = Map.insert n p (bAtoms b)}
+      (R.FormS, ArgForm f) -> Right b {bForms = Map.insert n f (bForms b)}
+      (R.CtxS, ArgCtx g) -> Right b {bCtxs = Map.insert n g (bCtxs b)}
+      _ -> Left (Malformed ("ill-sorted argument for " <> n <> " of " <> name))
+
+    instSequent b (hyps :|- s) = do
+      hyps' <- foldM (\acc f -> (<> acc) <$> instHypothesis b f) extra (toList hyps)
+      s' <- instF b s
+      pure (hyps' :|- s')
+
+    instHypothesis b f = case f of
+      Atm p | Just (R.CtxS, n) <- metaAtom p -> look R.CtxS n (bCtxs b)
+      _ -> (`MS.insertOne` MS.empty) <$> instF b f
+
+    instF b = \case
+      Atm p -> case metaAtom p of
+        Just (R.FormS, n) -> look R.FormS n (bForms b)
+        Just (R.CtxS, n) -> Left (Malformed (n <> " is a ctx metavariable, but stands as a formula in " <> name))
+        _ -> Atm <$> instA b p
+      f :/\ g -> (:/\) <$> instF b f <*> instF b g
+      f :\/ g -> (:\/) <$> instF b f <*> instF b g
+      f :==> g -> (:==>) <$> instF b f <*> instF b g
+      Bot -> pure Bot
+
+    instA b p@(s :=== t) = case metaAtom p of
+      Just (R.AtomS, n) -> look R.AtomS n (bAtoms b)
+      Just (_, n) -> Left (Malformed (n <> " is not an atom metavariable, but stands as an atom in " <> name))
+      Nothing -> (:===) <$> instT b s <*> instT b t
+
+    instT b = \case
+      Var v -> case metaName v of
+        Just (R.TermS, n) -> look R.TermS n (bTerms b)
+        Just (R.VarS, n) -> Var <$> look R.VarS n (bVars b)
+        Just (_, n) -> Left (Malformed (n <> " is not a term metavariable, but stands as a term in " <> name))
+        Nothing -> pure (HM.lookupDefault (Var v) v sigma)
+      Lit n -> pure (Lit n)
+      App f xs -> App f <$> traverse (instT b) xs
+
+    look :: forall v. R.Sort -> String -> Map String v -> Either (Failure a) v
+    look s n = maybe (Left (CannotInstantiate name [R.MetaRef s n])) Right . Map.lookup n
+
 -- * Terms
 
 -- | Whether the term occurs in the atomic formula, as a subterm.
@@ -803,8 +1215,22 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       RewriteWithItself h -> "rewrite: cannot rewrite " <> ra h <> " with itself"
       NotFresh x -> "induction: " <> name x <> " occurs in the goal"
       NotInContext f -> "assumption: " <> rf f <> " is not in the context"
-      UnknownPremise d -> "exact: no premise named " <> d
+      UnknownPremise d -> "exact: no premise or lemma named " <> d
       PremiseMismatch d s -> "exact: the premise " <> d <> " establishes " <> rs s
+      NotAnInstance d s -> "exact: the goal is not an instance of " <> d <> ", which proves " <> rs s
+      AmbiguousInstance d f _ -> "exact: more than one hypothesis is an instance of " <> rf f <> ", a hypothesis of " <> d
+      CannotInstantiate d refs ->
+        "exact: cannot infer " <> intercalate ", " (map R.refName refs) <> " of " <> d <> "; supply it"
+      CannotWeaken d g ->
+        "exact: " <> d <> " has premises but no context metavariable, so it cannot take the hypotheses " <> rc g
+      NotClosed d vs ->
+        "exact: "
+          <> d
+          <> " has metavariables or premises, so the free variables "
+          <> intercalate ", " (map name vs)
+          <> " of its statement cannot be instantiated; declare them as term metavariables"
+      NotEigen d x v ->
+        "exact: " <> d <> " binds " <> x <> ", so " <> name v <> " must not occur in the goal or the other arguments"
       WrongGoalCount expected actual ->
         show expected <> " blocks given for " <> show actual <> " goals"
       Alternatives _ -> "every alternative failed"
@@ -812,7 +1238,9 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       RepeatLimit -> "repeat: no end after " <> show repeatLimit <> " iterations"
       Unfinished -> "sorry: the proof stops here"
       Rejected _ -> "the checker rejected the proof a tactic built (a bug in the tactic)"
-      WrongConclusion s -> "the proof a tactic built proves " <> rs s <> " instead (a bug in the tactic)"
+      WrongPremise d expected actual ->
+        "the proof built for a premise of " <> d <> " proves " <> rs actual <> " instead of " <> rs expected <> " (a bug in a tactic)"
+      WrongConclusion s -> "the proof a tactic built proves " <> rs s <> " instead (a bug in a tactic)"
       Malformed msg -> "malformed tactic: " <> msg
 
     details :: Failure a -> [String]
@@ -821,6 +1249,7 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       NoHypothesis r args _ -> given r args
       AmbiguousHypothesis r args _ fs -> given r args <> ["candidates: " <> intercalate "; " (map rf fs)]
       AmbiguousMatch _ fs -> ["candidates: " <> intercalate "; " (map rf fs)]
+      AmbiguousInstance _ _ fs -> ["candidates: " <> intercalate "; " (map rf fs)]
       Alternatives es -> concatMap (map ("| " <>) . render) es
       Unsolved gs -> map (("- " <>) . rs) gs
       Rejected errs -> ["- " <> show (context e) <> ": " <> side (reason e) | e <- NE.toList errs]
