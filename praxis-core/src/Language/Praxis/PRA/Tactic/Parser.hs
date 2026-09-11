@@ -6,7 +6,7 @@ The textual syntax of tactics, and of the declarations which use them.
 > simple  ::= basic {'{' tactic '}'}       -- t {u1} … {un}: t must leave n goals, ui gets goal i
 > basic   ::= Rule {arg}                   -- a rule of the calculus, applied backwards
 >           | refl | symmetry atom | rewrite atom in atom
->           | induction ident [as ident] | assumption | exact ident
+>           | induction arg [as ident] | assumption | exact ident
 >           | skip | sorry | try basic | repeat basic | ( tactic )
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
 >
@@ -206,7 +206,7 @@ tacticP sc0 = seqP
             , Refl <$ keywordP "refl"
             , Symmetry <$> (keywordP "symmetry" *> atomArgP)
             , Rewrite <$> (keywordP "rewrite" *> atomArgP) <*> (keywordP "in" *> atomArgP)
-            , Induction <$> (keywordP "induction" *> variableP) <*> optional (keywordP "as" *> variableP)
+            , Induction <$> (keywordP "induction" *> closedP (termAtomP sc)) <*> optional (keywordP "as" *> variableP)
             , Assumption <$ keywordP "assumption"
             , Exact <$> (keywordP "exact" *> identifierP sc)
             , Skip <$ keywordP "skip"

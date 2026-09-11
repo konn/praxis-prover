@@ -53,5 +53,10 @@ and this project adheres to the
   reads whenever the signature has their symbols: operators infix, `ifte` as a
   conditional, a schema instance with its parameter in braces or as a lambda,
   and an instance of `mu` at a lambda as the bounded search `μ i < b. body`.
+- `induction` takes a term, `induction (S x) as n` or a term metavariable of a
+  rule, and abstracts its occurrences into the eigenvariable.
+- The errors of schematic proofs render metavariables by name, through
+  `renderSchemaTacticError` and the hooked renderers of
+  `Language.Praxis.PRA.Syntax.Pretty`, so a `sorry` report reads `Γ |- A`.
 
 ## 0.1.0.0 - YYYY-MM-DD

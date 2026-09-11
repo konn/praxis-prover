@@ -25,7 +25,7 @@ import Language.Praxis.PRA.Syntax.Parser
 import Language.Praxis.PRA.Syntax.Pretty
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
-import Language.Praxis.PRA.Tactic.Quote (schemaScope)
+import Language.Praxis.PRA.Tactic.Quote (renderSchemaTacticError, schemaScope)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -42,6 +42,7 @@ tacticTests =
     , declarationTests
     , prettyTests
     , sorryTests
+    , inductionTests
     ]
 
 sig :: Signature
@@ -167,7 +168,7 @@ tacticParserTests =
         h <- parsed (parseAtomicPattern sc "plus t 0 = _")
         "rewrite (t = s) in plus t 0 = _" `parsesTo` Rewrite e h
     , testCase "induction takes an optional eigenvariable" $
-        "induction y as n" `parsesTo` Induction "y" (Just "n")
+        "induction y as n" `parsesTo` Induction (Var "y") (Just "n")
     , testCase "errors carry the position of the tactic" $ do
         (goal, tac) <- parsed (parseGoal sc "|- 2 = 3 by skip; refl")
         either errorLoc (const Nothing) (prove goal tac) @?= Just (Loc 1 19)
@@ -440,4 +441,32 @@ sorryTests =
         case prove goal tac of
           Right _ -> assertFailure "proved"
           Left err -> renderTacticError sig id err @?= "1:42: sorry: the proof stops here\n  a = 0\n  b = 0\n  c = 0\n  |- c = 0"
+    ]
+
+inductionTests :: TestTree
+inductionTests =
+  testGroup
+    "induction on a term"
+    [ testCase "a compound term is abstracted into the eigenvariable" $
+        proves "|- plus (S x) 0 = S x by induction (S x) as n { refl } { Defeq (plus (S n) 0) (S (plus n 0)); rewrite (plus n 0 = n) in (plus (S n) 0 = _); Id }"
+    , testCase "a term metavariable of a rule, whose branches sorry reports by name" $ do
+        let source =
+              unlines
+                [ "rule ltZero (t: term) (G: ctx) (A : formula) : t < 0 = 1, G |- A"
+                , "by"
+                , "  induction t"
+                , "  { "
+                , "    sorry "
+                , "  }"
+                , "  { "
+                , "    sorry"
+                , "  }"
+                ]
+        decls <- parsed (parseDecls (schemaScope builtin) source)
+        env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+        case decls of
+          [d] -> case proveOpenIn env Map.empty (declGoal d) (declTactic d) of
+            Left err -> renderSchemaTacticError builtin err @?= "5:5: sorry: the proof stops here\n  (t < 0) = 1\n  G\n  |- A"
+            Right _ -> assertFailure "proved"
+          _ -> assertFailure "expected one declaration"
     ]

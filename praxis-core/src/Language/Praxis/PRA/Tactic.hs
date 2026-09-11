@@ -34,6 +34,7 @@ module Language.Praxis.PRA.Tactic (
   TacticError (..),
   Failure (..),
   renderTacticError,
+  renderTacticErrorWith,
 
   -- * Names
   Fresh (..),
@@ -43,7 +44,7 @@ module Language.Praxis.PRA.Tactic (
 import Control.Applicative ((<|>))
 import Control.Exception (displayException)
 import Control.Lens ((^?))
-import Control.Monad (foldM, join, unless, when)
+import Control.Monad (foldM, join, unless, when, (>=>))
 import Control.Monad.Free (Free (..), iter)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (evalStateT, get, put)
@@ -129,10 +130,11 @@ data Tactic a
     by @s@, by 'Subst'.
     -}
     Rewrite !(Atomic (Hole a)) !(Atomic (Hole a))
-  | {- | @Induction y n@: prove the goal by 'Ind' on the variable @y@, with the
-    eigenvariable @n@, chosen fresh when it is not given.
+  | {- | @Induction t n@: prove the goal by 'Ind' on the term @t@, whose
+    occurrences in the succedent the eigenvariable @n@ abstracts; @n@ is
+    chosen fresh when it is not given.
     -}
-    Induction !a !(Maybe a)
+    Induction !(Term a) !(Maybe a)
   | {- | Close a goal whose succedent is in the context, expanding the identity
     through the connectives down to 'Id'.
     -}
@@ -333,14 +335,14 @@ runTacticIn env prems = go
         unless (t `occursIn` h) $ failWith (NothingToRewrite t h)
         let x = freshen (goalNames goal) anyName
         go (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (abstract t x h)]) goal
-      Induction y given -> do
+      Induction t given -> do
         let names = goalNames goal
         n <- case given of
           Just n
             | n `HS.member` names -> failWith (NotFresh n)
             | otherwise -> pure n
-          Nothing -> pure (freshen names y)
-        go (applyWith IndRule [ArgVar (Named n), form (subst y (Var n) c), term (Var y)]) goal
+          Nothing -> pure (freshen names (case t of Var y -> y; _ -> anyName))
+        go (applyWith IndRule [ArgVar (Named n), form (abstractIn t n c), term t]) goal
       Assumption
         | not (MS.member c ctx) -> failWith (NotInContext c)
         | otherwise -> case c of
@@ -731,11 +733,26 @@ abstract t x (s :=== u) = go s :=== go u
           App f args -> App f (fmap go args)
           _ -> v
 
+-- | Replace every occurrence of the term by the variable, throughout a formula.
+abstractIn :: (Eq a) => Term a -> a -> Formula a -> Formula a
+abstractIn t x = go
+  where
+    go = \case
+      Atm p -> Atm (abstract t x p)
+      p :/\ q -> go p :/\ go q
+      p :\/ q -> go p :\/ go q
+      p :==> q -> go p :==> go q
+      Bot -> Bot
+
 -- * Rendering
 
 -- | Render an error for a human, naming symbols through the signature.
 renderTacticError :: forall a. Signature -> (a -> String) -> TacticError a -> String
-renderTacticError sig name = intercalate "\n" . render
+renderTacticError sig name = renderTacticErrorWith sig name (const Nothing)
+
+-- | Render an error, showing an atom the hook names, such as a metavariable, as that name.
+renderTacticErrorWith :: forall a. Signature -> (a -> String) -> (Atomic a -> Maybe String) -> TacticError a -> String
+renderTacticErrorWith sig name hook = intercalate "\n" . render
   where
     render (TacticError loc goal failure) =
       (maybe "" (\(Loc l col) -> show l <> ":" <> show col <> ": ") loc <> headline failure)
@@ -796,8 +813,8 @@ renderTacticError sig name = intercalate "\n" . render
       ArgVar h -> renderHole name h
       ArgTerm t -> rtp t
       ArgAtom p -> rap p
-      ArgForm f -> renderFormula sig (renderHole name) f
-      ArgCtx g -> renderContext sig (renderHole name) g
+      ArgForm f -> renderFormulaWith (closed >=> hook) sig (renderHole name) f
+      ArgCtx g -> renderContextWith (closed >=> hook) sig (renderHole name) g
 
     side = \case
       EqualityCheckFailed s t -> rt s <> " and " <> rt t <> " are not definitionally equal"
@@ -812,9 +829,9 @@ renderTacticError sig name = intercalate "\n" . render
     succedentOf r = let _ R.:|- s = R.ruleConclusion (ruleSpec r) in R.renderFormPat s
 
     rt = renderTerm sig name
-    ra = renderAtomic sig name
-    rf = renderFormula sig name
-    rc = renderContext sig name
-    rs = renderSequent sig name
+    ra = renderAtomicWith hook sig name
+    rf = renderFormulaWith hook sig name
+    rc = renderContextWith hook sig name
+    rs = renderSequentWith hook sig name
     rtp = renderTerm sig (renderHole name)
-    rap = renderAtomic sig (renderHole name)
+    rap = renderAtomicWith (closed >=> hook) sig (renderHole name)

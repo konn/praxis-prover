@@ -27,9 +27,13 @@ be shown as the user would have written it.
 module Language.Praxis.PRA.Syntax.Pretty (
   renderTerm,
   renderAtomic,
+  renderAtomicWith,
   renderFormula,
+  renderFormulaWith,
   renderContext,
+  renderContextWith,
   renderSequent,
+  renderSequentWith,
   renderHole,
 ) where
 
@@ -224,18 +228,28 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
 product, a power or an application.
 -}
 renderAtomic :: Signature -> (a -> String) -> Atomic a -> String
-renderAtomic sig name (s :=== t) = renderTermAt sig name 2 s <> " = " <> renderTerm sig name t
+renderAtomic = renderAtomicWith (const Nothing)
+
+-- | Render an equation, unless the hook names the atom, as for a metavariable.
+renderAtomicWith :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Atomic a -> String
+renderAtomicWith hook sig name p@(s :=== t) = case hook p of
+  Just shown -> shown
+  Nothing -> renderTermAt sig name 2 s <> " = " <> renderTerm sig name t
 
 {- |
 Render a formula, parenthesising according to the fixities in
 "Language.Praxis.PRA.Syntax".  An implication into @_|_@ is shown as a
 negation.
 -}
-renderFormula :: forall a. Signature -> (a -> String) -> Formula a -> String
-renderFormula sig name = go (0 :: Int)
+renderFormula :: Signature -> (a -> String) -> Formula a -> String
+renderFormula = renderFormulaWith (const Nothing)
+
+-- | Render a formula, its atoms through the hook.
+renderFormulaWith :: forall a. (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Formula a -> String
+renderFormulaWith hook sig name = go (0 :: Int)
   where
     go :: Int -> Formula a -> String
-    go _ (Atm p) = renderAtomic sig name p
+    go _ (Atm p) = renderAtomicWith hook sig name p
     go _ Bot = "_|_"
     go _ (p :==> Bot) = "~" <> go 6 p
     go d (p :/\ q) = paren (d > 4) (go 5 p <> " /\\ " <> go 4 q)
@@ -246,12 +260,18 @@ renderFormula sig name = go (0 :: Int)
 
 -- | Render a context, each formula once per occurrence, in a fixed order.
 renderContext :: Signature -> (a -> String) -> Multiset (Formula a) -> String
-renderContext sig name = intercalate ", " . sort . map (renderFormula sig name) . toList
+renderContext = renderContextWith (const Nothing)
+
+renderContextWith :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Multiset (Formula a) -> String
+renderContextWith hook sig name = intercalate ", " . sort . map (renderFormulaWith hook sig name) . toList
 
 renderSequent :: Signature -> (a -> String) -> Sequent a -> String
-renderSequent sig name (ctx :|- c)
-  | null ctx = "|- " <> renderFormula sig name c
-  | otherwise = renderContext sig name ctx <> " |- " <> renderFormula sig name c
+renderSequent = renderSequentWith (const Nothing)
+
+renderSequentWith :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Sequent a -> String
+renderSequentWith hook sig name (ctx :|- c)
+  | null ctx = "|- " <> renderFormulaWith hook sig name c
+  | otherwise = renderContextWith hook sig name ctx <> " |- " <> renderFormulaWith hook sig name c
 
 -- | A wildcard is an underscore.
 renderHole :: (a -> String) -> Hole a -> String

@@ -56,6 +56,7 @@ module Language.Praxis.PRA.Tactic.Quote (
   -- * Schematic names
   SchemaName (..),
   renderSchemaName,
+  renderSchemaTacticError,
   schemaScope,
 ) where
 
@@ -144,6 +145,10 @@ decodeMeta (Var (Meta s n) :=== Lit 0)
   | s `elem` [R.AtomS, R.FormS, R.CtxS] = Just (s, n)
 decodeMeta _ = Nothing
 
+-- | Render an error of a schematic proof, its metavariables by name.
+renderSchemaTacticError :: Signature -> TacticError SchemaName -> String
+renderSchemaTacticError sig = renderTacticErrorWith sig renderSchemaName (fmap snd . decodeMeta)
+
 -- | The scope in which a declaration with the given metavariables is read.
 schemaScope :: Signature -> [(String, R.Sort)] -> Scope SchemaName
 schemaScope sig metas =
@@ -187,7 +192,7 @@ praQuoter sig =
     { quoteExp = \src -> do
         env <- either (fail . displayException) pure (signatureKernelEnv sig)
         (goal, tac) <- either (fail . displayException) pure (parseGoal (schemaScope sig []) src)
-        proof <- either (fail . renderTacticError sig renderSchemaName) pure (proveOpenIn env Map.empty goal tac)
+        proof <- either (fail . renderSchemaTacticError sig) pure (proveOpenIn env Map.empty goal tac)
         (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty) proof)
         pure body
     , quoteDec = \src -> do
@@ -213,7 +218,7 @@ compileDecl sig decl = do
   unless (startsLower dname) $
     fail ("pra: " <> dname <> " is not a Haskell variable name")
   checked <-
-    either (fail . renderTacticError sig renderSchemaName) pure $
+    either (fail . renderSchemaTacticError sig) pure $
       proveOpenIn kernel prems (declGoal decl) (declTactic decl)
 
   -- One parameter per binder, in order.
