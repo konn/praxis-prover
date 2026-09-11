@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
-The rules of the quantifier-free fragment of G3i, extended with the equality
+The rules of the quantifier-free fragment of G3i, extended with cut, the equality
 rules and the PRA-specific axioms.
 
 This module is the single source of truth for the calculus.  Everything else —
@@ -30,6 +30,7 @@ module Language.Praxis.PRA.Rule.G3i (
   succNonZeroRule,
   succInjRule,
   indRule,
+  cutRule,
 ) where
 
 import Language.Praxis.PRA.Rule
@@ -231,6 +232,21 @@ indRule =
     x = VarM "x"
 
 {- |
+Cut.  Admissible in pure G3i, it is not eliminable once 'indRule' is present: a
+hypothesis about the induction term enters the induction formula only as the
+antecedent of an implication, which cut then discharges.
+-}
+cutRule :: Rule
+cutRule =
+  Rule
+    { ruleLabel = "Cut"
+    , ruleParams = [PForm (FormM "A")]
+    , rulePremises = [[] :+ g :|- fA, [fA] :+ g :|- fC]
+    , ruleConclusion = [] :+ g :|- fC
+    , ruleSides = []
+    }
+
+{- |
 Every rule of the calculus, in the order the generated constructors take.
 -}
 allRules :: [Rule]
@@ -249,4 +265,5 @@ allRules =
   , succNonZeroRule
   , succInjRule
   , indRule
+  , cutRule
   ]

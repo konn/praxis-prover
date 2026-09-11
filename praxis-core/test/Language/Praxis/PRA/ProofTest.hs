@@ -46,6 +46,7 @@ proofTests =
     , indTests
     , errorContextTests
     , isProofOfTests
+    , cutTests
     ]
 
 -- * A small stock of formulae to build proofs out of
@@ -383,4 +384,14 @@ indTests =
               (Defeq (suc xt) (suc xt) (Id (suc xt :=== suc xt) (ctx [xt === xt])))
           )
           @?= [TermEigenVariableViolation "x" xt]
+    ]
+
+cutTests :: TestTree
+cutTests =
+  testGroup
+    "Cut"
+    [ testCase "the cut formula is proved on the left and assumed on the right" $
+        inferConclusion (Cut a (Id pA MS.empty) (Id pA (ctx [a]))) @?= Right (ctx [a] |- a)
+    , testCase "a left premise proving another formula is rejected" $
+        reasons (Cut a (Id pB MS.empty) (Id pA (ctx [a]))) /= [] @?= True
     ]

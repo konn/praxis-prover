@@ -25,6 +25,9 @@ and this project adheres to the
   assumptions and the goal of that branch, and `|`, `try` and `repeat` do not
   catch it, so a script under construction may end in `sorry` to see where it
   stands.
+- The rule `Cut`, in `Language.Praxis.PRA.Rule.G3i`: admissible in pure G3i,
+  it is not eliminable in the presence of `Ind`, which needs it to reason
+  about hypotheses mentioning the induction term.
 
 ### Changed
 
@@ -54,7 +57,10 @@ and this project adheres to the
   conditional, a schema instance with its parameter in braces or as a lambda,
   and an instance of `mu` at a lambda as the bounded search `μ i < b. body`.
 - `induction` takes a term, `induction (S x) as n` or a term metavariable of a
-  rule, and abstracts its occurrences into the eigenvariable.
+  rule, and abstracts its occurrences into the eigenvariable; the hypotheses
+  mentioning the term are generalized into the induction formula through
+  `Cut` and reintroduced in each case, where the induction hypothesis is an
+  implication from them.
 - The errors of schematic proofs render metavariables by name, through
   `renderSchemaTacticError` and the hooked renderers of
   `Language.Praxis.PRA.Syntax.Pretty`, so a `sorry` report reads `Γ |- A`.

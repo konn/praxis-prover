@@ -54,7 +54,7 @@ import Data.Functor.Foldable (embed)
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.Hashable (Hashable)
-import Data.List (intercalate, sort)
+import Data.List (intercalate, nub, sort)
 import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
@@ -130,9 +130,11 @@ data Tactic a
     by @s@, by 'Subst'.
     -}
     Rewrite !(Atomic (Hole a)) !(Atomic (Hole a))
-  | {- | @Induction t n@: prove the goal by 'Ind' on the term @t@, whose
-    occurrences in the succedent the eigenvariable @n@ abstracts; @n@ is
-    chosen fresh when it is not given.
+  | {- | @Induction t n@: prove the goal by 'Ind' on the term @t@, with the
+    eigenvariable @n@, chosen fresh when it is not given.  The hypotheses
+    mentioning @t@ are generalized into the induction formula, through 'Cut',
+    and reintroduced in each case, where the induction hypothesis then is an
+    implication from them.
     -}
     Induction !(Term a) !(Maybe a)
   | {- | Close a goal whose succedent is in the context, expanding the identity
@@ -342,7 +344,17 @@ runTacticIn env prems = go
             | n `HS.member` names -> failWith (NotFresh n)
             | otherwise -> pure n
           Nothing -> pure (freshen names (case t of Var y -> y; _ -> anyName))
-        go (applyWith IndRule [ArgVar (Named n), form (abstractIn t n c), term t]) goal
+        -- The hypotheses mentioning the term join the induction formula, by Cut,
+        -- and are reintroduced in each case; modus ponens on them discharges the cut.
+        let dependent = nub [h | h <- toList ctx, t `occursInFormula` h]
+            motive = foldr (:==>) c dependent
+            induction = applyWith IndRule [ArgVar (Named n), form (abstractIn t n motive), term t]
+            reintroduce = foldr (\_ u -> applyWith ImplRRule [] `Then` u) Skip dependent
+            discharge [] = Assumption
+            discharge (h : hs) = Dispatch (applyWith ImplLRule [form h, form (foldr (:==>) c hs)]) [Assumption, discharge hs]
+        if null dependent
+          then go induction goal
+          else go (Dispatch (applyWith CutRule [form motive]) [induction `Then` reintroduce, discharge dependent]) goal
       Assumption
         | not (MS.member c ctx) -> failWith (NotInContext c)
         | otherwise -> case c of
@@ -722,6 +734,17 @@ occursIn t (s :=== u) = go s || go u
       v == t || case v of
         App _ args -> any go args
         _ -> False
+
+-- | Whether the term occurs in the formula, as a subterm of an atom.
+occursInFormula :: (Eq a) => Term a -> Formula a -> Bool
+occursInFormula t = go
+  where
+    go = \case
+      Atm p -> t `occursIn` p
+      p :/\ q -> go p || go q
+      p :\/ q -> go p || go q
+      p :==> q -> go p || go q
+      Bot -> False
 
 -- | Replace every occurrence of the term by the variable.
 abstract :: (Eq a) => Term a -> a -> Atomic a -> Atomic a

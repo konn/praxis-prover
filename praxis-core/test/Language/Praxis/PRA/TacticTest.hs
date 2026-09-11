@@ -466,7 +466,18 @@ inductionTests =
         env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
         case decls of
           [d] -> case proveOpenIn env Map.empty (declGoal d) (declTactic d) of
-            Left err -> renderSchemaTacticError builtin err @?= "5:5: sorry: the proof stops here\n  (t < 0) = 1\n  G\n  |- A"
+            Left err -> renderSchemaTacticError builtin err @?= "5:5: sorry: the proof stops here\n  (0 < 0) = 1\n  (t < 0) = 1\n  G\n  |- A"
             Right _ -> assertFailure "proved"
           _ -> assertFailure "expected one declaration"
+    , testCase "hypotheses mentioning the term are generalized, through Cut" $
+        proves "y + 0 = 0 |- y = 0 by induction y as n { refl } { Defeq (S n + 0) (S (n + 0)); rewrite (S n + 0 = S (n + 0)) in (S n + 0 = 0); SuccNonZero }"
+    , testCase "each case carries the generalized hypotheses and the induction hypothesis" $ do
+        (base, baseTactic) <- parsed (parseGoal sc "y + 0 = z |- y = z by induction y as n { sorry } { skip }")
+        case prove base baseTactic of
+          Left err -> renderTacticError sig id err @?= "1:42: sorry: the proof stops here\n  0 + 0 = z\n  y + 0 = z\n  |- 0 = z"
+          Right _ -> assertFailure "proved"
+        (step, stepTactic) <- parsed (parseGoal sc "y + 0 = z |- y = z by induction y as n { skip } { sorry }")
+        case prove step stepTactic of
+          Left err -> renderTacticError sig id err @?= "1:51: sorry: the proof stops here\n  S n + 0 = z\n  n + 0 = z ==> n = z\n  y + 0 = z\n  |- S n = z"
+          Right _ -> assertFailure "proved"
     ]
