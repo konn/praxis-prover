@@ -57,6 +57,7 @@ module Language.Praxis.PRA.Syntax.Parser (
   Scope (..),
   plainScope,
   SyntaxError,
+  syntaxErrorPosition,
 
   -- * Parsing
   parseTerm,
@@ -96,6 +97,7 @@ import Control.Monad (unless, void)
 import Data.Bifunctor (first)
 import Data.Hashable (Hashable)
 import Data.List (nub)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
 import Data.Multiset qualified as MS
 import Data.Proxy (Proxy (..))
@@ -119,7 +121,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature (Signature)
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural (Natural)
-import Text.Megaparsec (ParseErrorBundle, choice, eof, errorBundlePretty, getOffset, notFollowedBy, oneOf, option, parse, region, sepBy1, setErrorOffset, try, (<?>), (<|>))
+import Text.Megaparsec (ParseErrorBundle, attachSourcePos, bundleErrors, bundlePosState, choice, eof, errorBundlePretty, errorOffset, getOffset, notFollowedBy, oneOf, option, parse, region, sepBy1, setErrorOffset, sourceColumn, sourceLine, try, unPos, (<?>), (<|>))
 import Text.Megaparsec.Char qualified as CP
 
 {- |
@@ -163,6 +165,13 @@ newtype SyntaxError = SyntaxError (ParseErrorBundle T.Text Void)
 
 instance Exception SyntaxError where
   displayException (SyntaxError bundle) = errorBundlePretty bundle
+
+-- | Where a syntax error is: line and column, from 1.
+syntaxErrorPosition :: SyntaxError -> (Int, Int)
+syntaxErrorPosition (SyntaxError bundle) =
+  let (errs, _) = attachSourcePos errorOffset (bundleErrors bundle) (bundlePosState bundle)
+      pos = snd (NE.head errs)
+   in (unPos (sourceLine pos), unPos (sourceColumn pos))
 
 -- | Run a parser on a whole input.
 runParserFully :: Parser x -> String -> Either SyntaxError x

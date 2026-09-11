@@ -27,11 +27,20 @@ module Language.Praxis.PRA.PrimitiveRecursion.Quote (
   prfFile,
   quoteFile,
   liftSignature,
+
+  -- * Checking
+  checkQuote,
+  Checked (..),
+  Header (..),
+  CheckError (..),
+  renderCheckError,
+  checkErrorPosition,
 ) where
 
 import Control.Exception (displayException)
 import Control.Monad (unless, void, when)
 import Data.Char (isAlphaNum, isLower)
+import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isNothing)
@@ -39,6 +48,7 @@ import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
+import Data.Void (Void)
 import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal, type (+), type (-), type (<=))
 import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Desugar qualified as D
@@ -55,7 +65,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (arityType)
 import Language.Praxis.PRA.Signature qualified as Sig
 import Language.Praxis.TH.Internal qualified as QTH
 import Numeric.Natural (Natural)
-import Text.Megaparsec (SourcePos (..), eof, errorBundlePretty, getSourcePos, optional, parse, sourcePosPretty, try, (<|>))
+import Text.Megaparsec (ParseErrorBundle, SourcePos (..), attachSourcePos, bundleErrors, bundlePosState, eof, errorBundlePretty, errorOffset, getSourcePos, optional, parse, sourcePosPretty, try, unPos, (<|>))
 
 data Header = Header !T.Text !(Maybe T.Text)
 
@@ -119,16 +129,51 @@ quoteP = (,) <$> optional (try headerP) <*> equationsP
       here <- getSourcePos
       unless (sourceLine here == sourceLine start) (fail "environment header must be on one line")
 
-compileQuote :: Sig.Signature -> String -> TH.Q [TH.Dec]
-compileQuote initial source = do
-  loc <- TH.location
-  let (line, column) = TH.loc_start loc
-      padded = T.replicate (line - 1) "\n" <> T.replicate (column - 1) " " <> T.pack source
-  (header, equations) <- either (fail . errorBundlePretty) pure $ parse (spaceConsumer *> quoteP <* eof) (TH.loc_filename loc) padded
-  registry <- maybe (Registry Map.empty Set.empty) id <$> getQ
+-- | Why a quote of definitions is rejected: a syntax error, or a check which failed, at an equation when it concerns one.
+data CheckError
+  = CheckSyntax !(ParseErrorBundle T.Text Void)
+  | CheckFailed !(Maybe SourcePos) !String
+
+-- | Render a rejection for a human.
+renderCheckError :: CheckError -> String
+renderCheckError = \case
+  CheckSyntax bundle -> errorBundlePretty bundle
+  CheckFailed pos msg -> maybe "" (\p -> sourcePosPretty p <> ": ") pos <> msg
+
+-- | Where a rejection is: line and column, from 1, when it is located.
+checkErrorPosition :: CheckError -> Maybe (Int, Int)
+checkErrorPosition = \case
+  CheckSyntax bundle ->
+    let (errs, _) = attachSourcePos errorOffset (bundleErrors bundle) (bundlePosState bundle)
+        pos = snd (NE.head errs)
+     in Just (unPos (sourceLine pos), unPos (sourceColumn pos))
+  CheckFailed pos _ -> (\p -> (unPos (sourceLine p), unPos (sourceColumn p))) <$> pos
+
+-- | A quote of definitions, checked: its header, its equations, the environment and signature it extends, and the block and environment it makes.
+data Checked = Checked
+  { checkedHeader :: !(Maybe Header)
+  , checkedEquations :: ![LocatedEquation]
+  , checkedNames :: !(Set T.Text)
+  , checkedSignatureNames :: !(Set T.Text)
+  -- ^ the Haskell bindings the quote generates, and among them the signatures
+  , checkedParent :: !(CompiledEnv, Sig.Signature)
+  , checkedBlock :: !CompiledBlock
+  , checkedEnvironment :: !CompiledEnv
+  }
+
+{- |
+Check a quote of definitions as the quasiquoter does, without generating
+anything: parse it, resolve the environment it extends among the snapshots
+given, refuse the Haskell names already generated, and compile it over the
+initial signature.  The qualifier prefixes the identities of the
+definitions, and the path names the source in errors.
+-}
+checkQuote :: Sig.Signature -> Map T.Text (CompiledEnv, Sig.Signature) -> Set T.Text -> (T.Text -> T.Text) -> FilePath -> T.Text -> Either CheckError Checked
+checkQuote initial snapshotsKnown generated qualify path source = do
+  (header, equations) <- either (Left . CheckSyntax) Right $ parse (spaceConsumer *> quoteP <* eof) path source
   (parent, parentSig) <- case header of
     Just (Header _ (Just ident)) ->
-      maybe (fail ("prf: unknown environment " <> T.unpack ident <> "; parents must be declared earlier in this module")) pure (Map.lookup ident (snapshots registry))
+      maybe (failed ("prf: unknown environment " <> T.unpack ident <> "; parents must be declared earlier in this module")) pure (Map.lookup ident snapshotsKnown)
     _ -> pure (compiledEnvironment initial, initial)
   let raw = map locatedEquation equations
       functionNames = Set.fromList (map name raw)
@@ -136,30 +181,43 @@ compileQuote initial source = do
         Nothing -> Set.map (<> "Signature") functionNames
         Just (Header ident _) -> Set.singleton ident
       names = functionNames <> signatureNames
-      at eq err = fail (sourcePosPretty (equationPosition eq) <> ": " <> err)
-  unless (Set.null (functionNames `Set.intersection` signatureNames)) (fail "prf: generated signature and function names must differ")
+      at eq err = Left (CheckFailed (Just (equationPosition eq)) err)
+  unless (Set.null (functionNames `Set.intersection` signatureNames)) (failed "prf: generated signature and function names must differ")
   mapM_ (\eq -> unless (validBinding (name (locatedEquation eq))) (at eq "prf: function name must be a Haskell variable identifier")) equations
   case header of
     Nothing -> pure ()
     Just (Header ident _) -> do
-      unless (validBinding ident) (fail "prf: environment name must be a Haskell variable identifier")
-      when (Set.member ident functionNames) (fail "prf: environment and function names must differ")
-      when (Map.member ident (snapshots registry)) (fail ("prf: environment already defined: " <> T.unpack ident))
-  unless (Set.null (names `Set.intersection` generatedNames registry)) $
-    fail ("prf: Haskell binding already generated: " <> show (Set.toList (names `Set.intersection` generatedNames registry)))
+      unless (validBinding ident) (failed "prf: environment name must be a Haskell variable identifier")
+      when (Set.member ident functionNames) (failed "prf: environment and function names must differ")
+      when (Map.member ident snapshotsKnown) (failed ("prf: environment already defined: " <> T.unpack ident))
+  unless (Set.null (names `Set.intersection` generated)) $
+    failed ("prf: Haskell binding already generated: " <> show (Set.toList (names `Set.intersection` generated)))
   -- Locate name/arity errors at the individual clause before compilation. An
   -- instance clause is attributed to the template clause it expands.
-  expanded <- either (fail . displayException) pure (expandFamily True (signatureEnv parentSig) [] raw)
-  renamingEnv <- either (fail . displayException) pure (equationEnv (expandedEnv expanded) (expandedEquations expanded))
+  expanded <- either (failed . displayException) pure (expandFamily True (signatureEnv parentSig) [] raw)
+  renamingEnv <- either (failed . displayException) pure (equationEnv (expandedEnv expanded) (expandedEquations expanded))
   let concreteLocated = [eq | eq <- equations, isNothing (variadic (locatedEquation eq))]
       templateLocated ident = [eq | eq <- equations, name (locatedEquation eq) == ident]
       attributed =
         zip concreteLocated (expandedConcrete expanded)
           <> concat [zip (templateLocated ident) clauses | ((ident, _), clauses) <- expandedInstanceClauses expanded]
   mapM_ (\(located, eq) -> either (at located . displayException) (const (pure ())) (renameEquation renamingEnv eq)) attributed
-  let qualify ident = T.pack (TH.loc_package loc <> ":" <> TH.loc_module loc <> ".") <> ident
-  block <- either (fail . withLocations equations . displayException) pure (compileDefinitionsWith qualify parent raw)
-  extended <- either (fail . displayException) pure (extendEnvironment parent block)
+  block <- either (failed . withLocations equations . displayException) pure (compileDefinitionsWith qualify parent raw)
+  extended <- either (failed . displayException) pure (extendEnvironment parent block)
+  pure (Checked header equations names signatureNames (parent, parentSig) block extended)
+  where
+    failed = Left . CheckFailed Nothing
+
+compileQuote :: Sig.Signature -> String -> TH.Q [TH.Dec]
+compileQuote initial source = do
+  loc <- TH.location
+  let (line, column) = TH.loc_start loc
+      padded = T.replicate (line - 1) "\n" <> T.replicate (column - 1) " " <> T.pack source
+      qualify ident = T.pack (TH.loc_package loc <> ":" <> TH.loc_module loc <> ".") <> ident
+  registry <- maybe (Registry Map.empty Set.empty) id <$> getQ
+  Checked header equations names signatureNames (parent, parentSig) block extended <-
+    either (fail . renderCheckError) pure $
+      checkQuote initial (snapshots registry) (generatedNames registry) qualify (TH.loc_filename loc) padded
   let hsName ident = mkNameG_v (TH.loc_package loc) (TH.loc_module loc) (T.unpack ident)
       newSymbols =
         Sig.signatureWithVariadicSchemas

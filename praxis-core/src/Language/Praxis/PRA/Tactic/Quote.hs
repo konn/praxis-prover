@@ -79,6 +79,9 @@ module Language.Praxis.PRA.Tactic.Quote (
   LemmaEntry (..),
   Flag (..),
 
+  -- * Checking
+  checkDecl,
+
   -- * Schematic names
   SchemaName (..),
   renderSchemaName,
@@ -314,6 +317,17 @@ proofConstructors = do
   info <- reifyDatatype ''Proof
   pure (Map.fromList [(nameBase n, n) | con <- datatypeCons info, let n = constructorName con])
 
+{- |
+Certify a declaration, given the lemmas it may appeal to, without generating
+anything: the checked proof, and the lemma the declaration is for those
+after it.
+-}
+checkDecl :: F.KernelEnv -> Map String (Lemma SchemaName) -> Decl SchemaName -> Either (TacticError SchemaName) (Free (Step SchemaName) String, Lemma SchemaName)
+checkDecl kernel lemmas decl = do
+  let prems = Map.fromList [(n, s) | PremiseBinder n s <- declBinders decl]
+  checked <- proveOpenWith kernel lemmas prems (declGoal decl) (declTactic decl)
+  pure (checked, (declLemma decl) {lemmaBound = boundVarMetas checked})
+
 -- | Compile a declaration to its binding, given the lemmas it may appeal to and how to name its binding globally; also the lemma it is for those after it.
 compileDecl :: Signature -> (String -> Name) -> Map String LemmaEntry -> Decl SchemaName -> Q ([Dec], LemmaEntry)
 compileDecl sig global lemmas decl = do
@@ -324,10 +338,7 @@ compileDecl sig global lemmas decl = do
       prems = Map.fromList [(n, s) | PremiseBinder n s <- binders]
   unless (startsLower dname) $
     fail ("pra: " <> dname <> " is not a Haskell variable name")
-  checked <-
-    either (fail . renderSchemaTacticError sig) pure $
-      proveOpenWith kernel (fmap entryLemma lemmas) prems (declGoal decl) (declTactic decl)
-  let lemma = (declLemma decl) {lemmaBound = boundVarMetas checked}
+  (checked, lemma) <- either (fail . renderSchemaTacticError sig) pure (checkDecl kernel (fmap entryLemma lemmas) decl)
 
   -- One parameter per binder, in order.
   params <- traverse (newName . stem . fst) (binderParams binders)

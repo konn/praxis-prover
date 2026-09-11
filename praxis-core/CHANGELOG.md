@@ -56,6 +56,12 @@ and this project adheres to the
   `prfQuoter` reuses a signature. `quoteFile`, `praFile` and `prfFile` splice
   a file of declarations in place of a quote, relative to the package
   directory, and recompile the module when the file changes.
+- For tools such as the language server of `praxis-lsp`: `checkDecl` in
+  `Language.Praxis.PRA.Tactic.Quote` certifies a declaration without
+  generating anything, `checkQuote` in
+  `Language.Praxis.PRA.PrimitiveRecursion.Quote` checks a quote of
+  definitions the same way, reporting a `CheckError` with its position, and
+  `syntaxErrorPosition` locates a `SyntaxError`.
 - Calculational proofs: `calc t0 = t1 by u1 = t2 by u2 …` proves the goal
   `t0 = tn` as a chain of equations, each step proved by its tactic under the
   hypotheses of the goal, by `refl` when none is given; the steps are cut in
