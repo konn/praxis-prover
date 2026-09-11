@@ -9,6 +9,7 @@ The textual syntax of tactics, and of the declarations which use them.
 >           | refl | symmetry sel | rewrite sel in sel
 >           | induction arg [as ident {ident}] | assumption
 >           | exact ident {arg}            -- a premise, a hypothesis, or a lemma with the arguments for its metavariables
+>           | calc term {= term [by simple]} -- a chain of equations, each step by its tactic, or by refl
 >           | skip | sorry | try basic | repeat basic | ( tactic )
 > sel     ::= ident | atom                 -- a hypothesis by name, or the unique one matching the pattern
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
@@ -42,6 +43,10 @@ succedent, or a lemma: a theorem or rule declared earlier, whose
 metavariables take arguments the same way, in the order of its binders.  The
 lemmas in scope, with the sorts of their metavariables, are the 'Lemmas' the
 parsers are given; a declaration is in scope for the declarations after it.
+
+@calc t0 = t1 by u1 = t2 by u2 …@ proves the goal @t0 = tn@ as a chain: each
+step @t(i-1) = ti@ is proved by its tactic under the hypotheses of the goal,
+by @refl@ when none is given, and the steps are chained by transitivity.
 
 @sorry@ abandons the proof at its goal, which the error then reports; neither
 @|@, @try@ nor @repeat@ catches it, so a script may end in @sorry@ to see
@@ -94,7 +99,7 @@ import Text.Megaparsec.Char (char)
 tacticKeywords :: [String]
 tacticKeywords =
   map (R.ruleLabel . ruleSpec) [minBound .. maxBound]
-    <> words "refl symmetry rewrite in induction as on assumption exact skip sorry try repeat"
+    <> words "refl symmetry rewrite in induction as on assumption exact calc skip sorry try repeat"
     <> words "theorem rule by var term atom formula ctx"
 
 -- | Reserve the words of the tactic language in a scope.
@@ -262,6 +267,7 @@ tacticP lemmas sc0 = seqP
             , inductionP
             , Assumption <$ keywordP "assumption"
             , exactP
+            , calcP
             , Skip <$ keywordP "skip"
             , Sorry <$ keywordP "sorry"
             , Try <$> (keywordP "try" *> basicP)
@@ -286,6 +292,13 @@ tacticP lemmas sc0 = seqP
         Nothing -> Induction t Nothing
         Just (n, []) -> Induction t (Just n)
         Just (n, hs) -> As hs (Induction t (Just n))
+
+    -- A chain of equations, each step proved by the tactic after by, or by refl.
+    calcP = do
+      keywordP "calc"
+      t0 <- closedP (termP sc)
+      steps <- some ((,) <$> (symbolP "=" *> closedP (termP sc)) <*> option Refl (keywordP "by" *> simpleP))
+      pure (Calc t0 steps)
 
     -- A premise takes no arguments; a lemma takes those of its metavariables.
     exactP = do

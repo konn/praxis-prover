@@ -99,6 +99,10 @@ by exact conjSwap { Id } { Id }
 rule conjSwapMeta (A B : formula) (Γ : ctx) (D1 : A, B, Γ |- B) (D2 : A, B, Γ |- A)
   : A /\ B, Γ |- B /\ A
 by exact conjSwap { exact D1 } { exact D2 }
+
+-- A calculation, each step by a lemma.
+theorem calcPlus : |- plus (plus y 0) 0 = y
+by calc plus (plus y 0) 0 = plus y 0 by exact plusZeroRight = y by exact plusZeroRight
 |]
 
 -- A quote later in the module sees the lemmas of the quotes before it.
@@ -239,6 +243,8 @@ quoteTests =
         inferConclusion (symmGiven (Var "x") (Var "x'") (ctx ["x = x'"]))
           @?= Right (sequent "x = x', x = x' |- x' = x")
         inferConclusion transAt @?= Right (sequent "a = b, b = c |- a = c")
+    , testCase "a calculation appeals to lemmas at each step" $
+        inferConclusion calcPlus @?= Right (sequent "|- plus (plus y 0) 0 = y")
     , testCase "the premises of an appeal are proved by the blocks" $ do
         inferConclusion plusZeroRightTwice @?= Right (sequent "|- plus (plus y 0) 0 = y")
         inferConclusion conjSwapAt @?= Right (sequent "a = 0 /\\ b = 0, c = 0 |- b = 0 /\\ a = 0")

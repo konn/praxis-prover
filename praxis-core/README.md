@@ -149,6 +149,18 @@ step which introduces hypotheses numbers them on, or names them as told:
 `rewrite H1 in H2` and `exact H2` refer to hypotheses by name, and `ImplL on
 H2` picks the hypothesis a rule acts on where several have the right shape.
 
+An equation may be proved as a calculation, one step per line, each by its
+own tactic or by `refl` when definitional:
+
+```haskell
+[pra|
+theorem twiceZero : |- (y + 0) + 0 = y
+by calc (y + 0) + 0
+     = y + 0 by exact plusZeroRight
+     = y by exact plusZeroRight
+|]
+```
+
 ```haskell
 [pra|
 theorem succSubSucc : |- S n - S m = n - m

@@ -46,6 +46,7 @@ tacticTests =
     , inductionTests
     , lemmaTests
     , namingTests
+    , calcTests
     ]
 
 sig :: Signature
@@ -89,6 +90,7 @@ stripLoc = \case
   Dispatch t us -> Dispatch (stripLoc t) (map stripLoc us)
   On ns t -> On ns (stripLoc t)
   As ns t -> As ns (stripLoc t)
+  Calc t steps -> Calc t (map (fmap stripLoc) steps)
   t -> t
 
 parsesTo :: String -> Tactic String -> Assertion
@@ -650,5 +652,29 @@ namingTests =
           _ -> False
         "|- 2 = 2 by refl as H" `failsWith` \case
           NothingToName -> True
+          _ -> False
+    ]
+
+calcTests :: TestTree
+calcTests =
+  testGroup
+    "calc"
+    [ testCase "a chain of equations, each with its tactic or refl" $ do
+        "calc a = b by Id = c" `parsesTo` Calc (Var "a") [(Var "b", applyWith IdRule []), (Var "c", Refl)]
+        "calc plus 0 y = y" `parsesTo` Calc (plus :$ (Lit 0 :< Var "y" :< Nil)) [(Var "y", Refl)]
+    , testCase "the steps are proved under the hypotheses and chained" $ do
+        proves "a = b, b = c |- a = c by calc a = b by Id = c by Id"
+        proves "a = b, b = c, c = d |- a = d by calc a = b by Id = c by Id = d by Id"
+        proves "|- plus 0 y = y by calc plus 0 y = y"
+        proves "|- mult 2 3 = 6 by calc mult 2 3 = plus 3 3 = 6"
+        proves "t = s |- plus 0 t = s by calc plus 0 t = t = s by Id"
+    , testCase "a step may use blocks, and every step sees the goal's hypotheses" $ do
+        (goal, tac) <- parsed (parseGoal sc "a = b, b = c |- a = c by calc a = b by Id = c by sorry")
+        case prove goal tac of
+          Right _ -> assertFailure "proved"
+          Left err -> renderTacticError sig id err @?= "1:50: sorry: the proof stops here\n  H1 : a = b\n  H2 : b = c\n  |- b = c"
+    , testCase "the chain must run between the sides of the goal" $
+        "|- a = c by calc a = b = d" `failsWith` \case
+          CalcMismatch (Var "a") (Var "d") -> True
           _ -> False
     ]

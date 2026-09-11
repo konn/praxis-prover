@@ -287,6 +287,12 @@ data Tactic a
     order of its binders, as for 'Apply'.
     -}
     Exact !String ![Maybe (Arg (Hole a))]
+  | {- | @Calc t0 [(t1, u1), …, (tn, un)]@: prove the goal @t0 = tn@ as a
+    chain of equations, each step @t(i-1) = ti@ proved by @ui@ under the
+    hypotheses of the goal.  The steps are cut in as one conjunction, split
+    by 'ConjL' and chained by 'Subst' down to 'Id'.
+    -}
+    Calc !(Term a) ![(Term a, Tactic a)]
   | -- | Leave the goal open.
     Skip
   | -- | Abandon the whole proof, reporting the goal reached here.
@@ -459,6 +465,8 @@ data Failure a
     NameInUse !String
   | -- | 'On' or 'As' on a tactic which acts on no hypothesis
     NothingToName
+  | -- | 'Calc' on a goal which is not the equation between the ends of the chain
+    CalcMismatch !(Term a) !(Term a)
   | -- | 'Dispatch' with the wrong number of blocks: expected, actual
     WrongGoalCount !Int !Int
   | -- | every alternative of an 'OrElse' failed
@@ -690,6 +698,29 @@ runTacticWith env lemmas prems = go noHints
         if null dependent
           then go noHints induction goal
           else go noHints (Dispatch (applyWith CutRule [form motive]) [induction `Then` reintroduce, discharge dependent]) goal
+      Calc t0 steps -> plain do
+        let ts = t0 : map fst steps
+            tn = last ts
+            equations = zipWith (:===) ts (drop 1 ts)
+        case c of
+          Atm (s :=== u) | s == t0 && u == tn -> pure ()
+          _ -> failWith (CalcMismatch t0 tn)
+        case zip equations (map snd steps) of
+          [] -> failWith (Malformed "calc: no step")
+          [(_, u)] -> go noHints u goal
+          pairs -> do
+            let x = freshen (goalNames (goalSequent goal) <> HS.fromList (concatMap toList ts)) anyName
+                conjunction = foldr1 (:/\) (map Atm equations)
+                -- Each step under the hypotheses of the goal, as a conjunct.
+                proveSteps [(_, u)] = u
+                proveSteps ((_, u) : rest) = Dispatch (applyWith ConjRRule []) [u, proveSteps rest]
+                proveSteps [] = Skip
+                -- The conjunction split into its equations, which Subst chains.
+                split = foldr (\(e, rest) u -> applyWith ConjLRule [form (Atm e), form rest] `Then` u) Skip (conjuncts equations)
+                conjuncts (e : rest@(_ : _)) = (e, foldr1 (:/\) (map Atm rest)) : conjuncts rest
+                conjuncts _ = []
+                chain = foldr (\(u :=== v) k -> applyWith SubstRule [ArgVar (Named x), term u, term v, atom (t0 :=== Var x)] `Then` k) (applyWith IdRule []) (drop 1 equations)
+            go noHints (Dispatch (applyWith CutRule [form conjunction]) [proveSteps pairs, split `Then` chain]) goal
       Assumption
         | not (MS.member c ctx) -> failWith (NotInContext c)
         | otherwise -> plain case c of
@@ -1493,6 +1524,7 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       NamesUnused ns -> "as: no hypothesis introduced to name " <> intercalate ", " ns
       NameInUse n -> "as: a hypothesis is already named " <> n
       NothingToName -> "on/as: the tactic acts on no hypothesis"
+      CalcMismatch s t -> "calc: the chain proves " <> rt s <> " = " <> rt t <> ", which is not the goal"
       WrongGoalCount expected actual ->
         show expected <> " blocks given for " <> show actual <> " goals"
       Alternatives _ -> "every alternative failed"

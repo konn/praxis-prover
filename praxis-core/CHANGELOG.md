@@ -49,6 +49,10 @@ and this project adheres to the
   acts on, `ImplL on H2`. A `sorry` report lists the hypotheses by name.
   `parseGoal` and `Decl` carry goals, `prove` takes one, and `goalOf` makes
   one from a sequent.
+- Calculational proofs: `calc t0 = t1 by u1 = t2 by u2 …` proves the goal
+  `t0 = tn` as a chain of equations, each step proved by its tactic under the
+  hypotheses of the goal, by `refl` when none is given; the steps are cut in
+  as one conjunction, split by `ConjL` and chained by `Subst` down to `Id`.
 - `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
   the substitution and weakening of a proof, renaming the variables its steps
   bind apart; the spliced proof of an appeal to a theorem is built with them.
