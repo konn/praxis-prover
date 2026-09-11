@@ -4,11 +4,13 @@ The textual syntax of tactics, and of the declarations which use them.
 > tactic  ::= alt {; alt}                  -- t ; u       : u on every goal t leaves
 > alt     ::= simple {| simple}            -- t | u       : u if t fails; committed
 > simple  ::= basic {'{' tactic '}'}       -- t {u1} … {un}: t must leave n goals, ui gets goal i
-> basic   ::= Rule {arg}                   -- a rule of the calculus, applied backwards
->           | refl | symmetry atom | rewrite atom in atom
->           | induction arg [as ident] | assumption
->           | exact ident {arg}            -- a premise, or a lemma with the arguments for its metavariables
+> basic   ::= step [on ident {ident}] [as ident {ident}]
+> step    ::= Rule {arg}                   -- a rule of the calculus, applied backwards
+>           | refl | symmetry sel | rewrite sel in sel
+>           | induction arg [as ident {ident}] | assumption
+>           | exact ident {arg}            -- a premise, a hypothesis, or a lemma with the arguments for its metavariables
 >           | skip | sorry | try basic | repeat basic | ( tactic )
+> sel     ::= ident | atom                 -- a hypothesis by name, or the unique one matching the pattern
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
 >
 > decl    ::= theorem ident : sequent by tactic
@@ -26,11 +28,20 @@ term; atom and formula arguments are parenthesized.  Context parameters are
 never written.  A metavariable must be
 declared before the premises which mention it.
 
-@exact@ names a premise of the rule being proved, or a lemma: a theorem or
-rule declared earlier, whose metavariables take arguments the same way, in
-the order of its binders.  The lemmas in scope, with the sorts of their
-metavariables, are the 'Lemmas' the parsers are given; a declaration is in
-scope for the declarations after it.
+The hypotheses of a goal are named: @H1@, @H2@, … in the order the sequent
+lists them, a context metavariable by its own name, and a hypothesis a step
+introduces by the next number, or as @as@ says.  @on@ names the hypotheses
+a rule acts on, in the order of its principal formulas, or those of a lemma
+appealed to; @as@ names the hypotheses the step introduces, in the order of
+its premises.  Under @induction t as n H…@ the first name after the
+eigenvariable is for the induction hypothesis, the rest for the hypotheses
+reintroduced.
+
+@exact@ names a premise of the rule being proved, a hypothesis which is the
+succedent, or a lemma: a theorem or rule declared earlier, whose
+metavariables take arguments the same way, in the order of its binders.  The
+lemmas in scope, with the sorts of their metavariables, are the 'Lemmas' the
+parsers are given; a declaration is in scope for the declarations after it.
 
 @sorry@ abandons the proof at its goal, which the error then reports; neither
 @|@, @try@ nor @repeat@ catches it, so a script may end in @sorry@ to see
@@ -65,7 +76,6 @@ module Language.Praxis.PRA.Tactic.Parser (
   plainMetaScope,
 ) where
 
-import Data.Hashable (Hashable)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Language.Praxis.PRA.Pattern (Hole (..))
@@ -84,7 +94,7 @@ import Text.Megaparsec.Char (char)
 tacticKeywords :: [String]
 tacticKeywords =
   map (R.ruleLabel . ruleSpec) [minBound .. maxBound]
-    <> words "refl symmetry rewrite in induction as assumption exact skip sorry try repeat"
+    <> words "refl symmetry rewrite in induction as on assumption exact skip sorry try repeat"
     <> words "theorem rule by var term atom formula ctx"
 
 -- | Reserve the words of the tactic language in a scope.
@@ -132,18 +142,18 @@ binderMetas bs = [(n, s) | MetaBinder ns s <- bs, n <- ns]
 data Decl a = Decl
   { declName :: !String
   , declBinders :: ![Binder a]
-  , declGoal :: !(Sequent a)
+  , declGoal :: !(Goal a)
   , declTactic :: !(Tactic a)
   }
   deriving (Show, Eq)
 
 -- | The lemma a declaration states, once proved; it binds no metavariable, as far as the statement tells.
-declLemma :: Decl a -> Lemma a
+declLemma :: (Schematic a) => Decl a -> Lemma a
 declLemma d =
   Lemma
     { lemmaMetas = binderMetas (declBinders d)
     , lemmaPremises = [(n, s) | PremiseBinder n s <- declBinders d]
-    , lemmaGoal = declGoal d
+    , lemmaGoal = goalSequent (declGoal d)
     , lemmaBound = []
     }
 
@@ -156,18 +166,18 @@ the tactic of a declaration are read, from the metavariables it declares;
 'plainMetaScope' serves for plain names.  Each declaration is a lemma for
 those after it.
 -}
-parseDecls :: (Hashable a) => ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
+parseDecls :: (Schematic a) => ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
 parseDecls = parseDeclsIn Map.empty
 
 -- | 'parseDecls', with lemmas in scope from the start.
-parseDeclsIn :: (Hashable a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
+parseDeclsIn :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
 parseDeclsIn lemmas mkScope = runParserFully (declsP lemmas mkScope)
 
 -- | Parse @sequent by tactic@.
-parseGoal :: (Hashable a) => Scope a -> String -> Either SyntaxError (Sequent a, Tactic a)
+parseGoal :: (Schematic a) => Scope a -> String -> Either SyntaxError (Goal a, Tactic a)
 parseGoal = parseGoalIn Map.empty
 
-parseGoalIn :: (Hashable a) => Lemmas -> Scope a -> String -> Either SyntaxError (Sequent a, Tactic a)
+parseGoalIn :: (Schematic a) => Lemmas -> Scope a -> String -> Either SyntaxError (Goal a, Tactic a)
 parseGoalIn lemmas sc = runParserFully (goalP lemmas sc)
 
 parseTactic :: Scope a -> String -> Either SyntaxError (Tactic a)
@@ -176,7 +186,7 @@ parseTactic = parseTacticIn Map.empty
 parseTacticIn :: Lemmas -> Scope a -> String -> Either SyntaxError (Tactic a)
 parseTacticIn lemmas sc = runParserFully (tacticP lemmas sc)
 
-declsP :: (Hashable a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> Parser [Decl a]
+declsP :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> Parser [Decl a]
 declsP lemmas0 mkScope = go lemmas0
   where
     go lemmas =
@@ -184,7 +194,7 @@ declsP lemmas0 mkScope = go lemmas0
         Nothing -> pure []
         Just d -> (d :) <$> go (Map.insert (declName d) (map snd (binderMetas (declBinders d))) lemmas)
 
-declP :: forall a. (Hashable a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> Parser (Decl a)
+declP :: forall a. (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> Parser (Decl a)
 declP lemmas mkScope = theoremP <|> ruleP
   where
     theoremP = do
@@ -218,9 +228,9 @@ declP lemmas mkScope = theoremP <|> ruleP
         ]
         <?> "sort"
 
--- | @sequent by tactic@.
-goalP :: (Hashable a) => Lemmas -> Scope a -> Parser (Sequent a, Tactic a)
-goalP lemmas sc0 = (,) <$> sequentP sc <* keywordP "by" <*> tacticP lemmas sc
+-- | @sequent by tactic@; the hypotheses are named in the order written.
+goalP :: (Schematic a) => Lemmas -> Scope a -> Parser (Goal a, Tactic a)
+goalP lemmas sc0 = (,) <$> (uncurry mkGoal <$> hypothesesP sc) <* keywordP "by" <*> tacticP lemmas sc
   where
     sc = withTacticScope sc0
 
@@ -243,13 +253,13 @@ tacticP lemmas sc0 = seqP
     basicP = do
       pos <- getSourcePos
       let loc = Loc (unPos (sourceLine pos)) (unPos (sourceColumn pos))
-      At loc
-        <$> choice
+      t <-
+        choice
           ( [ parens seqP
             , Refl <$ keywordP "refl"
-            , Symmetry <$> (keywordP "symmetry" *> atomArgP)
-            , Rewrite <$> (keywordP "rewrite" *> atomArgP) <*> (keywordP "in" *> atomArgP)
-            , Induction <$> (keywordP "induction" *> closedP (termAtomP sc)) <*> optional (keywordP "as" *> variableP)
+            , Symmetry <$> (keywordP "symmetry" *> selectorP)
+            , Rewrite <$> (keywordP "rewrite" *> selectorP) <*> (keywordP "in" *> selectorP)
+            , inductionP
             , Assumption <$ keywordP "assumption"
             , exactP
             , Skip <$ keywordP "skip"
@@ -259,7 +269,23 @@ tacticP lemmas sc0 = seqP
             ]
               <> [rule r | r <- [minBound .. maxBound]]
           )
-        <?> "tactic"
+          <?> "tactic"
+      on <- optional (keywordP "on" *> some nameP)
+      as <- optional (keywordP "as" *> some nameP)
+      pure (At loc (maybe id As as (maybe id On on t)))
+
+    -- The names of hypotheses.
+    nameP = identifierP sc
+
+    -- The eigenvariable, then the names for the induction hypothesis and the hypotheses reintroduced.
+    inductionP = do
+      keywordP "induction"
+      t <- closedP (termAtomP sc)
+      names <- optional (keywordP "as" *> ((,) <$> variableP <*> many nameP))
+      pure case names of
+        Nothing -> Induction t Nothing
+        Just (n, []) -> Induction t (Just n)
+        Just (n, hs) -> As hs (Induction t (Just n))
 
     -- A premise takes no arguments; a lemma takes those of its metavariables.
     exactP = do
@@ -293,7 +319,8 @@ tacticP lemmas sc0 = seqP
           R.FormS -> ArgForm <$> parens (formulaP sc)
           R.CtxS -> empty
 
-    -- An atomic pattern, with or without parentheses.
+    -- A hypothesis: the unique one matching an atomic pattern, with or without parentheses, or the one named.
+    selectorP = (ByPattern <$> try atomArgP) <|> (ByName <$> nameP)
     atomArgP = try (parens atomArgP) <|> atomicP sc
 
     variableP :: Parser a

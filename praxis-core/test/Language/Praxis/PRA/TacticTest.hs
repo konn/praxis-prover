@@ -45,6 +45,7 @@ tacticTests =
     , sorryTests
     , inductionTests
     , lemmaTests
+    , namingTests
     ]
 
 sig :: Signature
@@ -67,7 +68,7 @@ proves src = do
   (goal, tac) <- parsed (parseGoal sc src)
   case prove goal tac of
     Left err -> assertFailure (renderTacticError sig id err)
-    Right p -> inferConclusion p @?= Right goal
+    Right p -> inferConclusion p @?= Right (goalSequent goal)
 
 -- | The script must fail, for the given reason.
 failsWith :: String -> (Failure String -> Bool) -> Assertion
@@ -86,6 +87,8 @@ stripLoc = \case
   Try t -> Try (stripLoc t)
   Repeat t -> Repeat (stripLoc t)
   Dispatch t us -> Dispatch (stripLoc t) (map stripLoc us)
+  On ns t -> On ns (stripLoc t)
+  As ns t -> As ns (stripLoc t)
   t -> t
 
 parsesTo :: String -> Tactic String -> Assertion
@@ -168,7 +171,7 @@ tacticParserTests =
     , testCase "the atomic pattern of rewrite may be parenthesised" $ do
         e <- parsed (parseAtomicPattern sc "t = s")
         h <- parsed (parseAtomicPattern sc "plus t 0 = _")
-        "rewrite (t = s) in plus t 0 = _" `parsesTo` Rewrite e h
+        "rewrite (t = s) in plus t 0 = _" `parsesTo` Rewrite (ByPattern e) (ByPattern h)
     , testCase "induction takes an optional eigenvariable" $
         "induction y as n" `parsesTo` Induction (Var "y") (Just "n")
     , testCase "errors carry the position of the tactic" $ do
@@ -245,7 +248,7 @@ combinatorTests =
     , testCase "; runs on every goal" $ proves "|- 2 = 2 /\\ 3 = 3 by ConjR; refl"
     , testCase "skip leaves a goal open, which is reported" $
         "|- 2 = 2 by skip" `failsWith` \case
-          Unsolved [g] -> g == sequent "|- 2 = 2"
+          Unsolved [g] -> goalSequent g == sequent "|- 2 = 2"
           _ -> False
     , testCase "repeat is bounded" $
         "|- 2 = 2 by repeat skip" `failsWith` \case
@@ -371,7 +374,7 @@ declarationTests =
         let scope = schemaScope sig [("A", FormS), ("G", CtxS)]
         mapM_
           (\src -> either (const (pure ())) (const (assertFailure ("accepted " <> src))) (parseTactic scope src))
-          ["Id (A)", "Subst x t s (A)", "symmetry A", "rewrite A in (A)", "Id (G)"]
+          ["Id (A)", "Subst x t s (A)", "rewrite A in (A)", "Id (G)"]
     ]
   where
     source =
@@ -442,7 +445,7 @@ sorryTests =
         (goal, tac) <- parsed (parseGoal sc "a = 0, b = 0 /\\ c = 0 |- c = 0 by ConjL; sorry")
         case prove goal tac of
           Right _ -> assertFailure "proved"
-          Left err -> renderTacticError sig id err @?= "1:42: sorry: the proof stops here\n  a = 0\n  b = 0\n  c = 0\n  |- c = 0"
+          Left err -> renderTacticError sig id err @?= "1:42: sorry: the proof stops here\n  H1 : a = 0\n  H3 : b = 0\n  H4 : c = 0\n  |- c = 0"
     ]
 
 inductionTests :: TestTree
@@ -468,7 +471,7 @@ inductionTests =
         env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
         case decls of
           [d] -> case proveOpenIn env Map.empty (declGoal d) (declTactic d) of
-            Left err -> renderSchemaTacticError builtin err @?= "5:5: sorry: the proof stops here\n  (0 < 0) = 1\n  (t < 0) = 1\n  G\n  |- A"
+            Left err -> renderSchemaTacticError builtin err @?= "5:5: sorry: the proof stops here\n  H1 : (t < 0) = 1\n  G\n  H2 : (0 < 0) = 1\n  |- A"
             Right _ -> assertFailure "proved"
           _ -> assertFailure "expected one declaration"
     , testCase "hypotheses mentioning the term are generalized, through Cut" $
@@ -476,11 +479,11 @@ inductionTests =
     , testCase "each case carries the generalized hypotheses and the induction hypothesis" $ do
         (base, baseTactic) <- parsed (parseGoal sc "y + 0 = z |- y = z by induction y as n { sorry } { skip }")
         case prove base baseTactic of
-          Left err -> renderTacticError sig id err @?= "1:42: sorry: the proof stops here\n  0 + 0 = z\n  y + 0 = z\n  |- 0 = z"
+          Left err -> renderTacticError sig id err @?= "1:42: sorry: the proof stops here\n  H1 : y + 0 = z\n  H2 : 0 + 0 = z\n  |- 0 = z"
           Right _ -> assertFailure "proved"
         (step, stepTactic) <- parsed (parseGoal sc "y + 0 = z |- y = z by induction y as n { skip } { sorry }")
         case prove step stepTactic of
-          Left err -> renderTacticError sig id err @?= "1:51: sorry: the proof stops here\n  S n + 0 = z\n  n + 0 = z ==> n = z\n  y + 0 = z\n  |- S n = z"
+          Left err -> renderTacticError sig id err @?= "1:51: sorry: the proof stops here\n  H1 : y + 0 = z\n  H2 : n + 0 = z ==> n = z\n  H3 : S n + 0 = z\n  |- S n = z"
           Right _ -> assertFailure "proved"
     ]
 
@@ -569,7 +572,7 @@ lemmaTests =
 certified :: String -> IO (Certified String)
 certified src = do
   (goal, tac) <- parsed (parseGoal sc src)
-  either (assertFailure . renderTacticError sig id) (pure . theorem goal) (prove goal tac)
+  either (assertFailure . renderTacticError sig id) (pure . theorem (goalSequent goal)) (prove goal tac)
 
 lemmaSortsOf :: Map.Map String (Certified String) -> Lemmas
 lemmaSortsOf = Map.map (map snd . lemmaMetas . certifiedLemma)
@@ -580,7 +583,7 @@ provesWith lemmas src = do
   (goal, tac) <- parsed (parseGoalIn (lemmaSortsOf lemmas) sc src)
   case proveWith emptyKernelEnv lemmas goal tac of
     Left err -> assertFailure (renderTacticError sig id err)
-    Right p -> inferConclusion p @?= Right goal
+    Right p -> inferConclusion p @?= Right (goalSequent goal)
 
 failsWithIn :: Map.Map String (Certified String) -> String -> (Failure String -> Bool) -> Assertion
 failsWithIn lemmas src ok = do
@@ -588,3 +591,64 @@ failsWithIn lemmas src ok = do
   case proveWith emptyKernelEnv lemmas goal tac of
     Right _ -> assertFailure "the script was not expected to succeed"
     Left err -> assertBool (renderTacticError sig id err) (ok (errorFailure err))
+
+namingTests :: TestTree
+namingTests =
+  testGroup
+    "named hypotheses"
+    [ testCase "on and as follow a step" $ do
+        "ConjL on H2 as H5 H6" `parsesTo` As ["H5", "H6"] (On ["H2"] (Apply ConjLRule [Nothing, Nothing]))
+        "symmetry H1" `parsesTo` Symmetry (ByName "H1")
+        h <- parsed (parseAtomicPattern sc "plus t 0 = _")
+        "rewrite H1 in (plus t 0 = _) as H3" `parsesTo` As ["H3"] (Rewrite (ByName "H1") (ByPattern h))
+        "induction y as n IH H" `parsesTo` As ["IH", "H"] (Induction (Var "y") (Just "n"))
+    , testCase "the hypotheses are numbered in the order written" $ do
+        (goal, _) <- parsed (parseGoal sc "a = 0, b = 0 |- c = 0 by skip")
+        map hypothesisName (goalHypotheses goal) @?= ["H1", "H2"]
+    , testCase "symmetry and rewrite select by name" $ do
+        proves "t = s |- s = t by symmetry H1; Id"
+        proves "t = s, plus t 0 = 3 |- plus s 0 = 3 by rewrite H1 in H2; Id"
+    , testCase "on picks the principal formula" $
+        proves "a = 0 ==> b = 0, c = 0 ==> b = 0, c = 0 |- b = 0 by ImplL on H2 { Id } { Id }"
+    , testCase "as names what a step introduces, and exact closes by a hypothesis" $ do
+        proves "a = 0 /\\ b = 0 |- b = 0 by ConjL as HA HB; exact HB"
+        proves "a = 0, b = 0 |- b = 0 by exact H2"
+        proves "a = 0, b = 0 |- b = 0 by Cut (a = 0) { Id } { exact H2 }"
+    , testCase "a hypothesis stated again keeps its name and place" $ do
+        (goal, tac) <- parsed (parseGoal sc "t = s, plus t 0 = 3 |- plus s 0 = 3 by rewrite H1 in H2 as H5; sorry")
+        case prove goal tac of
+          Right _ -> assertFailure "proved"
+          Left err -> renderTacticError sig id err @?= "1:64: sorry: the proof stops here\n  H1 : t = s\n  H2 : t + 0 = 3\n  H5 : s + 0 = 3\n  |- s + 0 = 3"
+    , testCase "a name given moves the numbering past it" $ do
+        (goal, tac) <- parsed (parseGoal sc "|- 2 = 2 /\\ 3 = 3 by Cut (1 = 1) as H7 { refl } { Cut (0 = 0) { refl } { sorry } }")
+        case prove goal tac of
+          Right _ -> assertFailure "proved"
+          Left err -> renderTacticError sig id err @?= "1:74: sorry: the proof stops here\n  H7 : 1 = 1\n  H8 : 0 = 0\n  |- 2 = 2 /\\ 3 = 3"
+    , testCase "induction names the induction hypothesis and the ones reintroduced" $ do
+        (goal, tac) <- parsed (parseGoal sc "y + 0 = z |- y = z by induction y as n IH H { skip } { sorry }")
+        case prove goal tac of
+          Right _ -> assertFailure "proved"
+          Left err -> renderTacticError sig id err @?= "1:56: sorry: the proof stops here\n  H1 : y + 0 = z\n  IH : n + 0 = z ==> n = z\n  H : S n + 0 = z\n  |- S n = z"
+    , testCase "an unknown name" $
+        "a = 0 |- a = 0 by symmetry H5" `failsWith` \case
+          UnknownHypothesis "H5" -> True
+          _ -> False
+    , testCase "on with a hypothesis of the wrong shape" $
+        "a = 0, b = 0 ==> c = 0 |- c = 0 by ImplL on H1 { Id } { Id }" `failsWith` \case
+          NotPrincipal ImplLRule "H1" _ -> True
+          _ -> False
+    , testCase "exact on a hypothesis which is not the succedent" $
+        "a = 0 |- b = 0 by exact H1" `failsWith` \case
+          HypothesisMismatch "H1" _ -> True
+          _ -> False
+    , testCase "names left over, a name in use, and a step which names nothing" $ do
+        "a = 0 /\\ b = 0 |- b = 0 by ConjL as H1 H2 H3; Id" `failsWith` \case
+          NamesUnused ["H3"] -> True
+          _ -> False
+        "a = 0, b = 0 /\\ c = 0 |- c = 0 by ConjL as H1 H9; Id" `failsWith` \case
+          NameInUse "H1" -> True
+          _ -> False
+        "|- 2 = 2 by refl as H" `failsWith` \case
+          NothingToName -> True
+          _ -> False
+    ]

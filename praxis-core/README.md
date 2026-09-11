@@ -142,6 +142,13 @@ metavariables inferred from the goal or given as arguments, its free variables
 instantiated, the hypotheses it does not mention weakened in, and its premises
 left as goals for the blocks which follow.
 
+The hypotheses of a goal are named, `H1`, `H2`, … in the order written and a
+context metavariable by its own name, and a `sorry` report lists them so. A
+step which introduces hypotheses numbers them on, or names them as told:
+`Cut (a = 0) as H`, `ConjL as HA HB`, `induction t as n IH H'`. `symmetry H1`,
+`rewrite H1 in H2` and `exact H2` refer to hypotheses by name, and `ImplL on
+H2` picks the hypothesis a rule acts on where several have the right shape.
+
 ```haskell
 [pra|
 theorem succSubSucc : |- S n - S m = n - m

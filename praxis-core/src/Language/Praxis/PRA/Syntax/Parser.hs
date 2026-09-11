@@ -75,6 +75,7 @@ module Language.Praxis.PRA.Syntax.Parser (
   atomicP,
   formulaP,
   sequentP,
+  hypothesesP,
   closedP,
 
   -- * Lexemes
@@ -477,9 +478,12 @@ formulaP sc = implP
 
 -- | A sequent is closed: it may not contain wildcards.
 sequentP :: (Hashable a) => Scope a -> Parser (Sequent a)
-sequentP sc = (:|-) <$> antecedentP <* turnstileP <*> closedP (formulaP sc)
+sequentP sc = (\(hs, c) -> foldr MS.insertOne MS.empty hs :|- c) <$> hypothesesP sc
+
+-- | A sequent as written: its hypotheses in order, and its succedent.
+hypothesesP :: Scope a -> Parser ([Formula a], Formula a)
+hypothesesP sc = (,) <$> option [] (itemP `sepBy1` commaP) <* turnstileP <*> closedP (formulaP sc)
   where
-    antecedentP = foldr MS.insertOne MS.empty <$> option [] (itemP `sepBy1` commaP)
     itemP = contextP <|> closedP (formulaP sc)
     contextP = try do
       name <- identifierP sc

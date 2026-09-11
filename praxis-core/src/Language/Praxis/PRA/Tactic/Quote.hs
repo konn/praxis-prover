@@ -274,7 +274,7 @@ compileDecl sig lemmas decl = do
 
   -- The object variables the script introduces, to be chosen fresh at run
   -- time when there are metavariables whose instantiations could clash.
-  let stated = HS.unions (map schemaNames (declGoal decl : Map.elems prems))
+  let stated = HS.unions (map schemaNames (goalSequent (declGoal decl) : Map.elems prems))
       proof = freshenSubstitutions stated checked
       internal = sort [s | Obj s <- HS.toList (proofNames proof), not (Obj s `HS.member` stated)]
       runtimeFresh = not (null metas) && not (null internal)
@@ -417,7 +417,7 @@ figure sig decl =
     kind = if null (declBinders decl) then "theorem" else "derived rule"
     render = renderSequent sig renderSchemaName
     above = intercalate "    " [n <> " : " <> render s | PremiseBinder n s <- declBinders decl]
-    below = render (declGoal decl)
+    below = render (goalSequent (declGoal decl))
     width = max (length above) (length below)
     haddockEscape = concatMap \c -> if c == '\\' then "\\\\" else [c]
 

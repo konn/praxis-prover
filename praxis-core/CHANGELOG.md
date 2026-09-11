@@ -40,6 +40,15 @@ and this project adheres to the
   `Appeal`, and `certify` checks an appeal against the lemma's statement
   instantiated afresh. In the quasiquoter, a declaration is a lemma for the
   declarations after it, across the quotes of a module.
+- Named hypotheses. A goal is a `Goal`, whose hypotheses are named `H1`,
+  `H2`, … in the order the sequent lists them, a context metavariable by its
+  own name; a hypothesis a step introduces takes the next number the branch
+  has not used, or the name `as` gives it, `Cut (a = 0) as H`, `ConjL as HA
+  HB`, `induction t as n IH H'`. `symmetry`, `rewrite` and `exact` accept a
+  name, `rewrite H1 in H2`, and `on` names the hypotheses a rule or a lemma
+  acts on, `ImplL on H2`. A `sorry` report lists the hypotheses by name.
+  `parseGoal` and `Decl` carry goals, `prove` takes one, and `goalOf` makes
+  one from a sequent.
 - `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
   the substitution and weakening of a proof, renaming the variables its steps
   bind apart; the spliced proof of an appeal to a theorem is built with them.
