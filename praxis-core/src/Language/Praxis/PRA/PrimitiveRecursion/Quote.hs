@@ -24,6 +24,9 @@ invariants when first demanded. Calls are never recursively expanded here.
 module Language.Praxis.PRA.PrimitiveRecursion.Quote (
   prf,
   prfQuoter,
+  prfFile,
+  quoteFile,
+  liftSignature,
 ) where
 
 import Control.Exception (displayException)
@@ -40,7 +43,7 @@ import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal, type (+), type (-), typ
 import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Language.Haskell.TH.Syntax (Lift, getQ, lift, liftTyped, mkNameG_v, putQ, unTypeCode)
+import Language.Haskell.TH.Syntax (Lift, addDependentFile, getQ, lift, liftTyped, mkNameG_v, putQ, unTypeCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename
@@ -65,6 +68,21 @@ data Registry = Registry
 -- | A declaration quasiquoter with only S and Succ initially in scope.
 prf :: QuasiQuoter
 prf = prfQuoter mempty
+
+{- |
+Splice a file of declarations, as the quasiquoter would the same text: the
+path is relative to the directory the compiler runs in, the package's, and
+the module is recompiled when the file changes.
+-}
+quoteFile :: QuasiQuoter -> FilePath -> TH.Q [TH.Dec]
+quoteFile qq path = do
+  addDependentFile path
+  source <- TH.runIO (readFile path)
+  quoteDec qq source
+
+-- | 'quoteFile' with 'prf'.
+prfFile :: FilePath -> TH.Q [TH.Dec]
+prfFile = quoteFile prf
 
 {- | Initial codes must be finite. Named signature entries are emitted as
 Haskell references; unnamed entries are lifted structurally.

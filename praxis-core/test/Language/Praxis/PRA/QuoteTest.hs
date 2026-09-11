@@ -5,7 +5,14 @@ Coverage for the quasiquoter.  The declarations below are certified when this
 module is compiled; the tests then instantiate the derived rules and hand the
 results to the checker, which is what the certification promises will succeed.
 -}
-module Language.Praxis.PRA.QuoteTest (quoteTests) where
+module Language.Praxis.PRA.QuoteTest (
+  quoteTests,
+
+  -- * The library of this module, for "Language.Praxis.PRA.QuoteLibrary"
+  testLemmas,
+  plusZeroRight,
+  symm,
+) where
 
 import Control.Exception (displayException)
 import Control.Monad (forM_)
@@ -25,6 +32,8 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 [testPra|
+library testLemmas
+
 -- The left identity is definitional.
 theorem plusZeroLeft : |- plus 0 y = y
 by refl

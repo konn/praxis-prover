@@ -1,0 +1,3 @@
+-- Declarations spliced from a file, over the library of QuoteTest.
+theorem plusThreeZeroFromFile : |- plus 3 0 = 3
+by exact plusZeroRight

@@ -143,6 +143,8 @@ test-suite praxis-core-test
     Language.Praxis.PRA.PRFQuoteTest
     Language.Praxis.PRA.PrimitiveRecursion.Examples
     Language.Praxis.PRA.ProofTest
+    Language.Praxis.PRA.QuoteLibrary
+    Language.Praxis.PRA.QuoteLibraryTest
     Language.Praxis.PRA.QuoteSignature
     Language.Praxis.PRA.QuoteTest
     Language.Praxis.PRA.TacticTest

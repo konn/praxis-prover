@@ -49,6 +49,13 @@ and this project adheres to the
   acts on, `ImplL on H2`. A `sorry` report lists the hypotheses by name.
   `parseGoal` and `Decl` carry goals, `prove` takes one, and `goalOf` makes
   one from a sequent.
+- Lemma libraries, across modules: a quote opening with `library name` also
+  binds `name :: Library`, the lemmas in scope at its end with their
+  statements and the global names of their bindings, and `praQuoterIn name`,
+  in a module of its own, is a quasiquoter whose quotes appeal to them, as
+  `prfQuoter` reuses a signature. `quoteFile`, `praFile` and `prfFile` splice
+  a file of declarations in place of a quote, relative to the package
+  directory, and recompile the module when the file changes.
 - Calculational proofs: `calc t0 = t1 by u1 = t2 by u2 …` proves the goal
   `t0 = tn` as a chain of equations, each step proved by its tactic under the
   hypotheses of the goal, by `refl` when none is given; the steps are cut in

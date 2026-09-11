@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveLift #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -35,8 +36,16 @@ spliced value is the checked proof.
 A declaration is a lemma for those after it: @exact name@ appeals to it,
 instantiated to the goal as "Language.Praxis.PRA.Tactic" describes, and the
 spliced proof refers to its binding.  The lemmas of every quote in a module
-are in scope for the quotes after it, through a registry local to the module;
-a lemma from another module is out of reach for now.
+are in scope for the quotes after it, through a registry local to the module.
+
+To reach them from another module, a quote opens with @library name@: the
+quasiquoter then also binds @name :: 'Library'@, the lemmas in scope at the
+end of the quote — the quoter's own and every declaration of the module so
+far — with their statements and the global names of their bindings, which
+must be exported.  A module of its own defines @myPra = 'praQuoterIn' name@,
+as for the signature of 'praQuoter', and the quotes of @myPra@ appeal to
+those lemmas and may open libraries extending them.  'praFile' and
+'quoteFile' splice a file of declarations instead of a quote.
 
 While a proof is being written, a script may end in @sorry@: the quote then
 fails, and the compile error lists the assumptions and the goal left at that point.
@@ -61,6 +70,14 @@ declare it an @atom@ instead.
 module Language.Praxis.PRA.Tactic.Quote (
   pra,
   praQuoter,
+  praQuoterIn,
+  praFile,
+  quoteFile,
+
+  -- * Libraries
+  Library (..),
+  LemmaEntry (..),
+  Flag (..),
 
   -- * Schematic names
   SchemaName (..),
@@ -70,7 +87,7 @@ module Language.Praxis.PRA.Tactic.Quote (
 ) where
 
 import Control.Exception (displayException)
-import Control.Monad (foldM, unless)
+import Control.Monad (foldM, unless, when)
 import Control.Monad.Free (Free (..), iter)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.Strict (WriterT, runWriterT, tell)
@@ -90,13 +107,15 @@ import Data.Sized qualified as SV
 import Data.String (IsString, fromString)
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
-import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, Name, Q, Type, mkName, nameBase, newName, putDoc, unTypeCode, unsafeCodeCoerce)
+import GHC.TypeNats (KnownNat)
+import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, Loc (..), Name, Q, Type, joinCode, location, mkName, nameBase, newName, putDoc, unTypeCode, unsafeCodeCoerce)
 import Language.Haskell.TH.Datatype (ConstructorInfo (..), DatatypeInfo (..), reifyDatatype)
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Language.Haskell.TH.Syntax (addModFinalizer, getQ, putQ)
+import Language.Haskell.TH.Syntax (Lift, addModFinalizer, getQ, liftTyped, mkNameG_v, putQ)
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..), builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
+import Language.Praxis.PRA.PrimitiveRecursion.Quote (liftSignature, quoteFile)
 import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (liftSizedWith)
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Proof.Transform (argNames, identityProof, substProof, weakenProof)
@@ -115,7 +134,7 @@ import Language.Praxis.TH.Internal qualified as QTH
 data SchemaName
   = Obj !String
   | Meta !R.Sort !String
-  deriving (Show, Eq, Ord, Generic)
+  deriving (Show, Eq, Ord, Generic, Lift)
 
 instance Hashable SchemaName where
   hashWithSalt salt = \case
@@ -203,39 +222,82 @@ and imported where it is used, as any quasiquoter must.
 pra :: QuasiQuoter
 pra = praQuoter builtin
 
+-- | The quasiquoter over a signature, with no lemmas but those of the module.
 praQuoter :: Signature -> QuasiQuoter
-praQuoter sig =
+praQuoter sig = praQuoterIn (Library sig Map.empty)
+
+{- |
+The quasiquoter over a library: its signature, and its lemmas to appeal to
+besides those the module declares.
+-}
+praQuoterIn :: Library -> QuasiQuoter
+praQuoterIn lib =
   QuasiQuoter
     { quoteExp = \src -> do
         env <- either (fail . displayException) pure (signatureKernelEnv sig)
-        lemmas <- registeredLemmas
+        lemmas <- inScope
         (goal, tac) <- either (fail . displayException) pure (parseGoalIn (lemmaSorts lemmas) (schemaScope sig []) src)
         proof <- either (fail . renderSchemaTacticError sig) pure (proveOpenWith env (fmap entryLemma lemmas) Map.empty goal tac)
-        (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty (fmap entryFlags lemmas)) proof)
+        (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty lemmas) proof)
         pure body
     , quoteDec = \src -> do
-        lemmas <- registeredLemmas
-        decls <- either (fail . displayException) pure (parseDeclsIn (lemmaSorts lemmas) (schemaScope sig) src)
-        (decs, lemmas') <-
+        lemmas <- inScope
+        (header, decls) <- either (fail . displayException) pure (parseQuoteIn (lemmaSorts lemmas) (schemaScope sig) src)
+        loc <- location
+        let global occ = mkNameG_v (loc_package loc) (loc_module loc) occ
+        (decs, known, new) <-
           foldM
-            ( \(acc, known) decl -> do
-                (ds, entry) <- compileDecl sig known decl
-                pure (acc <> ds, Map.insert (declName decl) entry known)
+            ( \(acc, known, new) decl -> do
+                (ds, entry) <- compileDecl sig global known decl
+                pure (acc <> ds, Map.insert (declName decl) entry known, Map.insert (declName decl) entry new)
             )
-            ([], lemmas)
+            ([], lemmas, Map.empty)
             decls
-        putQ (LemmaRegistry lemmas')
-        pure decs
+        registry <- registeredLemmas
+        putQ (LemmaRegistry (Map.union new registry))
+        libraryDecs <- case header of
+          Nothing -> pure []
+          Just name -> do
+            unless (startsLower name) $ fail ("pra: " <> name <> " is not a Haskell variable name")
+            when (Map.member name known) $ fail ("pra: the library " <> name <> " would shadow the lemma of that name")
+            body <- unTypeCode (liftLibrary (Library sig known))
+            addModFinalizer $ putDoc (DeclDoc (mkName name)) ("The lemmas in scope: " <> intercalate ", " (Map.keys known) <> ".")
+            sequence
+              [ QTH.signature (mkName name) [t|Library|]
+              , QTH.function (mkName name) [([], pure body)]
+              ]
+        pure (decs <> libraryDecs)
     , quotePat = const (fail "pra: a proof is not a pattern")
     , quoteType = const (fail "pra: a proof is not a type")
     }
+  where
+    sig = librarySignature lib
+    -- The module's own lemmas shadow the library's.
+    inScope = (`Map.union` libraryLemmas lib) <$> registeredLemmas
+    startsLower = \case
+      c : _ -> isLower c || c == '_'
+      [] -> False
+
+-- | 'quoteFile' with 'pra': splice a file of declarations, relative to the package directory.
+praFile :: FilePath -> Q [Dec]
+praFile = quoteFile pra
+
+{- |
+Lemmas, with the signature they are stated over: what 'praQuoterIn' builds
+a quasiquoter from, and what a quote opening with @library name@ binds.
+-}
+data Library = Library
+  { librarySignature :: !Signature
+  , libraryLemmas :: !(Map String LemmaEntry)
+  }
 
 -- | The lemmas the quotes of the current module have certified so far; a private type keeps it apart from other state.
 newtype LemmaRegistry = LemmaRegistry (Map String LemmaEntry)
 
--- | A certified lemma, with the constraints its binding carries, which an appeal to it inherits.
+-- | A certified lemma: its binding, by its global name, its statement, and the constraints the binding carries, which an appeal to it inherits.
 data LemmaEntry = LemmaEntry
-  { entryLemma :: !(Lemma SchemaName)
+  { entryName :: !Name
+  , entryLemma :: !(Lemma SchemaName)
   , entryFlags :: !(Set Flag)
   }
 
@@ -252,9 +314,9 @@ proofConstructors = do
   info <- reifyDatatype ''Proof
   pure (Map.fromList [(nameBase n, n) | con <- datatypeCons info, let n = constructorName con])
 
--- | Compile a declaration to its binding, given the lemmas it may appeal to; also the lemma it is for those after it.
-compileDecl :: Signature -> Map String LemmaEntry -> Decl SchemaName -> Q ([Dec], LemmaEntry)
-compileDecl sig lemmas decl = do
+-- | Compile a declaration to its binding, given the lemmas it may appeal to and how to name its binding globally; also the lemma it is for those after it.
+compileDecl :: Signature -> (String -> Name) -> Map String LemmaEntry -> Decl SchemaName -> Q ([Dec], LemmaEntry)
+compileDecl sig global lemmas decl = do
   kernel <- either (fail . displayException) pure (signatureKernelEnv sig)
   let dname = declName decl
       binders = declBinders decl
@@ -282,7 +344,7 @@ compileDecl sig lemmas decl = do
   let objParams
         | runtimeFresh = Map.fromList (zip internal internalNames)
         | otherwise = Map.empty
-      env = LiftEnv sig metaParams premParams objParams (fmap entryFlags lemmas)
+      env = LiftEnv sig metaParams premParams objParams lemmas
 
   (body, flags) <- runWriterT (liftProof env proof)
   usedName <- newName "used"
@@ -313,7 +375,7 @@ compileDecl sig lemmas decl = do
       [ QTH.signature name ty
       , QTH.function name [(map D.DVarP params, body')]
       ]
-  pure (decs, LemmaEntry lemma flags')
+  pure (decs, LemmaEntry (global dname) lemma flags')
   where
     startsLower = \case
       c : _ -> isLower c || c == '_'
@@ -429,12 +491,13 @@ data LiftEnv = LiftEnv
   , lePremise :: Map String Name
   , leObj :: Map String Name
   -- ^ object variables bound at run time
-  , leLemmas :: Map String (Set Flag)
-  -- ^ the constraints the binding of each lemma carries
+  , leLemmas :: Map String LemmaEntry
+  -- ^ the lemmas an appeal may refer to
   }
 
+-- | A constraint the binding of a proof carries, for the name type it is polymorphic in.
 data Flag = NeedsHashable | NeedsIsString | NeedsFresh
-  deriving (Show, Eq, Ord)
+  deriving (Show, Eq, Ord, Lift)
 
 type L = WriterT (Set Flag) Q
 
@@ -483,13 +546,17 @@ liftTerm env = go . canonicalise
         t <- go (SV.sIndex [od|0|] args)
         pure [||suc $$t||]
       App f args -> do
-        applied <- case symbolOfFunction f (leSig env) of
-          Just sym -> case symbolHaskellName sym of
-            Nothing -> failL ("the symbol " <> symbolName sym <> " records no Haskell name; declare it with symbolNamed")
-            Just hs -> pure (case f of F.Primitive _ -> [||F.Primitive $$(boundName hs)||]; _ -> boundName hs)
-          Nothing -> pure [||f||]
+        applied <- lift (functionCode (leSig env) f)
         as <- traverse go args
         pure [||App $$applied $$(liftSizedWith id as)||]
+
+-- | A function of the signature, by the Haskell name it records.
+functionCode :: (KnownNat n) => Signature -> F.Function n -> Q (Code Q (F.Function n))
+functionCode sig f = case symbolOfFunction f sig of
+  Just sym -> case symbolHaskellName sym of
+    Nothing -> fail ("pra: the symbol " <> symbolName sym <> " records no Haskell name; declare it with symbolNamed")
+    Just hs -> pure (case f of F.Primitive _ -> [||F.Primitive $$(boundName hs)||]; _ -> boundName hs)
+  Nothing -> pure [||f||]
 
 liftAtom :: LiftEnv -> Atomic SchemaName -> LCode (Atomic W)
 liftAtom env p@(s :=== t) = case decodeMeta p of
@@ -570,10 +637,11 @@ liftProof env proof = do
         -- The lemma's binding at the arguments, then the free variables of
         -- its statement substituted, then the weakening: what 'proveWith' does.
         Free (LemmaStep appeal subs) -> do
-          mapM_ need (Set.toList (Map.findWithDefault Set.empty (appealName appeal) (leLemmas env)))
+          entry <- maybe (failL ("no lemma named " <> appealName appeal)) pure (Map.lookup (appealName appeal) (leLemmas env))
+          mapM_ need (Set.toList (entryFlags entry))
           args' <- traverse (liftArg env) (appealArgs appeal)
           subs' <- traverse go subs
-          let applied = foldl (\f x -> [|$f $(pure x)|]) (QTH.varE (mkName (appealName appeal))) (args' <> subs')
+          let applied = foldl (\f x -> [|$f $(pure x)|]) (QTH.varE (entryName entry)) (args' <> subs')
           substituted <- case appealSubst appeal of
             [] -> pure applied
             pairs -> do
@@ -596,3 +664,49 @@ liftProof env proof = do
         t' <- liftTerm env t
         pure [|($(unTypeCode v'), $(unTypeCode t'))|]
   go proof
+
+-- * Libraries
+
+-- | A library as an expression: the signature and every lemma, its binding by its global name.
+liftLibrary :: Library -> Code Q Library
+liftLibrary (Library sig lemmas) =
+  [||Library $$(liftSignature sig) (Map.fromList $$(listCode (map entry (Map.toList lemmas))))||]
+  where
+    entry (n, LemmaEntry name lemma flags) =
+      [||($$(liftTyped n), LemmaEntry $$(liftTyped name) $$(liftLemma sig lemma) (Set.fromList $$(liftTyped (Set.toList flags))))||]
+
+liftLemma :: Signature -> Lemma SchemaName -> Code Q (Lemma SchemaName)
+liftLemma sig (Lemma metas premises goal bound) =
+  [||Lemma $$(liftTyped metas) $$(listCode [[||($$(liftTyped n), $$(liftSchemaSequent sig s))||] | (n, s) <- premises]) $$(liftSchemaSequent sig goal) $$(liftTyped bound)||]
+
+liftSchemaSequent :: Signature -> Sequent SchemaName -> Code Q (Sequent SchemaName)
+liftSchemaSequent sig (hyps :|- c) =
+  [||foldr MS.insertOne MS.empty $$(listCode (map (liftSchemaFormula sig) (toList hyps))) :|- $$(liftSchemaFormula sig c)||]
+
+liftSchemaFormula :: Signature -> Formula SchemaName -> Code Q (Formula SchemaName)
+liftSchemaFormula sig = go
+  where
+    go = \case
+      Atm p -> [||Atm $$(liftSchemaAtom sig p)||]
+      Bot -> [||Bot||]
+      f :/\ g -> [||$$(go f) :/\ $$(go g)||]
+      f :\/ g -> [||$$(go f) :\/ $$(go g)||]
+      f :==> g -> [||$$(go f) :==> $$(go g)||]
+
+liftSchemaAtom :: Signature -> Atomic SchemaName -> Code Q (Atomic SchemaName)
+liftSchemaAtom sig (s :=== t) = [||$$(liftSchemaTerm sig s) :=== $$(liftSchemaTerm sig t)||]
+
+-- | A term of a statement as data, its names lifted as they are and its functions by the names the signature records.
+liftSchemaTerm :: Signature -> Term SchemaName -> Code Q (Term SchemaName)
+liftSchemaTerm sig = go . canonicalise
+  where
+    go = \case
+      Var v -> [||Var $$(liftTyped v)||]
+      Lit n -> [||Lit n||]
+      Succ :$ args -> [||suc $$(go (SV.sIndex [od|0|] args))||]
+      App f args -> joinCode do
+        applied <- functionCode sig f
+        pure [||App $$applied $$(liftSizedWith id (fmap go args))||]
+
+listCode :: [Code Q x] -> Code Q [x]
+listCode = foldr (\x xs -> [||$$x : $$xs||]) [||[]||]

@@ -14,6 +14,7 @@ The textual syntax of tactics, and of the declarations which use them.
 > sel     ::= ident | atom                 -- a hypothesis by name, or the unique one matching the pattern
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
 >
+> quote   ::= [library ident] {decl}       -- the header names a binding for the lemmas in scope
 > decl    ::= theorem ident : sequent by tactic
 >           | rule ident {binder} : sequent by tactic
 > binder  ::= ( ident {ident} : sort )      -- metavariables
@@ -63,6 +64,7 @@ module Language.Praxis.PRA.Tactic.Parser (
   Lemmas,
   parseDecls,
   parseDeclsIn,
+  parseQuoteIn,
   parseGoal,
   parseGoalIn,
   parseTactic,
@@ -100,7 +102,7 @@ tacticKeywords :: [String]
 tacticKeywords =
   map (R.ruleLabel . ruleSpec) [minBound .. maxBound]
     <> words "refl symmetry rewrite in induction as on assumption exact calc skip sorry try repeat"
-    <> words "theorem rule by var term atom formula ctx"
+    <> words "theorem rule library by var term atom formula ctx"
 
 -- | Reserve the words of the tactic language in a scope.
 withTacticScope :: Scope a -> Scope a
@@ -177,6 +179,14 @@ parseDecls = parseDeclsIn Map.empty
 -- | 'parseDecls', with lemmas in scope from the start.
 parseDeclsIn :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
 parseDeclsIn lemmas mkScope = runParserFully (declsP lemmas mkScope)
+
+{- |
+Parse a declaration quote: an optional @library ident@ header, naming the
+binding the quasiquoter makes for the lemmas in scope, then declarations.
+-}
+parseQuoteIn :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError (Maybe String, [Decl a])
+parseQuoteIn lemmas mkScope =
+  runParserFully ((,) <$> optional (keywordP "library" *> identifierP (withTacticScope (mkScope []))) <*> declsP lemmas mkScope)
 
 -- | Parse @sequent by tactic@.
 parseGoal :: (Schematic a) => Scope a -> String -> Either SyntaxError (Goal a, Tactic a)

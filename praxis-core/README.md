@@ -142,6 +142,31 @@ metavariables inferred from the goal or given as arguments, its free variables
 instantiated, the hypotheses it does not mention weakened in, and its premises
 left as goals for the blocks which follow.
 
+To appeal to them from another module, open a quote with `library name`: the
+quasiquoter then also binds `name :: Library`, the lemmas in scope at the end
+of the quote, and a support module defines a quasiquoter over it, as for a
+signature:
+
+```haskell
+module Arithmetic.Lemmas (basics, plusZeroRight, …) where
+[pra|
+library basics
+theorem plusZeroRight : |- y + 0 = y
+by …
+|]
+
+module Arithmetic.Quotes (arithmeticProof) where
+import Arithmetic.Lemmas (basics)
+arithmeticProof = praQuoterIn basics
+```
+
+The bindings a library refers to must be exported. A quote of
+`arithmeticProof` may open a library of its own, which extends `basics`. A
+file of declarations is spliced the same way with `praFile "Lemmas.pra"`,
+`prfFile "Definitions.prf"` or `quoteFile arithmeticProof "More.pra"`; the
+path is relative to the package directory, and the module is recompiled when
+the file changes.
+
 The hypotheses of a goal are named, `H1`, `H2`, … in the order written and a
 context metavariable by its own name, and a `sorry` report lists them so. A
 step which introduces hypotheses numbers them on, or names them as told:
