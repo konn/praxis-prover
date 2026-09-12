@@ -85,6 +85,10 @@ handlers :: Handlers (LspM ())
 handlers =
   mconcat
     [ notificationHandler SMethod_Initialized \_ -> pure ()
+    , -- The library reads the configuration itself; these notifications need no answer.
+      notificationHandler SMethod_WorkspaceDidChangeConfiguration \_ -> pure ()
+    , notificationHandler SMethod_SetTrace \_ -> pure ()
+    , notificationHandler SMethod_WorkspaceDidChangeWatchedFiles \_ -> pure ()
     , notificationHandler SMethod_TextDocumentDidOpen \msg -> publish (toNormalizedUri msg._params._textDocument._uri)
     , notificationHandler SMethod_TextDocumentDidChange \msg -> publish (toNormalizedUri msg._params._textDocument._uri)
     , notificationHandler SMethod_TextDocumentDidSave \msg -> publish (toNormalizedUri msg._params._textDocument._uri)
