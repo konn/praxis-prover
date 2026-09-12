@@ -174,6 +174,18 @@ by induction t as n
          = 1 by exact H1 }
    }
 
+theorem zeroMinus : |- 0 - t = 0
+by induction t as n
+   { refl }
+   { calc (0 - S n) = prd (0 - n) = prd 0 by cong H1 = 0 }
+
+-- A theorem stating an equation, named where a hypothesis is expected.
+theorem ltZeroIsZero : |- (t < 0) = 0
+by calc (t < 0) = sgn (0 - t) = sgn 0 by cong zeroMinus = 0
+
+theorem zeroMinusUsed : 0 - x = y |- y = 0
+by rewrite zeroMinus in H1; symmetry (0 = y); Id
+
 -- A formula metavariable closed by assumption: the identity is expanded at the instance.
 rule assumeAny (A : formula) (Γ : ctx) : A, Γ |- A
 by assumption
@@ -292,6 +304,8 @@ quoteTests =
         inferConclusionIn kenv succSubSuccAt @?= Right (sequentMu "x = 0 |- S 3 - S x = 3 - x")
         inferConclusionIn kenv succSubSuccEigen @?= Right (sequentMu "|- S m' - S (S m') = m' - S m'")
         inferConclusionIn kenv ltSucc @?= Right (sequentMu "|- t < S t")
+        inferConclusionIn kenv ltZeroIsZero @?= Right (sequentMu "|- (t < 0) = 0")
+        inferConclusionIn kenv zeroMinusUsed @?= Right (sequentMu "0 - x = y |- y = 0")
     , testCase "a formula metavariable under Id is the identity expanded at the instance" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         let compound = atomMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)"

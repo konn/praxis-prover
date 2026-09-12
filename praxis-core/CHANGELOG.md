@@ -80,6 +80,12 @@ and this project adheres to the
   hypothesis `H`, a `Cut` whose second branch is the rest of the script;
   without a name, the hypothesis is `H`, or the next `H<n>` when `H` is
   taken.
+- A lemma stating an equation may be named wherever `symmetry`, `rewrite`
+  and `cong` take a hypothesis: its instance is found where it is used, at
+  the differing subterms of the goal for `cong` and at the first subterm the
+  left side matches for `rewrite`, cut in and proved by the lemma.
+  `LemmaNotEquation` and `Undetermined` report a lemma of another shape, or
+  an instance the use does not determine.
 - `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
   the substitution and weakening of a proof, renaming the variables its steps
   bind apart; the spliced proof of an appeal to a theorem is built with them.

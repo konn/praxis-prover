@@ -12,7 +12,7 @@ The textual syntax of tactics, and of the declarations which use them.
 >           | calc term {= term [by simple]} -- a chain of equations, each step by its tactic, or by refl
 >           | have [ident :] ( formula ) '{' tactic '}'  -- a lemma proved in the block, then a hypothesis
 >           | skip | sorry | try basic | repeat basic | ( tactic )
-> sel     ::= ident | ( atom )             -- a hypothesis by name, or the unique one matching the pattern
+> sel     ::= ident | ( atom )             -- a hypothesis by name, a lemma stating an equation, or the unique hypothesis matching the pattern
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
 >
 > quote   ::= [library ident] {decl}       -- the header names a binding for the lemmas in scope
@@ -57,6 +57,13 @@ alone uses the first hypothesis which fits.
 @have H: (A) { u }@ proves @A@ by @u@ and goes on with @A@ as the hypothesis
 @H@; without a name, the hypothesis is @H@, or the next @H<n>@ when @H@ is
 taken.  Blocks after it are for the goal it leaves, as for any step.
+
+Where @symmetry@, @rewrite@ and @cong@ take a hypothesis, they also take the
+name of a lemma stating an equation, @|- t = s@ under no hypotheses but a
+context metavariable: @cong zeroMinus@ finds the instance of @0 - t = 0@
+where the sides of the goal differ, @rewrite zeroMinus in H@ at the first
+subterm of @H@ that @0 - t@ matches, and @symmetry@ takes a closed equation;
+the instance is cut in and proved by the lemma.
 
 @sorry@ abandons the proof at its goal, which the error then reports; neither
 @|@, @try@ nor @repeat@ catches it, so a script may end in @sorry@ to see

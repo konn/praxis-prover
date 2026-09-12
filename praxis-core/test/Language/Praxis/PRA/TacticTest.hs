@@ -49,6 +49,7 @@ tacticTests =
     , calcTests
     , congTests
     , haveTests
+    , equationTests
     ]
 
 sig :: Signature
@@ -765,3 +766,46 @@ haveTests =
     , testCase "blocks after have are for the goal it leaves" $
         proves "a = 0 |- a = 0 by have H: (a = 0) { Id } { exact H }"
     ]
+
+equationTests :: TestTree
+equationTests =
+  testGroup
+    "a lemma as an equation"
+    [ testCase "cong finds the instance of a theorem where the sides differ" $ do
+        lemmas <- zeroPlus
+        provesWith lemmas "|- mult (plus 0 y) 2 = mult y 2 by cong zeroPlus"
+        provesWith lemmas "|- S (plus 0 (S z)) = S (S z) by cong zeroPlus"
+        provesWith lemmas "|- S y = S (plus 0 y) by cong zeroPlus"
+        provesWith lemmas "a = 0 |- plus (plus 0 y) (plus 0 y) = plus y y by cong zeroPlus"
+        provesWith lemmas "|- plus 0 y = plus 0 y by cong zeroPlus"
+    , testCase "rewrite finds the instance of a theorem in the hypothesis" $ do
+        lemmas <- zeroPlus
+        provesWith lemmas "plus 0 z = 3 |- z = 3 by rewrite zeroPlus in H1; Id"
+        provesWith lemmas "plus 0 z = 3 |- z = 3 by rewrite zeroPlus in H1 as H; exact H"
+        provesWith lemmas "plus 0 z = 3 |- z = 3 by rewrite zeroPlus in H1 as H2; exact H2"
+    , testCase "symmetry takes a closed equation" $ do
+        lemmas <- twoTwo
+        provesWith lemmas "|- 4 = plus 2 2 by symmetry twoTwo; Id"
+    , testCase "a lemma which is not an equation, or whose instance is not determined" $ do
+        conj <- Map.singleton "conj" <$> certified "|- 2 = 2 /\\ 3 = 3 by ConjR { refl } { refl }"
+        failsWithIn conj "|- 2 = 2 by cong conj" \case
+          LemmaNotEquation "conj" _ -> True
+          _ -> False
+        lemmas <- zeroPlus
+        failsWithIn lemmas "|- plus 1 y = y by cong zeroPlus" \case
+          NoCongruence _ [_] -> True
+          _ -> False
+        failsWithIn lemmas "|- 2 = 2 by symmetry zeroPlus; Id" \case
+          Undetermined "zeroPlus" ["y"] -> True
+          _ -> False
+        zeroMult <- Map.singleton "zeroMult" <$> certified "|- 0 = mult 0 y by refl"
+        failsWithIn zeroMult "0 = 5 |- 0 = 5 by rewrite zeroMult in H1; Id" \case
+          Undetermined "zeroMult" ["y"] -> True
+          _ -> False
+        failsWithIn lemmas "3 = 3 |- 3 = 3 by rewrite zeroPlus in H1; Id" \case
+          NothingToRewrite _ _ -> True
+          _ -> False
+    ]
+  where
+    zeroPlus = Map.singleton "zeroPlus" <$> certified "|- plus 0 y = y by refl"
+    twoTwo = Map.singleton "twoTwo" <$> certified "|- plus 2 2 = 4 by refl"

@@ -94,7 +94,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Set qualified as Set
@@ -271,11 +271,15 @@ data Tactic a
     @Defeq s t; Id@.
     -}
     Refl
-  | -- | From the hypothesis @t = s@ selected, add @s = t@.
+  | {- | From the hypothesis @t = s@ selected, add @s = t@.  The selector may
+    also name a lemma stating an equation, as for 'Cong', a closed one here.
+    -}
     Symmetry !(Selector a)
   | {- | @Rewrite eq h@: with the hypothesis @t = s@ selected by @eq@, add the
     atomic hypothesis selected by @h@ with every occurrence of @t@ replaced
-    by @s@, by 'Subst'.
+    by @s@, by 'Subst'.  @eq@ may also name a lemma stating an equation, as
+    for 'Cong': its instance is the first subterm of @h@ its left side
+    matches.
     -}
     Rewrite !(Selector a) !(Selector a)
   | {- | @Cong sel@: close the goal @u = v@ by the hypothesis @t = s@ selected,
@@ -283,7 +287,10 @@ data Tactic a
     occurrences of @t@ replaced by @s@; the hypothesis may state the equation
     either way round.  The context of the occurrences is inferred by
     comparing the sides, and the proof is 'Defeq' on @u = u@, 'Subst' and
-    'Id'.
+    'Id'.  The selector may also name a lemma stating an equation, @|- t = s@
+    under no hypotheses but a context metavariable: its instance is found
+    where the sides of the goal differ, cut in, proved by the lemma, and
+    used as the hypothesis.
     -}
     Cong !(Maybe (Selector a))
   | {- | @Induction t n@: prove the goal by 'Ind' on the term @t@, with the
@@ -462,6 +469,10 @@ data Failure a
     RewriteWithItself !(Atomic a)
   | -- | 'Cong' with no equation, among those tried, turning the left side of the goal into the right
     NoCongruence !(Atomic a) ![Atomic a]
+  | -- | a lemma named where a hypothesis is expected, which does not state an equation
+    LemmaNotEquation !String !(Sequent a)
+  | -- | variables of the equation of a lemma which its use does not determine
+    Undetermined !String ![a]
   | -- | the eigenvariable given to 'Induction' occurs in the goal
     NotFresh !a
   | -- | 'Assumption' on a succedent absent from the context
@@ -687,27 +698,36 @@ runTacticWith env lemmas prems = go noHints
           go noHints (applyWith DefeqRule [term s, term t] `Then` applyWith IdRule []) goal
         _ -> failWith (NotAnEquation "refl" c)
       Symmetry sel -> do
-        t :=== s <- select sel
         unless (null (hintOn hints)) $ failWith NothingToName
-        let x = freshen (goalNames (goalSequent goal)) anyName
-        -- The name given is for the symmetric equation, which Subst introduces; Defeq must not take it.
-        go noHints (applyWith DefeqRule [term t, term t]) (reserve (hintAs hints) goal)
-          >>= continue (go hints (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (Var x :=== t)]))
+        equation sel >>= \case
+          OfHypothesis (t :=== s) -> do
+            let x = freshen (goalNames (goalSequent goal)) anyName
+            -- The name given is for the symmetric equation, which Subst introduces; Defeq must not take it.
+            go noHints (applyWith DefeqRule [term t, term t]) (reserve (hintAs hints) goal)
+              >>= continue (go hints (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (Var x :=== t)]))
+          OfLemma n lemma p -> do
+            let open = undetermined emptyBindings p
+            unless (null open) $ failWith (Undetermined n open)
+            viaLemma n lemma p Symmetry
       Rewrite eqSel hSel -> do
-        t :=== s <- select eqSel
-        h <- select hSel
         unless (null (hintOn hints)) $ failWith NothingToName
-        when (h == (t :=== s)) $ failWith (RewriteWithItself h)
-        unless (t `occursIn` h) $ failWith (NothingToRewrite t h)
-        let x = freshen (goalNames (goalSequent goal)) anyName
-        go hints (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (abstract t x h)]) goal
+        h <- select hSel
+        equation eqSel >>= \case
+          OfHypothesis (t :=== s) -> do
+            when (h == (t :=== s)) $ failWith (RewriteWithItself h)
+            unless (t `occursIn` h) $ failWith (NothingToRewrite t h)
+            let x = freshen (goalNames (goalSequent goal)) anyName
+            go hints (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (abstract t x h)]) goal
+          OfLemma n lemma p@(t :=== _) -> do
+            b <- maybe (failWith (NothingToRewrite t h)) Right (firstInstance t h)
+            let open = undetermined b p
+            unless (null open) $ failWith (Undetermined n open)
+            inst <- first (TacticError Nothing goal) (instantiateAtom n b p)
+            viaLemma n lemma inst (`Rewrite` hSel)
       Cong sel -> plain do
         (u, v) <- case c of
           Atm (u :=== v) -> pure (u, v)
           _ -> failWith (NotAnEquation "cong" c)
-        candidates <- case sel of
-          Just chosen -> (: []) <$> select chosen
-          Nothing -> pure [p | Hypothesis _ (Atm p) <- goalHypotheses goal, isAtom p]
         let x = freshen (goalNames (goalSequent goal)) anyName
             -- The equation as the hypothesis states it, or turned around first, as Symmetry does.
             oriented p@(a :=== b) =
@@ -716,17 +736,32 @@ runTacticWith env lemmas prems = go noHints
             turned (a :=== b) =
               applyWith DefeqRule [term a, term a]
                 `Then` applyWith SubstRule [ArgVar (Named x), term a, term b, atom (Var x :=== a)]
-        case concatMap oriented candidates of
-          [] -> failWith (NoCongruence (u :=== v) candidates)
-          (turn, t, s, context) : _ ->
-            go
-              noHints
-              ( turn
-                  `Then` applyWith DefeqRule [term u, term u]
-                  `Then` applyWith SubstRule [ArgVar (Named x), term t, term s, atom (u :=== context)]
-                  `Then` applyWith IdRule []
-              )
-              goal
+            byHypotheses candidates = case concatMap oriented candidates of
+              [] -> failWith (NoCongruence (u :=== v) candidates)
+              (turn, t, s, context) : _ ->
+                go
+                  noHints
+                  ( turn
+                      `Then` applyWith DefeqRule [term u, term u]
+                      `Then` applyWith SubstRule [ArgVar (Named x), term t, term s, atom (u :=== context)]
+                      `Then` applyWith IdRule []
+                  )
+                  goal
+            -- The instance of a lemma's equation: the pair its sides match where the sides of the goal differ.
+            matching l r (b, seen) u' v' = case matchTermL noConstraints b l u' of
+              Matched b' | Matched b'' <- matchTermL noConstraints b' r v' -> Just (b'', seen <|> Just (u', v'))
+              _ -> Nothing
+        case sel of
+          Nothing -> byHypotheses [p | Hypothesis _ (Atm p) <- goalHypotheses goal, isAtom p]
+          Just chosen ->
+            equation chosen >>= \case
+              OfHypothesis p -> byHypotheses [p]
+              OfLemma n lemma p@(t :=== s) ->
+                case (congruenceWith (matching t s) (emptyBindings, Nothing) x u v, congruenceWith (matching s t) (emptyBindings, Nothing) x u v) of
+                  (Just ((_, Just (a, b)), _), _) -> viaLemma n lemma (a :=== b) (Cong . Just)
+                  (_, Just ((_, Just (a, b)), _)) -> viaLemma n lemma (b :=== a) (Cong . Just)
+                  (Just ((_, Nothing), _), _) -> go noHints Refl goal
+                  _ -> failWith (NoCongruence (u :=== v) [p])
       Induction t given -> do
         unless (null (hintOn hints)) $ failWith NothingToName
         let names = goalNames (goalSequent goal)
@@ -834,6 +869,37 @@ runTacticWith env lemmas prems = go noHints
             [p] -> Right p
             [] -> failWith (NoMatch pat)
             ps -> failWith (AmbiguousMatch pat (map Atm ps))
+
+        -- The equation a selector stands for: an atomic hypothesis, or a
+        -- lemma stating an equation, whose instance the tactic finds where
+        -- it uses it.
+        equation :: Selector a -> Either (TacticError a) (Equation a)
+        equation = \case
+          ByName n
+            | Nothing <- hypothesisNamed n goal
+            , Just lemma <- Map.lookup n lemmas ->
+                case lemmaEquation lemma of
+                  Just p -> Right (OfLemma n lemma p)
+                  Nothing -> failWith (LemmaNotEquation n (lemmaGoal lemma))
+          sel -> OfHypothesis <$> select sel
+
+        -- The instance of the equation of a lemma, cut in and proved by the
+        -- lemma; the tactic then selects it by its pattern, as a hypothesis.
+        viaLemma :: String -> Lemma a -> Atomic a -> (Selector a -> Tactic a) -> Either (TacticError a) (Partial a)
+        viaLemma n lemma inst tactic =
+          go
+            noHints
+            ( Dispatch
+                (applyWith CutRule [form (Atm inst)])
+                [Exact n (map (const Nothing) (lemmaMetas lemma)), As (hintAs hints) (tactic (ByPattern (fmap Named inst)))]
+            )
+            (reserve (hintAs hints) goal)
+
+        instantiateAtom :: String -> Bindings a -> Atomic a -> Either (Failure a) (Atomic a)
+        instantiateAtom n b p =
+          instantiateFormula n (bFree b) b (Atm p) >>= \case
+            Atm q -> Right q
+            _ -> Left (Malformed ("the instance of " <> n <> " is not an atom"))
 
     continue k =
       fmap join . traverse \case
@@ -1317,6 +1383,39 @@ useLemma hints name lemma userArgs goal = do
     look :: forall v. R.Sort -> String -> Map String v -> Either (Failure a) v
     look s n = maybe (Left (CannotInstantiate name [R.MetaRef s n])) Right . Map.lookup n
 
+-- | What a hypothesis selector stands for: a hypothesis, or a lemma stating an equation.
+data Equation a = OfHypothesis !(Atomic a) | OfLemma !String !(Lemma a) !(Atomic a)
+
+-- | The equation a lemma states: no premises, and no hypotheses but a context metavariable.
+lemmaEquation :: (Schematic a) => Lemma a -> Maybe (Atomic a)
+lemmaEquation lemma = case lemmaGoal lemma of
+  ctx :|- Atm p
+    | null (lemmaPremises lemma)
+    , isNothing (metaAtom p)
+    , all (isJust . contextMeta) (toList ctx) ->
+        Just p
+  _ -> Nothing
+
+-- | The variables and metavariables of an equation the bindings leave open.
+undetermined :: (Schematic a) => Bindings a -> Atomic a -> [a]
+undetermined b (t :=== s) = nub [v | v <- toList t <> toList s, open v]
+  where
+    open v = case metaName v of
+      Just (sort, n) -> not (isBound (R.MetaRef sort n) b)
+      Nothing -> not (HM.member v (bFree b))
+
+-- | The bindings under which the pattern matches the first subterm of the atom it matches at all, in order.
+firstInstance :: (Schematic a) => Term a -> Atomic a -> Maybe (Bindings a)
+firstInstance pat (s :=== u) = listToMaybe (mapMaybe attempt (subterms s <> subterms u))
+  where
+    attempt t = case matchTermL noConstraints emptyBindings pat t of
+      Matched b -> Just b
+      _ -> Nothing
+    subterms t =
+      t : case t of
+        App _ args -> concatMap subterms (toList args)
+        _ -> []
+
 -- ** Matching the statement of a lemma against the goal
 
 bindFree :: (Hashable a) => Bindings a -> a -> Term a -> Match a
@@ -1518,22 +1617,44 @@ abstractIn t x = go
 @s@ becomes @x@.
 -}
 congruence :: forall a. (Eq a) => a -> Term a -> Term a -> Term a -> Term a -> Maybe (Term a)
-congruence x t s = go
+congruence x t s u v = snd <$> congruenceWith hole () x u v
   where
-    go :: Term a -> Term a -> Maybe (Term a)
-    go u v
-      | u == t && v == s = Just (Var x)
-      | u == v = Just u
+    hole () u' v'
+      | u' == t && v' == s = Just ()
+      | otherwise = Nothing
+
+{- |
+'congruence' with a hole test of its own, threading a state through the
+holes: a pair of subterms the test accepts becomes @x@, with the state it
+returns.
+-}
+congruenceWith :: forall a b. (Eq a) => (b -> Term a -> Term a -> Maybe b) -> b -> a -> Term a -> Term a -> Maybe (b, Term a)
+congruenceWith hole b0 x = go b0
+  where
+    go :: b -> Term a -> Term a -> Maybe (b, Term a)
+    go b u v
+      | Just b' <- hole b u v = Just (b', Var x)
+      | u == v = Just (b, u)
       | otherwise = case (canonicalise u, canonicalise v) of
           (App (f :: Function n) us, App (g :: Function m) vs)
             | Just TE.Refl <- TE.testEquality (sNat @n) (sNat @m)
-            , f == g ->
-                App f <$> sequenceA (SV.zipWithSame go us vs)
+            , f == g -> do
+                (b', ws) <- goArgs b (toList us) (toList vs)
+                args <- SV.fromList' ws
+                pure (b', App f args)
           (u', v')
             | Just u'' <- u' ^? _Succ
             , Just v'' <- v' ^? _Succ ->
-                suc <$> go u'' v''
+                fmap suc <$> go b u'' v''
           _ -> Nothing
+
+    goArgs :: b -> [Term a] -> [Term a] -> Maybe (b, [Term a])
+    goArgs b [] [] = Just (b, [])
+    goArgs b (u : us) (v : vs) = do
+      (b', w) <- go b u v
+      (b'', ws) <- goArgs b' us vs
+      pure (b'', w : ws)
+    goArgs _ _ _ = Nothing
 
 -- * Rendering
 
@@ -1585,6 +1706,8 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       RewriteWithItself h -> "rewrite: cannot rewrite " <> ra h <> " with itself"
       NoCongruence (u :=== v) [p] -> "cong: " <> ra p <> " does not rewrite " <> rt u <> " into " <> rt v
       NoCongruence (u :=== v) _ -> "cong: no hypothesis rewrites " <> rt u <> " into " <> rt v
+      LemmaNotEquation n s -> n <> " does not state an equation, so it cannot stand for a hypothesis; it proves " <> rs s
+      Undetermined n vs -> "cannot instantiate " <> intercalate ", " (map name vs) <> " of " <> n <> " from where it is used; state the instance with have"
       NotFresh x -> "induction: " <> name x <> " occurs in the goal"
       NotInContext f -> "assumption: " <> rf f <> " is not in the context"
       UnknownPremise d -> "exact: no premise, lemma or hypothesis named " <> d

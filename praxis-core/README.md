@@ -182,6 +182,11 @@ every hypothesis.
 hypothesis `H`, a `Cut` whose second branch is the rest of the script; with
 no name given, the hypothesis is `H`, or the next `H<n>` when `H` is taken.
 
+Where `symmetry`, `rewrite` and `cong` take a hypothesis, they also take the
+name of a lemma stating an equation, with its instance found where it is
+used: `cong zeroMinus` on the goal `sgn (0 - t) = sgn 0` cuts in `0 - t = 0`,
+proves it by the theorem, and rewrites with it.
+
 An equation may be proved as a calculation, one step per line, each by its
 own tactic or by `refl` when definitional:
 
