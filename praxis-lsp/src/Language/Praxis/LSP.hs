@@ -165,8 +165,8 @@ analysePrf text = case checkQuote mempty Map.empty Set.empty id "" text of
   Right _ -> []
 
 {- |
-Check every declaration, each a lemma for those after it when it certifies;
-one which does not is reported, at the tactic which failed when one is
+Check every declaration, each a lemma for those after it, by its statement
+even when its proof fails; one which fails is reported, at the tactic which failed when one is
 known, and a @sorry@ as information with the goal it stopped at.
 -}
 analysePra :: Text -> [Report]
@@ -181,7 +181,7 @@ analysePra text = case parseQuoteIn Map.empty (schemaScope builtin) (T.unpack te
     go _ _ [] = []
     go kernel lemmas (d : ds) = case checkDecl kernel lemmas d of
       Right (_, lemma) -> go kernel (Map.insert (declName d) lemma lemmas) ds
-      Left err -> report d err : go kernel lemmas ds
+      Left err -> report d err : go kernel (Map.insert (declName d) (declLemma d) lemmas) ds
     report d err =
       let (line, column) = maybe (fromMaybe (1, 1) (firstLoc (declTactic d))) (\(Loc l c) -> (l, c)) (errorLoc err)
           severity = case errorFailure err of
@@ -226,13 +226,13 @@ hoverAt text line column = do
         )
     unlines' = foldr1 (\a b -> a <> "\n" <> b)
 
--- | The lemmas of the declarations which certify, in order.
+-- | The lemmas of the declarations, in order: as certified, or by statement alone when the proof fails.
 certified :: KernelEnv -> [Decl SchemaName] -> Map String (Lemma SchemaName)
 certified kernel = foldl step Map.empty
   where
     step lemmas d = case checkDecl kernel lemmas d of
       Right (_, lemma) -> Map.insert (declName d) lemma lemmas
-      Left _ -> lemmas
+      Left _ -> Map.insert (declName d) (declLemma d) lemmas
 
 -- | Every position the parser attached in a tactic.
 locations :: Tactic a -> [Loc]

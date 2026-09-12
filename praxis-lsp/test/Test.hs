@@ -36,6 +36,9 @@ tests =
           @?= Just "H1 : b = 0\n|- b = 0"
         hoverAt (proofs <> "\ntheorem again : b = 0 |- b + 0 = b\nby Cut (b = 0) { exact H1 } { exact plusZero }\n") 8 33
           @?= Just "H1 : b = 0\nH2 : b = 0\n|- b + 0 = b"
+    , testCase "a declaration whose proof fails is still a lemma for those after it" $
+        map reportSeverity (analyse Pra "theorem later : |- 3 = 3\nby sorry\n\ntheorem uses : b = 0 |- 3 = 3\nby exact later\n")
+          @?= [DiagnosticSeverity_Information]
     , testCase "a file of definitions is checked" $ do
         analyse Prf "double 0 = 0\ndouble (S n) = S (S (double n))\n" @?= []
         map reportSeverity (analyse Prf "double 0 = 0\ndouble (S n) = S (S (doubled n))\n") @?= [DiagnosticSeverity_Error]
