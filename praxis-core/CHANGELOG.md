@@ -66,6 +66,11 @@ and this project adheres to the
   `t0 = tn` as a chain of equations, each step proved by its tactic under the
   hypotheses of the goal, by `refl` when none is given; the steps are cut in
   as one conjunction, split by `ConjL` and chained by `Subst` down to `Id`.
+- `cong`: `cong H` closes an equation `u = v` by the hypothesis `H : t = s`
+  when `v` is `u` with occurrences of `t` replaced by `s`, or the other way
+  round, and `cong` alone by the first hypothesis which fits; the context of
+  the occurrences is inferred by comparing the sides, and the proof is `Defeq`
+  on `u = u`, `Subst` and `Id`.
 - `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
   the substitution and weakening of a proof, renaming the variables its steps
   bind apart; the spliced proof of an appeal to a theorem is built with them.
@@ -116,5 +121,9 @@ and this project adheres to the
   variables. `Exact` carries the arguments of the appeal, `proveOpen` returns
   a `Free (Step a) String`, and an opaque formula or context metavariable is
   never selected by `symmetry`, `rewrite` or the atomic patterns of a rule.
+- `NotAnEquation` names the tactic which met it, `refl` or `cong`.
+- A hypothesis selected by pattern, for `symmetry`, `rewrite` and `cong`, is
+  written in parentheses, as an atom argument of a rule is; a bare name
+  selects by name.
 
 ## 0.1.0.0 - YYYY-MM-DD

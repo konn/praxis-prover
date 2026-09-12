@@ -268,6 +268,14 @@ data Tactic a
     by @s@, by 'Subst'.
     -}
     Rewrite !(Selector a) !(Selector a)
+  | {- | @Cong sel@: close the goal @u = v@ by the hypothesis @t = s@ selected,
+    or by the first hypothesis which fits when none is, where @v@ is @u@ with
+    occurrences of @t@ replaced by @s@; the hypothesis may state the equation
+    either way round.  The context of the occurrences is inferred by
+    comparing the sides, and the proof is 'Defeq' on @u = u@, 'Subst' and
+    'Id'.
+    -}
+    Cong !(Maybe (Selector a))
   | {- | @Induction t n@: prove the goal by 'Ind' on the term @t@, with the
     eigenvariable @n@, chosen fresh when it is not given.  The hypotheses
     mentioning @t@ are generalized into the induction formula, through 'Cut',
@@ -424,8 +432,8 @@ data Failure a
   | -- | parameters neither given nor determined by the goal
     CannotInfer !RuleName ![R.MetaRef]
   | SideCondition !RuleName !(ProofErrorReason a)
-  | -- | 'Refl' on a goal which is not an equation
-    NotAnEquation !(Formula a)
+  | -- | 'Refl' or 'Cong', named, on a goal which is not an equation
+    NotAnEquation !String !(Formula a)
   | -- | no hypothesis matches the pattern of a derived tactic
     NoMatch !(Atomic (Hole a))
   | AmbiguousMatch !(Atomic (Hole a)) ![Formula a]
@@ -437,6 +445,8 @@ data Failure a
     NothingToRewrite !(Term a) !(Atomic a)
   | -- | a hypothesis cannot be rewritten with itself
     RewriteWithItself !(Atomic a)
+  | -- | 'Cong' with no equation, among those tried, turning the left side of the goal into the right
+    NoCongruence !(Atomic a) ![Atomic a]
   | -- | the eigenvariable given to 'Induction' occurs in the goal
     NotFresh !a
   | -- | 'Assumption' on a succedent absent from the context
@@ -660,7 +670,7 @@ runTacticWith env lemmas prems = go noHints
       Refl -> plain case c of
         Atm (s :=== t) ->
           go noHints (applyWith DefeqRule [term s, term t] `Then` applyWith IdRule []) goal
-        _ -> failWith (NotAnEquation c)
+        _ -> failWith (NotAnEquation "refl" c)
       Symmetry sel -> do
         t :=== s <- select sel
         unless (null (hintOn hints)) $ failWith NothingToName
@@ -676,6 +686,32 @@ runTacticWith env lemmas prems = go noHints
         unless (t `occursIn` h) $ failWith (NothingToRewrite t h)
         let x = freshen (goalNames (goalSequent goal)) anyName
         go hints (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (abstract t x h)]) goal
+      Cong sel -> plain do
+        (u, v) <- case c of
+          Atm (u :=== v) -> pure (u, v)
+          _ -> failWith (NotAnEquation "cong" c)
+        candidates <- case sel of
+          Just chosen -> (: []) <$> select chosen
+          Nothing -> pure [p | Hypothesis _ (Atm p) <- goalHypotheses goal, isAtom p]
+        let x = freshen (goalNames (goalSequent goal)) anyName
+            -- The equation as the hypothesis states it, or turned around first, as Symmetry does.
+            oriented p@(a :=== b) =
+              [(Skip, a, b, context) | Just context <- [congruence x a b u v]]
+                <> [(turned p, b, a, context) | Just context <- [congruence x b a u v]]
+            turned (a :=== b) =
+              applyWith DefeqRule [term a, term a]
+                `Then` applyWith SubstRule [ArgVar (Named x), term a, term b, atom (Var x :=== a)]
+        case concatMap oriented candidates of
+          [] -> failWith (NoCongruence (u :=== v) candidates)
+          (turn, t, s, context) : _ ->
+            go
+              noHints
+              ( turn
+                  `Then` applyWith DefeqRule [term u, term u]
+                  `Then` applyWith SubstRule [ArgVar (Named x), term t, term s, atom (u :=== context)]
+                  `Then` applyWith IdRule []
+              )
+              goal
       Induction t given -> do
         unless (null (hintOn hints)) $ failWith NothingToName
         let names = goalNames (goalSequent goal)
@@ -1454,6 +1490,30 @@ abstractIn t x = go
       p :==> q -> go p :==> go q
       Bot -> Bot
 
+{- |
+@congruence x t s u v@ finds the context @C@ with @C[x := t] == u@ and
+@C[x := s] == v@, when @v@ is @u@ with some occurrences of @t@ replaced by
+@s@: the sides are compared in step, and an occurrence of @t@ against one of
+@s@ becomes @x@.
+-}
+congruence :: forall a. (Eq a) => a -> Term a -> Term a -> Term a -> Term a -> Maybe (Term a)
+congruence x t s = go
+  where
+    go :: Term a -> Term a -> Maybe (Term a)
+    go u v
+      | u == t && v == s = Just (Var x)
+      | u == v = Just u
+      | otherwise = case (canonicalise u, canonicalise v) of
+          (App (f :: Function n) us, App (g :: Function m) vs)
+            | Just TE.Refl <- TE.testEquality (sNat @n) (sNat @m)
+            , f == g ->
+                App f <$> sequenceA (SV.zipWithSame go us vs)
+          (u', v')
+            | Just u'' <- u' ^? _Succ
+            , Just v'' <- v' ^? _Succ ->
+                suc <$> go u'' v''
+          _ -> Nothing
+
 -- * Rendering
 
 -- | Render an error for a human, naming symbols through the signature.
@@ -1495,13 +1555,15 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       CannotInfer r refs ->
         label r <> "cannot infer " <> intercalate ", " (map R.refName refs) <> "; supply it"
       SideCondition r reason -> label r <> side reason
-      NotAnEquation f -> "refl: the goal " <> rf f <> " is not an equation"
+      NotAnEquation t f -> t <> ": the goal " <> rf f <> " is not an equation"
       NoMatch pat -> "no hypothesis matches " <> rap pat
       AmbiguousMatch pat _ -> "more than one hypothesis matches " <> rap pat
       UnknownHypothesis n -> "no hypothesis named " <> n
       NotAtomic n f -> n <> " is " <> rf f <> ", not an atomic hypothesis"
       NothingToRewrite t h -> "rewrite: " <> rt t <> " does not occur in " <> ra h
       RewriteWithItself h -> "rewrite: cannot rewrite " <> ra h <> " with itself"
+      NoCongruence (u :=== v) [p] -> "cong: " <> ra p <> " does not rewrite " <> rt u <> " into " <> rt v
+      NoCongruence (u :=== v) _ -> "cong: no hypothesis rewrites " <> rt u <> " into " <> rt v
       NotFresh x -> "induction: " <> name x <> " occurs in the goal"
       NotInContext f -> "assumption: " <> rf f <> " is not in the context"
       UnknownPremise d -> "exact: no premise, lemma or hypothesis named " <> d
@@ -1544,6 +1606,7 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       AmbiguousHypothesis r args _ fs -> given r args <> ["candidates: " <> intercalate "; " (map rf fs)]
       AmbiguousMatch _ fs -> ["candidates: " <> intercalate "; " (map rf fs)]
       AmbiguousInstance _ _ fs -> ["candidates: " <> intercalate "; " (map rf fs)]
+      NoCongruence _ ps@(_ : _ : _) -> ["candidates: " <> intercalate "; " (map ra ps)]
       Alternatives es -> concatMap (map ("| " <>) . render) es
       Unsolved gs -> map (("- " <>) . rg) gs
       Rejected errs -> ["- " <> show (context e) <> ": " <> side (reason e) | e <- NE.toList errs]

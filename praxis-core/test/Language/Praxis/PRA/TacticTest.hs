@@ -47,6 +47,7 @@ tacticTests =
     , lemmaTests
     , namingTests
     , calcTests
+    , congTests
     ]
 
 sig :: Signature
@@ -173,7 +174,7 @@ tacticParserTests =
     , testCase "the atomic pattern of rewrite may be parenthesised" $ do
         e <- parsed (parseAtomicPattern sc "t = s")
         h <- parsed (parseAtomicPattern sc "plus t 0 = _")
-        "rewrite (t = s) in plus t 0 = _" `parsesTo` Rewrite (ByPattern e) (ByPattern h)
+        "rewrite (t = s) in (plus t 0 = _)" `parsesTo` Rewrite (ByPattern e) (ByPattern h)
     , testCase "induction takes an optional eigenvariable" $
         "induction y as n" `parsesTo` Induction (Var "y") (Just "n")
     , testCase "errors carry the position of the tactic" $ do
@@ -300,7 +301,7 @@ failureTests =
           _ -> False
     , testCase "refl on a connective" $
         "|- 2 = 2 /\\ 3 = 3 by refl" `failsWith` \case
-          NotAnEquation _ -> True
+          NotAnEquation "refl" _ -> True
           _ -> False
     , testCase "rewrite with a term which does not occur" $
         "t = s, u = 0 |- u = 0 by rewrite (t = s) in (u = 0)" `failsWith` \case
@@ -676,5 +677,48 @@ calcTests =
     , testCase "the chain must run between the sides of the goal" $
         "|- a = c by calc a = b = d" `failsWith` \case
           CalcMismatch (Var "a") (Var "d") -> True
+          _ -> False
+    ]
+
+congTests :: TestTree
+congTests =
+  testGroup
+    "cong"
+    [ testCase "cong takes a hypothesis, or finds one" $ do
+        "cong H2" `parsesTo` Cong (Just (ByName "H2"))
+        "cong" `parsesTo` Cong Nothing
+        e <- parsed (parseAtomicPattern sc "t = s")
+        "cong (t = s)" `parsesTo` Cong (Just (ByPattern e))
+    , testCase "an equation rewritten under function symbols" $ do
+        proves "t = s |- plus t 0 = plus s 0 by cong H1"
+        proves "t = s |- plus t t = plus s s by cong H1"
+        proves "t = s |- plus t t = plus s t by cong H1"
+        proves "t = s |- S (mult t 2) = S (mult s 2) by cong (t = s)"
+        proves "t = s |- t = s by cong H1"
+    , testCase "the hypothesis may state the equation either way round" $
+        proves "s = t |- plus t 0 = plus s 0 by cong H1"
+    , testCase "without a selector, the first hypothesis which fits is used" $
+        proves "a = 0, t = s, u = 0 |- mult t 2 = mult s 2 by cong"
+    , testCase "a numeral is a successor" $
+        proves "n = 2 |- S n = 3 by cong"
+    , testCase "cong in a calculation" $
+        proves "t = s, plus s 0 = s |- plus t 0 = s by calc plus t 0 = plus s 0 by cong H1 = s by Id"
+    , testCase "no hypothesis fits" $ do
+        "t = s |- plus t 0 = plus 0 s by cong" `failsWith` \case
+          NoCongruence _ [_] -> True
+          _ -> False
+        "t = s, u = 0 |- plus t 0 = plus u 0 by cong H1" `failsWith` \case
+          NoCongruence _ [_] -> True
+          _ -> False
+        "t = s, u = 0 |- plus t 0 = plus u 0 by cong" `failsWith` \case
+          NoCongruence _ [_, _] -> True
+          _ -> False
+    , testCase "cong on a goal which is not an equation" $
+        "t = s |- 2 = 2 /\\ 3 = 3 by cong" `failsWith` \case
+          NotAnEquation "cong" _ -> True
+          _ -> False
+    , testCase "cong names nothing" $
+        "t = s |- plus t 0 = plus s 0 by cong H1 as H" `failsWith` \case
+          NothingToName -> True
           _ -> False
     ]

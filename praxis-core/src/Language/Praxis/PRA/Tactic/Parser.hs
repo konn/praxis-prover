@@ -6,12 +6,12 @@ The textual syntax of tactics, and of the declarations which use them.
 > simple  ::= basic {'{' tactic '}'}       -- t {u1} … {un}: t must leave n goals, ui gets goal i
 > basic   ::= step [on ident {ident}] [as ident {ident}]
 > step    ::= Rule {arg}                   -- a rule of the calculus, applied backwards
->           | refl | symmetry sel | rewrite sel in sel
+>           | refl | symmetry sel | rewrite sel in sel | cong [sel]
 >           | induction arg [as ident {ident}] | assumption
 >           | exact ident {arg}            -- a premise, a hypothesis, or a lemma with the arguments for its metavariables
 >           | calc term {= term [by simple]} -- a chain of equations, each step by its tactic, or by refl
 >           | skip | sorry | try basic | repeat basic | ( tactic )
-> sel     ::= ident | atom                 -- a hypothesis by name, or the unique one matching the pattern
+> sel     ::= ident | ( atom )             -- a hypothesis by name, or the unique one matching the pattern
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
 >
 > quote   ::= [library ident] {decl}       -- the header names a binding for the lemmas in scope
@@ -48,6 +48,10 @@ parsers are given; a declaration is in scope for the declarations after it.
 @calc t0 = t1 by u1 = t2 by u2 …@ proves the goal @t0 = tn@ as a chain: each
 step @t(i-1) = ti@ is proved by its tactic under the hypotheses of the goal,
 by @refl@ when none is given, and the steps are chained by transitivity.
+
+@cong H@ closes the goal @u = v@ by the hypothesis @H : t = s@, when @v@ is
+@u@ with occurrences of @t@ replaced by @s@, or the other way round; @cong@
+alone uses the first hypothesis which fits.
 
 @sorry@ abandons the proof at its goal, which the error then reports; neither
 @|@, @try@ nor @repeat@ catches it, so a script may end in @sorry@ to see
@@ -101,7 +105,7 @@ import Text.Megaparsec.Char (char)
 tacticKeywords :: [String]
 tacticKeywords =
   map (R.ruleLabel . ruleSpec) [minBound .. maxBound]
-    <> words "refl symmetry rewrite in induction as on assumption exact calc skip sorry try repeat"
+    <> words "refl symmetry rewrite in cong induction as on assumption exact calc skip sorry try repeat"
     <> words "theorem rule library by var term atom formula ctx"
 
 -- | Reserve the words of the tactic language in a scope.
@@ -274,6 +278,7 @@ tacticP lemmas sc0 = seqP
             , Refl <$ keywordP "refl"
             , Symmetry <$> (keywordP "symmetry" *> selectorP)
             , Rewrite <$> (keywordP "rewrite" *> selectorP) <*> (keywordP "in" *> selectorP)
+            , Cong <$> (keywordP "cong" *> optional selectorP)
             , inductionP
             , Assumption <$ keywordP "assumption"
             , exactP
@@ -342,9 +347,8 @@ tacticP lemmas sc0 = seqP
           R.FormS -> ArgForm <$> parens (formulaP sc)
           R.CtxS -> empty
 
-    -- A hypothesis: the unique one matching an atomic pattern, with or without parentheses, or the one named.
-    selectorP = (ByPattern <$> try atomArgP) <|> (ByName <$> nameP)
-    atomArgP = try (parens atomArgP) <|> atomicP sc
+    -- A hypothesis: the one named, or the unique one matching a parenthesized atomic pattern.
+    selectorP = (ByPattern <$> parens (atomicP sc)) <|> (ByName <$> nameP)
 
     variableP :: Parser a
     variableP = do

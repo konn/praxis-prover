@@ -174,6 +174,10 @@ step which introduces hypotheses numbers them on, or names them as told:
 `rewrite H1 in H2` and `exact H2` refer to hypotheses by name, and `ImplL on
 H2` picks the hypothesis a rule acts on where several have the right shape.
 
+`cong H2` closes an equation whose right side is the left with one side of
+`H2` replaced by the other, under any function symbols; `cong` alone tries
+every hypothesis.
+
 An equation may be proved as a calculation, one step per line, each by its
 own tactic or by `refl` when definitional:
 
@@ -199,6 +203,24 @@ by induction m
 
 theorem succSubSuccAt : x = 0 |- S 3 - S x = 3 - x
 by exact succSubSucc
+|]
+```
+
+A lemma cut in serves a congruence step of a calculation:
+
+```haskell
+[pra|
+theorem ltSucc : |- (t < S t) = 1
+by induction t as n
+   { refl }
+   { Cut (S (S n) - S n = S n - n)
+     { exact succSubSucc }
+     { calc (S n < S (S n))
+         = sgn (S (S n) - S n)
+         = sgn (S n - n) by cong H2
+         = (n < S n)
+         = 1 by exact H1 }
+   }
 |]
 ```
 

@@ -161,6 +161,19 @@ by exact succSubSucc
 theorem succSubSuccEigen : |- S m' - S (S m') = m' - S m'
 by exact succSubSucc
 
+-- A lemma cut in, then a calculation with a congruence on it.
+theorem ltSucc : |- (t < S t) = 1
+by induction t as n
+   { refl }
+   { Cut (S (S n) - S n = S n - n)
+     { exact succSubSucc }
+     { calc (S n < S (S n))
+         = sgn (S (S n) - S n)
+         = sgn (S n - n) by cong H2
+         = (n < S n)
+         = 1 by exact H1 }
+   }
+
 -- A formula metavariable closed by assumption: the identity is expanded at the instance.
 rule assumeAny (A : formula) (Γ : ctx) : A, Γ |- A
 by assumption
@@ -278,6 +291,7 @@ quoteTests =
         inferConclusionIn kenv muSugar @?= Right (sequentMu "|- mu {λ i. 3 < i} 10 = 4")
         inferConclusionIn kenv succSubSuccAt @?= Right (sequentMu "x = 0 |- S 3 - S x = 3 - x")
         inferConclusionIn kenv succSubSuccEigen @?= Right (sequentMu "|- S m' - S (S m') = m' - S m'")
+        inferConclusionIn kenv ltSucc @?= Right (sequentMu "|- (t < S t) = 1")
     , testCase "a formula metavariable under Id is the identity expanded at the instance" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         let compound = atomMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)"
