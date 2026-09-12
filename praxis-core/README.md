@@ -132,7 +132,7 @@ qualified Haskell names, so consumer imports need not be unqualified.
 
 The library's own signature is `builtin`, exported by
 `Language.Praxis.PRA.PrimitiveRecursion` together with `add`, `mul`, `pow`,
-`sub`, `lt`, `ifte`, the bounded search `mu` and the rest of its arithmetic.
+`sub`, `lt`, `le`, `ifte`, the bounded search `mu` and the rest of its arithmetic.
 `Language.Praxis.PRA.Tactic.Quote` exports `pra = praQuoter builtin`, so proofs
 over that arithmetic need no support module of their own.
 
@@ -206,11 +206,15 @@ by exact succSubSucc
 |]
 ```
 
+A comparison may stand alone as an atom: `t < S t` is `(t < S t) = 1`, as
+are `x <= y` and `x == y` with their symbols, and a goal or a hypothesis of
+that shape is shown so.
+
 A lemma cut in serves a congruence step of a calculation:
 
 ```haskell
 [pra|
-theorem ltSucc : |- (t < S t) = 1
+theorem ltSucc : |- t < S t
 by induction t as n
    { refl }
    { Cut (S (S n) - S n = S n - n)

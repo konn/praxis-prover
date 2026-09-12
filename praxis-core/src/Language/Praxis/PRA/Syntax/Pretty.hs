@@ -53,6 +53,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode (..), V)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature
 import Language.Praxis.PRA.Syntax
+import Language.Praxis.PRA.Syntax.Parser (isComparison)
 
 {- |
 Render a term.  Symbols are named through the signature, and where the
@@ -225,7 +226,8 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
     paren False s = s
 
 {- | Render an equation, its left side parenthesized unless it is a sum, a
-product, a power or an application.
+product, a power or an application; the equation of a comparison with 1 is
+shown as the comparison alone, as the parser reads it.
 -}
 renderAtomic :: Signature -> (a -> String) -> Atomic a -> String
 renderAtomic = renderAtomicWith (const Nothing)
@@ -234,7 +236,9 @@ renderAtomic = renderAtomicWith (const Nothing)
 renderAtomicWith :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Atomic a -> String
 renderAtomicWith hook sig name p@(s :=== t) = case hook p of
   Just shown -> shown
-  Nothing -> renderTermAt sig name 2 s <> " = " <> renderTerm sig name t
+  Nothing
+    | Lit 1 <- canonicalise t, isComparison sig s -> renderTermAt sig name 1 s
+    | otherwise -> renderTermAt sig name 2 s <> " = " <> renderTerm sig name t
 
 {- |
 Render a formula, parenthesising according to the fixities in

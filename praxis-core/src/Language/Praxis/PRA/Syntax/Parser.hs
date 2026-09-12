@@ -15,7 +15,7 @@ Terms are written in the applicative syntax of the equation language,
 >           | _                              -- a wildcard, in patterns only
 >           | ( term )
 >           | { term }                       -- a schema parameter, within an application only
-> atom    ::= term = term
+> atom    ::= term = term | term            -- a comparison standing alone is its equation with 1
 > formula ::= atom | _|_ | ~ formula
 >           | formula /\ formula | formula \/ formula | formula ==> formula
 >           | ( formula )
@@ -31,6 +31,9 @@ right.  @~A@ is sugar for @A ==> _|_@ and binds tighter than the binary
 connectives.  The Unicode spellings @∧ ∨ → ⊥ ⊢ ¬@ are accepted for the ASCII
 connectives, absurdity, turnstile and negation.  Comments run from @--@ to
 the end of the line, or between @{-@ and @-}@.
+
+An application of a comparison, @<@, @<=@ or @==@, may stand alone as an
+atom, for its equation with @1@: @x < y@ is @(x < y) = 1@, and is shown so.
 
 Identifiers start with a letter and continue with letters, digits, @_@ and
 @'@.  An identifier the signature names is a symbol; how any other identifier
@@ -51,6 +54,8 @@ Right "a = 0 /\\ ~x + S y = 2 ==> b = 1"
 Right "a = 0, a = 0 |- a = 0"
 >>> either (const "no") (const "yes") (parseTerm sc "plus x")
 "no"
+>>> renderFormula builtin id <$> parseFormula (plainScope builtin) "x < y /\\ (x <= y) = 1"
+Right "x < y /\\ x <= y"
 -}
 module Language.Praxis.PRA.Syntax.Parser (
   -- * Scopes
@@ -58,6 +63,10 @@ module Language.Praxis.PRA.Syntax.Parser (
   plainScope,
   SyntaxError,
   syntaxErrorPosition,
+
+  -- * Comparisons
+  comparisonSymbols,
+  isComparison,
 
   -- * Parsing
   parseTerm,
@@ -93,12 +102,14 @@ module Language.Praxis.PRA.Syntax.Parser (
 ) where
 
 import Control.Exception (Exception (..))
-import Control.Monad (unless, void)
+import Control.Monad (guard, unless, void)
 import Data.Bifunctor (first)
+import Data.Foldable (toList)
 import Data.Hashable (Hashable)
 import Data.List (nub)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
+import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Multiset qualified as MS
 import Data.Proxy (Proxy (..))
 import Data.Sized qualified as SV
@@ -118,7 +129,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (signatureEnv)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax qualified as E
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic (expandTerm)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
-import Language.Praxis.PRA.Signature (Signature)
+import Language.Praxis.PRA.Signature (Signature, Symbol (..), lookupSymbol, symbolArity)
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural (Natural)
 import Text.Megaparsec (ParseErrorBundle, attachSourcePos, bundleErrors, bundlePosState, choice, eof, errorBundlePretty, errorOffset, getOffset, notFollowedBy, oneOf, option, parse, region, sepBy1, setErrorOffset, sourceColumn, sourceLine, try, unPos, (<?>), (<|>))
@@ -197,6 +208,35 @@ parseAtomicPattern sc = runParserFully (atomicP sc)
 
 parseFormulaPattern :: Scope a -> String -> Either SyntaxError (Formula (Hole a))
 parseFormulaPattern sc = runParserFully (formulaP sc)
+
+-- * Comparisons
+
+{- |
+The symbols the parser reads the comparisons @<@, @<=@ and @==@ as, when
+the signature has them: the first candidate of arity two, as for any
+operator.
+-}
+comparisonSymbols :: Signature -> [Symbol]
+comparisonSymbols sig =
+  [ sym
+  | candidates <- [["lt"], ["le", "lte"], ["eq"]]
+  , Just sym <- [listToMaybe (mapMaybe binary candidates)]
+  ]
+  where
+    binary c = do
+      sym <- lookupSymbol c sig
+      guard (symbolArity sym == 2)
+      pure sym
+
+{- |
+Whether the term is an application of a comparison.  Standing alone as an
+atom, it is its equation with @1@, and "Language.Praxis.PRA.Syntax.Pretty"
+shows such an equation the same way.
+-}
+isComparison :: Signature -> Term b -> Bool
+isComparison sig = \case
+  App f args | [_, _] <- toList args -> any ((== F.SomeFunction f) . symbolFunction) (comparisonSymbols sig)
+  _ -> False
 
 -- * Lexemes
 
@@ -449,8 +489,14 @@ resolveTerm sc raw = do
 -- * Formulae
 
 atomicP :: Scope a -> Parser (Atomic (Hole a))
-atomicP sc = metaAtomicP <|> ((:===) <$> termP sc <* equalsP <*> termP sc)
+atomicP sc = metaAtomicP <|> equationP
   where
+    -- A comparison may stand alone, for its equation with 1.
+    equationP = do
+      s <- termP sc
+      if isComparison (scopeSignature sc) s
+        then option (s :=== Lit 1) ((s :===) <$> (equalsP *> termP sc))
+        else (s :===) <$> (equalsP *> termP sc)
     metaAtomicP = try do
       name <- identifierP sc
       maybe (fail "not an atom") (pure . fmap Named) (scopeAtomic sc name)
@@ -465,13 +511,14 @@ formulaP sc = implP
     binary operand op rest con = do
       l <- operand
       option l (con l <$> (op *> rest))
+    -- An atom before a parenthesized formula: (x < y) may begin an equation, (x < y) = 0.
     unaryP =
       choice
         [ (:==> Bot) <$> (negOp *> unaryP)
         , Bot <$ botP
+        , Atm <$> try (atomicP sc)
         , try (parens (formulaP sc))
         , metaFormulaP
-        , Atm <$> atomicP sc
         ]
         <?> "formula"
     metaFormulaP = try do

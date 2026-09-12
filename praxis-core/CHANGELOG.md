@@ -71,6 +71,11 @@ and this project adheres to the
   round, and `cong` alone by the first hypothesis which fits; the context of
   the occurrences is inferred by comparing the sides, and the proof is `Defeq`
   on `u = u`, `Subst` and `Id`.
+- A comparison standing alone as an atom: `x < y`, `x <= y` and `x == y`
+  are read as `(x < y) = 1` and so on, in a formula or a pattern, and
+  `renderAtomic` shows such an equation the same way; `comparisonSymbols`
+  and `isComparison` in `Language.Praxis.PRA.Syntax.Parser` name the symbols
+  involved. `builtin` gains `le`, with `n <= m` as `n < S m`.
 - `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
   the substitution and weakening of a proof, renaming the variables its steps
   bind apart; the spliced proof of an appeal to a theorem is built with them.

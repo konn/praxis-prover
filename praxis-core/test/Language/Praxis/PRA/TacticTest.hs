@@ -403,7 +403,11 @@ prettyTests =
           , "|- 2 ^ 3 ^ 2 = 512"
           , "|- (2 ^ 3) ^ 2 = 64"
           , "|- x - (y - z) = x - y - z"
-          , "|- (x < y) = 1"
+          , "|- x < y"
+          , "|- (x < y) = 0"
+          , "|- (x < y) + 1 = 2"
+          , "|- x < y /\\ x <= y"
+          , "|- ~x < y"
           , "|- S (x + 1) = y"
           , "|- (if 0 < 1 then 10 else 20) = 10"
           , "|- x + (if x < y then 1 else 2) = z"
@@ -414,6 +418,12 @@ prettyTests =
           , "|- (μ i < 10. (μ j < i. 3 < j) < i) = 5"
           , "a + 1 = 2 |- a = 1"
           ]
+    , testCase "a comparison standing alone is its equation with 1" $ do
+        let sc' = plainScope builtin
+        parseSequent sc' "|- t < S t" @?= parseSequent sc' "|- (t < S t) = 1"
+        parseSequent sc' "x <= y, ~x < y |- _|_" @?= parseSequent sc' "(x <= y) = 1, ~(x < y) = 1 |- _|_"
+        (renderSequent builtin id <$> parseSequent sc' "|- (t < S t) = 1") @?= Right "|- t < S t"
+        (renderSequent builtin id <$> parseSequent sc' "|- 1 = (t < S t)") @?= Right "|- 1 = t < S t"
     , testCase "an operator is shown only for the symbol it reads as" $ do
         renderTerm sig id (plus :$ (Var "x" :< Var "y" :< Nil)) @?= "x + y"
         renderTerm sig id (mult :$ (Var "x" :< Var "y" :< Nil)) @?= "mult x y"
@@ -474,7 +484,7 @@ inductionTests =
         env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
         case decls of
           [d] -> case proveOpenIn env Map.empty (declGoal d) (declTactic d) of
-            Left err -> renderSchemaTacticError builtin err @?= "5:5: sorry: the proof stops here\n  H1 : (t < 0) = 1\n  G\n  H2 : (0 < 0) = 1\n  |- A"
+            Left err -> renderSchemaTacticError builtin err @?= "5:5: sorry: the proof stops here\n  H1 : t < 0\n  G\n  H2 : 0 < 0\n  |- A"
             Right _ -> assertFailure "proved"
           _ -> assertFailure "expected one declaration"
     , testCase "hypotheses mentioning the term are generalized, through Cut" $

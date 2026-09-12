@@ -162,7 +162,7 @@ theorem succSubSuccEigen : |- S m' - S (S m') = m' - S m'
 by exact succSubSucc
 
 -- A lemma cut in, then a calculation with a congruence on it.
-theorem ltSucc : |- (t < S t) = 1
+theorem ltSucc : |- t < S t
 by induction t as n
    { refl }
    { Cut (S (S n) - S n = S n - n)
@@ -179,13 +179,13 @@ rule assumeAny (A : formula) (Γ : ctx) : A, Γ |- A
 by assumption
 
 -- Generalized induction on a term metavariable, discharging a formula metavariable.
-rule ltZero (t : term) (Γ : ctx) (A : formula) : (t < 0) = 1, Γ |- A
+rule ltZero (t : term) (Γ : ctx) (A : formula) : t < 0, Γ |- A
 by induction t as n
    { Defeq (0 < 0) 0; Subst x (0 < 0) 0 (x = 1); symmetry (0 = 1); SuccNonZero }
    { Defeq (S n < 0) (sgn (prd (0 - n)))
    ; Subst x (S n < 0) (sgn (prd (0 - n))) (x = 1)
    ; Defeq (n < 0) (sgn (0 - n))
-   ; ImplL ((n < 0) = 1) (A)
+   ; ImplL (n < 0) (A)
      { induction (0 - n) as y
        { Defeq (sgn (prd 0)) 0; Subst x (sgn (prd 0)) 0 (x = 1); symmetry (0 = 1); SuccNonZero }
        { Defeq (sgn (S y)) 1; Subst x (sgn (S y)) 1 ((n < 0) = x); Id }
@@ -291,7 +291,7 @@ quoteTests =
         inferConclusionIn kenv muSugar @?= Right (sequentMu "|- mu {λ i. 3 < i} 10 = 4")
         inferConclusionIn kenv succSubSuccAt @?= Right (sequentMu "x = 0 |- S 3 - S x = 3 - x")
         inferConclusionIn kenv succSubSuccEigen @?= Right (sequentMu "|- S m' - S (S m') = m' - S m'")
-        inferConclusionIn kenv ltSucc @?= Right (sequentMu "|- (t < S t) = 1")
+        inferConclusionIn kenv ltSucc @?= Right (sequentMu "|- t < S t")
     , testCase "a formula metavariable under Id is the identity expanded at the instance" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         let compound = atomMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)"

@@ -16,6 +16,7 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   sub,
   prd,
   lt,
+  le,
   isZero,
   ifte,
   triangle,
@@ -55,6 +56,8 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
   sub n (S m) = prd (sub n m)
 
   lt n m = sgn (m - n)
+
+  le n m = n < S m
 
   isZero 0 = 1
   isZero (S n) = 0
