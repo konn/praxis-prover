@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Praxis definitions",
+  "scopeName": "source.prf",
+  "patterns": [
+    { "include": "#comments" },
+    {
+      "name": "keyword.other.declaration.prf",
+      "match": "\\b(environment|extends)\\b"
+    },
+    {
+      "name": "keyword.control.conditional.prf",
+      "match": "\\b(if|then|else)\\b"
+    },
+    {
+      "name": "constant.language.successor.prf",
+      "match": "\\b(S|Succ)\\b"
+    },
+    {
+      "name": "constant.numeric.prf",
+      "match": "\\b[0-9]+\\b"
+    },
+    {
+      "name": "keyword.operator.term.prf",
+      "match": "<=|==|<|=|\\+|-|\\*|\\^|μ|λ"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.prf",
+          "begin": "\\{-",
+          "end": "-\\}",
+          "patterns": [{ "include": "#comments" }]
+        },
+        {
+          "name": "comment.line.double-dash.prf",
+          "match": "--.*$"
+        }
+      ]
+    }
+  }
+}

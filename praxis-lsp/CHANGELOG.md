@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - The language server.
+- A VS Code extension, in `editors/vscode` of the repository, which
+  highlights `.pra` and `.prf` files and runs the server for them.
 
 ### Changed
 

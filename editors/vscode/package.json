@@ -1,0 +1,75 @@
+{
+  "name": "praxis",
+  "displayName": "Praxis",
+  "description": "The pra and prf languages of the Praxis prover: highlighting, and the praxis-lsp language server for diagnostics and goals on hover.",
+  "version": "0.1.0",
+  "publisher": "konn",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/konn/praxis-prover.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:pra",
+    "onLanguage:prf"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "pra",
+        "aliases": [
+          "Praxis proofs",
+          "pra"
+        ],
+        "extensions": [
+          ".pra"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "prf",
+        "aliases": [
+          "Praxis definitions",
+          "prf"
+        ],
+        "extensions": [
+          ".prf"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pra",
+        "scopeName": "source.pra",
+        "path": "./syntaxes/pra.tmLanguage.json"
+      },
+      {
+        "language": "prf",
+        "scopeName": "source.prf",
+        "path": "./syntaxes/prf.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Praxis",
+      "properties": {
+        "praxis.server.path": {
+          "type": "string",
+          "default": "praxis-lsp",
+          "description": "The praxis-lsp executable: a command on the path, or an absolute path."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

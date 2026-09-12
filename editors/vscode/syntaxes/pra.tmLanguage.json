@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Praxis proofs",
+  "scopeName": "source.pra",
+  "patterns": [
+    { "include": "#comments" },
+    {
+      "name": "keyword.other.declaration.pra",
+      "match": "\\b(theorem|rule|library|by|var|term|atom|formula|ctx)\\b"
+    },
+    {
+      "name": "keyword.control.tactic.pra",
+      "match": "\\b(refl|symmetry|rewrite|in|cong|induction|as|on|assumption|exact|calc|have|skip|sorry|try|repeat)\\b"
+    },
+    {
+      "name": "entity.name.function.rule.pra",
+      "match": "\\b(Id|ExFalso|ConjL|ConjR|DisjL|DisjR1|DisjR2|ImplL|ImplR|Defeq|Subst|SuccNonZero|SuccInj|Ind|Cut)\\b"
+    },
+    {
+      "name": "constant.language.successor.pra",
+      "match": "\\b(S|Succ)\\b"
+    },
+    {
+      "name": "constant.numeric.pra",
+      "match": "\\b[0-9]+\\b"
+    },
+    {
+      "name": "keyword.operator.sequent.pra",
+      "match": "\\|-|⊢|==>|→|/\\\\|∧|\\\\/|∨|_\\|_|⊥|~|¬"
+    },
+    {
+      "name": "keyword.operator.term.pra",
+      "match": "<=|==|<|=|\\+|-|\\*|\\^"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.pra",
+          "begin": "\\{-",
+          "end": "-\\}",
+          "patterns": [{ "include": "#comments" }]
+        },
+        {
+          "name": "comment.line.double-dash.pra",
+          "match": "--.*$"
+        }
+      ]
+    }
+  }
+}

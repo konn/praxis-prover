@@ -33,6 +33,14 @@ vim.api.nvim_create_autocmd("FileType", {
 })
 ```
 
-In VS Code, an extension which launches a language server for an extension
-of your choosing, such as a generic LSP client, does the same with
-`praxis-lsp` as the command; `cabal install praxis-lsp` puts it on the path.
+In VS Code, the extension in `editors/vscode` of the repository highlights
+both kinds of file and starts the server for them:
+
+```bash
+cabal install praxis-lsp
+cd editors/vscode && npm install && npx @vscode/vsce package
+code --install-extension praxis-0.1.0.vsix
+```
+
+Its setting `praxis.server.path` names the server when it is not on the
+path, such as the executable `cabal list-bin praxis-lsp` prints.
