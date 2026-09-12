@@ -110,7 +110,7 @@ import Language.Praxis.PRA.Pattern
 import Language.Praxis.PRA.PrimitiveRecursion (Evalable (..), PRFCode (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Function, KernelEnv, emptyKernelEnv)
 import Language.Praxis.PRA.Proof
-import Language.Praxis.PRA.Proof.Transform (argNames, substProof, weakenProof)
+import Language.Praxis.PRA.Proof.Transform (argNames, substAtomic, substFormula, substProof, weakenProof)
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Signature (Signature)
 import Language.Praxis.PRA.Syntax
@@ -134,6 +134,13 @@ class (Fresh a) => Schematic a where
 
   -- | The metavariable of sort @atom@, @formula@ or @ctx@ an atom stands for.
   metaAtom :: Atomic a -> Maybe (R.Sort, String)
+
+  {- | The parameters of the metavariable an atom stands for, each with the
+  argument it is applied to: @P(t)@, for @P@ declared with the parameter
+  @x@, has @[("x", t)]@; a plain metavariable has none.
+  -}
+  metaApplied :: Atomic a -> [(String, Term a)]
+  metaApplied _ = []
 
 instance Schematic String where
   metaName _ = Nothing
@@ -694,8 +701,9 @@ runTacticWith env lemmas prems = go noHints
         (Nothing, Nothing, Nothing) -> failWith (UnknownPremise d)
       Apply name args -> first (TacticError Nothing goal) (applyRule env hints name args goal)
       Refl -> plain case c of
-        Atm (s :=== t) ->
-          go noHints (applyWith DefeqRule [term s, term t] `Then` applyWith IdRule []) goal
+        Atm p@(s :=== t)
+          | isNothing (metaAtom p) ->
+              go noHints (applyWith DefeqRule [term s, term t] `Then` applyWith IdRule []) goal
         _ -> failWith (NotAnEquation "refl" c)
       Symmetry sel -> do
         unless (null (hintOn hints)) $ failWith NothingToName
@@ -726,7 +734,7 @@ runTacticWith env lemmas prems = go noHints
             viaLemma n lemma inst (`Rewrite` hSel)
       Cong sel -> plain do
         (u, v) <- case c of
-          Atm (u :=== v) -> pure (u, v)
+          Atm p@(u :=== v) | isNothing (metaAtom p) -> pure (u, v)
           _ -> failWith (NotAnEquation "cong" c)
         let x = freshen (goalNames (goalSequent goal)) anyName
             -- The equation as the hypothesis states it, or turned around first, as Symmetry does.
@@ -934,10 +942,12 @@ data Bindings a = Bindings
   , bCtxs :: !(Map String (Multiset (Formula a)))
   , bFree :: !(HashMap a (Term a))
   -- ^ the free variables of a lemma
+  , bAvoid :: !(HashSet a)
+  -- ^ names a placeholder for a parameter must be apart from: those of the goal
   }
 
 emptyBindings :: Bindings a
-emptyBindings = Bindings Map.empty Map.empty Map.empty Map.empty Map.empty HM.empty
+emptyBindings = Bindings Map.empty Map.empty Map.empty Map.empty Map.empty HM.empty HS.empty
 
 isBound :: R.MetaRef -> Bindings a -> Bool
 isBound (R.MetaRef s n) b = case s of
@@ -1295,9 +1305,10 @@ useLemma hints name lemma userArgs goal = do
   when (length (hintOn hints) > length hyps) $
     Left (Malformed ("on: " <> name <> " has " <> show (length hyps) <> " hypotheses"))
   pins <- pinned goal (hintOn hints)
-  (b0, cons) <- foldM (\acc (m, arg) -> seedArg m arg acc) (emptyBindings, noConstraints) (zip metas userArgs)
+  (b0, cons) <- foldM (\acc (m, arg) -> seedArg m arg acc) (emptyBindings {bAvoid = goalNames (goalSequent goal)}, noConstraints) (zip metas userArgs)
   b1 <- case matchFormL cons b0 lemmaSucc (goalSuccedent goal) of
     Matched b -> Right b
+    Deferred | unbound@(_ : _) <- [R.MetaRef s n | (n, s) <- metas, s == R.TermS, not (isBound (R.MetaRef s n) b0)] -> Left (CannotInstantiate name unbound)
     _ -> Left (NotAnInstance name (lemmaGoal lemma))
   (b2, rest) <- discharge cons b1 (goalHypotheses goal) (zip hyps (map (Just . hypothesisName) pins <> repeat Nothing))
   let dischargedNames = [hypothesisName h | h <- goalHypotheses goal, hypothesisName h `notElem` map hypothesisName rest]
@@ -1310,9 +1321,13 @@ useLemma hints name lemma userArgs goal = do
   let unbound = [ref | (n, s) <- metas, let ref = R.MetaRef s n, not (isBound ref b3)]
   unless (null unbound) $ Left (CannotInstantiate name unbound)
   args <- traverse (argOfSort b3) metas
+  -- The instance of a bound variable metavariable is apart from the goal and
+  -- the other arguments, but for a metavariable it parameterizes.
+  let parameterised = metaParameters lemma
   forM_ (lemmaBound lemma) \x -> case Map.lookup x (bVars b3) of
     Just v
-      | v `HS.member` goalNames (goalSequent goal) || or [v `HS.member` argNames arg | ((n, _), arg) <- zip metas args, n /= x] ->
+      | v `HS.member` goalNames (goalSequent goal)
+          || or [v `HS.member` argNames arg | ((n, _), arg) <- zip metas args, n /= x, x `notElem` Map.findWithDefault [] n parameterised] ->
           Left (NotEigen name x v)
     _ -> pure ()
   let sigma = [(v, HM.lookupDefault (Var v) v (bFree b3)) | v <- HS.toList free]
@@ -1458,7 +1473,11 @@ matchAll m = foldM' \b (x, y) -> m b x y
 matchAtomL :: (Schematic a) => Constraints a -> Bindings a -> Atomic a -> Atomic a -> Match a
 matchAtomL cons b pat@(ps :=== pt) q@(s :=== t) = case metaAtom pat of
   Just (R.AtomS, n)
-    | isAtom q -> bindAtom cons b n q
+    | isAtom q -> case metaApplied pat of
+        [] -> bindAtom cons b n q
+        pairs -> matchApplied b pairs (Atm q) \b' body -> case body of
+          Atm q' -> bindAtom cons b' n q'
+          _ -> Mismatch
   Just _ -> Mismatch
   Nothing -> case metaAtom q of
     Just _ -> Mismatch
@@ -1470,7 +1489,9 @@ matchFormL :: (Schematic a) => Constraints a -> Bindings a -> Formula a -> Formu
 matchFormL cons b pat f = case (pat, f) of
   -- A context metavariable of the goal is opaque; it is never an instance of anything.
   (_, Atm q) | Just (R.CtxS, _) <- metaAtom q -> Mismatch
-  (Atm p, _) | Just (R.FormS, n) <- metaAtom p -> bindForm cons b n f
+  (Atm p, _) | Just (R.FormS, n) <- metaAtom p -> case metaApplied p of
+    [] -> bindForm cons b n f
+    pairs -> matchApplied b pairs f (\b' body -> bindForm cons b' n body)
   (Atm p, _) | Just (R.CtxS, _) <- metaAtom p -> Mismatch
   (Atm p, Atm q) -> matchAtomL cons b p q
   (Atm _, _) -> Mismatch
@@ -1486,6 +1507,68 @@ matchFormL cons b pat f = case (pat, f) of
     both p g q h = case matchFormL cons b p g of
       Matched b' -> matchFormL cons b' q h
       other -> other
+
+{- |
+Match a metavariable applied to arguments, @P(a1, …, ak)@ for @P@ declared
+with the parameters @x1, …, xk@, against a formula: each parameter is bound
+to a placeholder variable, its binding when it has one and a fresh variable
+otherwise, each argument is instantiated, and the formula with every
+occurrence of the @i@-th argument abstracted into the @i@-th placeholder is
+handed on, to be bound to @P@.  'Deferred' when an argument mentions a
+metavariable not bound yet.
+-}
+matchApplied :: forall a. (Schematic a) => Bindings a -> [(String, Term a)] -> Formula a -> (Bindings a -> Formula a -> Match a) -> Match a
+matchApplied b0 pairs f bind = case placeholders b0 pairs of
+  Nothing -> Deferred
+  Just (b, slots) -> bind b (foldl (\g (v, arg) -> abstractIn arg v g) f slots)
+  where
+    placeholders :: Bindings a -> [(String, Term a)] -> Maybe (Bindings a, [(a, Term a)])
+    placeholders b [] = Just (b, [])
+    placeholders b ((x, arg) : rest) = do
+      let (b', v) = case Map.lookup x (bVars b) of
+            Just v' -> (b, v')
+            Nothing ->
+              let v' = freshen (bAvoid b <> HS.fromList (Map.elems (bVars b))) anyName
+               in (b {bVars = Map.insert x v' (bVars b)}, v')
+      arg' <- boundTerm b' arg
+      (b'', more) <- placeholders b' rest
+      pure (b'', (v, arg') : more)
+
+-- | A term of a lemma's statement at the bindings, when they cover its metavariables; a free variable as bound, or as it is.
+boundTerm :: (Schematic a) => Bindings a -> Term a -> Maybe (Term a)
+boundTerm b = go
+  where
+    go = \case
+      Var v -> case metaName v of
+        Just (R.TermS, n) -> Map.lookup n (bTerms b)
+        Just (R.VarS, n) -> Var <$> Map.lookup n (bVars b)
+        Just _ -> Nothing
+        Nothing -> Just (HM.lookupDefault (Var v) v (bFree b))
+      Lit n -> Just (Lit n)
+      App f xs -> App f <$> traverse go xs
+
+-- | The parameters of each metavariable of a lemma's statement, where it is applied.
+metaParameters :: (Schematic a) => Lemma a -> Map String [String]
+metaParameters lemma =
+  Map.fromList
+    [ (n, map fst pairs)
+    | s <- lemmaGoal lemma : map snd (lemmaPremises lemma)
+    , let hyps :|- c = s
+    , f <- c : toList hyps
+    , p <- atomsOf f
+    , Just (_, n) <- [metaAtom p]
+    , let pairs = metaApplied p
+    , not (null pairs)
+    ]
+
+-- | The atoms of a formula, in order.
+atomsOf :: Formula a -> [Atomic a]
+atomsOf = \case
+  Atm p -> [p]
+  Bot -> []
+  f :/\ g -> atomsOf f <> atomsOf g
+  f :\/ g -> atomsOf f <> atomsOf g
+  f :==> g -> atomsOf f <> atomsOf g
 
 -- ** Instantiating the statement of a lemma
 
@@ -1542,7 +1625,7 @@ instantiateFormula name sigma b = instF
   where
     instF = \case
       Atm p -> case metaAtom p of
-        Just (R.FormS, n) -> look R.FormS n (bForms b)
+        Just (R.FormS, n) -> look R.FormS n (bForms b) >>= atParameters p substFormula
         Just (R.CtxS, n) -> Left (Malformed (n <> " is a ctx metavariable, but stands as a formula in " <> name))
         _ -> Atm <$> instA p
       f :/\ g -> (:/\) <$> instF f <*> instF g
@@ -1551,7 +1634,7 @@ instantiateFormula name sigma b = instF
       Bot -> pure Bot
 
     instA p@(s :=== t) = case metaAtom p of
-      Just (R.AtomS, n) -> look R.AtomS n (bAtoms b)
+      Just (R.AtomS, n) -> look R.AtomS n (bAtoms b) >>= atParameters p substAtomic
       Just (_, n) -> Left (Malformed (n <> " is not an atom metavariable, but stands as an atom in " <> name))
       Nothing -> (:===) <$> instT s <*> instT t
 
@@ -1563,6 +1646,14 @@ instantiateFormula name sigma b = instF
         Nothing -> pure (HM.lookupDefault (Var v) v sigma)
       Lit n -> pure (Lit n)
       App f xs -> App f <$> traverse instT xs
+
+    -- The parameters of an applied metavariable, substituted by its arguments at once.
+    atParameters :: forall x. Atomic a -> (HashMap a (Term a) -> x -> x) -> x -> Either (Failure a) x
+    atParameters p substitute body = case metaApplied p of
+      [] -> pure body
+      pairs -> do
+        sigma' <- HM.fromList <$> traverse (\(x, arg) -> (,) <$> look R.VarS x (bVars b) <*> instT arg) pairs
+        pure (substitute sigma' body)
 
     look :: forall v. R.Sort -> String -> Map String v -> Either (Failure a) v
     look s n = maybe (Left (CannotInstantiate name [R.MetaRef s n])) Right . Map.lookup n

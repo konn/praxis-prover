@@ -26,7 +26,7 @@ import Language.Praxis.PRA.Syntax.Parser
 import Language.Praxis.PRA.Syntax.Pretty
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
-import Language.Praxis.PRA.Tactic.Quote (SchemaName (..), renderSchemaTacticError, schemaScope)
+import Language.Praxis.PRA.Tactic.Quote (SchemaName (..), checkDecl, renderSchemaTacticError, schemaScope)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -50,6 +50,7 @@ tacticTests =
     , congTests
     , haveTests
     , equationTests
+    , parameterTests
     ]
 
 sig :: Signature
@@ -341,7 +342,7 @@ declarationTests =
         map declBinders decls
           @?= [ []
               ,
-                [ MetaBinder ["a", "b"] TermS
+                [ MetaBinder [("a", []), ("b", [])] TermS
                 , PremiseBinder "D1" (sequent "a = 0, b = 0 |- b = 0")
                 , PremiseBinder "D2" (sequent "a = 0, b = 0 |- a = 0")
                 ]
@@ -372,12 +373,12 @@ declarationTests =
           (const (assertFailure "accepted"))
           (parseDecls (plainMetaScope sig) "rule r (A : formula) : A |- A by assumption")
     , testCase "atomic metavariables parse in primitive and derived tactic arguments" $ do
-        let scope = schemaScope sig [("P", AtomS), ("Q", AtomS)]
+        let scope = schemaScope sig [("P", AtomS), ("Q", AtomS)] []
         mapM_
           (parsed . parseTactic scope)
           ["Id (P)", "Subst x t s (P)", "symmetry (P)", "rewrite P in (Q)"]
     , testCase "formula and context metavariables are refused in atomic positions" $ do
-        let scope = schemaScope sig [("A", FormS), ("G", CtxS)]
+        let scope = schemaScope sig [("A", FormS), ("G", CtxS)] []
         mapM_
           (\src -> either (const (pure ())) (const (assertFailure ("accepted " <> src))) (parseTactic scope src))
           ["Id (A)", "Subst x t s (A)", "rewrite A in (A)", "Id (G)"]
@@ -550,12 +551,12 @@ lemmaTests =
           UnknownPremise "nothing" -> True
           _ -> False
     , testCase "a bound variable metavariable must be instantiated apart from the goal" $ do
-        let scope = schemaScope builtin [("x", VarS), ("t", TermS), ("Γ", CtxS)]
+        let scope = schemaScope builtin [("x", VarS), ("t", TermS), ("Γ", CtxS)] []
         statement <- parsed (parseSequent scope "Γ |- t + 0 = t")
         let indAt = Lemma [("x", VarS), ("t", TermS), ("Γ", CtxS)] [] statement ["x"]
             lemmas = Map.fromList [("indAt", indAt)]
             run src = do
-              (goal, tac) <- parsed (parseGoalIn (Map.map (map snd . lemmaMetas) lemmas) (schemaScope builtin []) src)
+              (goal, tac) <- parsed (parseGoalIn (Map.map (map snd . lemmaMetas) lemmas) (schemaScope builtin [] []) src)
               pure (proveOpenWith emptyKernelEnv lemmas Map.empty goal tac)
         either (assertFailure . renderSchemaTacticError builtin) (const (pure ())) =<< run "m = 0 |- n + 0 = n by exact indAt k"
         run "m = 0 |- n + 0 = n by exact indAt n" >>= \case
@@ -809,3 +810,63 @@ equationTests =
   where
     zeroPlus = Map.singleton "zeroPlus" <$> certified "|- plus 0 y = y by refl"
     twoTwo = Map.singleton "twoTwo" <$> certified "|- plus 2 2 = 4 by refl"
+
+parameterTests :: TestTree
+parameterTests =
+  testGroup
+    "metavariables with parameters"
+    [ testCase "a metavariable with parameters is declared, applied and bound by the proof" $ do
+        (_, lemma) <- ind
+        lemmaBound lemma @?= ["n"]
+        map fst (lemmaMetas lemma) @?= ["n", "t", "Γ", "P"]
+    , testCase "the parameters are var metavariables declared before, of an atom or formula, applied to as many arguments" $ do
+        refuses "rule r (t : term) (P(t) : formula) : |- P(t) by sorry"
+        refuses "rule r (n : var) (P(n) : term) : |- P(n) = 0 by sorry"
+        refuses "rule r (P(n) : formula) (n : var) : |- P(n) by sorry"
+        refuses "rule r (n : var) (P(n) : formula) : |- P by sorry"
+        refuses "rule r (n : var) (P(n) : formula) : |- P(n, n) by sorry"
+        refuses "rule r (n : var) (A : formula) : |- A(n) by sorry"
+    , testCase "the goal at a sorry shows the metavariable applied" $ do
+        decls <- parsed (parseDecls (schemaScope builtin) "rule courseOfValue (n : var) (t : term) (Γ : ctx) (P(n) : formula) (H : n < t, Γ |- P(n)) : Γ |- P(t)\nby sorry")
+        env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+        case decls of
+          [d] -> case checkDecl env Map.empty d of
+            Left err -> renderSchemaTacticError builtin err @?= "2:4: sorry: the proof stops here\n  Γ\n  |- P(t)"
+            Right _ -> assertFailure "proved"
+          _ -> assertFailure "expected one declaration"
+    , testCase "appealing to the rule abstracts the argument in the goal, and names the eigenvariable by the argument" $ do
+        (env, lemma) <- ind
+        let lemmas = Map.singleton "ind" lemma
+            run src = do
+              (goal, tac) <- parsed (parseGoalIn (Map.map (map snd . lemmaMetas) lemmas) (schemaScope builtin [] []) src)
+              pure (proveOpenWith env lemmas Map.empty goal tac)
+        run "|- y + 0 = y by exact ind k y as IH { refl } { sorry }" >>= \case
+          Left err -> renderSchemaTacticError builtin err @?= "1:48: sorry: the proof stops here\n  IH : k + 0 = k\n  |- S k + 0 = S k"
+          Right _ -> assertFailure "proved"
+        run "|- y + 0 = y by exact ind k y as IH { refl } { Defeq (S k + 0) (S (k + 0)); rewrite IH in (S k + 0 = _); Id }" >>= \case
+          Left err -> assertFailure (renderSchemaTacticError builtin err)
+          Right _ -> pure ()
+        run "z = 0 |- y + 0 = y by exact ind k y as IH { refl } { Defeq (S k + 0) (S (k + 0)); rewrite IH in (S k + 0 = _); Id }" >>= \case
+          Left err -> assertFailure (renderSchemaTacticError builtin err)
+          Right _ -> pure ()
+        run "|- y + 0 = y by exact ind" >>= \case
+          Left (TacticError _ _ (CannotInstantiate "ind" _)) -> pure ()
+          Left err -> assertFailure (renderSchemaTacticError builtin err)
+          Right _ -> assertFailure "proved"
+        run "|- y + 0 = y by exact ind y y { refl } { sorry }" >>= \case
+          Left (TacticError _ _ (NotEigen "ind" "n" _)) -> pure ()
+          Left err -> assertFailure (renderSchemaTacticError builtin err)
+          Right _ -> assertFailure "proved"
+    ]
+  where
+    refuses src =
+      either
+        (const (pure ()))
+        (const (assertFailure ("accepted: " <> src)))
+        (parseDecls (schemaScope builtin) src)
+    ind = do
+      decls <- parsed (parseDecls (schemaScope builtin) "rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula) (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t)\nby Ind n (P(n)) t { exact base } { exact step }")
+      env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+      case decls of
+        [d] -> either (assertFailure . renderSchemaTacticError builtin) (\(_, lemma) -> pure (env, lemma)) (checkDecl env Map.empty d)
+        _ -> assertFailure "expected one declaration"

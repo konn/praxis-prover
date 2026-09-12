@@ -186,6 +186,16 @@ by calc (t < 0) = sgn (0 - t) = sgn 0 by cong zeroMinus = 0
 theorem zeroMinusUsed : 0 - x = y |- y = 0
 by rewrite zeroMinus in H1; symmetry (0 = y); Id
 
+-- A metavariable with a parameter: induction as a derived rule, and an appeal to it.
+rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula) (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t)
+by Ind n (P(n)) t { exact base } { exact step }
+
+theorem plusZeroRightByInd : |- y + 0 = y
+by exact ind k y as IH { refl } { Defeq (S k + 0) (S (k + 0)); rewrite IH in (S k + 0 = _); Id }
+
+rule indUnder (Γ : ctx) (u : term) : 3 = 3, Γ |- u + 0 = u
+by exact ind k u as IH { refl } { Defeq (S k + 0) (S (k + 0)); rewrite IH in (S k + 0 = _); Id }
+
 -- A formula metavariable closed by assumption: the identity is expanded at the instance.
 rule assumeAny (A : formula) (Γ : ctx) : A, Γ |- A
 by assumption
@@ -306,6 +316,8 @@ quoteTests =
         inferConclusionIn kenv ltSucc @?= Right (sequentMu "|- t < S t")
         inferConclusionIn kenv ltZeroIsZero @?= Right (sequentMu "|- (t < 0) = 0")
         inferConclusionIn kenv zeroMinusUsed @?= Right (sequentMu "0 - x = y |- y = 0")
+        inferConclusionIn kenv plusZeroRightByInd @?= Right (sequentMu "|- y + 0 = y")
+        inferConclusionIn kenv (indUnder (ctxMu ["a = 0"]) (Lit 5)) @?= Right (sequentMu "3 = 3, a = 0 |- 5 + 0 = 5")
     , testCase "a formula metavariable under Id is the identity expanded at the instance" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         let compound = atomMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)"

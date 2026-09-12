@@ -96,6 +96,8 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.Strict (WriterT, runWriterT, tell)
 import Data.Char (isLower)
 import Data.Foldable (toList)
+import Data.HashMap.Strict (HashMap)
+import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.Hashable (Hashable (..))
@@ -104,24 +106,28 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
+import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Sized qualified as SV
 import Data.String (IsString, fromString)
+import Data.Text qualified as T
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
-import GHC.TypeNats (KnownNat)
+import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal)
 import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, Loc (..), Name, Q, Type, joinCode, location, mkName, nameBase, newName, putDoc, unTypeCode, unsafeCodeCoerce)
 import Language.Haskell.TH.Datatype (ConstructorInfo (..), DatatypeInfo (..), reifyDatatype)
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
 import Language.Haskell.TH.Syntax (Lift, addModFinalizer, getQ, liftTyped, mkNameG_v, putQ)
+import Language.Praxis.PRA.Pattern (Hole (..))
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..), builtin)
+import Language.Praxis.PRA.PrimitiveRecursion.Code (V)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (liftSignature, quoteFile)
 import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (liftSizedWith)
 import Language.Praxis.PRA.Proof
-import Language.Praxis.PRA.Proof.Transform (argNames, identityProof, substProof, weakenProof)
+import Language.Praxis.PRA.Proof.Transform (argNames, identityProof, substAtomic, substFormula, substProof, weakenProof)
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Signature
 import Language.Praxis.PRA.Syntax
@@ -166,6 +172,7 @@ instance Schematic SchemaName where
     Meta s n -> Just (s, n)
     Obj _ -> Nothing
   metaAtom = decodeMeta
+  metaApplied p = maybe [] (\(_, _, pairs) -> pairs) (decodeApplied p)
 
 sortName :: R.Sort -> String
 sortName = \case
@@ -179,18 +186,60 @@ sortName = \case
 encodeMeta :: R.Sort -> String -> Atomic SchemaName
 encodeMeta s n = Var (Meta s n) :=== Lit 0
 
+{- |
+The atom standing for a metavariable applied to arguments, @P(t1, …, tk)@
+for @P@ declared with @k@ parameters: the arguments are the arguments of a
+tag naming the parameters, so that substitution and the names occurring
+reach them.
+-}
+encodeApplied :: R.Sort -> String -> [(String, Term SchemaName)] -> Atomic SchemaName
+encodeApplied = encodeAppliedWith id
+
+encodeAppliedWith :: forall b. (SchemaName -> b) -> R.Sort -> String -> [(String, Term b)] -> Atomic b
+encodeAppliedWith name s n pairs = case someNatVal (fromIntegral (length pairs)) of
+  SomeNat (_ :: Proxy k) -> case SV.fromList' (map snd pairs) :: Maybe (V k (Term b)) of
+    Just args -> Var (name (Meta s n)) :=== App (F.Defined (F.DefId (T.pack (parameterTag (map fst pairs)))) :: F.Function k) args
+    Nothing -> Var (name (Meta s n)) :=== Lit 0
+
+parameterTag :: [String] -> String
+parameterTag ps = "«" <> unwords ps <> "»"
+
+parametersOfTag :: T.Text -> Maybe [String]
+parametersOfTag txt = case T.unpack txt of
+  '«' : rest | not (null rest), last rest == '»' -> Just (words (init rest))
+  _ -> Nothing
+
 decodeMeta :: Atomic SchemaName -> Maybe (R.Sort, String)
-decodeMeta (Var (Meta s n) :=== Lit 0)
-  | s `elem` [R.AtomS, R.FormS, R.CtxS] = Just (s, n)
-decodeMeta _ = Nothing
+decodeMeta p = (\(s, n, _) -> (s, n)) <$> decodeApplied p
+
+-- | A metavariable atom with its parameters and arguments, none for a plain one.
+decodeApplied :: Atomic SchemaName -> Maybe (R.Sort, String, [(String, Term SchemaName)])
+decodeApplied = \case
+  Var (Meta s n) :=== Lit 0 | s `elem` metaSorts -> Just (s, n, [])
+  Var (Meta s n) :=== App (F.Defined (F.DefId txt)) args
+    | s `elem` metaSorts
+    , Just ps <- parametersOfTag txt
+    , length ps == length args ->
+        Just (s, n, zip ps (toList args))
+  _ -> Nothing
+  where
+    metaSorts = [R.AtomS, R.FormS, R.CtxS]
+
+-- | An atom rendered by the metavariable it stands for, applied to its arguments.
+schemaHook :: Signature -> Atomic SchemaName -> Maybe String
+schemaHook sig p = do
+  (_, n, pairs) <- decodeApplied p
+  pure case pairs of
+    [] -> n
+    _ -> n <> "(" <> intercalate ", " [renderTerm sig renderSchemaName t | (_, t) <- pairs] <> ")"
 
 -- | Render an error of a schematic proof, its metavariables by name.
 renderSchemaTacticError :: Signature -> TacticError SchemaName -> String
-renderSchemaTacticError sig = renderTacticErrorWith sig renderSchemaName (fmap snd . decodeMeta)
+renderSchemaTacticError sig = renderTacticErrorWith sig renderSchemaName (schemaHook sig)
 
--- | The scope in which a declaration with the given metavariables is read.
-schemaScope :: Signature -> [(String, R.Sort)] -> Scope SchemaName
-schemaScope sig metas =
+-- | The scope in which a declaration with the given metavariables, and their parameters, is read.
+schemaScope :: Signature -> [(String, R.Sort)] -> [(String, [String])] -> Scope SchemaName
+schemaScope sig metas params =
   Scope
     { scopeSignature = sig
     , scopeReserved = []
@@ -202,17 +251,32 @@ schemaScope sig metas =
         Nothing -> Right (Var (Obj n))
         Just s
           | s `elem` [R.VarS, R.TermS] -> Right (Var (Meta s n))
+          | Just ps <- lookup n params -> Left (n <> " takes " <> show (length ps) <> " arguments")
           | otherwise -> Left (n <> " is a " <> sortName s <> " metavariable, not a term")
-    , scopeAtomic = \n -> case lookup n metas of
-        Just R.AtomS -> Just (encodeMeta R.AtomS n)
+    , scopeAtomic = \n -> case (lookup n metas, lookup n params) of
+        (Just R.AtomS, Nothing) -> Just (encodeMeta R.AtomS n)
         _ -> Nothing
-    , scopeFormula = \n -> case lookup n metas of
-        Just s | s `elem` [R.AtomS, R.FormS] -> Just (Atm (encodeMeta s n))
+    , scopeFormula = \n -> case (lookup n metas, lookup n params) of
+        (Just s, Nothing) | s `elem` [R.AtomS, R.FormS] -> Just (Atm (encodeMeta s n))
         _ -> Nothing
     , scopeContext = \n -> case lookup n metas of
         Just R.CtxS -> Just (Atm (encodeMeta R.CtxS n))
         _ -> Nothing
+    , scopeApplied = \n args -> Atm . snd <$> applied n args
+    , scopeAppliedAtom = \n args ->
+        applied n args >>= \(s, p) ->
+          if s == R.AtomS
+            then Right p
+            else Left (n <> " is a formula metavariable, but stands where an atom is required; declare it an atom")
     }
+  where
+    applied n args = case lookup n metas of
+      Nothing -> Left (n <> " is not a metavariable")
+      Just s -> case lookup n params of
+        Nothing -> Left (n <> " takes no arguments")
+        Just ps
+          | length args /= length ps -> Left (n <> " takes " <> show (length ps) <> " arguments")
+          | otherwise -> Right (s, encodeAppliedWith Named s n (zip ps args))
 
 -- * The quasiquoter
 
@@ -239,7 +303,7 @@ praQuoterIn lib =
     { quoteExp = \src -> do
         env <- either (fail . displayException) pure (signatureKernelEnv sig)
         lemmas <- inScope
-        (goal, tac) <- either (fail . displayException) pure (parseGoalIn (lemmaSorts lemmas) (schemaScope sig []) src)
+        (goal, tac) <- either (fail . displayException) pure (parseGoalIn (lemmaSorts lemmas) (schemaScope sig [] []) src)
         proof <- either (fail . renderSchemaTacticError sig) pure (proveOpenWith env (fmap entryLemma lemmas) Map.empty goal tac)
         (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty lemmas) proof)
         pure body
@@ -400,12 +464,12 @@ compileDecl sig global lemmas decl = do
 -- | The parameters a list of binders contributes: a metavariable with its sort, or a premise.
 binderParams :: [Binder a] -> [(String, Either R.Sort ())]
 binderParams = concatMap \case
-  MetaBinder ns s -> [(n, Left s) | n <- ns]
+  MetaBinder ns s -> [(n, Left s) | (n, _) <- ns]
   PremiseBinder n _ -> [(n, Right ())]
 
 binderNames :: Binder a -> [String]
 binderNames = \case
-  MetaBinder ns _ -> ns
+  MetaBinder ns _ -> map fst ns
   PremiseBinder n _ -> [n]
 
 binderType :: Name -> Binder a -> Q Type
@@ -488,7 +552,7 @@ figure sig decl =
       <> [haddockEscape below, "@"]
   where
     kind = if null (declBinders decl) then "theorem" else "derived rule"
-    render = renderSequent sig renderSchemaName
+    render = renderSequentWith (schemaHook sig) sig renderSchemaName
     above = intercalate "    " [n <> " : " <> render s | PremiseBinder n s <- declBinders decl]
     below = render (goalSequent (declGoal decl))
     width = max (length above) (length below)
@@ -569,10 +633,24 @@ functionCode sig f = case symbolOfFunction f sig of
     Just hs -> pure (case f of F.Primitive _ -> [||F.Primitive $$(boundName hs)||]; _ -> boundName hs)
   Nothing -> pure [||f||]
 
+-- | A metavariable applied to arguments: its parameters substituted by them at run time.
+liftApplied :: LiftEnv -> [(String, Term SchemaName)] -> Code Q (HashMap W (Term W) -> x -> x) -> Code Q x -> LCode x
+liftApplied env pairs substitute body
+  | null pairs = pure body
+  | otherwise = do
+      need NeedsHashable
+      pairs' <- traverse pair pairs
+      pure [||$$substitute (HM.fromList $$(listCode pairs')) $$body||]
+  where
+    pair (x, t) = do
+      x' <- metaParam env R.VarS x
+      t' <- liftTerm env t
+      pure [||($$x', $$t')||]
+
 liftAtom :: LiftEnv -> Atomic SchemaName -> LCode (Atomic W)
-liftAtom env p@(s :=== t) = case decodeMeta p of
-  Just (R.AtomS, n) -> metaParam env R.AtomS n
-  Just (sort', n) -> failL (n <> " is a " <> sortName sort' <> " metavariable, but stands where an atom is required; declare it an atom")
+liftAtom env p@(s :=== t) = case decodeApplied p of
+  Just (R.AtomS, n, pairs) -> metaParam env R.AtomS n >>= liftApplied env pairs [||substAtomic||]
+  Just (sort', n, _) -> failL (n <> " is a " <> sortName sort' <> " metavariable, but stands where an atom is required; declare it an atom")
   Nothing -> do
     s' <- liftTerm env s
     t' <- liftTerm env t
@@ -580,9 +658,9 @@ liftAtom env p@(s :=== t) = case decodeMeta p of
 
 liftFormula :: LiftEnv -> Formula SchemaName -> LCode (Formula W)
 liftFormula env = \case
-  Atm p -> case decodeMeta p of
-    Just (R.FormS, n) -> metaParam env R.FormS n
-    Just (R.CtxS, n) -> failL (n <> " is a ctx metavariable, but stands as a formula")
+  Atm p -> case decodeApplied p of
+    Just (R.FormS, n, pairs) -> metaParam env R.FormS n >>= liftApplied env pairs [||substFormula||]
+    Just (R.CtxS, n, _) -> failL (n <> " is a ctx metavariable, but stands as a formula")
     _ -> do
       p' <- liftAtom env p
       pure [||Atm $$p'||]
@@ -632,9 +710,9 @@ liftProof env proof = do
         Free (RuleStep step)
           | IdRule <- ruleName step
           , ([ArgAtom p, ArgCtx g], []) <- stepFields step
-          , Just (R.FormS, n) <- decodeMeta p -> do
+          , Just (R.FormS, _) <- decodeMeta p -> do
               need NeedsHashable
-              f <- metaParam env R.FormS n :: LCode (Formula W)
+              f <- liftFormula env (Atm p)
               g' <- liftContext env g
               lift [|identityProof $(unTypeCode g') $(unTypeCode f)|]
         Free (RuleStep step) -> do

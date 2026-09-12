@@ -18,7 +18,8 @@ The textual syntax of tactics, and of the declarations which use them.
 > quote   ::= [library ident] {decl}       -- the header names a binding for the lemmas in scope
 > decl    ::= theorem ident : sequent by tactic
 >           | rule ident {binder} : sequent by tactic
-> binder  ::= ( ident {ident} : sort )      -- metavariables
+> binder  ::= ( param {param} : sort )      -- metavariables
+> param   ::= ident [( ident {, ident} )]   -- with the var metavariables it takes as parameters
 >           | ( ident : sequent )           -- a premise, for exact
 > sort    ::= var | term | atom | formula | ctx
 
@@ -39,6 +40,15 @@ appealed to; @as@ names the hypotheses the step introduces, in the order of
 its premises.  Under @induction t as n H…@ the first name after the
 eigenvariable is for the induction hypothesis, the rest for the hypotheses
 reintroduced.
+
+A metavariable of sort @atom@ or @formula@ may take parameters, @var@
+metavariables declared before it: @(P(n) : formula)@.  It is then written
+applied, @P(n)@, @P(0)@, @P(S n)@, for the formula at that argument, so a
+derived rule can state induction, @(base : Γ |- P(0)) (step : P(n), Γ |- P(S
+n)) : Γ |- P(t)@.  Appealing to such a rule infers @P@ by abstracting the
+argument in the goal, every occurrence of it, as @induction@ does; the
+argument itself, @t@ here, must be given or determined elsewhere, and a
+@var@ parameter given as an argument names the eigenvariable.
 
 @exact@ names a premise of the rule being proved, a hypothesis which is the
 succedent, or a lemma: a theorem or rule declared earlier, whose
@@ -76,6 +86,7 @@ module Language.Praxis.PRA.Tactic.Parser (
   Decl (..),
   Binder (..),
   binderMetas,
+  binderParameters,
   declLemma,
   Lemmas,
   parseDecls,
@@ -99,6 +110,7 @@ module Language.Praxis.PRA.Tactic.Parser (
   plainMetaScope,
 ) where
 
+import Control.Monad (forM_, unless)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Language.Praxis.PRA.Pattern (Hole (..))
@@ -129,11 +141,13 @@ A scope for a declaration over plain names.  A @var@ or @term@ metavariable is
 simply a variable; the other sorts have no counterpart among plain names, and
 are refused.
 -}
-plainMetaScope :: Signature -> [(String, R.Sort)] -> Scope String
-plainMetaScope sig metas =
+plainMetaScope :: Signature -> [(String, R.Sort)] -> [(String, [String])] -> Scope String
+plainMetaScope sig metas _ =
   (plainScope sig)
     { scopeVariable = \n -> n <$ plain n
     , scopeTerm = \n -> Var n <$ plain n
+    , scopeApplied = \n _ -> Left (n <> " is a metavariable with parameters, which only the quasiquoter supports")
+    , scopeAppliedAtom = \n _ -> Left (n <> " is a metavariable with parameters, which only the quasiquoter supports")
     }
   where
     plain n = case lookup n metas of
@@ -151,15 +165,19 @@ plainMetaScope sig metas =
 -- * Declarations
 
 data Binder a
-  = -- | metavariables of a sort
-    MetaBinder ![String] !R.Sort
+  = -- | metavariables of a sort, each with the @var@ metavariables it takes as parameters
+    MetaBinder ![(String, [String])] !R.Sort
   | -- | a premise, with the sequent it is declared to establish
     PremiseBinder !String !(Sequent a)
   deriving (Show, Eq)
 
 -- | The metavariables a list of binders declares, in order.
 binderMetas :: [Binder a] -> [(String, R.Sort)]
-binderMetas bs = [(n, s) | MetaBinder ns s <- bs, n <- ns]
+binderMetas bs = [(n, s) | MetaBinder ns s <- bs, (n, _) <- ns]
+
+-- | The metavariables which take parameters, with them.
+binderParameters :: [Binder a] -> [(String, [String])]
+binderParameters bs = [(n, ps) | MetaBinder ns _ <- bs, (n, ps) <- ns, not (null ps)]
 
 -- | A theorem, or a derived rule when it has binders.
 data Decl a = Decl
@@ -189,20 +207,20 @@ the tactic of a declaration are read, from the metavariables it declares;
 'plainMetaScope' serves for plain names.  Each declaration is a lemma for
 those after it.
 -}
-parseDecls :: (Schematic a) => ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
+parseDecls :: (Schematic a) => ([(String, R.Sort)] -> [(String, [String])] -> Scope a) -> String -> Either SyntaxError [Decl a]
 parseDecls = parseDeclsIn Map.empty
 
 -- | 'parseDecls', with lemmas in scope from the start.
-parseDeclsIn :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError [Decl a]
+parseDeclsIn :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> [(String, [String])] -> Scope a) -> String -> Either SyntaxError [Decl a]
 parseDeclsIn lemmas mkScope = runParserFully (declsP lemmas mkScope)
 
 {- |
 Parse a declaration quote: an optional @library ident@ header, naming the
 binding the quasiquoter makes for the lemmas in scope, then declarations.
 -}
-parseQuoteIn :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> String -> Either SyntaxError (Maybe String, [Decl a])
+parseQuoteIn :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> [(String, [String])] -> Scope a) -> String -> Either SyntaxError (Maybe String, [Decl a])
 parseQuoteIn lemmas mkScope =
-  runParserFully ((,) <$> optional (keywordP "library" *> identifierP (withTacticScope (mkScope []))) <*> declsP lemmas mkScope)
+  runParserFully ((,) <$> optional (keywordP "library" *> identifierP (withTacticScope (mkScope [] []))) <*> declsP lemmas mkScope)
 
 -- | Parse @sequent by tactic@.
 parseGoal :: (Schematic a) => Scope a -> String -> Either SyntaxError (Goal a, Tactic a)
@@ -217,7 +235,7 @@ parseTactic = parseTacticIn Map.empty
 parseTacticIn :: Lemmas -> Scope a -> String -> Either SyntaxError (Tactic a)
 parseTacticIn lemmas sc = runParserFully (tacticP lemmas sc)
 
-declsP :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> Parser [Decl a]
+declsP :: (Schematic a) => Lemmas -> ([(String, R.Sort)] -> [(String, [String])] -> Scope a) -> Parser [Decl a]
 declsP lemmas0 mkScope = go lemmas0
   where
     go lemmas =
@@ -225,29 +243,40 @@ declsP lemmas0 mkScope = go lemmas0
         Nothing -> pure []
         Just d -> (d :) <$> go (Map.insert (declName d) (map snd (binderMetas (declBinders d))) lemmas)
 
-declP :: forall a. (Schematic a) => Lemmas -> ([(String, R.Sort)] -> Scope a) -> Parser (Decl a)
+declP :: forall a. (Schematic a) => Lemmas -> ([(String, R.Sort)] -> [(String, [String])] -> Scope a) -> Parser (Decl a)
 declP lemmas mkScope = theoremP <|> ruleP
   where
     theoremP = do
       keywordP "theorem"
       name <- nameP
       symbolP ":"
-      uncurry (Decl name []) <$> goalP lemmas (mkScope [])
+      uncurry (Decl name []) <$> goalP lemmas (mkScope [] [])
     ruleP = do
       keywordP "rule"
       name <- nameP
       binders <- bindersP []
       symbolP ":"
-      uncurry (Decl name binders) <$> goalP lemmas (mkScope (binderMetas binders))
-    nameP = identifierP (withTacticScope (mkScope []))
+      uncurry (Decl name binders) <$> goalP lemmas (mkScope (binderMetas binders) (binderParameters binders))
+    nameP = identifierP (withTacticScope (mkScope [] []))
 
     bindersP :: [Binder a] -> Parser [Binder a]
     bindersP acc =
-      optional (binderP (withTacticScope (mkScope (binderMetas acc)))) >>= \case
+      optional (binderP (binderMetas acc) (withTacticScope (mkScope (binderMetas acc) (binderParameters acc)))) >>= \case
         Nothing -> pure acc
         Just b -> bindersP (acc <> [b])
-    binderP sc = parens (try (metaBinderP sc) <|> premiseBinderP sc)
-    metaBinderP sc = MetaBinder <$> some (identifierP sc) <* symbolP ":" <*> sortP
+    binderP metas sc = parens (try (metaBinderP metas sc) <|> premiseBinderP sc)
+    -- A metavariable with parameters, var metavariables declared before it, is an atom or a formula.
+    metaBinderP metas sc = do
+      names <- some ((,) <$> identifierP sc <*> option [] (parens (identifierP sc `sepBy1` commaP)))
+      symbolP ":"
+      s <- sortP
+      forM_ names \(n, ps) -> do
+        unless (null ps || s `elem` [R.AtomS, R.FormS]) $
+          fail (n <> " takes parameters, so it must be an atom or formula metavariable")
+        forM_ ps \p ->
+          unless (lookup p metas == Just R.VarS) $
+            fail ("the parameter " <> p <> " of " <> n <> " is not a var metavariable declared before it")
+      pure (MetaBinder names s)
     premiseBinderP sc = PremiseBinder <$> identifierP sc <* symbolP ":" <*> sequentP sc
     sortP =
       choice

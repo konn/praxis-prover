@@ -13,6 +13,8 @@ mentioning the placeholder would be read as more holes of the template.
 -}
 module Language.Praxis.PRA.Proof.Transform (
   substProof,
+  substFormula,
+  substAtomic,
   weakenProof,
   identityProof,
   proofNames,

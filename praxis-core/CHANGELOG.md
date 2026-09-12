@@ -86,6 +86,13 @@ and this project adheres to the
   left side matches for `rewrite`, cut in and proved by the lemma.
   `LemmaNotEquation` and `Undetermined` report a lemma of another shape, or
   an instance the use does not determine.
+- Metavariables with parameters: `(P(n) : formula)` declares `P` over the
+  `var` metavariable `n`, and `P(0)`, `P(S n)`, `P(t)` are the formula at
+  those arguments, so a derived rule can state induction. Appealing to such
+  a rule infers `P` by abstracting the argument in the goal, every
+  occurrence of it; the `Schematic` class gains `metaApplied`, `Bindings`
+  keep the names placeholders must avoid, and `Language.Praxis.PRA.Proof.Transform`
+  exports `substFormula` and `substAtomic`, which the spliced rule uses.
 - `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
   the substitution and weakening of a proof, renaming the variables its steps
   bind apart; the spliced proof of an appeal to a theorem is built with them.

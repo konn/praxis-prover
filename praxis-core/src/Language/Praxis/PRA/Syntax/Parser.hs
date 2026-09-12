@@ -40,6 +40,10 @@ Identifiers start with a letter and continue with letters, digits, @_@ and
 is read is decided by the 'Scope', which is what lets the same grammar serve
 both closed sequents and the schematic ones of a derived rule.
 
+An identifier applied to arguments in parentheses, @P(t)@ or @P(t, s)@, is
+a metavariable declared with parameters, which the scope of a derived rule
+provides.
+
 >>> :seti -XDataKinds -XQuasiQuotes -XPatternSynonyms
 >>> import Data.Sized (pattern Nil, pattern (:<))
 >>> import Data.Type.Ordinal (od)
@@ -132,7 +136,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature (Signature, Symbol (..), lookupSymbol, symbolArity)
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural (Natural)
-import Text.Megaparsec (ParseErrorBundle, attachSourcePos, bundleErrors, bundlePosState, choice, eof, errorBundlePretty, errorOffset, getOffset, notFollowedBy, oneOf, option, parse, region, sepBy1, setErrorOffset, sourceColumn, sourceLine, try, unPos, (<?>), (<|>))
+import Text.Megaparsec (ParseErrorBundle, attachSourcePos, bundleErrors, bundlePosState, choice, eof, errorBundlePretty, errorOffset, getOffset, notFollowedBy, oneOf, option, optional, parse, region, sepBy1, setErrorOffset, sourceColumn, sourceLine, try, unPos, (<?>), (<|>))
 import Text.Megaparsec.Char qualified as CP
 
 {- |
@@ -155,6 +159,10 @@ data Scope a = Scope
   -- ^ an identifier standing alone as a formula
   , scopeContext :: String -> Maybe (Formula a)
   -- ^ an identifier standing for a context, in an antecedent
+  , scopeApplied :: String -> [Term (Hole a)] -> Either String (Formula (Hole a))
+  -- ^ a metavariable applied to arguments, standing as a formula: @P(t)@
+  , scopeAppliedAtom :: String -> [Term (Hole a)] -> Either String (Atomic (Hole a))
+  -- ^ the same, standing as an atom
   }
 
 -- | Every identifier which is not a symbol is an object variable.
@@ -168,6 +176,8 @@ plainScope sig =
     , scopeAtomic = const Nothing
     , scopeFormula = const Nothing
     , scopeContext = const Nothing
+    , scopeApplied = \n _ -> Left (n <> " takes no arguments")
+    , scopeAppliedAtom = \n _ -> Left (n <> " takes no arguments")
     }
 
 -- | A syntax error. Render it for a human with @displayException@.
@@ -499,7 +509,9 @@ atomicP sc = metaAtomicP <|> equationP
         else (s :===) <$> (equalsP *> termP sc)
     metaAtomicP = try do
       name <- identifierP sc
-      maybe (fail "not an atom") (pure . fmap Named) (scopeAtomic sc name)
+      optional (parens (termP sc `sepBy1` commaP)) >>= \case
+        Nothing -> maybe (fail "not an atom") (pure . fmap Named) (scopeAtomic sc name)
+        Just args -> either fail pure (scopeAppliedAtom sc name args)
 
 formulaP :: Scope a -> Parser (Formula (Hole a))
 formulaP sc = implP
@@ -523,7 +535,9 @@ formulaP sc = implP
         <?> "formula"
     metaFormulaP = try do
       name <- identifierP sc
-      maybe (fail "not a formula") (pure . fmap Named) (scopeFormula sc name)
+      optional (parens (termP sc `sepBy1` commaP)) >>= \case
+        Nothing -> maybe (fail "not a formula") (pure . fmap Named) (scopeFormula sc name)
+        Just args -> either fail pure (scopeApplied sc name args)
     andOp = lexeme (try (void (CP.string "/\\") <|> void (CP.char '\8743'))) <?> "\"/\\\""
     orOp = lexeme (try (void (CP.string "\\/") <|> void (CP.char '\8744'))) <?> "\"\\/\""
     implOp = lexeme (try (void (CP.string "==>") <|> void (CP.char '\8594'))) <?> "\"==>\""

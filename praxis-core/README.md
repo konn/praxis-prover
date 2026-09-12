@@ -219,6 +219,26 @@ A comparison may stand alone as an atom: `t < S t` is `(t < S t) = 1`, as
 are `x <= y` and `x == y` with their symbols, and a goal or a hypothesis of
 that shape is shown so.
 
+A metavariable of sort `atom` or `formula` may take parameters, `var`
+metavariables declared before it, and is then written applied, so that a
+derived rule can speak of a formula at several arguments:
+
+```haskell
+[pra|
+rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula)
+  (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t)
+by Ind n (P(n)) t { exact base } { exact step }
+
+theorem plusZeroRight' : |- y + 0 = y
+by exact ind k y as IH { refl } { Defeq (S k + 0) (S (k + 0)); rewrite IH in (S k + 0 = _); Id }
+|]
+```
+
+Appealing to such a rule infers `P` by abstracting the argument in the
+goal, every occurrence of it, as `induction` does; the argument, `y` here,
+must be given or determined elsewhere, and giving the `var` parameter names
+the eigenvariable the premises see.
+
 A lemma cut in serves a congruence step of a calculation:
 
 ```haskell
