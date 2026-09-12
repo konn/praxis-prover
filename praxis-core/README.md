@@ -178,6 +178,10 @@ H2` picks the hypothesis a rule acts on where several have the right shape.
 `H2` replaced by the other, under any function symbols; `cong` alone tries
 every hypothesis.
 
+`have H: (A) { … }` proves `A` in its block and goes on with `A` as the
+hypothesis `H`, a `Cut` whose second branch is the rest of the script; with
+no name given, the hypothesis is `H`, or the next `H<n>` when `H` is taken.
+
 An equation may be proved as a calculation, one step per line, each by its
 own tactic or by `refl` when definitional:
 

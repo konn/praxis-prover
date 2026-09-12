@@ -48,6 +48,7 @@ tacticTests =
     , namingTests
     , calcTests
     , congTests
+    , haveTests
     ]
 
 sig :: Signature
@@ -92,6 +93,7 @@ stripLoc = \case
   On ns t -> On ns (stripLoc t)
   As ns t -> As ns (stripLoc t)
   Calc t steps -> Calc t (map (fmap stripLoc) steps)
+  Have n f t -> Have n f (stripLoc t)
   t -> t
 
 parsesTo :: String -> Tactic String -> Assertion
@@ -737,4 +739,29 @@ congTests =
         "t = s |- plus t 0 = plus s 0 by cong H1 as H" `failsWith` \case
           NothingToName -> True
           _ -> False
+    ]
+
+haveTests :: TestTree
+haveTests =
+  testGroup
+    "have"
+    [ testCase "have takes a name, or none" $ do
+        f <- parsed (parseFormula sc "a = 0")
+        "have H: (a = 0) { Id }" `parsesTo` Have (Just "H") f (applyWith IdRule [])
+        "have (a = 0) { Id }" `parsesTo` Have Nothing f (applyWith IdRule [])
+        "have : (a = 0) { Id }" `parsesTo` Have Nothing f (applyWith IdRule [])
+    , testCase "the lemma is proved in the block and is a hypothesis after" $ do
+        proves "a = 0 |- a = 0 /\\ a = 0 by have H: (a = 0) { Id }; ConjR { exact H } { exact H }"
+        proves "t = s |- plus s 0 = plus t 0 by have (s = t) { symmetry H1; Id }; cong H"
+    , testCase "the hypothesis is H, or the next number when H is taken" $ do
+        (goal, tac) <- parsed (parseGoal sc "a = 0 |- b = 0 by have (a = 0) { Id }; have (a = 0) { Id }; sorry")
+        case prove goal tac of
+          Right _ -> assertFailure "proved"
+          Left err -> renderTacticError sig id err @?= "1:61: sorry: the proof stops here\n  H1 : a = 0\n  H : a = 0\n  H2 : a = 0\n  |- b = 0"
+    , testCase "a name in use" $
+        "a = 0 |- b = 0 by have H1: (a = 0) { Id }; sorry" `failsWith` \case
+          NameInUse "H1" -> True
+          _ -> False
+    , testCase "blocks after have are for the goal it leaves" $
+        proves "a = 0 |- a = 0 by have H: (a = 0) { Id } { exact H }"
     ]

@@ -246,6 +246,7 @@ locations = \case
   On _ t -> locations t
   As _ t -> locations t
   Calc _ steps -> concatMap (locations . snd) steps
+  Have _ _ t -> locations t
   _ -> []
 
 -- | The first position in a tactic, in source order.
@@ -268,4 +269,5 @@ replaceAt target new = go
       On ns t -> On ns (go t)
       As ns t -> As ns (go t)
       Calc t0 steps -> Calc t0 [(t, go u) | (t, u) <- steps]
+      Have n f t -> Have n f (go t)
       t -> t

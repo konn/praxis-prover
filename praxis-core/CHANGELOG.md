@@ -76,6 +76,10 @@ and this project adheres to the
   `renderAtomic` shows such an equation the same way; `comparisonSymbols`
   and `isComparison` in `Language.Praxis.PRA.Syntax.Parser` name the symbols
   involved. `builtin` gains `le`, with `n <= m` as `n < S m`.
+- `have H: (A) { u }`: proves `A` by `u` and goes on with it as the
+  hypothesis `H`, a `Cut` whose second branch is the rest of the script;
+  without a name, the hypothesis is `H`, or the next `H<n>` when `H` is
+  taken.
 - `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
   the substitution and weakening of a proof, renaming the variables its steps
   bind apart; the spliced proof of an appeal to a theorem is built with them.

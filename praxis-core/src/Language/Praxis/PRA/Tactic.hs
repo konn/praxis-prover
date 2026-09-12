@@ -311,6 +311,11 @@ data Tactic a
     by 'ConjL' and chained by 'Subst' down to 'Id'.
     -}
     Calc !(Term a) ![(Term a, Tactic a)]
+  | {- | @Have name f u@: prove @f@ by @u@ and go on with it as a hypothesis,
+    named @name@, or @H@ when no name is given, or the next @H<n>@ when @H@ is
+    taken: @Cut f { u } { skip }@, with the name.
+    -}
+    Have !(Maybe String) !(Formula a) !(Tactic a)
   | -- | Leave the goal open.
     Skip
   | -- | Abandon the whole proof, reporting the goal reached here.
@@ -767,6 +772,12 @@ runTacticWith env lemmas prems = go noHints
                 conjuncts _ = []
                 chain = foldr (\(u :=== v) k -> applyWith SubstRule [ArgVar (Named x), term u, term v, atom (t0 :=== Var x)] `Then` k) (applyWith IdRule []) (drop 1 equations)
             go noHints (Dispatch (applyWith CutRule [form conjunction]) [proveSteps pairs, split `Then` chain]) goal
+      Have given f u -> plain do
+        let taken = map hypothesisName (goalHypotheses goal)
+            names = case given of
+              Just n -> [n]
+              Nothing -> ["H" | "H" `notElem` taken]
+        go noHints (Dispatch (As names (applyWith CutRule [form f])) [u, Skip]) goal
       Assumption
         | not (MS.member c ctx) -> failWith (NotInContext c)
         | otherwise -> plain case c of

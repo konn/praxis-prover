@@ -10,6 +10,7 @@ The textual syntax of tactics, and of the declarations which use them.
 >           | induction arg [as ident {ident}] | assumption
 >           | exact ident {arg}            -- a premise, a hypothesis, or a lemma with the arguments for its metavariables
 >           | calc term {= term [by simple]} -- a chain of equations, each step by its tactic, or by refl
+>           | have [ident :] ( formula ) '{' tactic '}'  -- a lemma proved in the block, then a hypothesis
 >           | skip | sorry | try basic | repeat basic | ( tactic )
 > sel     ::= ident | ( atom )             -- a hypothesis by name, or the unique one matching the pattern
 > arg     ::= _ | ident | numeral | ( term ) | ( atom ) | ( formula )   -- by the sort of the parameter
@@ -52,6 +53,10 @@ by @refl@ when none is given, and the steps are chained by transitivity.
 @cong H@ closes the goal @u = v@ by the hypothesis @H : t = s@, when @v@ is
 @u@ with occurrences of @t@ replaced by @s@, or the other way round; @cong@
 alone uses the first hypothesis which fits.
+
+@have H: (A) { u }@ proves @A@ by @u@ and goes on with @A@ as the hypothesis
+@H@; without a name, the hypothesis is @H@, or the next @H<n>@ when @H@ is
+taken.  Blocks after it are for the goal it leaves, as for any step.
 
 @sorry@ abandons the proof at its goal, which the error then reports; neither
 @|@, @try@ nor @repeat@ catches it, so a script may end in @sorry@ to see
@@ -105,7 +110,7 @@ import Text.Megaparsec.Char (char)
 tacticKeywords :: [String]
 tacticKeywords =
   map (R.ruleLabel . ruleSpec) [minBound .. maxBound]
-    <> words "refl symmetry rewrite in cong induction as on assumption exact calc skip sorry try repeat"
+    <> words "refl symmetry rewrite in cong induction as on assumption exact calc have skip sorry try repeat"
     <> words "theorem rule library by var term atom formula ctx"
 
 -- | Reserve the words of the tactic language in a scope.
@@ -283,6 +288,7 @@ tacticP lemmas sc0 = seqP
             , Assumption <$ keywordP "assumption"
             , exactP
             , calcP
+            , haveP
             , Skip <$ keywordP "skip"
             , Sorry <$ keywordP "sorry"
             , Try <$> (keywordP "try" *> basicP)
@@ -314,6 +320,16 @@ tacticP lemmas sc0 = seqP
       t0 <- closedP (termP sc)
       steps <- some ((,) <$> (symbolP "=" *> closedP (termP sc)) <*> option Refl (keywordP "by" *> simpleP))
       pure (Calc t0 steps)
+
+    -- A lemma proved in the block, then a hypothesis: named, or H, or the next H<n>.
+    haveP = do
+      keywordP "have"
+      name <- optional (try (nameP <* symbolP ":"))
+      case name of
+        Nothing -> () <$ optional (symbolP ":")
+        Just _ -> pure ()
+      f <- closedP (parens (formulaP sc))
+      Have name f <$> braces seqP
 
     -- A premise takes no arguments; a lemma takes those of its metavariables.
     exactP = do
