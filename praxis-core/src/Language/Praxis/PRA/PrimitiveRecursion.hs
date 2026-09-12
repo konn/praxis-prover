@@ -29,14 +29,15 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   lft,
   rgt,
   holdsBelow,
-  and,
+  conj,
+  disj,
+  imp,
   eq,
   builtin,
 ) where
 
 import Language.Praxis.PRA.PrimitiveRecursion.Code
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
-import Prelude hiding (and)
 
 [prf|
   environment builtin
@@ -98,6 +99,12 @@ import Prelude hiding (and)
       then holdsBelow {P} n $[xs] 
       else 0
   
-  and 0 m = 0
-  and (S n) m = m
+  conj 0 m = 0
+  conj (S n) m = sgn m
+
+  disj 0 m = sgn m
+  disj (S n) m = 1
+
+  imp 0 m = 1
+  imp (S n) m = sgn m
 |]

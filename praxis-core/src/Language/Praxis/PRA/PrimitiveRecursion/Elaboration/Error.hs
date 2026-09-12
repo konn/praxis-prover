@@ -139,6 +139,8 @@ data ElaborationError
     AppliedBinder
   | -- | a bounded search without a schema @mu@ in scope
     BoundedSearchOutOfScope
+  | -- | a bounded quantifier without the schema it searches with in scope
+    QuantifierOutOfScope !T.Text
   | -- | a clause with a variadic group reached the renamer unexpanded
     UnexpandedVariadicClause !T.Text
   | -- | an application of a variadic schema reached the renamer unexpanded: schema, fixed arity
@@ -236,6 +238,7 @@ instance Exception ElaborationError where
     InvalidBinderIndex position -> "Invalid binder index: " <> show position
     AppliedBinder -> "Cannot apply a lambda-bound variable"
     BoundedSearchOutOfScope -> "A bounded search 'μ i < b. body' requires a schema 'mu' to be in scope"
+    QuantifierOutOfScope schema -> "A bounded quantifier '∀ i < b. body' or '∃ i < b. body' requires the schema '" <> T.unpack schema <> "' to be in scope"
     UnexpandedVariadicClause schema -> "Variadic schema " <> T.unpack schema <> " must be instantiated before renaming"
     UnexpandedVariadicApplication schema fixed ->
       "Variadic schema " <> T.unpack schema <> " must be applied to its parameter and at least " <> show fixed <> " arguments"

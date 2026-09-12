@@ -1,0 +1,32 @@
+-- Examples of the bounded quantifiers and of reflection, over the library of
+-- praxis-core, src-pra/lemmas.pra, whose lemmas are in scope: the tests
+-- certify them.
+
+-- ∀ i < t. A is holdsBelow at the code of A, so belowIntro proves it.
+theorem forallLtSucc : |- ∀ i < t. i < S t
+by exact belowIntro m t { have A: (m < S t) { exact ltSuccOfLt }; exact oneNonzero }
+
+theorem forallUse : ∀ i < t. i < S t, u < t |- 0 < (u < S t)
+by exact belowElim _ t u
+
+-- ∃ i < t. A is mu at the code of A below t: muBelow proves it from a witness.
+theorem existsSmall : 3 < t |- ∃ i < t. 2 < i
+by have P: (0 < (2 < 3)) { refl }; exact muBelow _ t 3
+
+-- reify turns a formula into the truth of its code, reflect back.
+theorem reifyConj : x < y /\ y < z |- 0 < conj (x < y) (y < z)
+by reify H1; assumption
+
+theorem reflectConj : 0 < conj (x < y) (y < z) |- y < z
+by reflect H1 as K; ConjL on K; assumption
+
+-- The body of a bounded quantifier at a point, reflected.
+theorem forallReflect : ∀ i < t. i < x /\ x < 5, u < t |- u < x
+by exact belowUse _ t u as Q { reflect Q as R; ConjL on R; assumption }
+
+theorem existsReflect : ∃ i < t. i < x /\ x < i |- _|_
+by exact existsUse _ t as Q { reflect Q as R; ConjL on R as K1 K2; exact ltAsym on K1 K2 }
+
+theorem forallNe : |- ∀ i < t. ~ i = t
+by exact belowIntro m t
+   { reflect; ImplR as E; have K: (m < m) { calc (m < m) = (m < t) by cong E = 1 by assumption }; exact ltIrrefl }

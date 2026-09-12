@@ -265,6 +265,31 @@ by induction t as n
 |]
 ```
 
+Bounded quantifiers are atoms: `∀ i < t. A` stands for
+`holdsBelow {λ i ys. ⟦A⟧} t ss = 1` and `∃ i < t. A` for
+`mu {λ i ys. ⟦A⟧} t ss < t`, where `⟦A⟧`, the code of `A`, is a term which is
+nonzero where `A` holds and 0 elsewhere, 0 or 1 but for `0 < c`, whose code is
+`c` itself, and the lambda captures the subterms of the
+code which do not mention `i`, the `ss`. `forall` and `exists` spell them
+out, `⟦A⟧` may be written `[[A]]` within a term, and a goal is shown with the
+quantifiers it was written with. `reflect` turns the truth of a code,
+`0 < ⟦A⟧` or `⟦A⟧ = 1`, into `A`, on the goal or on a hypothesis,
+`reflect H as K`, and `reify` does the converse.
+
+The library of praxis-core, `src-pra/lemmas.pra`, proves the order and
+arithmetic lemmas such proofs need, the reflection lemmas `reflect` and
+`reify` appeal to, the introduction and use of the quantifiers, `belowIntro`,
+`belowUse` and `existsUse`, the properties of the bounded search, `muLe`,
+`muMin`, `muHit`, `muWitness`, and those of pairing, `pairInjL`, `pairSurj`.
+`Language.Praxis.PRA.Library` certifies it when first needed, and the
+language server of praxis-lsp reads a `.pra` document with its lemmas in
+scope:
+
+```
+theorem forallReflect : ∀ i < t. i < x /\ x < 5, u < t |- u < x
+by exact belowUse _ t u as Q { reflect Q as R; ConjL on R; assumption }
+```
+
 For non-TH use, `PrimitiveRecursion.Environment` provides `compileDefinitions`,
 `compileDefinitionsWith` (qualified identities), and `extendEnvironment`.
 Compiled blocks retain equation rows, case trees, and the recursion argument

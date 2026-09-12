@@ -140,6 +140,48 @@ and this project adheres to the
   keeps; the quasiquoter splices an appeal to one as the proof itself, a
   `LemmaEntry` now carrying a `LemmaSource`. `Language.Praxis.PRA.Syntax.Parser`
   exports `resolveTerm`, and `Language.Praxis.PRA.Tactic` `renderProofErrorReason`.
+- Bounded quantifiers: `∀ i < t. A` and `∃ i < t. A`, or `forall` and
+  `exists` spelt out, are atoms, the equations of
+  `holdsBelow {λ i ys. c} t ss` with 1 and of `mu {λ i ys. c} t ss < t`, where
+  `c` is the code of `A` and the lambda captures the maximal subterms of `c`
+  not mentioning `i`, the `ss`; so a substitution in the formula is one in
+  what it captures, and the printer shows it as it was written. Within a term,
+  `∀ i < t. c` and `∃ i < t. c` quantify a code `c` directly, in the equation
+  language as in the concrete syntax, where `⟦A⟧`, or `[[A]]`, is the code of
+  `A`. The equation language gains `QuantET`, and `Syntax.capturedTerms`
+  lists what a lambda captures.
+  Any number of parentheses around a quantifier read it as the formula
+  unless a term goes on after it, a wildcard in the body of a pattern is
+  captured, and an abstract function of a rule may stand anywhere in the
+  body.
+- Codes of formulas, `Language.Praxis.PRA.Reflection`: `⟦s = t⟧ = s == t`,
+  `⟦A /\ B⟧ = conj ⟦A⟧ ⟦B⟧`, likewise `disj` and `imp`, `⟦_|_⟧ = 0`, a
+  comparison `<` or `<=`, or an instance of `holdsBelow`, equated with 1 is
+  its own code, and `0 < c`, for any other `c`, has the code `c`.
+  `encodeFormula` and `decodeFormula` are inverse on formulas without
+  metavariables.
+- `reflect` and `reify`, on the goal or on a hypothesis, `reflect H as K`:
+  the truth of a code, `0 < c` or `c = 1`, becomes the formula it is the code
+  of, and the converse. Both are built from the reflection lemmas of the
+  library, found by name, `conjIntro`, `conjElim1`, …, `eqOne`, `belowOne`;
+  `ReflectionLemma` names one which is missing or hidden by a premise or a
+  hypothesis of its name, `NothingToReflect` and `NoCode` what cannot be done.
+- The library of lemmas, `src-pra/lemmas.pra`, which
+  `Language.Praxis.PRA.Library` embeds and certifies when first needed,
+  splicing it being too slow to compile: order and arithmetic (`leTrans`,
+  `leAntisym`, `ltTrichotomy`, `addComm`, `addCancelL`, `subAddCancel`,
+  `addLtMonoL`, …), multiplication (`mulComm`, `mulAssoc`, `mulDistribL`,
+  `mulLeMonoL`, `mulPos`, …), conditionals (`ifZero`, `ifPos`), the
+  connectives and `==`, the reflection lemmas, `holdsBelow` (`belowIntro`,
+  bounded course-of-values induction, `belowElim`, `belowUse`), `mu`
+  (`muLe`, `muMin`, `muHit`, `muWitness`, `muBelow`, `muMiss`, `existsUse`,
+  `muLeast`) and pairing (`projWChar`, `pi1Pair`, `pi2Pair`, `pairInjL`,
+  `pairInjR`, `pairSurj`, `consSurj`, `lftLt`, `rgtLt`, `pi1Le`, …).
+  `libraryScope` adds the unfolding lemmas of `builtin`; the quasiquoters do
+  not see the library.
+- `exact D` on a premise `D` whose hypotheses are among those of the goal
+  uses it weakened, a `WeakenStep`, which the quasiquoter splices with
+  `weakenProof`.
 
 ### Changed
 
@@ -186,5 +228,23 @@ and this project adheres to the
 - A hypothesis selected by pattern, for `symmetry`, `rewrite` and `cong`, is
   written in parentheses, as an atom argument of a rule is; a bare name
   selects by name.
+- The builtin conjunction of codes is `conj`, where it was `and`, which
+  clashed with the Prelude; `disj` and `imp` join it, each 0 or 1 whatever
+  its arguments.
+- `forall` and `exists` are reserved words, of the equation language and of
+  the concrete syntax.
+- The bounded search `μ i < b. body` captures the maximal subterms of its
+  body not mentioning `i`, numerals included, as the quantifiers do, and
+  `Syntax.abstraction` abstracts by the same rule, a body `f i` for a
+  function `f` which is not inlined being `f` itself; so an instance of `mu`
+  or `holdsBelow` the engine builds reads back as the sugar it is shown as.
+- `on` with a lemma tries every placing of the hypotheses named among those
+  of the lemma, whose order is not the order they were written in, and a
+  succedent the arguments do not determine is matched after the hypotheses.
+- An appeal instantiating an eigenvariable of the lemma by a `var`
+  metavariable `n` of the rule being proved needs the rule to declare `n` not
+  free in every metavariable of the goal and of the other arguments, but one
+  `n` parameterizes, as an induction on `n` does; `NotDeclaredFresh` says what
+  to add.
 
 ## 0.1.0.0 - YYYY-MM-DD

@@ -7,6 +7,7 @@ The textual syntax of tactics, and of the declarations which use them.
 > basic   ::= step [on ident {ident}] [as ident {ident}]
 > step    ::= Rule {arg}                   -- a rule of the calculus, applied backwards
 >           | refl | symmetry sel | rewrite sel in sel | cong [sel]
+>           | reflect [sel] | reify [sel]  -- a formula and the truth of its code, at the goal or the hypothesis selected
 >           | induction arg [as ident {ident}] | assumption
 >           | exact ident {arg}            -- a premise, a hypothesis, or a lemma with the arguments for its metavariables
 >           | calc term {= term [by simple]} -- a chain of equations, each step by its tactic, or by refl
@@ -36,8 +37,9 @@ declared before the premises which mention it.
 The hypotheses of a goal are named: @H1@, @H2@, … in the order the sequent
 lists them, a context metavariable by its own name, and a hypothesis a step
 introduces by the next number, or as @as@ says.  @on@ names the hypotheses
-a rule acts on, in the order of its principal formulas, or those of a lemma
-appealed to; @as@ names the hypotheses the step introduces, in the order of
+a rule acts on, in the order of its principal formulas, or those a lemma
+appealed to discharges its own with, each one it is an instance of; @as@
+names the hypotheses the step introduces, in the order of
 its premises.  Under @induction t as n H…@ the first name after the
 eigenvariable is for the induction hypothesis, the rest for the hypotheses
 reintroduced.
@@ -71,7 +73,8 @@ term and its motive, but one @n@ parameterizes; and an appeal to the rule
 instantiates @n@ apart from the goal and the other arguments, as for the
 eigenvariable of a primitive rule.
 
-@exact@ names a premise of the rule being proved, a hypothesis which is the
+@exact@ names a premise of the rule being proved, weakened when the goal
+states it under more hypotheses, a hypothesis which is the
 succedent, or a lemma: a theorem or rule declared earlier, whose
 metavariables take arguments the same way, in the order of its binders.  The
 lemmas in scope, with the sorts of their metavariables, are the 'Lemmas' the
@@ -84,6 +87,16 @@ by @refl@ when none is given, and the steps are chained by transitivity.
 @cong H@ closes the goal @u = v@ by the hypothesis @H : t = s@, when @v@ is
 @u@ with occurrences of @t@ replaced by @s@, or the other way round; @cong@
 alone uses the first hypothesis which fits.
+
+@reflect@, on the goal @0 < c@ or @c = 1@, the truth of a code, goes on with
+the formula @c@ is the code of, as "Language.Praxis.PRA.Reflection" decodes
+it; @reflect H@ adds that formula, from the hypothesis @H@.  @reify@ goes the
+other way: on the goal @A@ it goes on with @0 < ⟦A⟧@, and @reify H@ adds @0 <
+⟦A⟧@ from @H : A@.  A bounded quantifier, @∀ i < t. A@ or @∃ i < t. A@, has
+the truths of codes for its instances, so it is used and proved through the
+formulas they are codes of: @exact belowUse _ t u as Q { reflect Q; … }@.
+Both tactics appeal to the reflection lemmas of the library,
+"Language.Praxis.PRA.Lemmas", by name.
 
 @have H: (A) { u }@ proves @A@ by @u@ and goes on with @A@ as the hypothesis
 @H@; without a name, the hypothesis is @H@, or the next @H<n>@ when @H@ is
@@ -159,7 +172,7 @@ import Text.Megaparsec.Char (char)
 tacticKeywords :: [String]
 tacticKeywords =
   map (R.ruleLabel . ruleSpec) [minBound .. maxBound]
-    <> words "refl symmetry rewrite in cong induction as on assumption exact calc have skip sorry try repeat"
+    <> words "refl symmetry rewrite in cong reflect reify induction as on assumption exact calc have skip sorry try repeat"
     <> words "theorem rule library by where var term atom formula ctx"
 
 -- | Reserve the words of the tactic language in a scope.
@@ -372,6 +385,8 @@ tacticP lemmas sc0 = seqP
             , Symmetry <$> (keywordP "symmetry" *> selectorP)
             , Rewrite <$> (keywordP "rewrite" *> selectorP) <*> (keywordP "in" *> selectorP)
             , Cong <$> (keywordP "cong" *> optional selectorP)
+            , Reflect <$> (keywordP "reflect" *> optional selectorP)
+            , Reify <$> (keywordP "reify" *> optional selectorP)
             , inductionP
             , Assumption <$ keywordP "assumption"
             , exactP

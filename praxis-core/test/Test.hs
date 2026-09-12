@@ -16,6 +16,7 @@ import Language.Praxis.PRA.PRFQuoteTest (prfQuoteTests)
 import Language.Praxis.PRA.PrimitiveRecursion hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Examples
 import Language.Praxis.PRA.ProofTest (proofTests)
+import Language.Praxis.PRA.QuantifierTest (quantifierTests)
 import Language.Praxis.PRA.QuoteLibraryTest (libraryTests)
 import Language.Praxis.PRA.QuoteTest (quoteTests)
 import Language.Praxis.PRA.Syntax
@@ -43,6 +44,7 @@ main =
       , quoteTests
       , libraryTests
       , variadicTests
+      , quantifierTests
       ]
 
 -- | Every term below is closed, so no environment is ever consulted.

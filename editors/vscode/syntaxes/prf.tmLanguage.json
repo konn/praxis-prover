@@ -22,7 +22,7 @@
     },
     {
       "name": "keyword.operator.term.prf",
-      "match": "<=|==|<|=|\\+|-|\\*|\\^|μ|λ"
+      "match": "<=|==|<|=|\\+|-|\\*|\\^|μ|λ|∀|∃|\\b(forall|exists)\\b"
     }
   ],
   "repository": {

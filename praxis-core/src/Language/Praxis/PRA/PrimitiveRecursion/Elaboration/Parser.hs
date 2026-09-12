@@ -4,10 +4,11 @@
 
 Besides application, infix operators and conditionals, a term may be a
 lambda @λ x y. body@ (also @\\x y -> body@), a bounded search
-@μ i < bound. body@, or use the variadic arguments @$[xs]@ of the enclosing
-schema. Binder occurrences are resolved to locally nameless indices while
-parsing, so a name bound by an enclosing lambda or @μ@ never leaks out as a
-free identifier.
+@μ i < bound. body@, a bounded quantifier over a code @∀ i < bound. body@ or
+@∃ i < bound. body@ (also @forall@ and @exists@), or use the variadic
+arguments @$[xs]@ of the enclosing schema. Binder occurrences are resolved to
+locally nameless indices while parsing, so a name bound by an enclosing
+lambda, @μ@ or quantifier never leaks out as a free identifier.
 
 The term grammar also serves the concrete syntax of PRA terms, in
 "Language.Praxis.PRA.Syntax.Parser": a host language adapts it through a
@@ -31,6 +32,8 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser (
   eqTermP,
   eqTermWith,
   eqAtomWith,
+  eqTermUnder,
+  eqBoundUnder,
   equationP,
   LocatedEquation (..),
   equationsP,
@@ -89,7 +92,7 @@ reserved op = lexeme (try (void (CP.string op) <* notFollowedBy identRest))
 
 -- | The words which are never identifiers.
 keywords :: [T.Text]
-keywords = ["if", "then", "else"]
+keywords = ["if", "then", "else", "forall", "exists"]
 
 -- | An identifier which is neither a keyword nor one of the given reserved words.
 identifier :: [T.Text] -> Parser T.Text
@@ -107,17 +110,19 @@ wildcard :: Parser ()
 wildcard = lexeme (try (CP.char '_' *> notFollowedBy (identRest <|> CP.char '|'))) <?> "wildcard"
 
 {- | How a host language adapts the term grammar: its own reserved words,
-which are not identifiers, and whether a wildcard @_@ is an atom, read as
-the name @_@.
+which are not identifiers, whether a wildcard @_@ is an atom, read as the
+name @_@, and an atom of its own, read under the binders in scope, as the
+code of a formula @⟦A⟧@ is for the tactic language.
 -}
 data TermSyntax = TermSyntax
   { syntaxReserved :: ![T.Text]
   , syntaxWildcard :: !Bool
+  , syntaxAtom :: !(Maybe (Binders -> Parser (EqTerm T.Text)))
   }
 
--- | The equation language itself: no further reserved words, no wildcards.
+-- | The equation language itself: no further reserved words, no wildcards, no atoms of its own.
 defaultTermSyntax :: TermSyntax
-defaultTermSyntax = TermSyntax [] False
+defaultTermSyntax = TermSyntax [] False Nothing
 
 -- | The variadic argument group @$[xs]@.
 splatP :: Parser T.Text
@@ -148,6 +153,14 @@ parenthesized term. A braced term is an argument only within an application.
 eqAtomWith :: TermSyntax -> Parser (EqTerm T.Text)
 eqAtomWith syntax = atomWith syntax (pure ()) []
 
+-- | A term under binders, innermost group first: the body of a quantifier the host language reads.
+eqTermUnder :: TermSyntax -> [[T.Text]] -> Parser (EqTerm T.Text)
+eqTermUnder syntax = termWith syntax (pure ())
+
+-- | A term at the level of sums, under binders: the bound of a quantifier the host language reads.
+eqBoundUnder :: TermSyntax -> [[T.Text]] -> Parser (EqTerm T.Text)
+eqBoundUnder syntax binders = snd (termLevels syntax (pure ()) binders)
+
 chainl1 :: Parser a -> Parser (a -> a -> a) -> Parser a
 chainl1 p op = do
   x <- p
@@ -170,11 +183,28 @@ resolveName binders ident =
     (depth, position) : _ -> BoundET depth position
     [] -> NameET ident
 
--- Lambdas and bounded searches extend as far right as a conditional does.
+-- Lambdas, bounded searches and quantifiers extend as far right as a conditional does.
 termWith :: TermSyntax -> Parser () -> Binders -> Parser (EqTerm T.Text)
-termWith syntax next binders = expr
+termWith syntax next binders = fst (termLevels syntax next binders)
+
+-- | A term, and a term at the level of sums: the bound of a search or of a quantifier.
+termLevels :: TermSyntax -> Parser () -> Binders -> (Parser (EqTerm T.Text), Parser (EqTerm T.Text))
+termLevels syntax next binders = (expr, addExpr)
   where
-    expr = ifExpr <|> lamExpr <|> muExpr <|> cmpExpr
+    expr = ifExpr <|> lamExpr <|> muExpr <|> quantExpr <|> cmpExpr
+
+    -- A bounded quantifier over a code: its binder scopes over the body only.
+    quantExpr = do
+      q <- next *> quantifierP
+      ident <- name
+      _ <- lexeme (try (CP.char '<' <* notFollowedBy (CP.char '=')))
+      bound <- addExpr
+      _ <- symbol "."
+      body <- termWith syntax next ([ident] : binders)
+      pure (QuantET q (IrrelevantName ident) bound body)
+    quantifierP =
+      ((Forall <$ (void (symbol "∀") <|> reserved "forall")) <|> (Exists <$ (void (symbol "∃") <|> reserved "exists")))
+        <?> "bounded quantifier"
 
     name = identifier (syntaxReserved syntax)
 
@@ -253,6 +283,7 @@ atomWith syntax next binders =
            <|> (NameET "_" <$ wildcardAtom)
            <|> parens (termWith syntax (pure ()) binders)
            <|> (SplatET <$> splatP)
+           <|> maybe empty ($ binders) (syntaxAtom syntax)
            <|> (resolveName binders <$> identifier (syntaxReserved syntax))
        )
   where

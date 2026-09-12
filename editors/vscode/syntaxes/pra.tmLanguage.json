@@ -10,7 +10,7 @@
     },
     {
       "name": "keyword.control.tactic.pra",
-      "match": "\\b(refl|symmetry|rewrite|in|cong|induction|as|on|assumption|exact|calc|have|skip|sorry|try|repeat)\\b"
+      "match": "\\b(refl|symmetry|rewrite|in|cong|induction|as|on|assumption|exact|calc|have|skip|sorry|try|repeat|reflect|reify)\\b"
     },
     {
       "name": "entity.name.function.rule.pra",
@@ -27,6 +27,14 @@
     {
       "name": "keyword.operator.sequent.pra",
       "match": "\\|-|⊢|==>|→|/\\\\|∧|\\\\/|∨|_\\|_|⊥|~|¬"
+    },
+    {
+      "name": "keyword.operator.quantifier.pra",
+      "match": "∀|∃|μ|λ|\\b(forall|exists)\\b"
+    },
+    {
+      "name": "punctuation.definition.code.pra",
+      "match": "⟦|⟧|\\[\\[|\\]\\]"
     },
     {
       "name": "keyword.operator.term.pra",

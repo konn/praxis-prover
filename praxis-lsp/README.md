@@ -10,7 +10,8 @@ It speaks the Language Server Protocol over standard input and output:
 cabal run praxis-lsp
 ```
 
-A `.pra` document is read over the `builtin` signature, with the unfolding
+A `.pra` document is read over the `builtin` signature, with the lemmas of the
+library of praxis-core, `src-pra/lemmas.pra`, and the unfolding
 lemmas of `builtin` in scope and each declaration a lemma for those after it,
 as the quasiquoter reads it. Every declaration is checked as it is edited: a
 tactic which fails is an error at its position,

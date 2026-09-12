@@ -202,9 +202,6 @@ for @P@ declared with @k@ parameters: the arguments are the arguments of a
 tag naming the parameters, so that substitution and the names occurring
 reach them.
 -}
-encodeApplied :: R.Sort -> String -> [(String, Term SchemaName)] -> Atomic SchemaName
-encodeApplied = encodeAppliedWith id
-
 encodeAppliedWith :: forall b. (SchemaName -> b) -> R.Sort -> String -> [(String, Term b)] -> Atomic b
 encodeAppliedWith name s n pairs = case someNatVal (fromIntegral (length pairs)) of
   SomeNat (_ :: Proxy k) -> case SV.fromList' (map snd pairs) :: Maybe (V k (Term b)) of
@@ -424,7 +421,7 @@ after it.
 checkDecl :: Env -> Map String (Lemma SchemaName) -> Decl SchemaName -> Either (TacticError SchemaName) (Free (Step SchemaName) String, Lemma SchemaName)
 checkDecl env lemmas decl = do
   let prems = Map.fromList [(n, s) | PremiseBinder n s <- declBinders decl]
-      fresh = Map.fromList (declSides decl)
+      fresh = Map.fromListWith (<>) (declSides decl)
   checked <- proveOpenDeclared env lemmas prems fresh (declGoal decl) (declTactic decl)
   pure (checked, declLemma decl)
 
@@ -504,11 +501,6 @@ binderParams = concatMap \case
   MetaBinder ns s -> [(n, Left s) | (n, _) <- ns]
   PremiseBinder n _ -> [(n, Right ())]
 
-binderNames :: Binder a -> [String]
-binderNames = \case
-  MetaBinder ns _ -> map fst ns
-  PremiseBinder n _ -> [n]
-
 -- | The type of the parameter for each name a binder declares: a term metavariable with parameters is an 'Abstraction'.
 binderTypes :: Name -> Binder a -> [Q Type]
 binderTypes a = \case
@@ -565,6 +557,7 @@ proofNames = iter step . fmap (const HS.empty)
               <> [argNames (ArgCtx (appealWeakening appeal))]
               <> subs
           )
+      WeakenStep extra sub -> HS.union (argNames (ArgCtx extra)) sub
 
 {- |
 Alpha-rename the variable bound by each substitution template.  Renaming the
@@ -680,6 +673,25 @@ liftTerm env = go . canonicalise
             need NeedsSignature
             let schema = instanceName inst
             pure [||instantiateSchemaAt $$(boundName (leSignature env)) schema $$a $$(listCode as)||]
+        -- An instance of a schema at a closure calling an abstract function:
+        -- the closure, as a body over its own parameters, is abstracted again
+        -- at run time from the body instantiated, as an argument for such a
+        -- metavariable is, so that caller and callee meet in the same closure.
+        | Just inst <- schemaInstanceOf (leSig env) f
+        , F.SomeFunction (g :: F.Function k) <- instanceParameter inst
+        , not (null (F.opaqueCalls (F.functionProgram g))) -> do
+            let extras = fromIntegral (instanceExtras inst)
+                (fixed, captured) = splitAt (length (toList args) - extras) (toList args)
+                own = fromIntegral (natVal (Proxy @k)) - extras
+                slots = [Obj ("«slot" <> show i <> "»") | i <- [0 .. own - 1 :: Int]]
+            body <- maybe (failL ("the parameter of an instance of " <> instanceName inst <> " does not decompile")) pure (decompileFunction (instanceParameter inst) (map Var slots <> captured))
+            body' <- go body
+            fixed' <- traverse go fixed
+            params' <- traverse (liftName env) slots
+            need NeedsSignature
+            need NeedsHashable
+            let schema = instanceName inst
+            pure [||instantiateSchemaAt $$(boundName (leSignature env)) schema (abstraction $$(listCode params') $$body') $$(listCode fixed')||]
         | otherwise -> do
             applied <- lift (functionCode (leSig env) f)
             as <- traverse go args
@@ -816,7 +828,8 @@ liftProof env proof = do
             -- The lemma's binding at the arguments, then the free variables of
             -- its statement substituted, then the weakening: what 'proveWith' does.
             Declared binding flags -> do
-              mapM_ need (Set.toList flags)
+              -- The constraints of the binding are the caller's too; the signature it binds is its own.
+              mapM_ need (Set.toList (Set.delete NeedsSignature flags))
               args' <- traverse (liftArg env) (appealArgs appeal)
               subs' <- traverse go subs
               let applied = foldl (\f x -> [|$f $(pure x)|]) (QTH.varE binding) (args' <> subs')
@@ -833,10 +846,16 @@ liftProof env proof = do
                   extra <- liftContext env (appealWeakening appeal)
                   lift [|weakenProof $(unTypeCode extra) $substituted|]
             -- A proof known here is instantiated here, and spliced as the steps it is made of.
-            Inline proof -> do
+            Inline inlined -> do
               unless (null (appealArgs appeal) && null subs) $
                 failL (appealName appeal <> " is spliced in place, so it takes neither arguments nor premises")
-              go (cata (Free . RuleStep) (weakenProof (appealWeakening appeal) (substProof (appealSubst appeal) proof)))
+              go (cata (Free . RuleStep) (weakenProof (appealWeakening appeal) (substProof (appealSubst appeal) inlined)))
+        -- A premise under more hypotheses than it states: its proof, weakened at run time.
+        Free (WeakenStep extra sub) -> do
+          need NeedsFresh
+          extra' <- liftContext env extra
+          sub' <- go sub
+          lift [|weakenProof $(unTypeCode extra') $(pure sub')|]
       -- A free variable of the lemma is the name its proof spells it by, whatever the current proof calls its own.
       liftPair (v, t) = do
         v' <- case v of

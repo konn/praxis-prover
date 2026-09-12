@@ -6,9 +6,10 @@ rules, as 'Language.Praxis.PRA.Tactic.Quote.praFile' splices them, and
 @.prf@ files of definitions, as 'Language.Praxis.PRA.PrimitiveRecursion.Quote.prfFile'
 does.
 
-A @.pra@ document is read over the 'builtin' signature, with the unfolding
+A @.pra@ document is read over the 'builtin' signature, with the lemmas of the
+library of praxis-core, "Language.Praxis.PRA.Library", and the unfolding
 lemmas of 'builtin' in scope and each declaration a lemma for those after it,
-as the quasiquoter reads it; every declaration is checked, and a failure is a
+as the quasiquoter reads it with those lemmas in scope; every declaration is checked, and a failure is a
 diagnostic at the tactic which failed, a @sorry@
 an information diagnostic listing the goal it stopped at.  Hovering over a
 tactic shows the goal it faces, found by running the proof with that tactic
@@ -28,7 +29,6 @@ module Language.Praxis.LSP (
 
 import Control.Exception (displayException)
 import Control.Monad.IO.Class (liftIO)
-import Data.Bifunctor (bimap)
 import Data.Char (isSpace)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
@@ -42,13 +42,13 @@ import Language.LSP.Protocol.Message
 import Language.LSP.Protocol.Types
 import Language.LSP.Server
 import Language.LSP.VFS (virtualFileText, virtualFileVersion)
+import Language.Praxis.PRA.Library (certifiedLibrary, libraryScope)
 import Language.Praxis.PRA.PrimitiveRecursion (builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (checkErrorPosition, checkQuote, renderCheckError)
 import Language.Praxis.PRA.Syntax.Parser (syntaxErrorPosition)
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
-import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaName, renderSchemaTacticError, schemaScope)
-import Language.Praxis.PRA.Tactic.Unfolding (renderUnfoldingError, unfoldingLemmas)
+import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeExtension)
 
@@ -183,7 +183,7 @@ analysePra text = case builtinLemmas of
        in [Report line column DiagnosticSeverity_Error (T.pack (displayException err))]
     Right (_, decls) -> case signatureEnv builtin of
       Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack (displayException err))]
-      Right kernel -> go kernel base decls
+      Right kernel -> go kernel (withoutDeclared decls base) decls
   where
     go _ _ [] = []
     go kernel lemmas (d : ds) = case checkDecl kernel lemmas d of
@@ -200,9 +200,23 @@ analysePra text = case builtinLemmas of
       (l, ':' : rest) | all (`elem` ['0' .. '9']) l, (c, ':' : ' ' : msg) <- break (== ':') rest, all (`elem` ['0' .. '9']) c, not (null c) -> msg
       _ -> s
 
--- | The lemmas in scope before any declaration: the unfolding lemmas of 'builtin'.
+{- |
+The lemmas in scope before any declaration: those of the library,
+"Language.Praxis.PRA.Library", and the unfolding lemmas of 'builtin'.
+-}
 builtinLemmas :: Either String (Map String (Lemma SchemaName))
-builtinLemmas = bimap (renderUnfoldingError builtin renderSchemaName) (fmap certifiedLemma) (unfoldingLemmas (schemaScope builtin [] []))
+builtinLemmas = libraryScope
+
+{- |
+The lemmas to check the declarations of a document against: all those before
+any declaration, but the lemmas of the library the document declares itself.
+The library read as a document then appeals only to what comes before, as
+when it is certified.
+-}
+withoutDeclared :: [Decl SchemaName] -> Map String (Lemma SchemaName) -> Map String (Lemma SchemaName)
+withoutDeclared decls = (`Map.withoutKeys` Set.intersection (Set.fromList (map declName decls)) library)
+  where
+    library = either (const Set.empty) Map.keysSet certifiedLibrary
 
 -- | What the parser needs of the lemmas: the sorts of their arguments.
 lemmaSorts :: Map String (Lemma SchemaName) -> Lemmas
@@ -225,7 +239,7 @@ hoverAt text line column = do
       | (before, d) <- reverse (zip (prefixes decls) decls)
       , Just loc <- [locBefore (declTactic d)]
       ]
-  let lemmas = certified kernel base before
+  let lemmas = certified kernel (withoutDeclared decls base) before
       stubbed = d {declTactic = replaceAt target Sorry (declTactic d)}
   case checkDecl kernel lemmas stubbed of
     Left (TacticError _ goal Unfinished) -> Just (renderGoal goal)

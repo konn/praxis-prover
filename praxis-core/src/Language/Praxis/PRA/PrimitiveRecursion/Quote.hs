@@ -54,7 +54,7 @@ import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal, type (+), type (-), typ
 import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
-import Language.Haskell.TH.Syntax (Lift, addDependentFile, getQ, lift, liftTyped, mkNameG_v, putQ, unTypeCode)
+import Language.Haskell.TH.Syntax (Lift, addDependentFile, getQ, lift, liftTyped, makeRelativeToProject, mkNameG_v, putQ, unTypeCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Parser
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename
@@ -66,6 +66,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (arityType)
 import Language.Praxis.PRA.Signature qualified as Sig
 import Language.Praxis.TH.Internal qualified as QTH
 import Numeric.Natural (Natural)
+import System.IO (IOMode (ReadMode), hGetContents', hSetEncoding, utf8, withFile)
 import Text.Megaparsec (ParseErrorBundle, SourcePos (..), attachSourcePos, bundleErrors, bundlePosState, eof, errorBundlePretty, errorOffset, getSourcePos, optional, parse, sourcePosPretty, try, unPos, (<|>))
 
 data Header = Header !T.Text !(Maybe T.Text)
@@ -86,9 +87,10 @@ path is relative to the directory the compiler runs in, the package's, and
 the module is recompiled when the file changes.
 -}
 quoteFile :: QuasiQuoter -> FilePath -> TH.Q [TH.Dec]
-quoteFile qq path = do
+quoteFile qq relative = do
+  path <- makeRelativeToProject relative
   addDependentFile path
-  source <- TH.runIO (readFile path)
+  source <- TH.runIO (withFile path ReadMode \h -> hSetEncoding h utf8 *> hGetContents' h)
   quoteDec qq source
 
 -- | 'quoteFile' with 'prf'.

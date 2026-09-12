@@ -197,6 +197,7 @@ apart taken eq = eq {E.args = map (fmap rename) (E.args eq), E.clause = renameIn
       E.IfThenElseET c t e -> E.IfThenElseET (renameIn c) (renameIn t) (renameIn e)
       E.LamET hs body -> E.LamET hs (renameIn body)
       E.MuET h bound body -> E.MuET h (renameIn bound) (renameIn body)
+      E.QuantET q h bound body -> E.QuantET q h (renameIn bound) (renameIn body)
       t -> t
 
 patternVariables :: E.Pattern name -> [name]

@@ -428,7 +428,8 @@ prettyTests =
           , "|- mu {lt} 3 0 = 3"
           , "|- (μ i < 10. 3 < i) = 4"
           , "|- (μ i < 10. y < i) + 1 = 4"
-          , "|- (μ i < 10. (μ j < i. 3 < j) < i) = 5"
+          , "|- (μ i < 10. (μ j < i. 3 < j) + 1 < i) = 5"
+          , "|- (μ i < 10. ∃ j < i. 3 < j) = 5"
           , "a + 1 = 2 |- a = 1"
           ]
     , testCase "a comparison standing alone is its equation with 1" $ do
@@ -911,7 +912,7 @@ abstractFunctionTests =
         lemmas <- checkedAll sig cvSource
         proved sig lemmas "|- 0 < S t by exact cvInduction m t { refl }"
         proved sig lemmas "y = 0 |- 0 < (y + S t) by exact cvInduction m t { refl }"
-        stopsIn sig lemmas "x = 0 |- 0 < (t < S x) by exact cvInduction m t { sorry }" "1:51: sorry: the proof stops here\n  H1 : x = 0\n  H2 : holdsBelow {λ i j. i < S j} m x = 1\n  |- 0 < (m < S x)"
+        stopsIn sig lemmas "x = 0 |- 0 < (t < S x) by exact cvInduction m t { sorry }" "1:51: sorry: the proof stops here\n  H1 : x = 0\n  H2 : ∀ i < m. i < S x\n  |- 0 < (m < S x)"
     ]
   where
     refuses src =
@@ -953,11 +954,8 @@ abstractFunctionTests =
       run sig lemmas src >>= \case
         Left err -> renderSchemaTacticError sig err @?= expected
         Right _ -> assertFailure "proved"
-    -- The builtin signature with holdsBelow: P holds below n.
-    cvSignature = do
-      eqs <- either (assertFailure . displayException) pure (parseEquations (T.pack "holdsBelow {P} 0 $[xs] = 1\nholdsBelow {P} (S n) $[xs] = if P n $[xs] then holdsBelow {P} n $[xs] else 0\n"))
-      block <- either (assertFailure . displayException) pure (compileDefinitions (compiledEnvironment builtin) eqs)
-      pure (builtin <> blockSignature block)
+    -- The builtin signature, which defines holdsBelow: P holds below n.
+    cvSignature = pure builtin
     cvSource =
       unlines
         [ "theorem zeroOrSucc : |- n = 0 \\/ n = S (prd n)"

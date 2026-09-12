@@ -10,16 +10,28 @@ Terms are written in the applicative syntax of the equation language,
 >           | term op term                   -- + - * ^ < <= ==, through the symbols the signature names
 >           | if term then term else term    -- through ifte
 >           | μ ident < term . term          -- a bounded search, through the schema mu
+>           | ∀ ident < term . term          -- a bounded quantifier over a code, through holdsBelow; ∃ through mu
 > arg     ::= ident                          -- a variable, or a 0-ary symbol
 >           | numeral
 >           | _                              -- a wildcard, in patterns only
 >           | ( term )
 >           | { term }                       -- a schema parameter, within an application only
 > atom    ::= term = term | term            -- a comparison standing alone is its equation with 1
+>           | ∀ ident < term . formula       -- a bounded quantifier; ∃ likewise, forall and exists spelt out
 > formula ::= atom | _|_ | ~ formula
 >           | formula /\ formula | formula \/ formula | formula ==> formula
 >           | ( formula )
 > sequent ::= [formula {, formula}] |- formula
+
+A bounded quantifier is an atom: @∀ i < t. A@ is the equation of @holdsBelow
+{λ i y₁ … yₖ. c} t s₁ … sₖ@ with 1, and @∃ i < t. A@ that of @mu {λ i y₁ …
+yₖ. c} t s₁ … sₖ < t@, where @c@ is the code of @A@, as
+"Language.Praxis.PRA.Reflection" encodes it, and the @sⱼ@ are the maximal
+subterms of @c@ not mentioning @i@, which the lambda captures: after a
+substitution, the formula is the same term again.  The binder scopes over the
+body, which extends as far right as it can, and a formula metavariable cannot
+stand in it, having no code.  Within a term, @∀ i < t. c@ and @∃ i < t. c@
+quantify a code @c@ directly.
 
 A schema is applied to its parameter first, a symbol name or a lambda
 @λ x. body@ closed over its binders, then to its arguments: @mu {lt} 3 0@,
@@ -108,14 +120,12 @@ module Language.Praxis.PRA.Syntax.Parser (
 ) where
 
 import Control.Exception (Exception (..))
-import Control.Monad (guard, unless, void)
+import Control.Monad (unless, void)
 import Data.Bifunctor (first)
-import Data.Foldable (toList)
 import Data.Hashable (Hashable)
 import Data.List (nub)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Multiset qualified as MS
 import Data.Proxy (Proxy (..))
 import Data.Sized qualified as SV
@@ -135,7 +145,8 @@ import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (signatureEnv)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax qualified as E
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic (expandTerm)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
-import Language.Praxis.PRA.Signature (Signature, Symbol (..), lookupSymbol, symbolArity)
+import Language.Praxis.PRA.Reflection (comparisonSymbols, isComparison)
+import Language.Praxis.PRA.Signature (Signature)
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural (Natural)
 import Text.Megaparsec (ParseErrorBundle, attachSourcePos, bundleErrors, bundlePosState, choice, eof, errorBundlePretty, errorOffset, getOffset, notFollowedBy, oneOf, option, optional, parse, region, sepBy1, setErrorOffset, sourceColumn, sourceLine, try, unPos, (<?>), (<|>))
@@ -227,35 +238,6 @@ parseAtomicPattern sc = runParserFully (atomicP sc)
 parseFormulaPattern :: Scope a -> String -> Either SyntaxError (Formula (Hole a))
 parseFormulaPattern sc = runParserFully (formulaP sc)
 
--- * Comparisons
-
-{- |
-The symbols the parser reads the comparisons @<@, @<=@ and @==@ as, when
-the signature has them: the first candidate of arity two, as for any
-operator.
--}
-comparisonSymbols :: Signature -> [Symbol]
-comparisonSymbols sig =
-  [ sym
-  | candidates <- [["lt"], ["le", "lte"], ["eq"]]
-  , Just sym <- [listToMaybe (mapMaybe binary candidates)]
-  ]
-  where
-    binary c = do
-      sym <- lookupSymbol c sig
-      guard (symbolArity sym == 2)
-      pure sym
-
-{- |
-Whether the term is an application of a comparison.  Standing alone as an
-atom, it is its equation with @1@, and "Language.Praxis.PRA.Syntax.Pretty"
-shows such an equation the same way.
--}
-isComparison :: Signature -> Term b -> Bool
-isComparison sig = \case
-  App f args | [_, _] <- toList args -> any ((== F.SomeFunction f) . symbolFunction) (comparisonSymbols sig)
-  _ -> False
-
 -- * Lexemes
 
 -- | Whitespace and comments, those of the equation language.
@@ -312,7 +294,18 @@ closedP p = do
 
 -- | The term grammar of the equation language, with the scope's reserved words and wildcards.
 termSyntax :: Scope a -> TermSyntax
-termSyntax sc = TermSyntax {syntaxReserved = reservedWords sc, syntaxWildcard = True}
+termSyntax sc = TermSyntax {syntaxReserved = reservedWords sc, syntaxWildcard = True, syntaxAtom = Just (codeP sc)}
+
+{- | The code of a formula as a term, @⟦A⟧@, also spelt @[[A]]@: read under the
+binders in scope, and encoded as "Language.Praxis.PRA.Reflection" encodes a
+formula, as the body of a quantifier is.
+-}
+codeP :: Scope a -> [[T.Text]] -> Parser (E.EqTerm T.Text)
+codeP sc binders = do
+  unicode <- (True <$ symbolP "⟦") <|> (False <$ symbolP "[[")
+  f <- rawFormulaP sc binders
+  if unicode then symbolP "⟧" else symbolP "]]"
+  pure (encodeRaw f)
 
 -- | A term: an application, an operator expression, a conditional or a bounded search.
 termP :: Scope a -> Parser (Term (Hole a))
@@ -339,7 +332,8 @@ be closed, is compiled as a definition of its own.
 resolveTerm :: forall a. Scope a -> E.EqTerm T.Text -> Either String (Term (Hole a))
 resolveTerm sc raw = do
   let initial = signatureEnv (scopeSignature sc)
-      variables = nub [n | n <- names raw, Map.notMember n initial, n /= "_"]
+      -- The abstract functions of the scope are functions, not variables.
+      variables = nub [n | n <- names raw, Map.notMember n initial, n /= "_", Nothing <- [scopeSchemaParameter sc (T.unpack n)]]
   (env, term) <- elaboration (expandTerm initial variables raw)
   go env term
   where
@@ -367,6 +361,7 @@ resolveTerm sc raw = do
         pure (App f (l' SV.:< r' SV.:< SV.Nil))
       E.LamET {} -> elaboration (Left LambdaOutsideSchemaParameter)
       E.MuET {} -> elaboration (Left BoundedSearchOutOfScope)
+      E.QuantET q _ _ _ -> elaboration (Left (QuantifierOutOfScope (E.quantifierSchema q)))
       E.SplatET xs -> elaboration (Left (SplatOutsideVariadicSchema xs))
       E.BoundET {} -> elaboration (Left BinderOutsideLambda)
       term@(_ E.:@ _) -> application env (spine term)
@@ -449,8 +444,19 @@ resolveTerm sc raw = do
       E.LamET hints body -> do
         unless (fromIntegral (length hints) == pArity) $
           elaboration (Left (LambdaArityMismatch sName pArity (fromIntegral (length hints))))
-        compileLambda env hints body
+        compileLambda (env <> abstractEnv) hints body
       other -> elaboration (Left (InvalidSchemaArgument other))
+
+    -- The abstract functions of the scope the term names, which a lambda
+    -- calls as the functions they are: an opaque call, as the engine's
+    -- closures make one.
+    abstractEnv :: E.Env
+    abstractEnv =
+      Map.fromList
+        [ (n, E.SomeFunction (E.Bound fun))
+        | n <- nub (names raw)
+        , Just (F.SomeFunction fun) <- [scopeSchemaParameter sc (T.unpack n)]
+        ]
 
     -- A closed lambda is compiled as a definition over its binders.
     compileLambda :: E.Env -> [E.IrrelevantName] -> E.EqTerm T.Text -> Either String F.SomeFunction
@@ -483,6 +489,7 @@ resolveTerm sc raw = do
           E.BoundET d i | d == depth, i < length params -> E.NameET (params !! i)
           E.LamET hs b -> E.LamET hs (open (depth + 1) b)
           E.MuET h bound b -> E.MuET h (open depth bound) (open (depth + 1) b)
+          E.QuantET q h bound b -> E.QuantET q h (open depth bound) (open (depth + 1) b)
           f E.:@ x -> open depth f E.:@ open depth x
           E.InfixET l op r -> E.InfixET (open depth l) op (open depth r)
           E.IfThenElseET c t e -> E.IfThenElseET (open depth c) (open depth t) (open depth e)
@@ -504,6 +511,7 @@ resolveTerm sc raw = do
       E.IfThenElseET c t e -> names c <> names t <> names e
       E.LamET _ b -> names b
       E.MuET _ bound b -> names bound <> names b
+      E.QuantET _ _ bound b -> names bound <> names b
       _ -> []
 
     spine :: E.EqTerm T.Text -> (E.EqTerm T.Text, [E.EqTerm T.Text])
@@ -515,7 +523,7 @@ resolveTerm sc raw = do
 -- * Formulae
 
 atomicP :: Scope a -> Parser (Atomic (Hole a))
-atomicP sc = metaAtomicP <|> equationP
+atomicP sc = quantifiedP sc <|> parenthesizedQuantifierP sc <|> metaAtomicP <|> equationP
   where
     -- A comparison may stand alone, for its equation with 1.
     equationP = do
@@ -533,16 +541,14 @@ formulaP :: Scope a -> Parser (Formula (Hole a))
 formulaP sc = implP
   where
     -- Each level is right-associative.
-    implP = binary orP implOp implP (:==>)
-    orP = binary andP orOp orP (:\/)
-    andP = binary unaryP andOp andP (:/\)
-    binary operand op rest con = do
-      l <- operand
-      option l (con l <$> (op *> rest))
+    implP = connectiveP orP implOpP implP (:==>)
+    orP = connectiveP andP orOpP orP (:\/)
+    andP = connectiveP unaryP andOpP andP (:/\)
     -- An atom before a parenthesized formula: (x < y) may begin an equation, (x < y) = 0.
     unaryP =
       choice
-        [ (:==> Bot) <$> (negOp *> unaryP)
+        [ Atm <$> quantifiedP sc
+        , (:==> Bot) <$> (negOpP *> unaryP)
         , Bot <$ botP
         , Atm <$> try (atomicP sc)
         , try (parens (formulaP sc))
@@ -554,11 +560,6 @@ formulaP sc = implP
       optional (parens (termP sc `sepBy1` commaP)) >>= \case
         Nothing -> maybe (fail "not a formula") (pure . fmap Named) (scopeFormula sc name)
         Just args -> either fail pure (scopeApplied sc name args)
-    andOp = lexeme (try (void (CP.string "/\\") <|> void (CP.char '\8743'))) <?> "\"/\\\""
-    orOp = lexeme (try (void (CP.string "\\/") <|> void (CP.char '\8744'))) <?> "\"\\/\""
-    implOp = lexeme (try (void (CP.string "==>") <|> void (CP.char '\8594'))) <?> "\"==>\""
-    negOp = lexeme (void (CP.char '~') <|> void (CP.char '\172')) <?> "\"~\""
-    botP = lexeme (try (void (CP.string "_|_") <|> void (CP.char '\8869'))) <?> "\"_|_\""
 
 -- * Sequents
 
@@ -574,3 +575,156 @@ hypothesesP sc = (,) <$> option [] (itemP `sepBy1` commaP) <* turnstileP <*> clo
     contextP = try do
       name <- identifierP sc
       maybe (fail "not a context") pure (scopeContext sc name)
+
+-- * Bounded quantifiers
+
+{- |
+A formula in the body of a bounded quantifier: its atoms are terms of the
+equation language read under the binders of the quantifiers around them, so
+that a bound variable is an occurrence of its binder, never a name.
+-}
+data RawFormula
+  = RawAtom !(E.EqTerm T.Text) !(E.EqTerm T.Text)
+  | RawBot
+  | RawAnd !RawFormula !RawFormula
+  | RawOr !RawFormula !RawFormula
+  | RawImp !RawFormula !RawFormula
+  | RawQuant !E.Quantifier !E.IrrelevantName !(E.EqTerm T.Text) !RawFormula
+
+-- | A bounded quantifier as an atom: the code of its body, closed over the binder, searched.
+quantifiedP :: Scope a -> Parser (Atomic (Hole a))
+quantifiedP sc = do
+  o <- getOffset
+  (q, i, bound) <- quantifierHeadP sc []
+  body <- rawFormulaP sc [[i]]
+  let code = E.QuantET q (E.IrrelevantName i) bound (encodeRaw body)
+  t <- either (region (setErrorOffset o) . fail) pure (resolveTerm sc code)
+  pure (t :=== Lit 1)
+
+-- | The quantifier, its binder and its bound: @∀ i < t.@ or @∃ i < t.@, also spelt @forall@ and @exists@.
+quantifierHeadP :: Scope a -> [[T.Text]] -> Parser (E.Quantifier, T.Text, E.EqTerm T.Text)
+quantifierHeadP sc binders = do
+  q <- (E.Forall <$ (symbolP "∀" <|> keywordP "forall")) <|> (E.Exists <$ (symbolP "∃" <|> keywordP "exists"))
+  i <- T.pack <$> identifierP sc
+  lexeme (try (CP.char '<' *> notFollowedBy (CP.char '='))) <?> "\"<\""
+  bound <- EP.eqBoundUnder (termSyntax sc) binders
+  symbolP "."
+  pure (q, i, bound)
+
+-- | The body of a bounded quantifier, under the binders given, innermost first.
+rawFormulaP :: Scope a -> [[T.Text]] -> Parser RawFormula
+rawFormulaP sc binders = implP
+  where
+    implP = connectiveP orP implOpP implP RawImp
+    orP = connectiveP andP orOpP orP RawOr
+    andP = connectiveP unaryP andOpP andP RawAnd
+    unaryP =
+      choice
+        [ quantP
+        , (`RawImp` RawBot) <$> (negOpP *> unaryP)
+        , RawBot <$ botP
+        , try (parens parenthesizedQuantP <* notFollowedBy termContinuationP)
+        , try atomP
+        , parens (rawFormulaP sc binders)
+        ]
+        <?> "formula"
+    -- A quantifier in any number of parentheses.
+    parenthesizedQuantP = quantP <|> parens parenthesizedQuantP
+    quantP = do
+      (q, i, bound) <- quantifierHeadP sc binders
+      RawQuant q (E.IrrelevantName i) bound <$> rawFormulaP sc ([i] : binders)
+    atomP = do
+      s <- term
+      if rawComparison s
+        then option (RawAtom s (E.LitET 1)) (RawAtom s <$> (equalsP *> term))
+        else RawAtom s <$> (equalsP *> term)
+    term = EP.eqTermUnder (termSyntax sc) binders
+
+{- |
+The code of the body of a bounded quantifier, as "Language.Praxis.PRA.Reflection"
+encodes a formula, on the terms as written.
+-}
+encodeRaw :: RawFormula -> E.EqTerm T.Text
+encodeRaw = \case
+  RawAtom s t
+    | isOne t, Just u <- positive s, not (structuredCode u) -> u
+    | isOne t, booleanCode s -> s
+    | otherwise -> E.InfixET s "==" t
+  RawBot -> E.LitET 0
+  RawAnd f g -> connective "conj" f g
+  RawOr f g -> connective "disj" f g
+  RawImp f g -> connective "imp" f g
+  RawQuant q i bound f -> E.QuantET q i bound (encodeRaw f)
+  where
+    connective c f g = E.NameET c E.:@ encodeRaw f E.:@ encodeRaw g
+    isOne = \case
+      E.LitET 1 -> True
+      _ -> False
+    positive = \case
+      E.InfixET (E.LitET 0) "<" u -> Just u
+      E.NameET "lt" E.:@ E.LitET 0 E.:@ u -> Just u
+      _ -> Nothing
+
+-- | Whether a term as written is a comparison, which may stand alone as an atom.
+rawComparison :: E.EqTerm T.Text -> Bool
+rawComparison = \case
+  E.InfixET _ op _ -> op `elem` ["<", "<=", "=="]
+  E.NameET c E.:@ _ E.:@ _ -> c `elem` ["lt", "le", "lte", "eq"]
+  E.QuantET E.Exists _ _ _ -> True
+  _ -> False
+
+-- | Whether a code as written reads as its equation with 1: a comparison @<@ or @<=@, or a bounded quantifier.
+booleanCode :: E.EqTerm T.Text -> Bool
+booleanCode = \case
+  E.InfixET _ op _ -> op `elem` ["<", "<="]
+  E.NameET c E.:@ _ E.:@ _ | c `elem` ["lt", "le", "lte"] -> True
+  E.QuantET {} -> True
+  t -> case spineOf t of
+    (E.NameET "holdsBelow", _ : _) -> True
+    _ -> False
+
+-- | Whether a code as written is more than its truth: a connective, false, an equation, or boolean.
+structuredCode :: E.EqTerm T.Text -> Bool
+structuredCode t =
+  booleanCode t || case t of
+    E.LitET 0 -> True
+    E.InfixET _ "==" _ -> True
+    E.NameET c E.:@ _ E.:@ _ -> c `elem` ["conj", "disj", "imp", "eq"]
+    _ -> False
+
+spineOf :: E.EqTerm T.Text -> (E.EqTerm T.Text, [E.EqTerm T.Text])
+spineOf = collect []
+  where
+    collect xs (f E.:@ x) = collect (x : xs) f
+    collect xs f = (f, xs)
+
+-- The connectives: each level associates to the right.
+connectiveP :: Parser f -> Parser () -> Parser f -> (f -> f -> f) -> Parser f
+connectiveP operand op rest con = do
+  l <- operand
+  option l (con l <$> (op *> rest))
+
+andOpP, orOpP, implOpP, negOpP, botP :: Parser ()
+andOpP = lexeme (try (void (CP.string "/\\") <|> void (CP.char '\8743'))) <?> "\"/\\\""
+orOpP = lexeme (try (void (CP.string "\\/") <|> void (CP.char '\8744'))) <?> "\"\\/\""
+implOpP = lexeme (try (void (CP.string "==>") <|> void (CP.char '\8594'))) <?> "\"==>\""
+negOpP = lexeme (void (CP.char '~') <|> void (CP.char '\172')) <?> "\"~\""
+botP = lexeme (try (void (CP.string "_|_") <|> void (CP.char '\8869'))) <?> "\"_|_\""
+
+-- | What continues a parenthesized term within a larger one: an equation, or an operator.
+termContinuationP :: Parser ()
+termContinuationP =
+  equalsP
+    <|> void (try (CP.string "==" <* notFollowedBy (CP.char '>')))
+    <|> void (oneOf ("<+*^" :: String))
+    <|> void (try (CP.char '-' <* notFollowedBy (oneOf ("->" :: String))))
+
+{- |
+A bounded quantifier in any number of parentheses, read as the formula when
+no term goes on after it: @((∃ i < t. 0 < i))@ is @∃ i < t. 0 < i@, where
+@(∃ i < t. c) = 1@ quantifies the code @c@ as written.
+-}
+parenthesizedQuantifierP :: Scope a -> Parser (Atomic (Hole a))
+parenthesizedQuantifierP sc = try (parens inner <* notFollowedBy termContinuationP)
+  where
+    inner = quantifiedP sc <|> parens inner

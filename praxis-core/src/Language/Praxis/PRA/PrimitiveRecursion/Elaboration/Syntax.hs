@@ -8,6 +8,8 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (
   SplatPosition (..),
   IrrelevantName (..),
   EqTerm (..),
+  Quantifier (..),
+  quantifierSchema,
   Function (..),
   SchemaArg (..),
   VariadicTemplate (..),
@@ -73,10 +75,27 @@ data EqTerm name
     LamET ![IrrelevantName] !(EqTerm name)
   | -- | @μ i < bound. body@: bounded search, desugared into a @mu@ schema.
     MuET !IrrelevantName !(EqTerm name) !(EqTerm name)
+  | {- | @∀ i < bound. body@ or @∃ i < bound. body@: a bounded quantifier over a
+    code, desugared into the schema 'quantifierSchema' names.
+    -}
+    QuantET !Quantifier !IrrelevantName !(EqTerm name) !(EqTerm name)
   | -- | @$[xs]@ as an argument: the variadic arguments of the enclosing schema.
     SplatET !name
   deriving (Show, Eq, Ord, Generic, Lift)
   deriving anyclass (Hashable)
+
+-- | A bounded quantifier: for all, or for some, @i@ below the bound.
+data Quantifier = Forall | Exists
+  deriving (Show, Eq, Ord, Generic, Lift)
+  deriving anyclass (Hashable)
+
+{- | The schema a bounded quantifier searches with: @∀ i < b. c@ is @holdsBelow@
+of the code @c@ at @b@, and @∃ i < b. c@ is @mu@ of it at @b@ compared with @b@.
+-}
+quantifierSchema :: Quantifier -> T.Text
+quantifierSchema = \case
+  Forall -> T.pack "holdsBelow"
+  Exists -> T.pack "mu"
 
 infixl 9 :@
 

@@ -17,6 +17,11 @@ extra-doc-files:
   CHANGELOG.md
   README.md
 
+extra-source-files:
+  src-pra/*.pra
+  test/data/*.pra
+  test/data/*.prf
+
 source-repository head
   type: git
   location: https://github.com/konn/praxis
@@ -82,6 +87,7 @@ library
     Language.Praxis.Name
     Language.Praxis.PRA.Equality
     Language.Praxis.PRA.Lemmas
+    Language.Praxis.PRA.Library
     Language.Praxis.PRA.Pattern
     Language.Praxis.PRA.PrimitiveRecursion
     Language.Praxis.PRA.PrimitiveRecursion.Code
@@ -99,6 +105,7 @@ library
     Language.Praxis.PRA.PrimitiveRecursion.Quote
     Language.Praxis.PRA.Proof
     Language.Praxis.PRA.Proof.Transform
+    Language.Praxis.PRA.Reflection
     Language.Praxis.PRA.Rule
     Language.Praxis.PRA.Rule.G3i
     Language.Praxis.PRA.Rule.TH
@@ -144,6 +151,7 @@ test-suite praxis-core-test
     Language.Praxis.PRA.PRFQuoteTest
     Language.Praxis.PRA.PrimitiveRecursion.Examples
     Language.Praxis.PRA.ProofTest
+    Language.Praxis.PRA.QuantifierTest
     Language.Praxis.PRA.QuoteLibrary
     Language.Praxis.PRA.QuoteLibraryTest
     Language.Praxis.PRA.QuoteSignature

@@ -76,6 +76,7 @@ findSchemaParamArity param eqs defaultArity =
       IfThenElseET c t e -> findInTerm c <|> findInTerm t <|> findInTerm e
       LamET _ body -> findInTerm body
       MuET _ bound body -> findInTerm bound <|> findInTerm body
+      QuantET _ _ bound body -> findInTerm bound <|> findInTerm body
       t :@ x -> case spine (t :@ x) [] of
         (NameET h, arguments)
           | h == param -> Just (fromIntegral (length arguments))
@@ -173,6 +174,7 @@ renameTermIn env scope schemaCtx term = case term of
         _ -> lookupBinaryOp rest
   LamET _ _ -> Left LambdaOutsideSchemaParameter
   MuET {} -> Left BoundedSearchOutOfScope
+  QuantET q _ _ _ -> Left (QuantifierOutOfScope (quantifierSchema q))
   SplatET xs -> Left (SplatOutsideVariadicSchema xs)
   BoundET depth position -> case scopeOuter scope of
     Nothing -> Left BinderOutsideLambda

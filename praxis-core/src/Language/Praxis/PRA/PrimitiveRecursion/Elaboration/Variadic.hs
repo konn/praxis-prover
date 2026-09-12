@@ -13,10 +13,14 @@ argument: every arity constraint it induces is affine in @k@, so those two
 instances validate all of them, and the remaining checks do not depend on
 @k@ at all.
 
-A bounded search @μ i < b. body@ is sugar for the @mu@ schema in scope,
-applied to a lambda closed over the variables the body captures:
-@mu {λ i y₁ … yₖ. body} b y₁ … yₖ@, where the @yᵢ@ are the pattern variables
-and enclosing binders occurring in the body, in order of first occurrence.
+A bounded search @μ i < b. body@ is sugar for the @mu@ schema in scope, and a
+bounded quantifier over a code for the schema it searches with: @∀ i < b.
+body@ is @holdsBelow@, and @∃ i < b. body@ is @mu@ compared with @b@.  The
+schema is applied to a lambda closed over the maximal subterms of the body
+which do not mention @i@, numerals included, then to the bound and those
+subterms: @mu {λ i y₁ … yₖ. body'} b s₁ … sₖ@.  This makes the lambda
+canonical, the same whatever the captured terms become; a body which is a
+function applied to @i@ alone is that function.
 -}
 module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic (
   ExpandedFamily (..),
@@ -30,13 +34,15 @@ import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM_, unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, gets, modify', runStateT)
-import Data.List (elemIndex, nub)
+import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
+import Data.Proxy (Proxy (..))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text qualified as T
+import GHC.TypeNats (natVal)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Env
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax
@@ -62,9 +68,6 @@ expandedEquations expanded = expandedConcrete expanded <> concatMap snd (expande
 -- | The name of a template's instance at a number of variadic arguments.
 instanceName :: T.Text -> Natural -> T.Text
 instanceName ident k = ident <> "@" <> T.pack (show k)
-
-data Capture = CapturedPattern !T.Text | CapturedBinder !Int !Int
-  deriving (Eq)
 
 data Ctx = Ctx
   { ctxPatternVars :: ![T.Text]
@@ -189,6 +192,7 @@ paramShape param = foldr ((<|>) . find . clause) Nothing
       IfThenElseET c t e -> find c <|> find t <|> find e
       LamET _ body -> find body
       MuET _ bound body -> find bound <|> find body
+      QuantET _ _ bound body -> find bound <|> find body
       _ :@ _ -> case spine term of
         (NameET h, arguments)
           | h == param ->
@@ -242,6 +246,7 @@ rewrite ctx term = case term of
   IfThenElseET c t e -> IfThenElseET <$> rewrite ctx c <*> rewrite ctx t <*> rewrite ctx e
   LamET hints body -> LamET hints <$> rewrite ctx {ctxBinders = hints : ctxBinders ctx} body
   MuET hint bound body -> desugarMu ctx hint bound body
+  QuantET q hint bound body -> desugarQuant ctx q hint bound body
   SplatET xs -> throw (SplatOutsideArgument xs)
 
 rewriteApp :: Ctx -> EqTerm T.Text -> M (EqTerm T.Text)
@@ -310,56 +315,138 @@ instantiate ident k = do
               }
         _ -> throw (UnknownVariadicSchema ident)
 
-{- | Inner searches are desugared first, so afterwards only closed lambdas
-remain beneath the body and every capture is visible at its top level.
--}
+-- | A bounded search @μ i < b. body@ is the search of the schema @mu@ in scope, see 'searchWith'.
 desugarMu :: Ctx -> IrrelevantName -> EqTerm T.Text -> EqTerm T.Text -> M (EqTerm T.Text)
 desugarMu ctx hint bound body = do
-  bound' <- rewrite ctx bound
-  body' <- rewrite ctx {ctxBinders = [hint] : ctxBinders ctx} body
-  let captured = nub (captures 0 body')
-      binders = hint : map captureHint captured
-      closed = close captured 0 body'
-      arguments = map captureArgument captured
   env <- gets stEnv
   unless (Map.member "mu" env) $
     throw BoundedSearchOutOfScope
-  hd <- rewriteHead ctx (NameET "mu") (2 + length captured)
-  pure (foldl (:@) hd (LamET binders closed : bound' : arguments))
+  fst <$> searchWith ctx "mu" hint bound body
+
+{- | A bounded quantifier over a code is the search of the schema it searches
+with: @∀ i < b. body@ that of @holdsBelow@, and @∃ i < b. body@ that of @mu@
+compared with the bound.
+-}
+desugarQuant :: Ctx -> Quantifier -> IrrelevantName -> EqTerm T.Text -> EqTerm T.Text -> M (EqTerm T.Text)
+desugarQuant ctx q hint bound body = do
+  env <- gets stEnv
+  let schema = quantifierSchema q
+  unless (Map.member schema env) $
+    throw (QuantifierOutOfScope schema)
+  (search, bound') <- searchWith ctx schema hint bound body
+  pure case q of
+    Forall -> search
+    Exists -> InfixET search "<" bound'
+
+{- | The schema applied to the canonical closure of the body and to the bound,
+with the bound: @schema {λ i y₁ … yₖ. body'} b s₁ … sₖ@, where the @sⱼ@ are the
+maximal subterms of the body which do not mention @i@, in the order they occur,
+numerals included, and @body'@ is the body with each replaced by its @yⱼ@.
+Unlike capturing variables, this makes the lambda canonical, the same function
+whatever the captured terms become, as "Language.Praxis.PRA.Syntax" abstracts
+a term.  A body which is a function applied to @i@ alone is that function, the
+parameter itself.  Inner binders are desugared first, so only closed lambdas
+remain beneath the body.
+-}
+searchWith :: Ctx -> T.Text -> IrrelevantName -> EqTerm T.Text -> EqTerm T.Text -> M (EqTerm T.Text, EqTerm T.Text)
+searchWith ctx schema hint bound body = do
+  bound' <- rewrite ctx bound
+  body' <- rewrite ctx {ctxBinders = [hint] : ctxBinders ctx} body
+  env <- gets stEnv
+  instances <- gets stInstances
+  let (slots, closed) = captureSlots ctx env instances body'
+      param = case closed of
+        NameET f :@ BoundET 0 0 | null slots, unary env f -> NameET f
+        _ -> LamET (hint : map (const (IrrelevantName "y")) slots) closed
+  hd <- rewriteHead ctx (NameET schema) (2 + length slots)
+  pure (foldl (:@) hd (param : bound' : slots), bound')
   where
-    captures level = \case
-      BoundET depth position
-        | level == 0, depth >= 1 -> [CapturedBinder (depth - 1) position]
-        | otherwise -> []
-      NameET ident
-        | level == 0, ident `elem` ctxPatternVars ctx -> [CapturedPattern ident]
-        | otherwise -> []
-      LitET _ -> []
-      SplatET _ -> []
-      f :@ x -> captures level f <> captures level x
-      InfixET l _ r -> captures level l <> captures level r
-      IfThenElseET c t e -> captures level c <> captures level t <> captures level e
-      LamET _ inner -> captures (level + 1 :: Int) inner
-      MuET _ b inner -> captures level b <> captures (level + 1) inner
-    close captured level = \case
-      t@(BoundET depth position)
-        | level == 0, depth >= 1 -> BoundET 0 (position' (CapturedBinder (depth - 1) position))
-        | otherwise -> t
-      t@(NameET ident)
-        | level == 0, Just index <- elemIndex (CapturedPattern ident) captured -> BoundET 0 (1 + index)
-        | otherwise -> t
-      t@(LitET _) -> t
-      t@(SplatET _) -> t
-      f :@ x -> close captured level f :@ close captured level x
-      InfixET l op r -> InfixET (close captured level l) op (close captured level r)
-      IfThenElseET c t e -> IfThenElseET (close captured level c) (close captured level t) (close captured level e)
-      LamET hints inner -> LamET hints (close captured (level + 1 :: Int) inner)
-      MuET h b inner -> MuET h (close captured level b) (close captured (level + 1) inner)
-      where
-        position' capture = maybe 0 (1 +) (elemIndex capture captured)
-    captureHint (CapturedPattern ident) = IrrelevantName ident
-    captureHint (CapturedBinder depth position) = case drop depth (ctxBinders ctx) of
-      (group : _) | position < length group -> group !! position
-      _ -> IrrelevantName "x"
-    captureArgument (CapturedPattern ident) = NameET ident
-    captureArgument (CapturedBinder depth position) = BoundET depth position
+    -- A function of one argument: of the environment, or a name it lacks
+    -- which is no variable, as an abstract function of a rule, a parameter
+    -- of a schema or a definition of the same block, whose arity is checked
+    -- where it is resolved.
+    unary env f
+      | f `elem` ctxPatternVars ctx = False
+      | otherwise = case Map.lookup f env of
+          Just (SomeFunction (_ :: Function m)) -> natVal (Proxy @m) == 1
+          Just _ -> False
+          Nothing -> True
+
+{- | The maximal subterms of a body, under the binder of depth 0, which do not
+mention it, in the order they occur, as they read outside the binder; and the
+body with the @j@-th of them, from 0, replaced by @BoundET 0 (1 + j)@.  Such a
+subterm is a numeral, a variable of the clause, an outer binder, a constant or
+an application; a function standing as the parameter of a schema is none.
+-}
+captureSlots :: Ctx -> Env -> Set T.Text -> EqTerm T.Text -> ([EqTerm T.Text], EqTerm T.Text)
+captureSlots ctx env instances = go []
+  where
+    go acc t
+      | slot t, not (occurs 0 t) = (acc <> [shift 0 t], BoundET 0 (1 + length acc))
+      | otherwise = case t of
+          _ :@ _ -> case spine t of
+            (h, arguments) ->
+              let (parameters, rest) = splitAt (schemaParameters h) arguments
+                  (acc', rest') = goMany acc rest
+               in (acc', foldl (:@) h (parameters <> rest'))
+          InfixET l op r ->
+            let (a1, l') = go acc l
+                (a2, r') = go a1 r
+             in (a2, InfixET l' op r')
+          IfThenElseET c x e ->
+            let (a1, c') = go acc c
+                (a2, x') = go a1 x
+                (a3, e') = go a2 e
+             in (a3, IfThenElseET c' x' e')
+          _ -> (acc, t)
+    goMany acc [] = (acc, [])
+    goMany acc (x : xs) =
+      let (a1, x') = go acc x
+          (a2, xs') = goMany a1 xs
+       in (a2, x' : xs')
+
+    slot = \case
+      LitET _ -> True
+      BoundET d _ -> d > 0
+      NameET "_" -> True
+      NameET x
+        | x `elem` ctxPatternVars ctx -> True
+        | Just (SomeFunction (_ :: Function m)) <- Map.lookup x env -> natVal (Proxy @m) == 0
+        | otherwise -> False
+      _ :@ _ -> True
+      InfixET {} -> True
+      IfThenElseET {} -> True
+      _ -> False
+
+    -- The leading arguments of an application of a schema: its parameters, functions rather than terms.
+    schemaParameters = \case
+      NameET h
+        | Set.member h instances -> 1
+        | otherwise -> case Map.lookup h env of
+            Just (SchemaDef _ params _ _) -> length params
+            Just ImportedSchema {} -> 1
+            Just ImportedVariadic {} -> 1
+            Just VariadicDef {} -> 1
+            _ -> 0
+      _ -> 0
+
+    occurs :: Int -> EqTerm T.Text -> Bool
+    occurs level = \case
+      BoundET d _ -> d == level
+      f :@ x -> occurs level f || occurs level x
+      InfixET l _ r -> occurs level l || occurs level r
+      IfThenElseET c x e -> occurs level c || occurs level x || occurs level e
+      LamET _ b -> occurs (level + 1) b
+      MuET _ b x -> occurs level b || occurs (level + 1) x
+      QuantET _ _ b x -> occurs level b || occurs (level + 1) x
+      _ -> False
+
+    -- Outside the binder, an occurrence of an enclosing binder is one group nearer.
+    shift :: Int -> EqTerm T.Text -> EqTerm T.Text
+    shift level = \case
+      BoundET d p | d > level -> BoundET (d - 1) p
+      f :@ x -> shift level f :@ shift level x
+      InfixET l op r -> InfixET (shift level l) op (shift level r)
+      IfThenElseET c x e -> IfThenElseET (shift level c) (shift level x) (shift level e)
+      LamET hs b -> LamET hs (shift (level + 1) b)
+      t -> t

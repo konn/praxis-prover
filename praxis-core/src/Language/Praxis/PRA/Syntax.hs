@@ -28,6 +28,7 @@ module Language.Praxis.PRA.Syntax (
   functionMetas,
   Abstraction (..),
   abstraction,
+  capturedTerms,
   applyAbstraction,
   abstractionAt,
   compileTerm,
@@ -48,7 +49,6 @@ import Data.Type.Natural hiding (Succ, Zero)
 import Data.Type.Ordinal
 import Data.Vector qualified as V
 import GHC.Generics
-import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal)
 import Language.Praxis.PRA.PrimitiveRecursion.Code hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Function (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
@@ -291,13 +291,58 @@ data Abstraction a = Abstraction
   deriving (Show, Eq, Generic, Functor, Foldable, Traversable)
 
 {- |
-The abstraction of a term over parameters: the variables of the term which
-are not parameters are captured, in the order they first occur.
+The abstraction of a term over parameters.  A function applied to the
+parameters, in order, is that function.  Otherwise the code is the term over
+the parameters and then one slot for each maximal subterm mentioning no
+parameter, in the order they occur, which is captured.
+
+Capturing whole subterms, numerals included, rather than variables makes the
+abstraction canonical: the abstraction of a body with terms substituted for
+its free variables is the abstraction of the body with the substitution
+applied to what it captures.  So an instance of a schema at it is the same
+function whatever the captured terms become, as after an induction or at the
+instance of a lemma.
 -}
 abstraction :: (Eq a) => [a] -> Term a -> Abstraction a
-abstraction params body = Abstraction params body (compileTerm (params <> captured) body) (L.map Var captured)
+abstraction params body
+  | App f xs <- body'
+  , notInline f
+  , Foldable.toList xs == L.map Var params
+  , L.nub params == params =
+      Abstraction params body (F.SomeFunction f) []
+  | otherwise = Abstraction params body (closureCode params (L.length captured) body') captured
   where
-    captured = L.filter (`L.notElem` params) (L.nub (Foldable.toList body))
+    body' = canonicalise body
+    captured = capturedTerms params body'
+    -- Inline code, an instance of a schema, is compiled like any body, as the quantifiers compile it.
+    notInline :: F.Function n -> Bool
+    notInline = \case
+      F.Inline _ -> False
+      _ -> True
+
+-- | The maximal subterms mentioning none of the variables, in the order they occur.
+capturedTerms :: (Eq a) => [a] -> Term a -> [Term a]
+capturedTerms params t
+  | not (mentions params t) = [t]
+  | App _ xs <- t = L.concatMap (capturedTerms params) (Foldable.toList xs)
+  | otherwise = []
+
+mentions :: (Eq a) => [a] -> Term a -> Bool
+mentions params = L.any (`L.elem` params) . Foldable.toList
+
+-- | The code of a term over the parameters and then a slot for each of the given number of captured subterms, in order.
+closureCode :: forall a. (Eq a) => [a] -> Int -> Term a -> F.SomeFunction
+closureCode params slots body = case someNatVal (fromIntegral (L.length params + slots)) of
+  SomeNat (_ :: Proxy n) -> F.SomeFunction (F.programFunction (snd (go @n (L.length params) body)))
+  where
+    go :: forall n. (KnownNat n) => Int -> Term a -> (Int, F.Program n)
+    go next t
+      | not (mentions params t) = (next + 1, F.Base (Proj (ordinals @n L.!! next)))
+      | Var v <- t, Just i <- L.elemIndex v params = (next, F.Base (Proj (ordinals @n L.!! i)))
+      | App f xs <- t = F.Comp (F.functionProgram f) <$> L.mapAccumL (go @n) next xs
+      | otherwise = (next, F.Base Zero)
+    ordinals :: forall n. (KnownNat n) => [Ordinal n]
+    ordinals = Foldable.toList (SV.generate (sNat @n) id :: V n (Ordinal n))
 
 -- | The abstraction applied: its body with the arguments substituted for the parameters, at once; 'Nothing' for the wrong number of them.
 applyAbstraction :: (Eq a) => Abstraction a -> [Term a] -> Maybe (Term a)

@@ -222,22 +222,12 @@ by have C: (t + (u - t) = u \/ u + (t - u) = t) { exact subCases };
          { calc (triangle u) = (triangle t) by cong H1 = (triangle (u + (t - u))) by cong R = (triangle (u + S (prd (t - u)))) by cong Zb };
        exact triangleInjAdd } }
 
-theorem pairInjL : (pair t u = pair t' u') |- (t = t') 
-by 
-  induction u
-  { induction u'
-    { sorry }
-    { sorry }
-  }
-  { sorry 
-  }
-
-
 -- Course-of-values induction, specialized to holdsBelow: p is a term-level
 -- predicate, a term metavariable with a parameter, and holdsBelow {p} n = 1
 -- says p is nonzero below n.  The step is the only premise; an appeal infers
 -- p by abstracting t in the goal, 0 < p(t), and its instance of holdsBelow
--- takes the other variables of the goal as further arguments.
+-- captures the maximal subterms of p(t) not mentioning t, as the lambda of
+-- the quantifier ∀ i < n. A does, passing them as further arguments.
 
 rule cvInduction (n : var) (t : term) (Γ : ctx) (p(n) : term)
   (step : holdsBelow {p} n = 1, Γ |- 0 < p(n))
@@ -284,6 +274,962 @@ theorem ltSuccByCv : |- 0 < (t < S t)
 by exact cvInduction m t
    { calc (0 < (m < S m)) = (0 < 1) by cong ltSucc = 1 }
 
--- The lookup, at an instance capturing a variable of the goal.
-theorem belowAtUsed : holdsBelow {λ i j. i < S j} (S k) x = 1 |- 0 < (k < S x)
+-- The lookup, at an instance capturing a subterm of the goal: the hypothesis
+-- is ∀ i < S k. i < S x, whose lambda captures S x.
+theorem belowAtUsed : holdsBelow {λ i j. i < j} (S k) (S x) = 1 |- 0 < (k < S x)
 by exact belowAt _ k
+
+-- * Absurdity
+
+rule absurdOneZero (Γ : ctx) (A : formula) : 1 = 0, Γ |- A
+by SuccNonZero
+
+rule absurdZeroOne (Γ : ctx) (A : formula) : 0 = 1, Γ |- A
+by symmetry H1 as F; SuccNonZero
+
+-- * Zero, positivity and sgn
+
+theorem zeroOrPos : |- t = 0 \/ 0 < t
+by have Z: (t = 0 \/ t = S (prd t)) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { DisjR2; exact Za }
+   { DisjR1; calc (0 < t) = (0 < S (prd t)) by cong Zb = 1 }
+
+theorem posSucc : 0 < t |- t = S (prd t)
+by have Z: (t = 0 \/ t = S (prd t)) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { have F: (0 = 1) { calc 0 = (0 < 0) = (0 < t) by cong Za = 1 by exact H1 };
+     exact absurdZeroOne }
+   { exact Zb }
+
+theorem sgnPos : 0 < t |- sgn t = 1
+by have E: (t = S (prd t)) { exact posSucc };
+   calc (sgn t) = sgn (S (prd t)) by cong E = 1
+
+theorem sgnZero : sgn t = 0 |- t = 0
+by have Z: (t = 0 \/ 0 < t) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { exact Za }
+   { have E: (sgn t = 1) { exact sgnPos };
+     have F: (1 = 0) { calc 1 = (sgn t) by cong E = 0 by exact H1 };
+     SuccNonZero }
+
+theorem sgnBool : |- sgn t = 0 \/ sgn t = 1
+by have Z: (t = 0 \/ 0 < t) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { DisjR2; calc (sgn t) = sgn 0 by cong Za = 0 }
+   { DisjR1; exact sgnPos }
+
+rule notLtZero (t : term) (Γ : ctx) (A : formula) : t < 0, Γ |- A
+by have F: (0 = 1) { calc 0 = (t < 0) by cong ltZeroIsZero = 1 by exact H1 };
+   exact absurdZeroOne
+
+theorem ltIrreflZero : |- (t < t) = 0
+by calc (t < t) = sgn (t - t) = sgn 0 by cong subSelf = 0
+
+rule ltIrrefl (t : term) (Γ : ctx) (A : formula) : t < t, Γ |- A
+by have F: (0 = 1) { calc 0 = (t < t) by cong ltIrreflZero = 1 by exact H1 };
+   exact absurdZeroOne
+
+-- * Order: < and <= through the difference
+
+theorem ltSubPos : t < u |- 0 < u - t
+by calc (0 < u - t) = (t < u) = 1 by exact H1
+
+theorem subPosLt : 0 < u - t |- t < u
+by calc (t < u) = (0 < u - t) = 1 by exact H1
+
+theorem subAddZero : |- t - (t + k) = 0
+by induction k as j
+  { calc (t - (t + 0)) = (t - t) = 0 by exact subSelf }
+  { calc (t - (t + S j)) = prd (t - (t + j)) = prd 0 by cong H1 = 0 }
+
+theorem leAdd : |- t <= t + k
+by calc (t <= t + k) = sgn ((t + S k) - t) = sgn (S k) by cong addSubCancel = 1
+
+theorem ltAdd : |- t < t + S k
+by calc (t < t + S k) = sgn ((t + S k) - t) = sgn (S k) by cong addSubCancel = 1
+
+theorem leOfAdd : t + k = u |- t <= u
+by calc (t <= u) = (t <= t + k) by cong H1 = 1 by exact leAdd
+
+theorem ltOfAdd : t + S k = u |- t < u
+by calc (t < u) = (t < t + S k) by cong H1 = 1 by exact ltAdd
+
+theorem leAddSub : t <= u |- t + (u - t) = u
+by have C: (t + (u - t) = u \/ u + (t - u) = t) { exact subCases };
+   DisjL on C as L R
+   { exact L }
+   { have Z: (t - u = 0 \/ t - u = S (prd (t - u))) { exact zeroOrSucc };
+     DisjL on Z as Za Zb
+     { have E: (t = u) { calc t = (u + (t - u)) by cong R = (u + 0) by cong Za = u };
+       calc (t + (u - t)) = (u + (u - u)) by cong E = (u + 0) by cong subSelf = u }
+     { have E: (t = u + S (prd (t - u))) { calc t = (u + (t - u)) by cong R = (u + S (prd (t - u))) by cong Zb };
+       have F: (0 = 1)
+         { calc 0 = sgn 0
+             = sgn (u - (u + prd (t - u))) by cong subAddZero
+             = sgn (S u - S (u + prd (t - u))) by cong succSubSucc
+             = sgn (S u - (u + S (prd (t - u))))
+             = sgn (S u - t) by cong E
+             = (t <= u)
+             = 1 by exact H1 };
+       exact absurdZeroOne } }
+
+theorem ltSuccLe : t < u |- S t <= u
+by calc (S t <= u) = sgn (S u - S t) = sgn (u - t) by cong succSubSucc = (t < u) = 1 by exact H1
+
+theorem succLeLt : S t <= u |- t < u
+by calc (t < u) = sgn (u - t) = sgn (S u - S t) by cong succSubSucc = (S t <= u) = 1 by exact H1
+
+theorem leSuccSucc : t <= u |- S t <= S u
+by calc (S t <= S u) = sgn (S (S u) - S t) = sgn (S u - t) by cong succSubSucc = (t <= u) = 1 by exact H1
+
+theorem succLeSucc : S t <= S u |- t <= u
+by calc (t <= u) = sgn (S u - t) = sgn (S (S u) - S t) by cong succSubSucc = (S t <= S u) = 1 by exact H1
+
+theorem ltAddSub : t < u |- S t + (u - S t) = u
+by have L: (S t <= u) { exact ltSuccLe }; exact leAddSub
+
+theorem leSucc : |- t <= S t
+by calc (t <= S t) = (t <= t + 1) = 1 by exact leAdd
+
+theorem zeroLe : |- 0 <= t
+by refl
+
+theorem leTrans : t <= u, u <= v |- t <= v
+by have A: (t + (u - t) = u) { exact leAddSub };
+   have B: (u + (v - u) = v) { exact leAddSub };
+   have E: (t + ((u - t) + (v - u)) = v)
+     { calc (t + ((u - t) + (v - u))) = ((t + (u - t)) + (v - u)) by cong addAssoc = (u + (v - u)) by cong A = v by exact B };
+   exact leOfAdd
+
+theorem ltLe : t < u |- t <= u
+by have A: (S t <= u) { exact ltSuccLe }; have B: (t <= S t) { exact leSucc }; exact leTrans
+
+theorem ltLeTrans : t < u, u <= v |- t < v
+by have A: (S t <= u) { exact ltSuccLe }; have B: (S t <= v) { exact leTrans }; exact succLeLt
+
+theorem leLtTrans : t <= u, u < v |- t < v
+by have A: (S u <= v) { exact ltSuccLe };
+   have B: (S t <= S u) { exact leSuccSucc };
+   have C: (S t <= v) { exact leTrans };
+   exact succLeLt
+
+theorem ltTrans : t < u, u < v |- t < v
+by have A: (t <= u) { exact ltLe }; exact leLtTrans
+
+theorem addSelfZero : t + k = t |- k = 0
+by have Z: (k = 0 \/ k = S (prd k)) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { exact Za }
+   { have E: (t + S (prd k) = t) { calc (t + S (prd k)) = (t + k) by cong Zb = t by exact H1 };
+     exact addSuccNe }
+
+theorem addZeroR : t + u = 0 |- u = 0
+by have Z: (u = 0 \/ u = S (prd u)) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { exact Za }
+   { have F: (S (t + prd u) = 0) { calc (S (t + prd u)) = (t + S (prd u)) = (t + u) by cong Zb = 0 by exact H1 };
+     SuccNonZero }
+
+theorem addZeroL : t + u = 0 |- t = 0
+by have U: (u = 0) { exact addZeroR };
+   calc t = (t + 0) = (t + u) by cong U = 0 by exact H1
+
+theorem leAntisym : t <= u, u <= t |- t = u
+by have A: (t + (u - t) = u) { exact leAddSub };
+   have B: (u + (t - u) = t) { exact leAddSub };
+   have C: (t + ((u - t) + (t - u)) = t)
+     { calc (t + ((u - t) + (t - u))) = ((t + (u - t)) + (t - u)) by cong addAssoc = (u + (t - u)) by cong A = t by exact B };
+   have D: ((u - t) + (t - u) = 0) { exact addSelfZero };
+   have K: (u - t = 0) { exact addZeroL };
+   calc t = (t + 0) = (t + (u - t)) by cong K = u by exact A
+
+theorem leTotal : |- t <= u \/ u <= t
+by have C: (t + (u - t) = u \/ u + (t - u) = t) { exact subCases };
+   DisjL on C as L R
+   { DisjR2; exact leOfAdd }
+   { DisjR1; exact leOfAdd }
+
+theorem leCases : t <= u |- t < u \/ t = u
+by have A: (t + (u - t) = u) { exact leAddSub };
+   have Z: (u - t = 0 \/ u - t = S (prd (u - t))) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { DisjR1; calc t = (t + 0) = (t + (u - t)) by cong Za = u by exact A }
+   { DisjR2;
+     have E: (t + S (prd (u - t)) = u) { calc (t + S (prd (u - t))) = (t + (u - t)) by cong Zb = u by exact A };
+     exact ltOfAdd }
+
+theorem ltOrGe : |- t < u \/ u <= t
+by have C: (u <= t \/ t <= u) { exact leTotal };
+   DisjL on C as L R
+   { DisjR1; exact L }
+   { have D: (t < u \/ t = u) { exact leCases };
+     DisjL on D as Lt E
+     { DisjR2; exact Lt }
+     { DisjR1; calc (u <= t) = (t <= t) by cong E = 1 by exact leqRefl } }
+
+theorem ltBool : |- (t < u) = 0 \/ t < u
+by have C: (sgn (u - t) = 0 \/ sgn (u - t) = 1) { exact sgnBool };
+   DisjL on C as Z O
+   { DisjR2; calc (t < u) = sgn (u - t) = 0 by exact Z }
+   { DisjR1; calc (t < u) = sgn (u - t) = 1 by exact O }
+
+theorem notLtLe : (t < u) = 0 |- u <= t
+by have C: (t < u \/ u <= t) { exact ltOrGe };
+   DisjL on C as L R
+   { have F: (0 = 1) { calc 0 = (t < u) by cong H1 = 1 by exact L }; exact absurdZeroOne }
+   { exact R }
+
+theorem leNotLt : u <= t |- (t < u) = 0
+by have C: ((t < u) = 0 \/ t < u) { exact ltBool };
+   DisjL on C as Z L
+   { exact Z }
+   { have A: (u < u) { exact leLtTrans }; exact ltIrrefl }
+
+rule ltAsym (t u : term) (Γ : ctx) (A : formula) : t < u, u < t, Γ |- A
+by have B: (t < t) { exact ltTrans }; exact ltIrrefl
+
+rule ltLeAbsurd (t u : term) (Γ : ctx) (A : formula) : t < u, u <= t, Γ |- A
+by have B: (t < t) { exact ltLeTrans }; exact ltIrrefl
+
+theorem ltSuccCases : t < S u |- t < u \/ t = u
+by have A: (t <= u) { calc (t <= u) = (t < S u) = 1 by exact H1 }; exact leCases
+
+theorem ltSuccOfLe : t <= u |- t < S u
+by calc (t < S u) = (t <= u) = 1 by exact H1
+
+theorem leOfLtSucc : t < S u |- t <= u
+by calc (t <= u) = (t < S u) = 1 by exact H1
+
+theorem ltSuccOfLt : t < u |- t < S u
+by have A: (u < S u) { exact ltSucc }; exact ltTrans
+
+theorem leZero : t <= 0 |- t = 0
+by have A: (0 <= t) { exact zeroLe }; exact leAntisym
+
+theorem posOfLt : t < u |- 0 < u
+by have A: (0 <= t) { exact zeroLe }; exact leLtTrans
+
+-- * Arithmetic
+
+theorem addComm : |- t + u = u + t
+by induction u as m
+  { calc (t + 0) = t = (0 + t) by cong zeroAdd }
+  { calc (t + S m) = S (t + m) = S (m + t) by cong H1 = (S m + t) by cong succAdd }
+
+theorem addCancelL : t + u = t + v |- u = v
+by induction t as n IH H
+  { calc u = (0 + u) by cong zeroAdd = (0 + v) by exact H = v by exact zeroAdd }
+  { have G: (S (n + u) = S (n + v))
+      { calc (S (n + u)) = (S n + u) by cong succAdd = (S n + v) by exact H = (S (n + v)) by exact succAdd };
+    SuccInj on G as G2;
+    ImplL on IH { exact G2 } { assumption } }
+
+theorem addCancelR : u + t = v + t |- u = v
+by have E: (t + u = t + v) { calc (t + u) = (u + t) by exact addComm = (v + t) by exact H1 = (t + v) by exact addComm };
+   exact addCancelL
+
+theorem subAddCancel : |- (t + u) - u = t
+by calc ((t + u) - u) = ((u + t) - u) by cong addComm = t by exact addSubCancel
+
+theorem leAddR : |- u <= t + u
+by calc (u <= t + u) = (u <= u + t) by cong addComm = 1 by exact leAdd
+
+theorem addLeMonoL : t <= u |- v + t <= v + u
+by have A: (t + (u - t) = u) { exact leAddSub };
+   have E: ((v + t) + (u - t) = v + u) { calc ((v + t) + (u - t)) = (v + (t + (u - t))) by exact addAssoc = (v + u) by cong A };
+   exact leOfAdd
+
+theorem addLeMonoR : t <= u |- t + v <= u + v
+by have A: (v + t <= v + u) { exact addLeMonoL };
+   calc (t + v <= u + v) = (v + t <= u + v) by cong addComm = (v + t <= v + u) by cong addComm = 1 by exact A
+
+theorem subLe : |- t - u <= t
+by have C: (t + (u - t) = u \/ u + (t - u) = t) { exact subCases };
+   DisjL on C as L R
+   { have Z: (t - u = 0) { calc (t - u) = (t - (t + (u - t))) by cong L = 0 by exact subAddZero };
+     calc (t - u <= t) = (0 <= t) by cong Z = 1 }
+   { have E: ((t - u) + u = t) { calc ((t - u) + u) = (u + (t - u)) by exact addComm = t by exact R };
+     exact leOfAdd }
+
+theorem leTriangle : |- t <= triangle t
+by induction t as n
+  { refl }
+  { calc (S n <= triangle (S n)) = (S n <= triangle n + S n) = 1 by exact leAddR }
+
+theorem triangleMono : t <= u |- triangle t <= triangle u
+by have A: (t + (u - t) = u) { exact leAddSub };
+   have B: (triangle t + (triangle (t + (u - t)) - triangle t) = triangle (t + (u - t))) { exact triangleLe };
+   have C: (triangle t <= triangle (t + (u - t))) { exact leOfAdd };
+   calc (triangle t <= triangle u) = (triangle t <= triangle (t + (u - t))) by cong A = 1 by exact C
+
+-- * Multiplication
+
+theorem mulZero : |- t * 0 = 0 by refl
+theorem mulSucc : |- t * S u = t + t * u by refl
+
+theorem zeroMul : |- 0 * t = 0
+by induction t as m
+  { refl }
+  { calc (0 * S m) = (0 + 0 * m) = (0 * m) by exact zeroAdd = 0 by exact H1 }
+
+theorem succMul : |- S t * u = t * u + u
+by induction u as m
+  { refl }
+  { calc (S t * S m) = (S t + S t * m) = (S t + (t * m + m)) by cong H1
+       = (S (t + (t * m + m))) by exact succAdd
+       = (S ((t + t * m) + m)) by cong addAssoc
+       = ((t + t * m) + S m)
+       = (t * S m + S m) }
+
+theorem mulComm : |- t * u = u * t
+by induction u as m
+  { calc (t * 0) = 0 = (0 * t) by cong zeroMul }
+  { calc (t * S m) = (t + t * m) = (t + m * t) by cong H1 = (m * t + t) by exact addComm = (S m * t) by cong succMul }
+
+theorem mulOne : |- t * 1 = t by refl
+
+theorem oneMul : |- 1 * t = t
+by calc (1 * t) = (t * 1) by exact mulComm = t
+
+theorem mulDistribL : |- t * (u + v) = t * u + t * v
+by induction v as m
+  { refl }
+  { calc (t * (u + S m)) = (t + t * (u + m)) = (t + (t * u + t * m)) by cong H1
+       = ((t + t * u) + t * m) by cong addAssoc
+       = ((t * u + t) + t * m) by cong addComm
+       = (t * u + (t + t * m)) by exact addAssoc
+       = (t * u + t * S m) }
+
+theorem mulDistribR : |- (t + u) * v = t * v + u * v
+by calc ((t + u) * v) = (v * (t + u)) by exact mulComm
+     = (v * t + v * u) by exact mulDistribL
+     = (t * v + v * u) by cong mulComm
+     = (t * v + u * v) by cong mulComm
+
+theorem mulAssoc : |- (t * u) * v = t * (u * v)
+by induction v as m
+  { refl }
+  { calc ((t * u) * S m) = (t * u + (t * u) * m) = (t * u + t * (u * m)) by cong H1
+       = (t * (u + u * m)) by cong mulDistribL
+       = (t * (u * S m)) }
+
+theorem mulPos : 0 < t, 0 < u |- 0 < t * u
+by have U: (u = S (prd u)) { exact posSucc };
+   have L: (t <= t + t * prd u) { exact leAdd };
+   have M: (0 < t + t * prd u) { exact ltLeTrans };
+   calc (0 < t * u) = (0 < t * S (prd u)) by cong U = (0 < t + t * prd u) = 1 by exact M
+
+theorem mulLeMonoL : t <= u |- v * t <= v * u
+by have A: (t + (u - t) = u) { exact leAddSub };
+   have B: (v * t <= v * t + v * (u - t)) { exact leAdd };
+   calc (v * t <= v * u) = (v * t <= v * (t + (u - t))) by cong A
+     = (v * t <= v * t + v * (u - t)) by cong mulDistribL
+     = 1 by exact B
+
+theorem mulLeMonoR : t <= u |- t * v <= u * v
+by have A: (v * t <= v * u) { exact mulLeMonoL };
+   calc (t * v <= u * v) = (v * t <= u * v) by cong mulComm = (v * t <= v * u) by cong mulComm = 1 by exact A
+
+-- * Order, strictly
+
+theorem addLtMonoL : t < u |- v + t < v + u
+by have A: (S t <= u) { exact ltSuccLe };
+   have B: (v + S t <= v + u) { exact addLeMonoL };
+   have C: (S (v + t) <= v + u) { calc (S (v + t) <= v + u) = (v + S t <= v + u) = 1 by exact B };
+   exact succLeLt
+
+theorem addLtMonoR : t < u |- t + v < u + v
+by have A: (v + t < v + u) { exact addLtMonoL };
+   calc (t + v < u + v) = (v + t < u + v) by cong addComm = (v + t < v + u) by cong addComm = 1 by exact A
+
+theorem ltTrichotomy : |- t < u \/ t = u \/ u < t
+by have C: (t < u \/ u <= t) { exact ltOrGe };
+   DisjL on C as L R
+   { DisjR2; exact L }
+   { DisjR1;
+     have D: (u < t \/ u = t) { exact leCases };
+     DisjL on D as Lt E
+     { DisjR1; exact Lt }
+     { DisjR2; symmetry E as E2; exact E2 } }
+
+theorem ltNe : t < u |- ~ t = u
+by ImplR as E; have K: (t < t) { calc (t < t) = (t < u) by cong E = 1 by exact H1 }; exact ltIrrefl
+
+-- * Booleans: isZero, == and the connectives
+
+-- reflect and reify appeal to these lemmas by name: oneNonzero,
+-- zeroPosAbsurd, ltOne, leOne, eqOne, eqIntro, eqElim, conjIntro, conjElim1,
+-- conjElim2, conjOne, disjIntro1, disjIntro2, disjElim, disjOne, impIntro,
+-- impElim and impOne here, and belowOne below; renaming one breaks them.
+
+theorem oneNonzero : t = 1 |- 0 < t
+by calc (0 < t) = (0 < 1) by cong H1 = 1
+
+rule zeroPosAbsurd (Γ : ctx) (A : formula) : 0 < 0, Γ |- A
+by have F: (0 = 1) { calc 0 = (0 < 0) = 1 by exact H1 }; exact absurdZeroOne
+
+theorem sgnOneOf : 0 < sgn t |- sgn t = 1
+by have Z: (t = 0 \/ 0 < t) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { have F: (0 < 0) { calc (0 < 0) = (0 < sgn 0) = (0 < sgn t) by cong Za = 1 by exact H1 }; exact zeroPosAbsurd }
+   { exact sgnPos }
+
+theorem isZeroOne : isZero t = 1 |- t = 0
+by have Z: (t = 0 \/ t = S (prd t)) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { exact Za }
+   { have F: (0 = 1) { calc 0 = isZero (S (prd t)) = (isZero t) by cong Zb = 1 by exact H1 }; exact absurdZeroOne }
+
+theorem isZeroOfZero : t = 0 |- isZero t = 1
+by calc (isZero t) = isZero 0 by cong H1 = 1
+
+theorem isZeroBool : |- isZero t = 0 \/ isZero t = 1
+by have Z: (t = 0 \/ t = S (prd t)) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { DisjR1; exact isZeroOfZero }
+   { DisjR2; calc (isZero t) = isZero (S (prd t)) by cong Zb = 0 }
+
+theorem isZeroOneOf : 0 < isZero t |- isZero t = 1
+by have C: (isZero t = 0 \/ isZero t = 1) { exact isZeroBool };
+   DisjL on C as Z O
+   { have F: (0 < 0) { calc (0 < 0) = (0 < isZero t) by cong Z = 1 by exact H1 }; exact zeroPosAbsurd }
+   { exact O }
+
+theorem eqRefl : |- t == t
+by calc (t == t) = isZero ((t - t) + (t - t)) = isZero (0 + 0) by cong subSelf = 1
+
+theorem eqOfEq : s = t |- s == t
+by calc (s == t) = (s == s) by cong H1 = 1 by exact eqRefl
+
+theorem eqSound : s == t |- s = t
+by have A: (isZero ((s - t) + (t - s)) = 1) { calc (isZero ((s - t) + (t - s))) = (s == t) = 1 by exact H1 };
+   have B: ((s - t) + (t - s) = 0) { exact isZeroOne };
+   have C: (s - t = 0) { exact addZeroL };
+   have D: (t - s = 0) { exact addZeroR };
+   have E: (s + (t - s) = t \/ t + (s - t) = s) { exact subCases };
+   DisjL on E as L R
+   { calc s = (s + 0) = (s + (t - s)) by cong D = t by exact L }
+   { calc s = (t + (s - t)) by cong R = (t + 0) by cong C = t }
+
+theorem eqBool : |- (s == t) = 0 \/ (s == t) = 1
+by have C: (isZero ((s - t) + (t - s)) = 0 \/ isZero ((s - t) + (t - s)) = 1) { exact isZeroBool };
+   DisjL on C as Z O
+   { DisjR2; calc (s == t) = isZero ((s - t) + (t - s)) = 0 by exact Z }
+   { DisjR1; calc (s == t) = isZero ((s - t) + (t - s)) = 1 by exact O }
+
+theorem eqFalse : (s == t) = 0 |- ~ s = t
+by ImplR;
+   have E: (s == t) { exact eqOfEq };
+   have F: (0 = 1) { calc 0 = (s == t) by cong H1 = 1 by exact E };
+   exact absurdZeroOne
+
+theorem neqEqZero : ~ s = t |- (s == t) = 0
+by have C: ((s == t) = 0 \/ (s == t) = 1) { exact eqBool };
+   DisjL on C as Z O
+   { exact Z }
+   { have E: (s = t) { exact eqSound };
+     ImplL on H1 { exact E } { ExFalso } }
+
+theorem eqDec : |- s = t \/ ~ s = t
+by have C: ((s == t) = 0 \/ (s == t) = 1) { exact eqBool };
+   DisjL on C as Z O
+   { DisjR1; exact eqFalse }
+   { DisjR2; exact eqSound }
+
+theorem eqOne : 0 < (s == t) |- s == t
+by have A: (0 < isZero ((s - t) + (t - s))) { calc (0 < isZero ((s - t) + (t - s))) = (0 < (s == t)) = 1 by exact H1 };
+   have B: (isZero ((s - t) + (t - s)) = 1) { exact isZeroOneOf };
+   calc (s == t) = isZero ((s - t) + (t - s)) = 1 by exact B
+
+theorem eqIntro : s = t |- 0 < (s == t)
+by have E: (s == t) { exact eqOfEq }; exact oneNonzero
+
+theorem eqElim : 0 < (s == t) |- s = t
+by have E: (s == t) { exact eqOne }; exact eqSound
+
+theorem ltOne : 0 < (t < u) |- t < u
+by have P: (0 < sgn (u - t)) { calc (0 < sgn (u - t)) = (0 < (t < u)) = 1 by exact H1 };
+   have Q: (sgn (u - t) = 1) { exact sgnOneOf };
+   calc (t < u) = sgn (u - t) = 1 by exact Q
+
+theorem leOne : 0 < (t <= u) |- t <= u
+by have P: (0 < sgn (S u - t)) { calc (0 < sgn (S u - t)) = (0 < (t <= u)) = 1 by exact H1 };
+   have Q: (sgn (S u - t) = 1) { exact sgnOneOf };
+   calc (t <= u) = sgn (S u - t) = 1 by exact Q
+
+theorem conjIntro : 0 < a, 0 < b |- 0 < conj a b
+by have A: (a = S (prd a)) { exact posSucc };
+   have B: (sgn b = 1) { exact sgnPos };
+   calc (0 < conj a b) = (0 < conj (S (prd a)) b) by cong A = (0 < sgn b) = (0 < 1) by cong B = 1
+
+theorem conjElim1 : 0 < conj a b |- 0 < a
+by have Z: (a = 0 \/ 0 < a) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { have F: (0 = 1) { calc 0 = (0 < conj 0 b) = (0 < conj a b) by cong Za = 1 by exact H1 }; exact absurdZeroOne }
+   { exact Zb }
+
+theorem conjElim2 : 0 < conj a b |- 0 < b
+by have P: (0 < a) { exact conjElim1 };
+   have A: (a = S (prd a)) { exact posSucc };
+   have Z: (b = 0 \/ 0 < b) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { have F: (0 = 1) { calc 0 = (0 < conj (S (prd a)) 0) = (0 < conj a 0) by cong A = (0 < conj a b) by cong Za = 1 by exact H1 }; exact absurdZeroOne }
+   { exact Zb }
+
+theorem conjOne : 0 < conj a b |- conj a b = 1
+by have P: (0 < a) { exact conjElim1 };
+   have Q: (0 < b) { exact conjElim2 };
+   have A: (a = S (prd a)) { exact posSucc };
+   have B: (sgn b = 1) { exact sgnPos };
+   calc (conj a b) = conj (S (prd a)) b by cong A = sgn b = 1 by exact B
+
+theorem disjIntro1 : 0 < a |- 0 < disj a b
+by have A: (a = S (prd a)) { exact posSucc };
+   calc (0 < disj a b) = (0 < disj (S (prd a)) b) by cong A = 1
+
+theorem disjIntro2 : 0 < b |- 0 < disj a b
+by have Z: (a = 0 \/ 0 < a) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { have B: (sgn b = 1) { exact sgnPos };
+     calc (0 < disj a b) = (0 < disj 0 b) by cong Za = (0 < sgn b) = (0 < 1) by cong B = 1 }
+   { exact disjIntro1 }
+
+theorem disjElim : 0 < disj a b |- 0 < a \/ 0 < b
+by have Z: (a = 0 \/ 0 < a) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { DisjR1;
+     have Y: (b = 0 \/ 0 < b) { exact zeroOrPos };
+     DisjL on Y as Ya Yb
+     { have F: (0 = 1) { calc 0 = (0 < disj 0 0) = (0 < disj a 0) by cong Za = (0 < disj a b) by cong Ya = 1 by exact H1 }; exact absurdZeroOne }
+     { exact Yb } }
+   { DisjR2; exact Zb }
+
+theorem disjOne : 0 < disj a b |- disj a b = 1
+by have Z: (a = 0 \/ 0 < a) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { have P: (0 < sgn b) { calc (0 < sgn b) = (0 < disj 0 b) = (0 < disj a b) by cong Za = 1 by exact H1 };
+     have B: (sgn b = 1) { exact sgnOneOf };
+     calc (disj a b) = disj 0 b by cong Za = sgn b = 1 by exact B }
+   { have A: (a = S (prd a)) { exact posSucc };
+     calc (disj a b) = disj (S (prd a)) b by cong A = 1 }
+
+theorem impIntro : 0 < a ==> 0 < b |- 0 < imp a b
+by have Z: (a = 0 \/ 0 < a) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { calc (0 < imp a b) = (0 < imp 0 b) by cong Za = 1 }
+   { ImplL on H1
+     { exact Zb }
+     { have A: (a = S (prd a)) { exact posSucc };
+       have B: (sgn b = 1) { exact sgnPos };
+       calc (0 < imp a b) = (0 < imp (S (prd a)) b) by cong A = (0 < sgn b) = (0 < 1) by cong B = 1 } }
+
+theorem impElim : 0 < imp a b, 0 < a |- 0 < b
+by have A: (a = S (prd a)) { exact posSucc };
+   have Y: (b = 0 \/ 0 < b) { exact zeroOrPos };
+   DisjL on Y as Ya Yb
+   { have F: (0 = 1) { calc 0 = (0 < imp (S (prd a)) 0) = (0 < imp a 0) by cong A = (0 < imp a b) by cong Ya = 1 by exact H1 }; exact absurdZeroOne }
+   { exact Yb }
+
+theorem impOne : 0 < imp a b |- imp a b = 1
+by have Z: (a = 0 \/ 0 < a) { exact zeroOrPos };
+   DisjL on Z as Za Zb
+   { calc (imp a b) = imp 0 b by cong Za = 1 }
+   { have Q: (0 < b) { exact impElim };
+     have A: (a = S (prd a)) { exact posSucc };
+     have B: (sgn b = 1) { exact sgnPos };
+     calc (imp a b) = imp (S (prd a)) b by cong A = sgn b = 1 by exact B }
+
+-- * Conditionals
+
+theorem ifZero : c = 0 |- (if c then t else e) = e
+by calc (if c then t else e) = (if 0 then t else e) by cong H1 = e
+
+theorem ifPos : 0 < c |- (if c then t else e) = t
+by have P: (c = S (prd c)) { exact posSucc };
+   calc (if c then t else e) = (if S (prd c) then t else e) by cong P = t
+
+-- * Case analysis, as rules
+
+rule cases (t : term) (Γ : ctx) (A : formula) (zero : t = 0, Γ |- A) (succ : t = S (prd t), Γ |- A) : Γ |- A
+by Cut (t = 0 \/ t = S (prd t)) as Z
+   { exact zeroOrSucc }
+   { DisjL on Z as Za Zb { exact zero } { exact succ } }
+
+rule posCases (t : term) (Γ : ctx) (A : formula) (zero : t = 0, Γ |- A) (pos : 0 < t, Γ |- A) : Γ |- A
+by Cut (t = 0 \/ 0 < t) as Z
+   { exact zeroOrPos }
+   { DisjL on Z as Za Zb { exact zero } { exact pos } }
+
+rule ltCases (t u : term) (Γ : ctx) (A : formula) (less : t < u, Γ |- A) (geq : u <= t, Γ |- A) : Γ |- A
+by Cut (t < u \/ u <= t) as Z
+   { exact ltOrGe }
+   { DisjL on Z as L R { exact less } { exact geq } }
+
+-- * holdsBelow: the bounded universal quantifier
+
+rule belowZero (n : var) (Γ : ctx) (p(n) : term) : Γ |- holdsBelow {p} 0 = 1
+by refl
+
+rule belowBool (n : var) (t : term) (Γ : ctx) (p(n) : term) : Γ |- holdsBelow {p} t = 0 \/ holdsBelow {p} t = 1
+by induction t as m
+  { DisjR1; refl }
+  { have Z: (p(m) = 0 \/ p(m) = S (prd (p(m)))) { exact zeroOrSucc };
+    DisjL on Z as Za Zb
+    { DisjR2;
+      calc (holdsBelow {p} (S m)) = (if p(m) then holdsBelow {p} m else 0) = (if 0 then holdsBelow {p} m else 0) by cong Za = 0 }
+    { have E: (holdsBelow {p} (S m) = holdsBelow {p} m)
+        { calc (holdsBelow {p} (S m)) = (if p(m) then holdsBelow {p} m else 0) = (if S (prd (p(m))) then holdsBelow {p} m else 0) by cong Zb = (holdsBelow {p} m) };
+      DisjL on H1 as L R
+      { DisjR2; calc (holdsBelow {p} (S m)) = (holdsBelow {p} m) by exact E = 0 by exact L }
+      { DisjR1; calc (holdsBelow {p} (S m)) = (holdsBelow {p} m) by exact E = 1 by exact R } } }
+
+rule belowOne (n : var) (t : term) (Γ : ctx) (p(n) : term) : 0 < holdsBelow {p} t, Γ |- holdsBelow {p} t = 1
+by have C: (holdsBelow {p} t = 0 \/ holdsBelow {p} t = 1) { exact belowBool };
+   DisjL on C as Z O
+   { have F: (0 < 0) { calc (0 < 0) = (0 < holdsBelow {p} t) by cong Z = 1 by exact H1 }; exact zeroPosAbsurd }
+   { exact O }
+
+rule belowSuccElim (n : var) (t : term) (Γ : ctx) (p(n) : term) : holdsBelow {p} (S t) = 1, Γ |- holdsBelow {p} t = 1
+by have Z: (p(t) = 0 \/ p(t) = S (prd (p(t)))) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { have F: (0 = 1)
+       { calc 0 = (if 0 then holdsBelow {p} t else 0) = (if p(t) then holdsBelow {p} t else 0) by cong Za = (holdsBelow {p} (S t)) = 1 by exact H1 };
+     exact absurdZeroOne }
+   { calc (holdsBelow {p} t) = (if S (prd (p(t))) then holdsBelow {p} t else 0) = (if p(t) then holdsBelow {p} t else 0) by cong Zb = (holdsBelow {p} (S t)) = 1 by exact H1 }
+
+rule belowSucc (n : var) (t : term) (Γ : ctx) (p(n) : term) : holdsBelow {p} t = 1, 0 < p(t), Γ |- holdsBelow {p} (S t) = 1
+by have E: (p(t) = S (prd (p(t)))) { exact posSucc };
+   calc (holdsBelow {p} (S t)) = (if p(t) then holdsBelow {p} t else 0) = (if S (prd (p(t))) then holdsBelow {p} t else 0) by cong E = (holdsBelow {p} t) = 1 by exact H1
+
+rule belowAdd (n : var) (t k : term) (Γ : ctx) (p(n) : term) : holdsBelow {p} (t + k) = 1, Γ |- holdsBelow {p} t = 1
+by induction k as j IH H
+  { calc (holdsBelow {p} t) = (holdsBelow {p} (t + 0)) = 1 by exact H }
+  { have G: (holdsBelow {p} (S (t + j)) = 1) { calc (holdsBelow {p} (S (t + j))) = (holdsBelow {p} (t + S j)) = 1 by exact H };
+    have G2: (holdsBelow {p} (t + j) = 1) { exact belowSuccElim };
+    ImplL on IH { exact G2 } { assumption } }
+
+rule belowMono (n : var) (t u : term) (Γ : ctx) (p(n) : term) : holdsBelow {p} t = 1, u <= t, Γ |- holdsBelow {p} u = 1
+by have A: (u + (t - u) = t) { exact leAddSub };
+   have B: (holdsBelow {p} (u + (t - u)) = 1) { calc (holdsBelow {p} (u + (t - u))) = (holdsBelow {p} t) by cong A = 1 by exact H1 };
+   exact belowAdd _ u (t - u)
+
+rule belowElim (n : var) (t u : term) (Γ : ctx) (p(n) : term) : holdsBelow {p} t = 1, u < t, Γ |- 0 < p(u)
+by have A: (S u <= t) { exact ltSuccLe };
+   have B: (holdsBelow {p} (S u) = 1) { exact belowMono _ t (S u) };
+   exact belowAt _ u
+
+-- * mu: the bounded search
+
+rule muZero (n : var) (Γ : ctx) (p(n) : term) : Γ |- mu {p} 0 = 0
+by refl
+
+rule muSuccLt (n : var) (t : term) (Γ : ctx) (p(n) : term) : mu {p} t < t, Γ |- mu {p} (S t) = mu {p} t
+by calc (mu {p} (S t))
+     = (if mu {p} t < t then mu {p} t else if p(t) then t else S t)
+     = (if 1 then mu {p} t else if p(t) then t else S t) by cong H1
+     = (mu {p} t)
+
+rule muSuccHit (n : var) (t : term) (Γ : ctx) (p(n) : term) : (mu {p} t < t) = 0, 0 < p(t), Γ |- mu {p} (S t) = t
+by have E: (p(t) = S (prd (p(t)))) { exact posSucc };
+   calc (mu {p} (S t))
+     = (if mu {p} t < t then mu {p} t else if p(t) then t else S t)
+     = (if 0 then mu {p} t else if p(t) then t else S t) by cong H1
+     = (if p(t) then t else S t)
+     = (if S (prd (p(t))) then t else S t) by cong E
+     = t
+
+rule muSuccMiss (n : var) (t : term) (Γ : ctx) (p(n) : term) : (mu {p} t < t) = 0, p(t) = 0, Γ |- mu {p} (S t) = S t
+by calc (mu {p} (S t))
+     = (if mu {p} t < t then mu {p} t else if p(t) then t else S t)
+     = (if 0 then mu {p} t else if p(t) then t else S t) by cong H1
+     = (if p(t) then t else S t)
+     = (if 0 then t else S t) by cong H2
+     = (S t)
+
+rule muLe (n : var) (t : term) (Γ : ctx) (p(n) : term) : Γ |- mu {p} t <= t
+by induction t as m
+  { refl }
+  { have C: ((mu {p} m < m) = 0 \/ mu {p} m < m) { exact ltBool };
+    DisjL on C as N L
+    { have Z: (p(m) = 0 \/ 0 < p(m)) { exact zeroOrPos };
+      DisjL on Z as Za Zb
+      { have E: (mu {p} (S m) = S m) { exact muSuccMiss };
+        calc (mu {p} (S m) <= S m) = (S m <= S m) by cong E = 1 by exact leqRefl }
+      { have E: (mu {p} (S m) = m) { exact muSuccHit };
+        calc (mu {p} (S m) <= S m) = (m <= S m) by cong E = 1 by exact leSucc } }
+    { have E: (mu {p} (S m) = mu {p} m) { exact muSuccLt };
+      have A: (mu {p} m <= S m) { have B: (mu {p} m < S m) { exact ltSuccOfLt }; exact ltLe };
+      calc (mu {p} (S m) <= S m) = (mu {p} m <= S m) by cong E = 1 by exact A } }
+
+rule muMin (n : var) (t u : term) (Γ : ctx) (p(n) : term) : u < mu {p} t, Γ |- p(u) = 0
+by induction t as m IH H
+  { have K: (u < 0) { calc (u < 0) = (u < mu {p} 0) = 1 by exact H }; exact notLtZero }
+  { have C: ((mu {p} m < m) = 0 \/ mu {p} m < m) { exact ltBool };
+    DisjL on C as N L
+    { have M1: (m <= mu {p} m) { exact notLtLe };
+      have M2: (mu {p} m <= m) { exact muLe };
+      have M: (mu {p} m = m) { exact leAntisym };
+      have Z: (p(m) = 0 \/ 0 < p(m)) { exact zeroOrPos };
+      DisjL on Z as Za Zb
+      { have E: (mu {p} (S m) = S m) { exact muSuccMiss };
+        have K: (u < S m) { calc (u < S m) = (u < mu {p} (S m)) by cong E = 1 by exact H };
+        have D: (u < m \/ u = m) { exact ltSuccCases };
+        DisjL on D as Dl Dr
+        { have K2: (u < mu {p} m) { calc (u < mu {p} m) = (u < m) by cong M = 1 by exact Dl };
+          ImplL on IH { exact K2 } { assumption } }
+        { calc (p(u)) = (p(m)) by cong Dr = 0 by exact Za } }
+      { have E: (mu {p} (S m) = m) { exact muSuccHit };
+        have K2: (u < mu {p} m) { calc (u < mu {p} m) = (u < m) by cong M = (u < mu {p} (S m)) by cong E = 1 by exact H };
+        ImplL on IH { exact K2 } { assumption } } }
+    { have E: (mu {p} (S m) = mu {p} m) { exact muSuccLt };
+      have K2: (u < mu {p} m) { calc (u < mu {p} m) = (u < mu {p} (S m)) by cong E = 1 by exact H };
+      ImplL on IH { exact K2 } { assumption } } }
+
+-- The search hits below its bound: p holds at mu {p} t when mu {p} t < t.
+-- The converse fails: mu {p} t = t both when p holds nowhere below t and
+-- when it first holds at t, so 0 < p(mu {p} t) does not give mu {p} t < t;
+-- muBelow gives it from a witness below t.
+rule muHit (n : var) (t : term) (Γ : ctx) (p(n) : term) : mu {p} t < t, Γ |- 0 < p(mu {p} t)
+by induction t as m IH H
+  { exact notLtZero }
+  { have C: ((mu {p} m < m) = 0 \/ mu {p} m < m) { exact ltBool };
+    DisjL on C as N L
+    { have Z: (p(m) = 0 \/ 0 < p(m)) { exact zeroOrPos };
+      DisjL on Z as Za Zb
+      { have E: (mu {p} (S m) = S m) { exact muSuccMiss };
+        have K: (S m < S m) { calc (S m < S m) = (mu {p} (S m) < S m) by cong E = 1 by exact H };
+        exact ltIrrefl }
+      { have E: (mu {p} (S m) = m) { exact muSuccHit };
+        calc (0 < p(mu {p} (S m))) = (0 < p(m)) by cong E = 1 by exact Zb } }
+    { have E: (mu {p} (S m) = mu {p} m) { exact muSuccLt };
+      ImplL on IH
+      { exact L }
+      { calc (0 < p(mu {p} (S m))) = (0 < p(mu {p} m)) by cong E = 1 by assumption } } }
+
+rule muWitness (n : var) (t u : term) (Γ : ctx) (p(n) : term) : u < t, 0 < p(u), Γ |- mu {p} t <= u
+by induction t as m IH H
+  { exact notLtZero }
+  { have D: (u < m \/ u = m) { exact ltSuccCases };
+    DisjL on D as Dl Dr
+    { ImplL on IH
+      { exact Dl }
+      { have A: (mu {p} m < m) { exact leLtTrans };
+        have E: (mu {p} (S m) = mu {p} m) { exact muSuccLt };
+        calc (mu {p} (S m) <= u) = (mu {p} m <= u) by cong E = 1 by assumption } }
+    { have C: ((mu {p} m < m) = 0 \/ mu {p} m < m) { exact ltBool };
+      DisjL on C as N L
+      { have Q: (0 < p(m)) { calc (0 < p(m)) = (0 < p(u)) by cong Dr = 1 by exact H2 };
+        have E: (mu {p} (S m) = m) { exact muSuccHit };
+        calc (mu {p} (S m) <= u) = (m <= u) by cong E = (u <= u) by cong Dr = 1 by exact leqRefl }
+      { have E: (mu {p} (S m) = mu {p} m) { exact muSuccLt };
+        have A: (mu {p} m <= u) { have B: (mu {p} m < u) { calc (mu {p} m < u) = (mu {p} m < m) by cong Dr = 1 by exact L }; exact ltLe };
+        calc (mu {p} (S m) <= u) = (mu {p} m <= u) by cong E = 1 by exact A } } }
+
+rule muBelow (n : var) (t u : term) (Γ : ctx) (p(n) : term) : u < t, 0 < p(u), Γ |- mu {p} t < t
+by have A: (mu {p} t <= u) { exact muWitness }; exact leLtTrans
+
+rule muMiss (n : var) (t u : term) (Γ : ctx) (p(n) : term) : mu {p} t = t, u < t, Γ |- p(u) = 0
+by have K: (u < mu {p} t) { calc (u < mu {p} t) = (u < t) by cong H1 = 1 by exact H2 };
+   exact muMin _ t u
+
+-- * Cancellation
+
+theorem addSubAdd : |- (t + v) - (t + u) = v - u
+by induction t as n
+  { calc ((0 + v) - (0 + u)) = (v - (0 + u)) by cong zeroAdd = (v - u) by cong zeroAdd }
+  { calc ((S n + v) - (S n + u))
+      = (S (n + v) - (S n + u)) by cong succAdd
+      = (S (n + v) - S (n + u)) by cong succAdd
+      = ((n + v) - (n + u)) by exact succSubSucc
+      = (v - u) by exact H1 }
+
+theorem addLtCancelL : t + u < t + v |- u < v
+by calc (u < v) = sgn (v - u) = sgn ((t + v) - (t + u)) by cong addSubAdd = (t + u < t + v) = 1 by exact H1
+
+-- * Pairing
+
+-- projW z is the w with triangle w <= z < triangle (w + 1).
+theorem projWChar : triangle w <= z, z < triangle (w + 1) |- projW z = w
+by have P0: (0 < (z < triangle (w + 1))) { exact oneNonzero };
+   have W1: (w <= triangle w) { exact leTriangle };
+   have W2: (w <= z) { exact leTrans };
+   have WS: (w < S z) { exact ltSuccOfLe };
+   have U: ((μ k < S z. z < triangle (k + 1)) <= w) { exact muWitness };
+   have C: ((μ k < S z. z < triangle (k + 1)) < w \/ w <= (μ k < S z. z < triangle (k + 1))) { exact ltOrGe };
+   DisjL on C as L R
+   { have A2: ((μ k < S z. z < triangle (k + 1)) < S z) { exact ltTrans };
+     have A3: (0 < (z < triangle ((μ k < S z. z < triangle (k + 1)) + 1))) { exact muHit };
+     have A4: (z < triangle ((μ k < S z. z < triangle (k + 1)) + 1)) { exact ltOne };
+     have A5: ((μ k < S z. z < triangle (k + 1)) + 1 <= w)
+       { calc ((μ k < S z. z < triangle (k + 1)) + 1 <= w) = (S ((μ k < S z. z < triangle (k + 1))) <= w) = 1 by exact ltSuccLe };
+     have A6: (triangle ((μ k < S z. z < triangle (k + 1)) + 1) <= triangle w) { exact triangleMono };
+     have A7: (triangle ((μ k < S z. z < triangle (k + 1)) + 1) <= z) { exact leTrans };
+     exact ltLeAbsurd on A4 A7 }
+   { have M: ((μ k < S z. z < triangle (k + 1)) = w) { exact leAntisym };
+     calc (projW z) = ((μ k < S z. z < triangle (k + 1))) = w by exact M }
+
+theorem projWPair : |- projW (pair t u) = t + u
+by have T: (triangle ((t + u) + 1) = pair t u + S t)
+     { calc (triangle ((t + u) + 1)) = (triangle (t + u) + S (t + u))
+          = (triangle (t + u) + S (u + t)) by cong addComm
+          = (triangle (t + u) + (u + S t))
+          = ((triangle (t + u) + u) + S t) by cong addAssoc
+          = (pair t u + S t) };
+   have P: (pair t u < triangle ((t + u) + 1)) { calc (pair t u < triangle ((t + u) + 1)) = (pair t u < pair t u + S t) by cong T = 1 by exact ltAdd };
+   have Q: (triangle (t + u) <= pair t u) { calc (triangle (t + u) <= pair t u) = (triangle (t + u) <= triangle (t + u) + u) = 1 by exact leAdd };
+   exact projWChar
+
+theorem pi2Pair : |- godelPi2 (pair t u) = u
+by calc (godelPi2 (pair t u))
+     = (pair t u - triangle (projW (pair t u)))
+     = (pair t u - triangle (t + u)) by cong projWPair
+     = ((triangle (t + u) + u) - triangle (t + u))
+     = u by exact addSubCancel
+
+theorem pi1Pair : |- godelPi1 (pair t u) = t
+by calc (godelPi1 (pair t u))
+     = (projW (pair t u) - godelPi2 (pair t u))
+     = ((t + u) - godelPi2 (pair t u)) by cong projWPair
+     = ((t + u) - u) by cong pi2Pair
+     = t by exact subAddCancel
+
+theorem lftCons : |- lft (cons t u) = t
+by calc (lft (cons t u)) = (godelPi1 (pair t u)) = t by exact pi1Pair
+
+theorem rgtCons : |- rgt (cons t u) = u
+by calc (rgt (cons t u)) = (godelPi2 (pair t u)) = u by exact pi2Pair
+
+theorem pairInjL : (pair t u = pair t' u') |- (t = t')
+by calc t = (godelPi1 (pair t u)) by cong pi1Pair = (godelPi1 (pair t' u')) by cong H1 = t' by exact pi1Pair
+
+theorem pairInjR : (pair t u = pair t' u') |- (u = u')
+by calc u = (godelPi2 (pair t u)) by cong pi2Pair = (godelPi2 (pair t' u')) by cong H1 = u' by exact pi2Pair
+
+theorem lePairL : |- t <= pair t u
+by have A: (t <= t + u) { exact leAdd };
+   have B: (t + u <= triangle (t + u)) { exact leTriangle };
+   have C: (t <= triangle (t + u)) { exact leTrans };
+   have D: (triangle (t + u) <= pair t u) { calc (triangle (t + u) <= pair t u) = (triangle (t + u) <= triangle (t + u) + u) = 1 by exact leAdd };
+   exact leTrans
+
+theorem lePairR : |- u <= pair t u
+by calc (u <= pair t u) = (u <= triangle (t + u) + u) = 1 by exact leAddR
+
+theorem ltConsL : |- t < cons t u
+by have A: (t <= pair t u) { exact lePairL };
+   calc (t < cons t u) = (t < S (pair t u)) = 1 by exact ltSuccOfLe
+
+theorem ltConsR : |- u < cons t u
+by have A: (u <= pair t u) { exact lePairR };
+   calc (u < cons t u) = (u < S (pair t u)) = 1 by exact ltSuccOfLe
+
+theorem projWHigh : |- z < triangle (projW z + 1)
+by have A: (z <= triangle z) { exact leTriangle };
+   have B: (triangle z < triangle (z + 1)) { calc (triangle z < triangle (z + 1)) = (triangle z < triangle z + S z) = 1 by exact ltAdd };
+   have C: (z < triangle (z + 1)) { exact leLtTrans };
+   have C0: (0 < (z < triangle (z + 1))) { exact oneNonzero };
+   have D: (z < S z) { exact ltSucc };
+   have U: ((μ k < S z. z < triangle (k + 1)) <= z) { exact muWitness };
+   have V: ((μ k < S z. z < triangle (k + 1)) < S z) { exact ltSuccOfLe };
+   have X: (0 < (z < triangle ((μ k < S z. z < triangle (k + 1)) + 1))) { exact muHit };
+   have Y: (z < triangle ((μ k < S z. z < triangle (k + 1)) + 1)) { exact ltOne };
+   calc (z < triangle (projW z + 1)) = (z < triangle ((μ k < S z. z < triangle (k + 1)) + 1)) = 1 by exact Y
+
+theorem projWLow : |- triangle (projW z) <= z
+by have Z: (projW z = 0 \/ projW z = S (prd (projW z))) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { calc (triangle (projW z) <= z) = (triangle 0 <= z) by cong Za = 1 }
+   { have K: (prd (projW z) < projW z) { calc (prd (projW z) < projW z) = (prd (projW z) < S (prd (projW z))) by cong Zb = 1 by exact ltSucc };
+     have K2: (prd (projW z) < (μ k < S z. z < triangle (k + 1))) { calc (prd (projW z) < (μ k < S z. z < triangle (k + 1))) = (prd (projW z) < projW z) = 1 by exact K };
+     have N: ((z < triangle (prd (projW z) + 1)) = 0) { exact muMin };
+     have L: (triangle (prd (projW z) + 1) <= z) { exact notLtLe };
+     calc (triangle (projW z) <= z) = (triangle (S (prd (projW z))) <= z) by cong Zb = (triangle (prd (projW z) + 1) <= z) = 1 by exact L }
+
+theorem pairSurj : |- pair (godelPi1 z) (godelPi2 z) = z
+by have A: (triangle (projW z) <= z) { exact projWLow };
+   have B: (z < triangle (projW z + 1)) { exact projWHigh };
+   have C: (triangle (projW z) + (z - triangle (projW z)) = z) { exact leAddSub };
+   have D: (triangle (projW z) + (z - triangle (projW z)) < triangle (projW z) + S (projW z))
+     { calc (triangle (projW z) + (z - triangle (projW z)) < triangle (projW z) + S (projW z))
+          = (z < triangle (projW z) + S (projW z)) by cong C
+          = (z < triangle (projW z + 1))
+          = 1 by exact B };
+   have E: (z - triangle (projW z) < S (projW z)) { exact addLtCancelL };
+   have F: (z - triangle (projW z) <= projW z) { exact leOfLtSucc };
+   have G: ((z - triangle (projW z)) + (projW z - (z - triangle (projW z))) = projW z) { exact leAddSub };
+   calc (pair (godelPi1 z) (godelPi2 z))
+     = (triangle (godelPi1 z + godelPi2 z) + godelPi2 z)
+     = (triangle ((projW z - (z - triangle (projW z))) + (z - triangle (projW z))) + (z - triangle (projW z)))
+     = (triangle ((z - triangle (projW z)) + (projW z - (z - triangle (projW z)))) + (z - triangle (projW z))) by cong addComm
+     = (triangle (projW z) + (z - triangle (projW z))) by cong G
+     = z by exact C
+
+-- The projections of a code are at most it, and those of a cons below it.
+
+theorem consSurj : 0 < z |- cons (lft z) (rgt z) = z
+by have P: (z = S (prd z)) { exact posSucc };
+   calc (cons (lft z) (rgt z)) = (S (pair (godelPi1 (prd z)) (godelPi2 (prd z))))
+     = (S (prd z)) by cong pairSurj
+     = z by cong P
+
+theorem lftLt : 0 < z |- lft z < z
+by have C: (cons (lft z) (rgt z) = z) { exact consSurj };
+   have L: (lft z < cons (lft z) (rgt z)) { exact ltConsL };
+   calc (lft z < z) = (lft z < cons (lft z) (rgt z)) by cong C = 1 by exact L
+
+theorem rgtLt : 0 < z |- rgt z < z
+by have C: (cons (lft z) (rgt z) = z) { exact consSurj };
+   have L: (rgt z < cons (lft z) (rgt z)) { exact ltConsR };
+   calc (rgt z < z) = (rgt z < cons (lft z) (rgt z)) by cong C = 1 by exact L
+
+theorem pi1Le : |- godelPi1 z <= z
+by have P: (pair (godelPi1 z) (godelPi2 z) = z) { exact pairSurj };
+   have L: (godelPi1 z <= pair (godelPi1 z) (godelPi2 z)) { exact lePairL };
+   calc (godelPi1 z <= z) = (godelPi1 z <= pair (godelPi1 z) (godelPi2 z)) by cong P = 1 by exact L
+
+theorem pi2Le : |- godelPi2 z <= z
+by have P: (pair (godelPi1 z) (godelPi2 z) = z) { exact pairSurj };
+   have L: (godelPi2 z <= pair (godelPi1 z) (godelPi2 z)) { exact lePairR };
+   calc (godelPi2 z <= z) = (godelPi2 z <= pair (godelPi1 z) (godelPi2 z)) by cong P = 1 by exact L
+
+-- * Introducing and using the bounded quantifiers
+
+-- To prove p nonzero below t, prove it at an n < t below which it holds:
+-- bounded course-of-values induction.  The premise is used under the
+-- hypotheses of the induction step, weakened.
+rule belowIntro (n : var) (t : term) (Γ : ctx) (p(n) : term)
+  (step : n < t, holdsBelow {p} n = 1, Γ |- 0 < p(n))
+  : Γ |- holdsBelow {p} t = 1
+  where n ∉ Γ, t
+by Cut (t <= t ==> holdsBelow {p} t = 1)
+   { Ind n (n <= t ==> holdsBelow {p} n = 1) t
+       { ImplR; refl }
+       { ImplR as L;
+         have A: (n < t) { exact succLeLt };
+         have B: (n <= t) { exact ltLe };
+         ImplL on H1
+         { exact B }
+         { have Q: (0 < p(n)) { exact step };
+           exact belowSucc } } }
+   { ImplL on H1 { exact leqRefl } { assumption } }
+
+-- The bounded universal quantifier used at u < t, as a left rule: the
+-- instance of its body is a hypothesis of the premise.
+rule belowUse (n : var) (t u : term) (Γ : ctx) (p(n) : term) (A : formula)
+  (k : 0 < p(u), holdsBelow {p} t = 1, u < t, Γ |- A)
+  : holdsBelow {p} t = 1, u < t, Γ |- A
+by Cut (0 < p(u)) as Q { exact belowElim _ t u } { exact k }
+
+-- The bounded existential mu {p} t < t used: its witness is mu {p} t.
+rule existsUse (n : var) (t : term) (Γ : ctx) (p(n) : term) (A : formula)
+  (k : 0 < p(mu {p} t), mu {p} t < t, Γ |- A)
+  : mu {p} t < t, Γ |- A
+by Cut (0 < p(mu {p} t)) as Q { exact muHit } { exact k }
+
+-- The least witness: p holds at it, and it is at most any witness below t.
+rule muLeast (n : var) (t u : term) (Γ : ctx) (p(n) : term) : u < t, 0 < p(u), Γ |- 0 < p(mu {p} t) /\ mu {p} t <= u
+by have A: (mu {p} t <= u) { exact muWitness };
+   have B: (mu {p} t < t) { exact leLtTrans };
+   ConjR { exact muHit } { exact A }

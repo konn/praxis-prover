@@ -89,7 +89,7 @@ import Control.Lens ((^?))
 import Control.Monad (foldM, forM_, join, unless, when, (>=>))
 import Control.Monad.Free (Free (..))
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.State.Strict (evalStateT, get, put)
+import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, put)
 import Data.Bifunctor (first)
 import Data.Char (isDigit)
 import Data.Either (partitionEithers)
@@ -123,8 +123,9 @@ import Language.Praxis.PRA.PrimitiveRecursion.Function (Function, KernelEnv, Ker
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Proof.Transform (argNames, substAtomic, substFormula, substProof, weakenProof)
+import Language.Praxis.PRA.Reflection (CodeView (..), codeView, comparisonSymbol, decodeFormula, encodeFormula)
 import Language.Praxis.PRA.Rule qualified as R
-import Language.Praxis.PRA.Signature (SchemaInstance (..), Signature, applySchemaNamed, decompileFunction, instanceName, schemaInstanceOf, signatureKernelEnv)
+import Language.Praxis.PRA.Signature (SchemaInstance (..), Signature, Symbol (..), applySchemaNamed, applySymbol, decompileFunction, instanceName, schemaInstanceOf, signatureKernelEnv)
 import Language.Praxis.PRA.Syntax
 import Language.Praxis.PRA.Syntax.Pretty
 
@@ -342,6 +343,20 @@ data Tactic a
     taken: @Cut f { u } { skip }@, with the name.
     -}
     Have !(Maybe String) !(Formula a) !(Tactic a)
+  | {- | @Reflect Nothing@: on the goal @0 < c@ or @c = 1@, the truth of a
+    code, go on with the formula it is the code of, as
+    "Language.Praxis.PRA.Reflection" decodes it; @0 < c@ is read as the
+    truth of @c@ first.  @Reflect (Just sel)@: from the hypothesis selected,
+    the truth of a code, add that formula.  The proof appeals to the
+    reflection lemmas of the library by name: @conjIntro@, @conjElim1@, …,
+    'ReflectionLemma' when one is not in scope.
+    -}
+    Reflect !(Maybe (Selector a))
+  | {- | @Reify Nothing@: on the goal @A@, go on with @0 < ⟦A⟧@, the truth of
+    its code.  @Reify (Just sel)@: from the hypothesis @A@ selected, add @0 <
+    ⟦A⟧@.  A formula mentioning a metavariable has no code.
+    -}
+    Reify !(Maybe (Selector a))
   | -- | Leave the goal open.
     Skip
   | -- | Abandon the whole proof, reporting the goal reached here.
@@ -358,7 +373,9 @@ data Tactic a
     -}
     Dispatch !(Tactic a) ![Tactic a]
   | {- | @t on H…@: the principal formulas of the rule, or the hypotheses of
-    the lemma, @t@ applies are the named hypotheses, in order.
+    the lemma, @t@ applies are the named hypotheses: in order for a rule, and
+    for a lemma each discharges a hypothesis of its statement it is an
+    instance of.
     -}
     On ![String] !(Tactic a)
   | -- | @t as H…@: the hypotheses @t@ introduces take the names, in order.
@@ -444,10 +461,17 @@ data Appeal a = Appeal
   }
   deriving (Show, Eq, Generic)
 
--- | A step of a partial proof: a rule of the calculus, or a lemma with the proofs of its premises.
+{- |
+A step of a partial proof: a rule of the calculus, a lemma with the proofs of
+its premises, or the sequent a proof establishes with hypotheses added, which
+a premise of the derived rule being proved needs under hypotheses it does not
+state.  Weakening is admissible, not a rule: the proof of the weakened
+sequent is the proof beneath under 'weakenProof'.
+-}
 data Step a x
   = RuleStep !(ProofF a x)
   | LemmaStep !(Appeal a) ![x]
+  | WeakenStep !(Multiset (Formula a)) x
   deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
 
 type Partial a = Free (Step a) (Leaf a)
@@ -521,6 +545,12 @@ data Failure a
     it is bound to: lemma, metavariable, why
     -}
     CannotCapture !String !String !String
+  | -- | 'Reflect' on a formula which is not the truth of a code more than its truth
+    NothingToReflect !(Formula a)
+  | -- | 'Reify' on a formula which has no code: why
+    NoCode !String
+  | -- | 'Reflect' or 'Reify' needs a reflection lemma of the library which is not in scope
+    ReflectionLemma !String
   | -- | names given by 'As' for hypotheses the tactic did not introduce
     NamesUnused ![String]
   | -- | a name given by 'As' which a hypothesis of the goal already has
@@ -599,12 +629,15 @@ proveWith env certified goal t = do
         c <- maybe (failWith (UnknownPremise (appealName appeal))) Right (Map.lookup (appealName appeal) certified)
         subs' <- traverse close subs
         pure (weakenProof (appealWeakening appeal) (substProof (appealSubst appeal) (certifiedProof c (appealArgs appeal) subs')))
+      Free (WeakenStep extra sub) -> weakenProof extra <$> close sub
 
+    -- A proof transformed from others is checked again.
     appeals :: Free (Step a) String -> Bool
     appeals = \case
       Pure _ -> False
       Free (RuleStep step) -> any appeals step
       Free (LemmaStep _ _) -> True
+      Free (WeakenStep _ _) -> True
 
 {- |
 Prove a goal from declared premises, as a derived rule does.  Every open
@@ -675,6 +708,10 @@ certify env lemmas leaf = check
         forM_ (zip premises proved) \(expected, actual) ->
           unless (expected == actual) $ Left (WrongPremise name expected actual)
         pure (Pure conclusion)
+      -- A proof weakened establishes its sequent with the hypotheses added.
+      Free (WeakenStep extra sub) -> do
+        hyps :|- s <- check sub
+        pure (Pure ((extra <> hyps) :|- s))
 
 -- | The limit on the iterations of 'Repeat' along any branch.
 repeatLimit :: Int
@@ -742,8 +779,18 @@ runTacticDeclared env lemmas prems fresh = go noHints
         (Just s, _, _)
           | any isJust args -> failWith (Malformed ("the premise " <> d <> " takes no arguments"))
           | s == goalSequent goal -> plain (Right (Pure (Premise d s)))
+          -- Under more hypotheses than it states, the premise is weakened.
+          | premiseCtx :|- premiseSucc <- s
+          , premiseSucc == c
+          , Just extra <- foldM (flip MS.removeOne) ctx (toList premiseCtx) ->
+              plain (Right (Free (WeakenStep extra (Pure (Premise d s)))))
           | otherwise -> failWith (PremiseMismatch d s)
-        (Nothing, Just lemma, _) -> first (TacticError Nothing goal) (useLemma (envSignature env) hints d lemma args goal)
+        (Nothing, Just lemma, _) -> do
+          p <- first (TacticError Nothing goal) (useLemma (envSignature env) hints d lemma args goal)
+          case p of
+            Free (LemmaStep appeal _) -> first (TacticError Nothing goal) (appealDeclared d lemma appeal)
+            _ -> pure ()
+          pure p
         (Nothing, Nothing, Just h)
           | any isJust args -> failWith (Malformed ("the hypothesis " <> d <> " takes no arguments"))
           | hypothesisFormula h == c -> plain (go noHints Assumption goal)
@@ -870,6 +917,61 @@ runTacticDeclared env lemmas prems fresh = go noHints
                 conjuncts _ = []
                 chain = foldr (\(u :=== v) k -> applyWith SubstRule [ArgVar (Named x), term u, term v, atom (t0 :=== Var x)] `Then` k) (applyWith IdRule []) (drop 1 equations)
             go noHints (Dispatch (applyWith CutRule [form conjunction]) [proveSteps pairs, split `Then` chain]) goal
+      Reflect sel -> case sel of
+        -- The goal, the truth of a code, becomes the formula it is the code of.
+        Nothing -> do
+          unless (unhinted hints) $ failWith NothingToName
+          (code, positive) <- maybe (failWith (NothingToReflect c)) Right (truthOf c)
+          refuseTrivial c code positive
+          d <- decoded c code
+          script <- flip evalStateT 1 do
+            h <- freshName
+            proof <- complete code h
+            let reflected = Dispatch (cutOn h d) [Skip, proof]
+            if positive
+              then pure reflected
+              else do
+                k <- freshName
+                one <- oneOf c code k
+                zc <- lift (zeroLt code)
+                pure (Dispatch (cutOn k zc) [reflected, one])
+          go noHints script goal
+        -- The hypothesis, the truth of a code, gives the formula it is the code of.
+        Just s -> do
+          unless (null (hintOn hints)) $ failWith NothingToName
+          (n, f) <- selected s
+          (code, positive) <- maybe (failWith (NothingToReflect f)) Right (truthOf f)
+          refuseTrivial f code positive
+          d <- decoded f code
+          proof <- flip evalStateT 1 do
+            if positive
+              then sound code n
+              else do
+                k <- freshName
+                one <- lemmaStep "oneNonzero" [n]
+                zc <- lift (zeroLt code)
+                proofK <- sound code k
+                pure (Dispatch (cutOn k zc) [one, proofK])
+          go noHints (Dispatch (named (applyWith CutRule [form d])) [proof, Skip]) goal
+      Reify sel -> case sel of
+        -- The goal becomes the truth of its code.
+        Nothing -> do
+          unless (unhinted hints) $ failWith NothingToName
+          code <- encoded c
+          zc <- zeroLt code
+          script <- flip evalStateT 1 do
+            k <- freshName
+            proof <- sound code k
+            pure (Dispatch (cutOn k zc) [Skip, proof])
+          go noHints script goal
+        -- The hypothesis gives the truth of its code.
+        Just s -> do
+          unless (null (hintOn hints)) $ failWith NothingToName
+          (n, f) <- selected s
+          code <- encoded f
+          zc <- zeroLt code
+          proof <- flip evalStateT 1 (complete code n)
+          go noHints (Dispatch (named (applyWith CutRule [form zc])) [proof, Skip]) goal
       Have given f u -> plain do
         let taken = map hypothesisName (goalHypotheses goal)
             names = case given of
@@ -909,6 +1011,181 @@ runTacticDeclared env lemmas prems fresh = go noHints
       where
         c = goalSuccedent goal
         ctx = goalContext goal
+        -- \* Reflection
+
+        -- The code a formula is the truth of: 0 < c, read as the truth of c, or c = 1.
+        truthOf :: Formula a -> Maybe (Term a, Bool)
+        truthOf = \case
+          Atm p@(s :=== t)
+            | isAtom p
+            , Lit 1 <- canonicalise t ->
+                case canonicalise s of
+                  App f args
+                    | [Lit 0, u] <- toList args
+                    , Just sym <- comparisonSymbol sig "<"
+                    , symbolFunction sym == F.SomeFunction f ->
+                        Just (u, True)
+                  _ -> Just (s, False)
+          _ -> Nothing
+
+        -- The formula a code is the code of, when it is more than its truth.
+        decoded :: Formula a -> Term a -> Either (TacticError a) (Formula a)
+        decoded f code = case codeView sig code of
+          CodeOther -> failWith (NothingToReflect f)
+          _ -> maybe (failWith (NothingToReflect f)) Right (decodeFormula sig code)
+
+        -- The code of a formula without metavariables.
+        encoded :: Formula a -> Either (TacticError a) (Term a)
+        encoded f = either (failWith . NoCode) Right (encodeFormula sig (isJust . metaAtom) f)
+
+        -- A code whose equation with 1 is the formula it reads as: nothing to reflect.
+        refuseTrivial :: Formula a -> Term a -> Bool -> Either (TacticError a) ()
+        refuseTrivial f code positive = case codeView sig code of
+          CodeBoolean _ | not positive -> failWith (NothingToReflect f)
+          _ -> pure ()
+
+        -- The truth of a code, 0 < c.
+        zeroLt :: Term a -> Either (TacticError a) (Formula a)
+        zeroLt code = case comparisonSymbol sig "<" >>= (`applySymbol` [Lit 0, code]) of
+          Just s -> Right (s === Lit 1)
+          Nothing -> failWith (NoCode "the signature has no comparison < to state the truth of a code")
+
+        -- The hypothesis selected, with its name.
+        selected :: Selector a -> Either (TacticError a) (String, Formula a)
+        selected = \case
+          ByName n -> maybe (failWith (UnknownHypothesis n)) (\h -> Right (n, hypothesisFormula h)) (hypothesisNamed n goal)
+          ByPattern pat -> case [h | h@(Hypothesis _ (Atm p)) <- goalHypotheses goal, isAtom p, matchAtomic pat p] of
+            [h] -> Right (hypothesisName h, hypothesisFormula h)
+            [] -> failWith (NoMatch pat)
+            hs -> failWith (AmbiguousMatch pat (map hypothesisFormula hs))
+
+        -- A name for a hypothesis the proof introduces, apart from those of the goal.
+        freshName :: StateT Int (Either (TacticError a)) String
+        freshName = do
+          k <- get
+          case [(n, j + 1) | j <- [k ..], let n = "ρ" <> show j, n `notElem` map hypothesisName (goalHypotheses goal)] of
+            (n, k') : _ -> n <$ put k'
+            [] -> lift (failWith (Malformed "no fresh name"))
+
+        -- An appeal to a lemma of the library, on the hypotheses named.
+        lemmaStep :: String -> [String] -> StateT Int (Either (TacticError a)) (Tactic a)
+        lemmaStep n hs = case Map.lookup n lemmas of
+          _ | Map.member n prems || isJust (hypothesisNamed n goal) -> lift (failWith (ReflectionLemma n))
+          Nothing -> lift (failWith (ReflectionLemma n))
+          Just l -> pure (On hs (Exact n (map (const Nothing) (lemmaMetas l))))
+
+        cutOn :: String -> Formula a -> Tactic a
+        cutOn k f = As [k] (applyWith CutRule [form f])
+
+        -- The proof of 0 < c under the hypothesis h, the formula c is the code of.
+        complete :: Term a -> String -> StateT Int (Either (TacticError a)) (Tactic a)
+        complete code h = case codeView sig code of
+          CodeConj x y -> do
+            h1 <- freshName
+            h2 <- freshName
+            kx <- freshName
+            ky <- freshName
+            zx <- lift (zeroLt x)
+            zy <- lift (zeroLt y)
+            tx <- complete x h1
+            ty <- complete y h2
+            intro <- lemmaStep "conjIntro" [kx, ky]
+            pure (On [h] (As [h1, h2] (applyWith ConjLRule [])) `Then` Dispatch (cutOn kx zx) [tx, Dispatch (cutOn ky zy) [ty, intro]])
+          CodeDisj x y -> do
+            h1 <- freshName
+            h2 <- freshName
+            kx <- freshName
+            ky <- freshName
+            zx <- lift (zeroLt x)
+            zy <- lift (zeroLt y)
+            tx <- complete x h1
+            ty <- complete y h2
+            ix <- lemmaStep "disjIntro1" [kx]
+            iy <- lemmaStep "disjIntro2" [ky]
+            pure (Dispatch (On [h] (As [h1, h2] (applyWith DisjLRule []))) [Dispatch (cutOn kx zx) [tx, ix], Dispatch (cutOn ky zy) [ty, iy]])
+          CodeImp x y -> do
+            k <- freshName
+            k1 <- freshName
+            k2 <- freshName
+            k3 <- freshName
+            zx <- lift (zeroLt x)
+            zy <- lift (zeroLt y)
+            dx <- lift (maybe (failWith (NoCode "the signature has no comparison < to state the truth of a code")) Right (decodeFormula sig x))
+            sx <- sound x k1
+            ty <- complete y k3
+            intro <- lemmaStep "impIntro" [k]
+            pure
+              ( Dispatch
+                  (cutOn k (zx :==> zy))
+                  [ As [k1] (applyWith ImplRRule []) `Then` Dispatch (cutOn k2 dx) [sx, Dispatch (On [h] (As [k3] (applyWith ImplLRule []))) [Assumption, ty]]
+                  , intro
+                  ]
+              )
+          CodeFalse -> pure (On [h] (applyWith ExFalsoRule []))
+          CodeEq _ _ -> lemmaStep "eqIntro" [h]
+          CodeBoolean _ -> lemmaStep "oneNonzero" [h]
+          CodeOther -> pure Assumption
+
+        -- The proof of the formula c is the code of under the hypothesis h, 0 < c.
+        sound :: Term a -> String -> StateT Int (Either (TacticError a)) (Tactic a)
+        sound code h = case codeView sig code of
+          CodeConj x y -> do
+            k1 <- freshName
+            k2 <- freshName
+            zx <- lift (zeroLt x)
+            zy <- lift (zeroLt y)
+            e1 <- lemmaStep "conjElim1" [h]
+            e2 <- lemmaStep "conjElim2" [h]
+            sx <- sound x k1
+            sy <- sound y k2
+            pure (Dispatch (cutOn k1 zx) [e1, Dispatch (cutOn k2 zy) [e2, Dispatch (applyWith ConjRRule []) [sx, sy]]])
+          CodeDisj x y -> do
+            k <- freshName
+            k1 <- freshName
+            k2 <- freshName
+            zx <- lift (zeroLt x)
+            zy <- lift (zeroLt y)
+            e <- lemmaStep "disjElim" [h]
+            sx <- sound x k1
+            sy <- sound y k2
+            pure (Dispatch (cutOn k (zx :\/ zy)) [e, Dispatch (On [k] (As [k1, k2] (applyWith DisjLRule []))) [applyWith DisjR2Rule [] `Then` sx, applyWith DisjR1Rule [] `Then` sy]])
+          CodeImp x y -> do
+            k1 <- freshName
+            k2 <- freshName
+            k3 <- freshName
+            zx <- lift (zeroLt x)
+            zy <- lift (zeroLt y)
+            cx <- complete x k1
+            e <- lemmaStep "impElim" [h, k2]
+            sy <- sound y k3
+            pure (As [k1] (applyWith ImplRRule []) `Then` Dispatch (cutOn k2 zx) [cx, Dispatch (cutOn k3 zy) [e, sy]])
+          CodeFalse -> lemmaStep "zeroPosAbsurd" [h]
+          CodeEq _ _ -> lemmaStep "eqElim" [h]
+          CodeBoolean n -> lemmaStep (booleanOne n) [h]
+          CodeOther -> pure Assumption
+
+        -- The proof of c = 1 under the hypothesis k, 0 < c, for a code which is 0 or 1.
+        oneOf :: Formula a -> Term a -> String -> StateT Int (Either (TacticError a)) (Tactic a)
+        oneOf f code k = case codeView sig code of
+          CodeConj _ _ -> lemmaStep "conjOne" [k]
+          CodeDisj _ _ -> lemmaStep "disjOne" [k]
+          CodeImp _ _ -> lemmaStep "impOne" [k]
+          CodeEq _ _ -> lemmaStep "eqOne" [k]
+          CodeBoolean n -> lemmaStep (booleanOne n) [k]
+          CodeFalse -> lemmaStep "zeroPosAbsurd" [k]
+          CodeOther -> lift (failWith (NothingToReflect f))
+
+        booleanOne :: String -> String
+        booleanOne = \case
+          "holdsBelow" -> "belowOne"
+          "lt" -> "ltOne"
+          _ -> "leOne"
+
+        sig = envSignature env
+
+        -- The name the script gives the hypothesis a step adds, if any.
+        named :: Tactic a -> Tactic a
+        named t = if null (hintAs hints) then t else As (hintAs hints) t
 
         failWith :: forall x. Failure a -> Either (TacticError a) x
         failWith = Left . TacticError Nothing goal
@@ -974,6 +1251,31 @@ runTacticDeclared env lemmas prems fresh = go noHints
                 missing = filter (`notElem` Map.findWithDefault [] n fresh) needed
             unless (null missing) $ Left (NotDeclaredFresh n missing)
           _ -> pure ()
+
+        -- An appeal instantiating an eigenvariable of the lemma by a var
+        -- metavariable n of the rule being proved needs the rule to declare n
+        -- not free in every metavariable of the goal and of the other
+        -- arguments, but one n parameterizes, as an induction on n does.
+        appealDeclared :: String -> Lemma a -> Appeal a -> Either (Failure a) ()
+        appealDeclared _ lemma appeal = forM_ (lemmaBound lemma) \x ->
+          case [v | ((m, R.VarS), ArgVar v) <- zip (lemmaMetas lemma) (appealArgs appeal), m == x] of
+            [v] | Just (R.VarS, n) <- metaName v -> do
+              let parameterised = metaParameters lemma
+                  others = [arg | ((m, _), arg) <- zip (lemmaMetas lemma) (appealArgs appeal), m /= x, x `notElem` Map.findWithDefault [] m parameterised]
+                  needed = nub (concatMap (metasIn n) (c : map hypothesisFormula (goalHypotheses goal)) <> concatMap (argMetas n) others)
+                  missing = filter (`notElem` Map.findWithDefault [] n fresh) needed
+              unless (null missing) $ Left (NotDeclaredFresh n missing)
+            _ -> pure ()
+
+        -- The metavariables an argument mentions, but the var metavariable given.
+        argMetas :: String -> Arg a -> [String]
+        argMetas n = \case
+          ArgVar w -> [m | Just (_, m) <- [metaName w], m /= n]
+          ArgTerm t -> termMetas n t
+          ArgFun ab -> termMetas n (abstractionBody ab) <> concatMap (termMetas n) (abstractionCaptured ab)
+          ArgAtom p -> metasIn n (Atm p)
+          ArgForm f -> metasIn n f
+          ArgCtx g -> concatMap (metasIn n) (toList g)
 
     continue k =
       fmap join . traverse \case
@@ -1374,11 +1676,32 @@ useLemma sig hints name lemma userArgs goal = do
     Left (Malformed ("on: " <> name <> " has " <> show (length hyps) <> " hypotheses"))
   pins <- pinned goal (hintOn hints)
   (b0, cons) <- foldM (\acc (m, arg) -> seedMeta m arg acc) (emptyBindings {bAvoid = goalNames (goalSequent goal)}, noConstraints) (zip metas userArgs)
-  b1 <- case matchFormL sig cons b0 lemmaSucc (goalSuccedent goal) of
-    Matched b -> Right b
-    Deferred | unbound@(_ : _) <- [R.MetaRef s n | (n, s) <- metas, s == R.TermS, not (isBound (R.MetaRef s n) b0)] -> Left (CannotInstantiate name unbound)
+  let succedent b = matchFormL sig cons b lemmaSucc (goalSuccedent goal)
+      -- The hypotheses pinned discharge hypotheses of the lemma, each one it
+      -- is an instance of: the hypotheses of a statement are a multiset, so
+      -- every placing of the pinned ones is tried, the first which discharges
+      -- them all taken.
+      placings = [zip hyps (map (`lookup` placed) [0 ..]) | placed <- arrangements (map hypothesisName pins)]
+      arrangements names = [zip is names | is <- injections (length names) [0 .. length hyps - 1]]
+      injections :: Int -> [Int] -> [[Int]]
+      injections 0 _ = [[]]
+      injections k is = [i : more | i <- is, more <- injections (k - 1) (filter (/= i) is)]
+      dischargeAll b = firstRight [discharge cons b (goalHypotheses goal) obligations | obligations <- placings]
+      firstRight attempts = case [r | Right r <- attempts] of
+        r : _ -> Right r
+        [] -> case attempts of
+          e : _ -> e
+          [] -> Left (Malformed ("on: no placing of the hypotheses named among those of " <> name))
+  (b2, rest) <- case succedent b0 of
+    Matched b1 -> dischargeAll b1
+    -- A succedent the arguments do not determine is matched once the
+    -- hypotheses have bound what it needs, as muHit's p(mu {p} t) by mu {p} t < t.
+    Deferred
+      | Right (b1, rest) <- dischargeAll b0
+      , Matched b2 <- succedent b1 ->
+          Right (b2, rest)
+      | unbound@(_ : _) <- [R.MetaRef s n | (n, s) <- metas, s == R.TermS, not (isBound (R.MetaRef s n) b0)] -> Left (CannotInstantiate name unbound)
     _ -> Left (NotAnInstance name (lemmaGoal lemma))
-  (b2, rest) <- discharge cons b1 (goalHypotheses goal) (zip hyps (map (Just . hypothesisName) pins <> repeat Nothing))
   let dischargedNames = [hypothesisName h | h <- goalHypotheses goal, hypothesisName h `notElem` map hypothesisName rest]
       restCtx = foldr (MS.insertOne . hypothesisFormula) MS.empty rest
   -- The first context metavariable takes what is left; without one, it is weakened in.
@@ -2004,7 +2327,7 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       NoCongruence (u :=== v) _ -> "cong: no hypothesis rewrites " <> rt u <> " into " <> rt v
       LemmaNotEquation n s -> n <> " does not state an equation, so it cannot stand for a hypothesis; it proves " <> rs s
       Undetermined n vs -> "cannot instantiate " <> intercalate ", " (map name vs) <> " of " <> n <> " from where it is used; state the instance with have"
-      NotDeclaredFresh n ms -> "induction on " <> n <> " needs " <> n <> " not free in " <> intercalate ", " ms <> "; declare it in the rule, where " <> n <> " ∉ " <> intercalate ", " ms
+      NotDeclaredFresh n ms -> n <> " is an eigenvariable here, of an induction or a lemma, so it must not be free in " <> intercalate ", " ms <> "; declare it in the rule, where " <> n <> " ∉ " <> intercalate ", " ms
       NotFresh x -> "induction: " <> name x <> " occurs in the goal"
       NotInContext f -> "assumption: " <> rf f <> " is not in the context"
       UnknownPremise d -> "exact: no premise, lemma or hypothesis named " <> d
@@ -2027,6 +2350,9 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       CannotCapture d n why ->
         "exact: the schema at " <> n <> " in " <> d <> " cannot be instantiated at the function found for " <> n <> ": " <> why
       NamesUnused ns -> "as: no hypothesis introduced to name " <> intercalate ", " ns
+      NothingToReflect f -> "reflect: " <> rf f <> " is not the truth of a code which reads as another formula"
+      NoCode why -> "reflect/reify: " <> why
+      ReflectionLemma n -> "reflect/reify: the reflection lemma " <> n <> " is not in scope, or a premise or hypothesis of that name hides it; the library, Language.Praxis.PRA.Library, states it"
       NameInUse n -> "as: a hypothesis is already named " <> n
       NothingToName -> "on/as: the tactic acts on no hypothesis"
       CalcMismatch s t -> "calc: the chain proves " <> rt s <> " = " <> rt t <> ", which is not the goal"

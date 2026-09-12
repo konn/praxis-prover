@@ -90,6 +90,10 @@ by exact plusZeroRight
 rule transP (t s u : term) (Γ : ctx) (D1 : Γ |- t = s) (D2 : t = s, Γ |- s = u) : Γ |- t = u
 by Cut (t = s) { exact D1 } { Cut (s = u) { exact D2 } { Subst x s u (t = x); Id } }
 
+-- A premise used under hypotheses it does not state, weakened.
+rule weakenPremise (a : term) (Γ : ctx) (D : a = 0, Γ |- a = 0) : a = 0, a = 1, Γ |- a = 0
+by exact D
+
 theorem plusZeroRightTwice : |- plus (plus y 0) 0 = y
 by exact transP _ (plus y 0) { exact plusZeroRight } { exact plusZeroRight }
 
@@ -331,6 +335,9 @@ quoteTests =
     , testCase "an appeal to a theorem is weakened, renaming its eigenvariable apart from the hypotheses" $
         inferConclusion (plusZeroRightUnder (ctx ["n = 0", "y = 1"]))
           @?= Right (sequent "n = 0, y = 1 |- plus y 0 = y")
+    , testCase "a premise is used under hypotheses it does not state, weakened" $
+        inferConclusion (weakenPremise (Var "x") (ctx ["y = 2"]) (Id (Var "x" :=== Lit 0) (ctx ["y = 2"])))
+          @?= Right (sequent "x = 0, x = 1, y = 2 |- x = 0")
     , testCase "an appeal to a rule instantiates its metavariables" $ do
         inferConclusion (symmUse (Var "a") (Lit 3) (ctx ["b = 0"]))
           @?= Right (sequent "a = 3, b = 0 |- 3 = a")
@@ -360,7 +367,7 @@ quoteTests =
         inferConclusionIn kenv muSchemaApp2 @?= Right (sequentMu "|- mu {lt} 3 0 = 3")
         inferConclusionIn kenv muUnaryApp @?= Right (sequentMu "|- mu sgn 5 = 1")
         inferConclusionIn kenv muLambda @?= Right (sequentMu "|- mu {λ i. 3 < i} 10 = 4")
-        inferConclusionIn kenv muSugar @?= Right (sequentMu "|- mu {λ i. 3 < i} 10 = 4")
+        inferConclusionIn kenv muSugar @?= Right (sequentMu "|- mu {λ i y. y < i} 10 3 = 4")
         inferConclusionIn kenv succSubSuccAt @?= Right (sequentMu "x = 0 |- S 3 - S x = 3 - x")
         inferConclusionIn kenv succSubSuccEigen @?= Right (sequentMu "|- S m' - S (S m') = m' - S m'")
         inferConclusionIn kenv ltSucc @?= Right (sequentMu "|- t < S t")
