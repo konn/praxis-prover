@@ -73,6 +73,8 @@ uniformly instead of one constructor at a time.
 data Arg a
   = ArgVar !a
   | ArgTerm !(Term a)
+  | -- | the argument for a term metavariable with parameters, in an appeal to a derived rule
+    ArgFun !(Abstraction a)
   | ArgAtom !(Atomic a)
   | ArgForm !(Formula a)
   | ArgCtx !(Multiset (Formula a))

@@ -59,11 +59,13 @@ import Language.Praxis.PRA.Syntax.Parser (isComparison)
 Render a term.  Symbols are named through the signature, and where the
 signature has the symbols the parser reads a notation as, the notation is
 used: an operator is shown infix, a ternary @ifte@ as a conditional, and an
-application of a schema of the signature with its parameter, a symbol in
-braces or a lambda; an instance of @mu@ at a lambda is shown as the bounded
-search @μ i < b. body@.  A code the signature does not name is shown raw,
-between angle brackets.  The term is canonicalised first, so a successor of a
-numeral is shown as the next numeral.
+application of a schema of the signature with its parameter, a symbol or an
+abstract function in braces or a lambda; an instance of @mu@ at a lambda is
+shown as the bounded search @μ i < b. body@.  An abstract function, a term
+metavariable with parameters, is shown applied, @p(t)@.  A code the signature
+does not name is shown raw, between angle brackets.  The term is
+canonicalised first, so a successor of a numeral is shown as the next
+numeral.
 -}
 renderTerm :: Signature -> (a -> String) -> Term a -> String
 renderTerm sig name = renderTermAt sig name 0
@@ -81,6 +83,7 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
       Lit n -> show n
       Succ :$ args -> application "S" args
       App f args
+        | Just (n, _) <- abstractName f -> applied n args
         | Just (op, opLevel, leftLevel, rightLevel) <- operatorOf f
         , [l, r] <- toList args ->
             paren (level > opLevel) (at leftLevel l <> " " <> op <> " " <> at rightLevel r)
@@ -88,7 +91,7 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
         , [c, t, e] <- toList args ->
             paren (level > 0) ("if " <> at 0 c <> " then " <> at 0 t <> " else " <> at 0 e)
         | Just sym <- symbolOfFunction f sig -> application (symbolName sym) args
-        | Just rendered <- instanceOf f args -> rendered
+        | Just inst <- schemaInstanceOf sig f, Just rendered <- schemaApplication inst args -> rendered
         | otherwise -> application ("<" <> show f <> ">") args
       where
         at = go bound name
@@ -98,41 +101,38 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
           | null args = hd
           | otherwise = paren (level > 5) (unwords (hd : map (at 6) (toList args)))
 
-        -- An inline code which instantiates a schema of the signature.
-        instanceOf :: forall n. (KnownNat n) => F.Function n -> V n (Term b) -> Maybe String
-        instanceOf (F.Inline code) args =
-          listToMaybe (mapMaybe variadic (variadicSchemas sig) <> mapMaybe plain (schemas sig))
-          where
-            arity = natVal (Proxy @n)
-            variadic sym = do
-              guard (arity >= variadicSchemaFixedArity sym)
-              inst <- either (const Nothing) Just (instantiateVariadicSchemaSymbol sym (arity - variadicSchemaFixedArity sym))
-              param <- parameterOf inst code
-              let search = variadicSchemaName sym == "mu" && variadicSchemaFixedArity sym == 1 && variadicSchemaParamArity sym == 1
-              schemaApplication (variadicSchemaName sym) search param args
-            plain sch = do
-              guard (schemaSymbolArity sch == arity)
-              param <- parameterOf sch code
-              schemaApplication (schemaSymbolName sch) False param args
-        instanceOf _ _ = Nothing
+        -- An abstract function applied, as a metavariable with parameters is written: @p(t, u)@.
+        applied :: forall n. String -> V n (Term b) -> String
+        applied hd args
+          | null args = hd
+          | otherwise = hd <> "(" <> intercalate ", " (map (at 0) (toList args)) <> ")"
 
-        -- @mu {λ i y₁ … yₖ. body} b y₁ … yₖ@ is the bounded search @μ i < b. body@.
-        schemaApplication :: forall n. (KnownNat n) => String -> Bool -> F.SomeFunction -> V n (Term b) -> Maybe String
-        schemaApplication schema search (F.SomeFunction (param :: F.Function k)) args
-          | Just sym <- symbolOfFunction param sig = Just (application (schema <> " {" <> symbolName sym <> "}") args)
-          | search
-          , Just Refl <- testEquality (sNat @k) (sNat @n)
-          , b : captured <- toList args = do
-              let binder = fresh (bound <> avoid args)
-              slots <- SV.fromList' (Var (Left binder) : map (fmap Right) captured)
-              let body = decompile slots (F.functionProgram param)
-              pure (paren (level > 0) ("μ " <> binder <> " < " <> at 2 b <> ". " <> go (binder : bound) (either id name) 0 body))
-          | otherwise = do
-              let binders = take (fromIntegral (natVal (Proxy @k))) (freshNames (bound <> avoid args))
-              slots <- SV.fromList' (map (Var . Left) binders)
-              let body = decompile slots (F.functionProgram param)
-                  lambda = "{λ " <> unwords binders <> ". " <> go (binders <> bound) (either id name) 0 body <> "}"
-              pure (application (schema <> " " <> lambda) args)
+        -- An instance of a schema at its parameter: a symbol or an abstract
+        -- function in braces, or a lambda; @mu {λ i y₁ … yₖ. body} b y₁ … yₖ@
+        -- is the bounded search @μ i < b. body@.
+        schemaApplication :: forall n. (KnownNat n) => SchemaInstance -> V n (Term b) -> Maybe String
+        schemaApplication inst args = case instanceParameter inst of
+          F.SomeFunction (param :: F.Function k)
+            | Just (p, _) <- abstractName param -> Just (application (schema <> " {" <> p <> "}") args)
+            | Just sym <- symbolOfFunction param sig -> Just (application (schema <> " {" <> symbolName sym <> "}") args)
+            | search
+            , Just Refl <- testEquality (sNat @k) (sNat @n)
+            , b : captured <- toList args -> do
+                let binder = fresh (bound <> avoid args)
+                slots <- SV.fromList' (Var (Left binder) : map (fmap Right) captured)
+                let body = decompileProgram slots (F.functionProgram param)
+                pure (paren (level > 0) ("μ " <> binder <> " < " <> at 2 b <> ". " <> go (binder : bound) (either id name) 0 body))
+            | otherwise -> do
+                let binders = take (fromIntegral (natVal (Proxy @k))) (freshNames (bound <> avoid args))
+                slots <- SV.fromList' (map (Var . Left) binders)
+                let body = decompileProgram slots (F.functionProgram param)
+                    lambda = "{λ " <> unwords binders <> ". " <> go (binders <> bound) (either id name) 0 body <> "}"
+                pure (application (schema <> " " <> lambda) args)
+          where
+            schema = instanceName inst
+            search = case instanceSchema inst of
+              Right sym -> variadicSchemaName sym == "mu" && variadicSchemaFixedArity sym == 1 && variadicSchemaParamArity sym == 1
+              Left _ -> False
 
         -- The names a binder must avoid: the variables of the arguments, and symbols.
         avoid :: forall n. V n (Term b) -> [String]
@@ -174,53 +174,6 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
       , ("*", ["mul", "times"], 3, 3, 4)
       , ("^", ["pow"], 4, 5, 4)
       ]
-
-    -- The parameter a code instantiates a schema at: the code is matched
-    -- against the instantiation at a placeholder, whose calls it binds.
-    parameterOf :: forall n. (KnownNat n) => SchemaSymbol -> F.Program n -> Maybe F.SomeFunction
-    parameterOf (SchemaSymbol _ (inst :: F.Function k -> F.Function m) _) code =
-      case testEquality (sNat @m) (sNat @n) of
-        Just Refl -> do
-          let template = F.functionProgram (inst (F.Defined (F.DefId placeholder)))
-          bound <- unify Nothing template code
-          bound
-        Nothing -> Nothing
-
-    placeholder :: T.Text
-    placeholder = T.pack "«parameter»"
-
-    unify :: forall m. (KnownNat m) => Maybe F.SomeFunction -> F.Program m -> F.Program m -> Maybe (Maybe F.SomeFunction)
-    unify acc template code = case (template, code) of
-      (F.Call (F.DefId ident), _)
-        | ident == placeholder -> case acc of
-            Nothing -> Just (Just (F.SomeFunction (F.programFunction code)))
-            Just p
-              | p == F.SomeFunction (F.programFunction code) -> Just acc
-              | otherwise -> Nothing
-      (F.Base x, F.Base y) | x == y -> Just acc
-      (F.Call x, F.Call y) | x == y -> Just acc
-      (F.Comp (g :: F.Program i) xs, F.Comp (h :: F.Program j) ys) -> case testEquality (sNat @i) (sNat @j) of
-        Just Refl -> do
-          acc' <- unify acc g h
-          foldM (\a (x, y) -> unify a x y) acc' (zip (toList xs) (toList ys))
-        Nothing -> Nothing
-      (F.Rec b s, F.Rec b' s') -> unify acc b b' >>= \acc' -> unify acc' s s'
-      _ -> Nothing
-
-    -- A program applied to the terms in its slots, its compositions unfolded.
-    decompile :: forall p b. (KnownNat p) => V p (Term b) -> F.Program p -> Term b
-    decompile slots = \case
-      F.Comp g xs -> apply g (fmap (decompile slots) xs)
-      code -> apply code slots
-      where
-        apply :: forall m. (KnownNat m) => F.Program m -> V m (Term b) -> Term b
-        apply g ys = case g of
-          F.Base Zero -> Lit 0
-          F.Base (Proj i) -> SV.sIndex i ys
-          F.Base Succ -> suc (SV.head ys)
-          F.Base code -> App (F.Primitive code) ys
-          F.Call ident -> App (F.Defined ident) ys
-          _ -> App (F.Inline g) ys
 
     paren True s = "(" <> s <> ")"
     paren False s = s

@@ -21,6 +21,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Function (
   unionKernelEnv,
   lookupDefinition,
   functionProgram,
+  opaqueCalls,
   programFunction,
   evalFunction,
   evalFunctionM,
@@ -64,12 +65,20 @@ data Function n
   | Defined !(DefId n)
   | -- | Residual code produced by partial evaluation, still retaining calls.
     Inline !(Program n)
+  | {- | A function known by name only: the parameter of a schema left
+    abstract, as a term metavariable with parameters stands for one in the
+    statement of a derived rule.  An application of it never reduces, and a
+    schema instantiated at it unfolds around it.
+    -}
+    Abstract !(DefId n)
 
 data Program n where
   Base :: !(PRFCode n) -> Program n
   Call :: !(DefId n) -> Program n
   Comp :: (KnownNat m) => !(Program m) -> !(V m (Program n)) -> Program n
   Rec :: !(Program k) -> !(Program (k + 2)) -> Program (k + 1)
+  -- | A call of an 'Abstract' function, which is left as it is.
+  Opaque :: !(DefId n) -> Program n
 
 deriving instance (KnownNat n) => Show (Program n)
 
@@ -86,12 +95,14 @@ instance (KnownNat n) => Eq (Program n) where
     Just Refl -> f == g && xs == ys
     Nothing -> False
   Rec b s == Rec c t = b == c && s == t
+  Opaque x == Opaque y = x == y
   _ == _ = False
 
 instance (KnownNat n) => Eq (Function n) where
   Primitive x == Primitive y = x == y
   Defined x == Defined y = x == y
   Inline x == Inline y = x == y
+  Abstract x == Abstract y = x == y
   _ == _ = False
 
 instance (KnownNat n) => Hashable (Program n) where
@@ -100,12 +111,14 @@ instance (KnownNat n) => Hashable (Program n) where
     Call ident -> hashWithSalt salt (1 :: Int, ident)
     Comp f xs -> hashWithSalt salt (2 :: Int, f, SV.toList xs)
     Rec b s -> hashWithSalt salt (3 :: Int, b, s)
+    Opaque ident -> hashWithSalt salt (4 :: Int, ident)
 
 instance (KnownNat n) => Hashable (Function n) where
   hashWithSalt salt = \case
     Primitive code -> hashWithSalt salt (0 :: Int, code)
     Defined ident -> hashWithSalt salt (1 :: Int, ident)
     Inline code -> hashWithSalt salt (2 :: Int, code)
+    Abstract ident -> hashWithSalt salt (3 :: Int, ident)
 
 data SomeFunction = forall n. (KnownNat n) => SomeFunction !(Function n)
 
@@ -174,6 +187,16 @@ references = \case
   Call (DefId ident :: DefId n) -> [(ident, natVal (Proxy @n))]
   Comp f xs -> references f <> foldMap references xs
   Rec b s -> references b <> references s
+  Opaque _ -> []
+
+-- | The abstract functions a program calls, by name.
+opaqueCalls :: (KnownNat n) => Program n -> [Text]
+opaqueCalls = \case
+  Base _ -> []
+  Call _ -> []
+  Comp f xs -> opaqueCalls f <> foldMap opaqueCalls xs
+  Rec b s -> opaqueCalls b <> opaqueCalls s
+  Opaque (DefId ident) -> [ident]
 
 {- | Reject every call cycle, including self calls. Source self recursion must
 already have been reconstructed as 'Rec'. Checks never follow a call edge
@@ -207,15 +230,18 @@ functionProgram = \case
   Primitive code -> Base code
   Defined ident -> Call ident
   Inline code -> code
+  Abstract ident -> Opaque ident
 
 programFunction :: Program n -> Function n
 programFunction = \case
   Base code -> Primitive code
   Call ident -> Defined ident
+  Opaque ident -> Abstract ident
   code -> Inline code
 
 {- | Explicit erasure to the unchanged bare PRA language. Ordinary evaluation
-and term construction do not perform this expansion.
+and term construction do not perform this expansion.  An abstract function
+has no code to erase to.
 -}
 eraseFunction :: (KnownNat n) => KernelEnv -> Function n -> Either KernelError (PRFCode n)
 eraseFunction env = go . functionProgram
@@ -225,15 +251,18 @@ eraseFunction env = go . functionProgram
     go (Call ident) = lookupDefinition env ident >>= go
     go (Comp f xs) = PR.Comp <$> go f <*> traverse go xs
     go (Rec b s) = PR.Rec <$> go b <*> go s
+    go (Opaque (DefId ident)) = Left (UnknownDefinition ident)
 
 {- | Environment-aware evaluation with a residual constructor supplied by the
-syntactic domain. Named calls and residual programs retain their references.
+syntactic domain. Named calls and residual programs retain their references,
+and a call of an abstract function is residual whatever its arguments.
 -}
 evalFunctionM :: forall m n a. (Monad m, KnownNat n, Evalable a) => m Bool -> (forall k. (KnownNat k) => Function k -> V k a -> a) -> KernelEnv -> Function n -> V n a -> m (Either KernelError a)
 evalFunctionM step stuckFunction env fun args = runExceptT (go (functionProgram fun) args)
   where
     go :: (KnownNat k) => Program k -> V k a -> ExceptT KernelError m a
     go (Base code) xs = lift (PR.evalPRFCodeM step code xs)
+    go (Opaque ident) xs = pure (stuckFunction (Abstract ident) xs)
     go code xs =
       lift step >>= \case
         False -> pure (stuckFunction (programFunction code) xs)
@@ -255,4 +284,6 @@ evalFunctionM step stuckFunction env fun args = runExceptT (go (functionProgram 
         stuck = stuckFunction (Inline (Rec b s)) (y SV.:< xs)
 
 evalFunction :: (KnownNat n) => KernelEnv -> Function n -> V n Natural -> Either KernelError Natural
-evalFunction env f xs = runIdentity (evalFunctionM (pure True) (\_ _ -> error "unreachable residual in total evaluation") env f xs)
+evalFunction env f xs = case opaqueCalls (functionProgram f) of
+  ident : _ -> Left (UnknownDefinition ident)
+  [] -> runIdentity (evalFunctionM (pure True) (\_ _ -> error "unreachable residual in total evaluation") env f xs)

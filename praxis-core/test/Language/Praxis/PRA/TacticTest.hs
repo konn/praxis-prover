@@ -11,6 +11,7 @@ proof fails here as a rejected proof rather than a wrong theorem.
 module Language.Praxis.PRA.TacticTest (tacticTests) where
 
 import Control.Exception (displayException)
+import Control.Monad (foldM)
 import Data.Foldable (toList)
 import Data.List (sort)
 import Data.Map.Strict qualified as Map
@@ -56,6 +57,7 @@ tacticTests =
     , haveTests
     , equationTests
     , parameterTests
+    , abstractFunctionTests
     , eigenTests
     , unfoldingTests
     ]
@@ -492,7 +494,7 @@ inductionTests =
                 , "  }"
                 ]
         decls <- parsed (parseDecls (schemaScope builtin) source)
-        env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+        env <- either (assertFailure . displayException) pure (signatureEnv builtin)
         case decls of
           [d] -> case proveOpenIn env Map.empty (declGoal d) (declTactic d) of
             Left err -> renderSchemaTacticError builtin err @?= "5:5: sorry: the proof stops here\n  H1 : t < 0\n  G\n  H2 : 0 < 0\n  |- A"
@@ -564,7 +566,7 @@ lemmaTests =
             lemmas = Map.fromList [("indAt", indAt)]
             run src = do
               (goal, tac) <- parsed (parseGoalIn (Map.map (map snd . lemmaMetas) lemmas) (schemaScope builtin [] []) src)
-              pure (proveOpenWith emptyKernelEnv lemmas Map.empty goal tac)
+              pure (proveOpenWith (kernelOnly emptyKernelEnv) lemmas Map.empty goal tac)
         either (assertFailure . renderSchemaTacticError builtin) (const (pure ())) =<< run "m = 0 |- n + 0 = n by exact indAt k"
         run "m = 0 |- n + 0 = n by exact indAt n" >>= \case
           Left (TacticError _ _ (NotEigen "indAt" "x" (Obj "n"))) -> pure ()
@@ -605,14 +607,14 @@ lemmaSortsOf = Map.map (map snd . lemmaMetas . certifiedLemma)
 provesWith :: Map.Map String (Certified String) -> String -> Assertion
 provesWith lemmas src = do
   (goal, tac) <- parsed (parseGoalIn (lemmaSortsOf lemmas) sc src)
-  case proveWith emptyKernelEnv lemmas goal tac of
+  case proveWith (kernelOnly emptyKernelEnv) lemmas goal tac of
     Left err -> assertFailure (renderTacticError sig id err)
     Right p -> inferConclusion p @?= Right (goalSequent goal)
 
 failsWithIn :: Map.Map String (Certified String) -> String -> (Failure String -> Bool) -> Assertion
 failsWithIn lemmas src ok = do
   (goal, tac) <- parsed (parseGoalIn (lemmaSortsOf lemmas) sc src)
-  case proveWith emptyKernelEnv lemmas goal tac of
+  case proveWith (kernelOnly emptyKernelEnv) lemmas goal tac of
     Right _ -> assertFailure "the script was not expected to succeed"
     Left err -> assertBool (renderTacticError sig id err) (ok (errorFailure err))
 
@@ -826,16 +828,16 @@ parameterTests =
         (_, lemma) <- ind
         lemmaBound lemma @?= ["n"]
         map fst (lemmaMetas lemma) @?= ["n", "t", "Γ", "P"]
-    , testCase "the parameters are var metavariables declared before, of an atom or formula, applied to as many arguments" $ do
+    , testCase "the parameters are var metavariables declared before, of an atom, formula or term, applied to as many arguments" $ do
         refuses "rule r (t : term) (P(t) : formula) : |- P(t) by sorry"
-        refuses "rule r (n : var) (P(n) : term) : |- P(n) = 0 by sorry"
+        refuses "rule r (n : var) (P(n) : atom) : |- P(n) = 0 by sorry"
         refuses "rule r (P(n) : formula) (n : var) : |- P(n) by sorry"
         refuses "rule r (n : var) (P(n) : formula) : |- P by sorry"
         refuses "rule r (n : var) (P(n) : formula) : |- P(n, n) by sorry"
         refuses "rule r (n : var) (A : formula) : |- A(n) by sorry"
     , testCase "the goal at a sorry shows the metavariable applied" $ do
         decls <- parsed (parseDecls (schemaScope builtin) "rule courseOfValue (n : var) (t : term) (Γ : ctx) (P(n) : formula) (H : n < t, Γ |- P(n)) : Γ |- P(t) where n ∉ Γ, t\nby sorry")
-        env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+        env <- either (assertFailure . displayException) pure (signatureEnv builtin)
         case decls of
           [d] -> case checkDecl env Map.empty d of
             Left err -> renderSchemaTacticError builtin err @?= "2:4: sorry: the proof stops here\n  Γ\n  |- P(t)"
@@ -873,10 +875,109 @@ parameterTests =
         (parseDecls (schemaScope builtin) src)
     ind = do
       decls <- parsed (parseDecls (schemaScope builtin) "rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula) (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t) where n ∉ Γ, t\nby Ind n (P(n)) t { exact base } { exact step }")
-      env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+      env <- either (assertFailure . displayException) pure (signatureEnv builtin)
       case decls of
         [d] -> either (assertFailure . renderSchemaTacticError builtin) (\(_, lemma) -> pure (env, lemma)) (checkDecl env Map.empty d)
         _ -> assertFailure "expected one declaration"
+
+abstractFunctionTests :: TestTree
+abstractFunctionTests =
+  testGroup
+    "term metavariables with parameters"
+    [ testCase "an abstract function is applied, and stands as the parameter of a schema, which unfolds around it" $ do
+        certifies builtin "rule muZero (n : var) (p(n) : term) : |- mu {p} 0 = 0 by refl"
+        certifies builtin "rule muStep (n : var) (p(n) : term) : |- mu {p} (S n) = (if mu {p} n < n then mu {p} n else if p(n) then n else S n) by refl"
+        refuses "rule r (n : var) (p(n) : term) : |- p = 0 by sorry"
+        refuses "rule r (n : var) (p(n) : term) : |- p(n, n) = 0 by sorry"
+        refuses "rule r (n : var) (p(n) : term) : |- mu {p} 0 1 = 0 by sorry"
+    , testCase "the goal at a sorry shows the abstract function applied and as a parameter" $
+        stops builtin "rule r (n : var) (t : term) (p(n) : term) : |- p(t) = mu {p} t by sorry" "1:67: sorry: the proof stops here\n  |- p(t) = mu {p} t"
+    , testCase "an appeal infers the function by abstracting the argument in the goal, or takes it as an argument over the var argument" $ do
+        lemmas <- checkedAll builtin "rule same (n : var) (t : term) (p(n) : term) : |- p(t) = p(t) by refl"
+        proved builtin lemmas "|- y + 1 = y + 1 by exact same _ y"
+        proved builtin lemmas "z = 0 |- y + z = y + z by exact same _ y"
+        proved builtin lemmas "|- y + 1 = y + 1 by exact same k y (k + 1)"
+        failsAppeal builtin lemmas "|- y + 1 = y + 1 by exact same" \case
+          CannotInstantiate "same" _ -> True
+          _ -> False
+    , testCase "an appeal infers the function from an instance of the schema in the goal, the variables its parameter captures as further arguments" $ do
+        lemmas <- checkedAll builtin "rule muZero (n : var) (p(n) : term) : |- mu {p} 0 = 0 by refl"
+        proved builtin lemmas "|- mu {λ i. i < 3} 0 = 0 by exact muZero"
+        proved builtin lemmas "|- mu {λ i z. z < i} 0 z = 0 by exact muZero"
+        proved builtin lemmas "|- (μ i < 0. z + 1 < i) = 0 by exact muZero"
+        proved builtin lemmas "|- mu {lt} 0 1 = 0 by exact muZero"
+    , testCase "course-of-values induction over holdsBelow is a rule with the step as its only premise, proved once" $ do
+        sig <- cvSignature
+        lemmas <- checkedAll sig cvSource
+        proved sig lemmas "|- 0 < S t by exact cvInduction m t { refl }"
+        proved sig lemmas "y = 0 |- 0 < (y + S t) by exact cvInduction m t { refl }"
+        stopsIn sig lemmas "x = 0 |- 0 < (t < S x) by exact cvInduction m t { sorry }" "1:51: sorry: the proof stops here\n  H1 : x = 0\n  H2 : holdsBelow {λ i j. i < S j} m x = 1\n  |- 0 < (m < S x)"
+    ]
+  where
+    refuses src =
+      either
+        (const (pure ()))
+        (const (assertFailure ("accepted: " <> src)))
+        (parseDecls (schemaScope builtin) src)
+    -- Every declaration of the source checks, each a lemma for those after it.
+    checkedAll sig src = do
+      decls <- parsed (parseDecls (schemaScope sig) src)
+      env <- either (assertFailure . displayException) pure (signatureEnv sig)
+      let step lemmas d = case checkDecl env lemmas d of
+            Left err -> assertFailure (renderSchemaTacticError sig err)
+            Right (_, lemma) -> pure (Map.insert (declName d) lemma lemmas)
+      foldM step Map.empty decls
+    certifies sig src = () <$ checkedAll sig src
+    stops sig src expected = do
+      decls <- parsed (parseDecls (schemaScope sig) src)
+      env <- either (assertFailure . displayException) pure (signatureEnv sig)
+      case decls of
+        [d] -> case checkDecl env Map.empty d of
+          Left err -> renderSchemaTacticError sig err @?= expected
+          Right _ -> assertFailure "proved"
+        _ -> assertFailure "expected one declaration"
+    run sig lemmas src = do
+      (goal, tac) <- parsed (parseGoalIn (Map.map (map snd . lemmaMetas) lemmas) (schemaScope sig [] []) src)
+      env <- either (assertFailure . displayException) pure (signatureEnv sig)
+      pure (proveOpenWith env lemmas Map.empty goal tac)
+    proved sig lemmas src =
+      run sig lemmas src >>= \case
+        Left err -> assertFailure (renderSchemaTacticError sig err)
+        Right _ -> pure ()
+    failsAppeal sig lemmas src ok =
+      run sig lemmas src >>= \case
+        Left (TacticError _ _ failure) | ok failure -> pure ()
+        Left err -> assertFailure (renderSchemaTacticError sig err)
+        Right _ -> assertFailure "proved"
+    stopsIn sig lemmas src expected =
+      run sig lemmas src >>= \case
+        Left err -> renderSchemaTacticError sig err @?= expected
+        Right _ -> assertFailure "proved"
+    -- The builtin signature with holdsBelow: P holds below n.
+    cvSignature = do
+      eqs <- either (assertFailure . displayException) pure (parseEquations (T.pack "holdsBelow {P} 0 $[xs] = 1\nholdsBelow {P} (S n) $[xs] = if P n $[xs] then holdsBelow {P} n $[xs] else 0\n"))
+      block <- either (assertFailure . displayException) pure (compileDefinitions (compiledEnvironment builtin) eqs)
+      pure (builtin <> blockSignature block)
+    cvSource =
+      unlines
+        [ "theorem zeroOrSucc : |- n = 0 \\/ n = S (prd n)"
+        , "by induction n as m { DisjR2; refl } { DisjR1; refl }"
+        , "rule cvInduction (n : var) (t : term) (Γ : ctx) (p(n) : term) (step : holdsBelow {p} n = 1, Γ |- 0 < p(n)) : Γ |- 0 < p(t)"
+        , "  where n ∉ Γ, t"
+        , "by Cut (holdsBelow {p} (S t) = 1)"
+        , "   { Ind n (holdsBelow {p} n = 1) (S t)"
+        , "       { refl }"
+        , "       { Cut (0 < p(n))"
+        , "           { exact step }"
+        , "           { have Z: (p(n) = 0 \\/ p(n) = S (prd (p(n)))) { exact zeroOrSucc };"
+        , "             DisjL on Z as Za Zb"
+        , "             { have F: (0 = 1) { calc 0 = (0 < 0) = (0 < p(n)) by cong Za = 1 by exact H2 }; symmetry F as F1; SuccNonZero }"
+        , "             { calc (holdsBelow {p} (S n)) = (if p(n) then holdsBelow {p} n else 0) = (if S (prd (p(n))) then holdsBelow {p} n else 0) by cong Zb = (holdsBelow {p} n) = 1 by exact H1 } } } }"
+        , "   { have Z: (p(t) = 0 \\/ p(t) = S (prd (p(t)))) { exact zeroOrSucc };"
+        , "     DisjL on Z as Za Zb"
+        , "     { have F: (0 = 1) { calc 0 = (if 0 then holdsBelow {p} t else 0) = (if p(t) then holdsBelow {p} t else 0) by cong Za = (holdsBelow {p} (S t)) = 1 by exact H1 }; symmetry F as F1; SuccNonZero }"
+        , "     { calc (0 < p(t)) = (0 < S (prd (p(t)))) by cong Zb = 1 } }"
+        ]
 
 eigenTests :: TestTree
 eigenTests =
@@ -916,13 +1017,13 @@ eigenTests =
         (parseDecls (schemaScope builtin) src)
     checked src = do
       decls <- parsed (parseDecls (schemaScope builtin) src)
-      env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+      env <- either (assertFailure . displayException) pure (signatureEnv builtin)
       case decls of
         [d] -> either (assertFailure . renderSchemaTacticError builtin) (pure . snd) (checkDecl env Map.empty d)
         _ -> assertFailure "expected one declaration"
     failsCheck src ok = do
       decls <- parsed (parseDecls (schemaScope builtin) src)
-      env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+      env <- either (assertFailure . displayException) pure (signatureEnv builtin)
       case decls of
         [d] -> case checkDecl env Map.empty d of
           Left err -> assertBool (renderSchemaTacticError builtin err) (ok (errorFailure err))
@@ -991,8 +1092,8 @@ unfoldingTests =
 -- | Prove the script over the builtin signature, with lemmas to appeal to, and check the proof against its definitions.
 provesBuiltin :: Map.Map String (Certified String) -> String -> Assertion
 provesBuiltin lemmas src = do
-  kenv <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+  env <- either (assertFailure . displayException) pure (signatureEnv builtin)
   (goal, tac) <- parsed (parseGoalIn (lemmaSortsOf lemmas) (plainScope builtin) src)
-  case proveWith kenv lemmas goal tac of
+  case proveWith env lemmas goal tac of
     Left err -> assertFailure (renderTacticError builtin id err)
-    Right p -> inferConclusionIn kenv p @?= Right (goalSequent goal)
+    Right p -> inferConclusionIn (envKernel env) p @?= Right (goalSequent goal)

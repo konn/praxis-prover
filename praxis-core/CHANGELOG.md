@@ -10,6 +10,21 @@ and this project adheres to the
 
 ### Added
 
+- Term metavariables with parameters, `(p(n) : term)`: an abstract function,
+  written applied, `p(n)`, and standing as the parameter of a schema,
+  `holdsBelow {p} n`, which the checker unfolds around it. So a derived rule
+  states course-of-values induction with the step as its only premise,
+  `(step : holdsBelow {p} n = 1, Γ |- 0 < p(n)) : Γ |- 0 < p(t)`, and proves it
+  once. An appeal infers `p` by abstracting the arguments in the goal, at
+  `p(t)`, or from an instance of the schema in the goal, at `holdsBelow {p} n`;
+  the variables the function found captures are passed to the schema as
+  further variadic arguments. In the kernel, `Function` gains `Abstract` and
+  `Program` gains `Opaque`, a call left as it is by evaluation; `Signature`
+  recognises the instances of its schemas, `schemaInstanceOf`, and
+  instantiates them again, `applySchemaNamed`; the engine takes an `Env`, the
+  definitions and the signature, where it took a `KernelEnv`; `Arg` gains
+  `ArgFun`, an `Abstraction`.
+
 - A tactic language for the calculus: `Language.Praxis.PRA.Tactic` runs
   tactics against a goal and hands what they build to the checker,
   `Language.Praxis.PRA.Tactic.Parser` reads the textual syntax, and

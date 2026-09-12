@@ -45,10 +45,17 @@ data SchemaError
     variadic arguments: schema, number of variadic arguments
     -}
     VariadicInstanceMissing !T.Text !Natural
+  | -- | no schema of this name in the signature
+    SchemaNotInSignature !T.Text
+  | -- | an instance applied to another number of arguments than its arity: schema, arity, given
+    InstanceArgumentCountMismatch !T.Text !Natural !Natural
   deriving (Show, Eq, Generic)
 
 instance Exception SchemaError where
   displayException = \case
+    SchemaNotInSignature schema -> "No schema named " <> T.unpack schema
+    InstanceArgumentCountMismatch schema arity given ->
+      T.unpack schema <> ": an instance of arity " <> show arity <> " applied to " <> show given <> " argument(s)"
     SchemaParameterCountMismatch schema expected given ->
       "Schema " <> T.unpack schema <> " takes " <> show expected <> " parameter(s), given " <> show given
     SchemaParameterArityMismatch schema expected given ->

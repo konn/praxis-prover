@@ -40,6 +40,7 @@ argNames :: (Hashable a) => Arg a -> HashSet a
 argNames = \case
   ArgVar v -> HS.singleton v
   ArgTerm t -> HS.fromList (toList t)
+  ArgFun a -> HS.fromList (toList a)
   ArgAtom p -> HS.fromList (toList p)
   ArgForm f -> HS.fromList (toList f)
   ArgCtx g -> HS.fromList (foldMap toList g)
@@ -107,6 +108,8 @@ transformProof sigma0 extra
         Just (Var w) -> w
         _ -> v
       ArgTerm t -> ArgTerm (substTerm sigma t)
+      -- The parameters are bound, and apart from the substitution.
+      ArgFun a -> ArgFun a {abstractionBody = substTerm sigma (abstractionBody a), abstractionCaptured = map (substTerm sigma) (abstractionCaptured a)}
       ArgAtom q -> ArgAtom (substAtomic sigma q)
       ArgForm f -> ArgForm (substFormula sigma f)
       ArgCtx g -> ArgCtx (foldr (MS.insertOne . substFormula sigma) extra g)

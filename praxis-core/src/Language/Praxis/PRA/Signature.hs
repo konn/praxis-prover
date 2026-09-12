@@ -1,5 +1,6 @@
 {-# LANGUAGE RankNTypes #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
+{-# OPTIONS_GHC -fplugin GHC.TypeLits.Presburger #-}
 
 {- |
 Named function symbols.
@@ -67,13 +68,24 @@ module Language.Praxis.PRA.Signature (
   symbolOfFunction,
   signatureKernelEnv,
   withKernelEnv,
+
+  -- * Instances of schemas
+  SchemaInstance (..),
+  instanceName,
+  schemaInstanceOf,
+  applySchemaNamed,
+  instantiateSchemaAt,
+  decompileProgram,
+  decompileFunction,
 ) where
 
 import Control.Exception (displayException)
-import Control.Monad (when)
+import Control.Monad (foldM, guard, when)
+import Data.Foldable (toList)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Proxy (Proxy (..))
 import Data.Sized qualified as SV
 import Data.Text qualified as T
@@ -81,11 +93,11 @@ import Data.Type.Equality (testEquality, (:~:) (Refl))
 import Data.Type.Natural (SBool (..), sNat, (%<=?))
 import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal, type (+), type (-), type (<=))
 import Language.Haskell.TH.Syntax (Name)
-import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode)
+import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode (..), V)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error (SchemaError (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
-import Language.Praxis.PRA.Syntax (Term (..))
+import Language.Praxis.PRA.Syntax (Abstraction (..), Term (..), suc)
 import Numeric.Natural (Natural)
 
 -- | A code with its arity hidden.
@@ -389,3 +401,126 @@ signatureKernelEnv (Signature _ _ _ env) = env
 
 withKernelEnv :: F.KernelEnv -> Signature -> Signature
 withKernelEnv env (Signature syms schs vars _) = Signature syms schs vars (Right env)
+
+-- * Instances of schemas
+
+{- |
+A function which instantiates a schema of the signature: the schema, the
+number of variadic arguments it was instantiated with, and its parameter.
+-}
+data SchemaInstance = SchemaInstance
+  { instanceSchema :: !(Either SchemaSymbol VariadicSchemaSymbol)
+  , instanceExtras :: !Natural
+  , instanceParameter :: !F.SomeFunction
+  }
+  deriving (Show, Eq)
+
+-- | The name of the schema an instance is of.
+instanceName :: SchemaInstance -> String
+instanceName = either schemaSymbolName variadicSchemaName . instanceSchema
+
+{- |
+The schema an inline code instantiates, with its parameter: the code is
+matched against the schema instantiated at a placeholder, whose calls bind
+the parameter.  The variadic schemas are tried first, each at the number of
+variadic arguments the arity of the code leaves, then the plain ones.
+-}
+schemaInstanceOf :: forall n. (KnownNat n) => Signature -> F.Function n -> Maybe SchemaInstance
+schemaInstanceOf sig = \case
+  F.Inline code -> listToMaybe (mapMaybe (variadic code) (variadicSchemas sig) <> mapMaybe (plain code) (schemas sig))
+  _ -> Nothing
+  where
+    arity = natVal (Proxy @n)
+    variadic code sym = do
+      guard (arity >= variadicSchemaFixedArity sym)
+      let extras = arity - variadicSchemaFixedArity sym
+      inst <- either (const Nothing) Just (instantiateVariadicSchemaSymbol sym extras)
+      param <- parameterOf inst code
+      pure (SchemaInstance (Right sym) extras param)
+    plain code sch = do
+      guard (schemaSymbolArity sch == arity)
+      param <- parameterOf sch code
+      pure (SchemaInstance (Left sch) 0 param)
+
+-- | The parameter a code instantiates a schema at, by matching the code against the instantiation at a placeholder.
+parameterOf :: forall n. (KnownNat n) => SchemaSymbol -> F.Program n -> Maybe F.SomeFunction
+parameterOf (SchemaSymbol _ (inst :: F.Function k -> F.Function m) _) code =
+  case testEquality (sNat @m) (sNat @n) of
+    Just Refl -> do
+      let template = F.functionProgram (inst (F.Defined (F.DefId placeholder)))
+      bound <- unify Nothing template code
+      bound
+    Nothing -> Nothing
+  where
+    placeholder = T.pack "«parameter»"
+
+    unify :: forall j. (KnownNat j) => Maybe F.SomeFunction -> F.Program j -> F.Program j -> Maybe (Maybe F.SomeFunction)
+    unify acc template code' = case (template, code') of
+      (F.Call (F.DefId ident), _)
+        | ident == placeholder -> case acc of
+            Nothing -> Just (Just (F.SomeFunction (F.programFunction code')))
+            Just p
+              | p == F.SomeFunction (F.programFunction code') -> Just acc
+              | otherwise -> Nothing
+      (F.Base x, F.Base y) | x == y -> Just acc
+      (F.Call x, F.Call y) | x == y -> Just acc
+      (F.Opaque x, F.Opaque y) | x == y -> Just acc
+      (F.Comp (g :: F.Program i) xs, F.Comp (h :: F.Program l) ys) -> case testEquality (sNat @i) (sNat @l) of
+        Just Refl -> do
+          acc' <- unify acc g h
+          foldM (\a (x, y) -> unify a x y) acc' (zip (toList xs) (toList ys))
+        Nothing -> Nothing
+      (F.Rec b s, F.Rec b' s') -> unify acc b b' >>= \acc' -> unify acc' s s'
+      _ -> Nothing
+
+{- |
+The instance of the schema of the name at a parameter, applied to arguments:
+a variadic schema is instantiated at the number of variadic arguments the
+arity of the parameter determines, a plain one at its parameter arity.  The
+arguments must be as many as the arity of the instance.
+-}
+applySchemaNamed :: Signature -> String -> F.SomeFunction -> [Term a] -> Either SchemaError (Term a)
+applySchemaNamed sig n param args = do
+  fun <- case (lookupVariadicSchema n sig, lookupSchema n sig) of
+    (Just sym, _) -> applyVariadicSchemaSymbol sym param
+    (Nothing, Just sch) -> applySchemaSymbol sch param
+    (Nothing, Nothing) -> Left (SchemaNotInSignature (T.pack n))
+  case fun of
+    F.SomeFunction (f :: F.Function m) -> case SV.fromList' args of
+      Just xs -> Right (App f xs)
+      Nothing -> Left (InstanceArgumentCountMismatch (T.pack n) (natVal (Proxy @m)) (fromIntegral (length args)))
+
+{- |
+The instance of the schema of the name at the function of an abstraction,
+applied to the arguments and then to the terms the function captures: what
+a proof spliced for a derived rule builds where the rule had the schema at a
+term metavariable with parameters.  The rule was checked, so a failure is an
+error.
+-}
+instantiateSchemaAt :: Signature -> String -> Abstraction a -> [Term a] -> Term a
+instantiateSchemaAt sig n a args =
+  either (\err -> error ("Language.Praxis.PRA.Signature.instantiateSchemaAt: " <> n <> ": " <> displayException err)) id $
+    applySchemaNamed sig n (abstractionFunction a) (args <> abstractionCaptured a)
+
+{- |
+A program applied to the terms in its slots, its compositions unfolded: the
+body of a lambda, over the terms its parameters stand for.
+-}
+decompileProgram :: forall p b. (KnownNat p) => V p (Term b) -> F.Program p -> Term b
+decompileProgram slots = \case
+  F.Comp g xs -> apply g (fmap (decompileProgram slots) xs)
+  code -> apply code slots
+  where
+    apply :: forall m. (KnownNat m) => F.Program m -> V m (Term b) -> Term b
+    apply g ys = case g of
+      F.Base Zero -> Lit 0
+      F.Base (Proj i) -> SV.sIndex i ys
+      F.Base Succ -> suc (SV.head ys)
+      F.Base code -> App (F.Primitive code) ys
+      F.Call ident -> App (F.Defined ident) ys
+      F.Opaque ident -> App (F.Abstract ident) ys
+      _ -> App (F.Inline g) ys
+
+-- | A function applied to terms as a term, its code unfolded; 'Nothing' when they are not as many as its arity.
+decompileFunction :: F.SomeFunction -> [Term b] -> Maybe (Term b)
+decompileFunction (F.SomeFunction f) slots = (`decompileProgram` F.functionProgram f) <$> SV.fromList' slots

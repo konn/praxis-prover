@@ -21,21 +21,37 @@ module Language.Praxis.PRA.Syntax (
   suc,
   var,
   lit,
+
+  -- * Abstract functions
+  abstractFunction,
+  abstractName,
+  functionMetas,
+  Abstraction (..),
+  abstraction,
+  applyAbstraction,
+  abstractionAt,
+  compileTerm,
 ) where
 
 import Control.Lens (prism', review)
+import Data.Foldable qualified as Foldable
 import Data.Generics.Labels ()
 import Data.Hashable (Hashable (..))
+import Data.List qualified as L
 import Data.Multiset (Multiset)
+import Data.Proxy (Proxy (..))
 import Data.Sized
 import Data.Sized qualified as SV
+import Data.Text qualified as T
 import Data.Type.Equality
 import Data.Type.Natural hiding (Succ, Zero)
 import Data.Type.Ordinal
 import Data.Vector qualified as V
 import GHC.Generics
+import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal)
 import Language.Praxis.PRA.PrimitiveRecursion.Code hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Function (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Numeric.Natural
 
 data Term a where
@@ -219,3 +235,104 @@ data Sequent a = !(Multiset (Formula a)) :|- !(Formula a)
 (|-) = (:|-)
 
 infix 1 |-, :|-
+
+-- * Abstract functions
+
+{- |
+A function known by name only: what a term metavariable with parameters
+stands for in the statement of a derived rule, applied as @p(t)@ or standing
+as the parameter of a schema, @mu {p} b@.  Its identity records its name
+and the names of its parameters; its arity is their number.
+-}
+abstractFunction :: String -> [String] -> F.SomeFunction
+abstractFunction n ps = case someNatVal (fromIntegral (L.length ps)) of
+  SomeNat (_ :: Proxy k) -> F.SomeFunction (Abstract (F.DefId (T.pack (n <> "«" <> L.unwords ps <> "»"))) :: Function k)
+
+-- | The name and the parameters of an abstract function, and 'Nothing' for any other function.
+abstractName :: Function n -> Maybe (String, [String])
+abstractName = \case
+  Abstract (F.DefId txt) -> decodeAbstract txt
+  _ -> Nothing
+
+decodeAbstract :: T.Text -> Maybe (String, [String])
+decodeAbstract txt = case L.break (== '«') (T.unpack txt) of
+  (n, '«' : rest) | not (L.null n), not (L.null rest), L.last rest == '»' -> Just (n, L.words (L.init rest))
+  _ -> Nothing
+
+{- |
+The abstract functions a term mentions, with their parameters: applied, or
+as the parameter of a schema instantiated at them, inside the code of the
+instance.
+-}
+functionMetas :: Term a -> [(String, [String])]
+functionMetas = L.nub . go
+  where
+    go = \case
+      Var _ -> []
+      Lit _ -> []
+      App f xs -> mapMaybe' decodeAbstract (F.opaqueCalls (F.functionProgram f)) <> concatMap go (Foldable.toList xs)
+    mapMaybe' g = foldr (\x acc -> maybe acc (: acc) (g x)) []
+
+{- |
+What a term metavariable with parameters is instantiated by.  As a term, a
+body over placeholder variables for the parameters, which an application
+@p(t1, …, tk)@ substitutes for; as a function, the closed code of that body
+over the parameters and then the variables it captures, with the terms to
+pass for those, which an instance of a schema at the function takes as
+further arguments.  The two agree: the body is the code applied to the
+parameters and the captured terms.
+-}
+data Abstraction a = Abstraction
+  { abstractionParameters :: ![a]
+  , abstractionBody :: !(Term a)
+  , abstractionFunction :: !F.SomeFunction
+  , abstractionCaptured :: ![Term a]
+  }
+  deriving (Show, Eq, Generic, Functor, Foldable, Traversable)
+
+{- |
+The abstraction of a term over parameters: the variables of the term which
+are not parameters are captured, in the order they first occur.
+-}
+abstraction :: (Eq a) => [a] -> Term a -> Abstraction a
+abstraction params body = Abstraction params body (compileTerm (params <> captured) body) (L.map Var captured)
+  where
+    captured = L.filter (`L.notElem` params) (L.nub (Foldable.toList body))
+
+-- | The abstraction applied: its body with the arguments substituted for the parameters, at once; 'Nothing' for the wrong number of them.
+applyAbstraction :: (Eq a) => Abstraction a -> [Term a] -> Maybe (Term a)
+applyAbstraction a args
+  | L.length args /= L.length (abstractionParameters a) = Nothing
+  | otherwise = Just (go (abstractionBody a))
+  where
+    pairs = L.zip (abstractionParameters a) args
+    go = \case
+      Var y -> maybe (Var y) id (L.lookup y pairs)
+      Lit n -> Lit n
+      App f xs -> App f (fmap go xs)
+
+-- | 'applyAbstraction', for arguments which are known to be as many as the parameters.
+abstractionAt :: (Eq a) => Abstraction a -> [Term a] -> Term a
+abstractionAt a args = case applyAbstraction a args of
+  Just t -> t
+  Nothing -> error ("Language.Praxis.PRA.Syntax.abstractionAt: " <> show (L.length args) <> " arguments for " <> show (L.length (abstractionParameters a)) <> " parameters")
+
+{- |
+A term over variables as the closed code over those variables, in the order
+given: a variable is the projection of its slot, and every other symbol
+keeps its code.  A variable which is not a slot is read as zero.
+-}
+compileTerm :: forall a. (Eq a) => [a] -> Term a -> F.SomeFunction
+compileTerm slots body = case someNatVal (fromIntegral (L.length slots)) of
+  SomeNat (_ :: Proxy n) -> F.SomeFunction (F.programFunction (go @n (canonicalise body)))
+  where
+    go :: forall n. (KnownNat n) => Term a -> F.Program n
+    go = \case
+      Var v -> case L.lookup v (L.zip slots (Foldable.toList (SV.generate (sNat @n) id :: V n (Ordinal n)))) of
+        Just i -> F.Base (Proj i)
+        Nothing -> F.Base Zero
+      Lit k -> numeral k
+      App f xs -> F.Comp (F.functionProgram f) (fmap go xs)
+    numeral :: forall n. (KnownNat n) => Natural -> F.Program n
+    numeral 0 = F.Base Zero
+    numeral k = F.Comp (F.Base Succ) (SV.singleton (numeral (k - 1)))

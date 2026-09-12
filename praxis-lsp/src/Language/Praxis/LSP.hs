@@ -43,9 +43,7 @@ import Language.LSP.Protocol.Types
 import Language.LSP.Server
 import Language.LSP.VFS (virtualFileText, virtualFileVersion)
 import Language.Praxis.PRA.PrimitiveRecursion (builtin)
-import Language.Praxis.PRA.PrimitiveRecursion.Function (KernelEnv)
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (checkErrorPosition, checkQuote, renderCheckError)
-import Language.Praxis.PRA.Signature (signatureKernelEnv)
 import Language.Praxis.PRA.Syntax.Parser (syntaxErrorPosition)
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
@@ -183,7 +181,7 @@ analysePra text = case builtinLemmas of
     Left err ->
       let (line, column) = syntaxErrorPosition err
        in [Report line column DiagnosticSeverity_Error (T.pack (displayException err))]
-    Right (_, decls) -> case signatureKernelEnv builtin of
+    Right (_, decls) -> case signatureEnv builtin of
       Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack (displayException err))]
       Right kernel -> go kernel base decls
   where
@@ -219,7 +217,7 @@ hoverAt :: Text -> Int -> Int -> Maybe Text
 hoverAt text line column = do
   base <- either (const Nothing) Just builtinLemmas
   (_, decls) <- either (const Nothing) Just (parseQuoteIn (lemmaSorts base) (schemaScope builtin) (T.unpack text))
-  kernel <- either (const Nothing) Just (signatureKernelEnv builtin)
+  kernel <- either (const Nothing) Just (signatureEnv builtin)
   -- The last declaration with a tactic at or before the position, and that tactic.
   (before, d, target) <-
     listToMaybe
@@ -245,7 +243,7 @@ hoverAt text line column = do
     unlines' = foldr1 (\a b -> a <> "\n" <> b)
 
 -- | The lemmas of the declarations after those given, in order: as certified, or by statement alone when the proof fails.
-certified :: KernelEnv -> Map String (Lemma SchemaName) -> [Decl SchemaName] -> Map String (Lemma SchemaName)
+certified :: Env -> Map String (Lemma SchemaName) -> [Decl SchemaName] -> Map String (Lemma SchemaName)
 certified kernel base = foldl step base
   where
     step lemmas d = case checkDecl kernel lemmas d of

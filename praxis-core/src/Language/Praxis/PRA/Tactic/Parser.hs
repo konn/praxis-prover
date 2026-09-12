@@ -51,6 +51,18 @@ argument in the goal, every occurrence of it, as @induction@ does; the
 argument itself, @t@ here, must be given or determined elsewhere, and a
 @var@ parameter given as an argument names the eigenvariable.
 
+A @term@ metavariable may take parameters too, @(p(n) : term)@: an abstract
+function, written applied, @p(n)@, @p(0)@, and standing as the parameter of
+a schema, @holdsBelow {p} n@, which then unfolds around it.  So a derived
+rule can state course-of-values induction, @(step : holdsBelow {p} n = 1, Γ
+|- 0 < p(n)) : Γ |- 0 < p(t)@, and prove it once.  Appealing to such a rule
+infers @p@ by abstracting the arguments in the goal, at @p(t)@, or from an
+instance of the schema in the goal, at @holdsBelow {p} n@; where the body
+found mentions other variables of the goal, the instances of the schema in
+the rule take them as further variadic arguments, @holdsBelow {λ i x. …} n
+x@, so only a variadic schema takes such a @p@.  The argument for @p@ may
+also be given, a term over the @var@ arguments, @exact cv m t (m < S m)@.
+
 A rule declares its eigenvariable conditions after its conclusion: @where n
 not free in Γ, t@, or @where n ∉ Γ, t@, for a @var@ metavariable @n@ and
 metavariables of the rule.  An induction on @n@ in the proof is accepted
@@ -166,6 +178,8 @@ plainMetaScope sig metas _ =
     , scopeTerm = \n -> Var n <$ plain n
     , scopeApplied = \n _ -> Left (n <> " is a metavariable with parameters, which only the quasiquoter supports")
     , scopeAppliedAtom = \n _ -> Left (n <> " is a metavariable with parameters, which only the quasiquoter supports")
+    , scopeAppliedTerm = \n _ -> Left (n <> " is a metavariable with parameters, which only the quasiquoter supports")
+    , scopeSchemaParameter = const Nothing
     }
   where
     plain n = case lookup n metas of
@@ -303,14 +317,14 @@ declP lemmas mkScope = theoremP <|> ruleP
         Nothing -> pure acc
         Just b -> bindersP (acc <> [b])
     binderP metas sc = parens (try (metaBinderP metas sc) <|> premiseBinderP sc)
-    -- A metavariable with parameters, var metavariables declared before it, is an atom or a formula.
+    -- A metavariable with parameters, var metavariables declared before it, is an atom, a formula or a term.
     metaBinderP metas sc = do
       names <- some ((,) <$> identifierP sc <*> option [] (parens (identifierP sc `sepBy1` commaP)))
       symbolP ":"
       s <- sortP
       forM_ names \(n, ps) -> do
-        unless (null ps || s `elem` [R.AtomS, R.FormS]) $
-          fail (n <> " takes parameters, so it must be an atom or formula metavariable")
+        unless (null ps || s `elem` [R.AtomS, R.FormS, R.TermS]) $
+          fail (n <> " takes parameters, so it must be an atom, formula or term metavariable")
         forM_ ps \p ->
           unless (lookup p metas == Just R.VarS) $
             fail ("the parameter " <> p <> " of " <> n <> " is not a var metavariable declared before it")

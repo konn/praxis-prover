@@ -236,6 +236,25 @@ by induction t as n
      }
      { assumption }
    }
+
+-- A term metavariable with parameters: an abstract function, applied and as the parameter of a schema.
+rule muZeroQ (n : var) (p(n) : term) : |- mu {p} 0 = 0
+by refl
+
+theorem muZeroAtLambda : |- mu {λ i z. z < i} 0 z = 0
+by exact muZeroQ
+
+rule muZeroVia (n : var) (q(n) : term) : |- mu {q} 0 = 0
+by exact muZeroQ
+
+rule sameQ (n : var) (t : term) (p(n) : term) : |- p(t) = p(t)
+by refl
+
+theorem sameAt : |- y + 1 = y + 1
+by exact sameQ _ y
+
+rule sameVia (n : var) (u : term) (q(n) : term) : |- q(u) = q(u)
+by exact sameQ _ u
 |]
 
 -- A declaration shadows the unfolding lemma of its name, for the declarations after it.
@@ -361,6 +380,14 @@ quoteTests =
           Defeq _ _ (Id _ _) -> pure ()
           p -> assertFailure ("not spliced in place: " <> show p)
         inferConclusion shadowed @?= Right (sequentMu "|- 1 = 1")
+    , testCase "a term metavariable with parameters is an abstraction, applied and as the parameter of a schema" $ do
+        kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
+        inferConclusionIn kenv muZeroAtLambda @?= Right (sequentMu "|- mu {λ i z. z < i} 0 z = 0")
+        inferConclusionIn kenv sameAt @?= Right (sequentMu "|- y + 1 = y + 1")
+        inferConclusionIn kenv (muZeroVia "k" (abstraction ["k"] (Var "k"))) @?= Right (sequentMu "|- mu {λ i. i} 0 = 0")
+        inferConclusionIn kenv (muZeroVia "k" (abstraction ["k"] (Var "w"))) @?= Right (sequentMu "|- mu {λ i j. j} 0 w = 0")
+        inferConclusionIn kenv (sameVia "k" (Lit 2) (abstraction ["k"] (suc (Var "k")))) @?= Right (sequentMu "|- S 2 = S 2")
+        inferConclusionIn kenv (sameVia "k" (Var "y") (abstraction ["k"] (Var "k"))) @?= Right (sequentMu "|- y = y")
     , testCase "a formula metavariable under Id is the identity expanded at the instance" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         let compound = atomMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)"

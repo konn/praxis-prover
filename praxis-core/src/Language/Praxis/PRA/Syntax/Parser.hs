@@ -42,7 +42,8 @@ both closed sequents and the schematic ones of a derived rule.
 
 An identifier applied to arguments in parentheses, @P(t)@ or @P(t, s)@, is
 a metavariable declared with parameters, which the scope of a derived rule
-provides.
+provides: a formula or an atom, or a term, an abstract function, which may
+also stand as the parameter of a schema, @mu {p} b@.
 
 >>> :seti -XDataKinds -XQuasiQuotes -XPatternSynonyms
 >>> import Data.Sized (pattern Nil, pattern (:<))
@@ -164,6 +165,10 @@ data Scope a = Scope
   -- ^ a metavariable applied to arguments, standing as a formula: @P(t)@
   , scopeAppliedAtom :: String -> [Term (Hole a)] -> Either String (Atomic (Hole a))
   -- ^ the same, standing as an atom
+  , scopeAppliedTerm :: String -> [Term (Hole a)] -> Either String (Term (Hole a))
+  -- ^ the same, standing as a term: a term metavariable with parameters, an abstract function
+  , scopeSchemaParameter :: String -> Maybe F.SomeFunction
+  -- ^ an identifier standing as the parameter of a schema, @mu {p} b@: an abstract function
   }
 
 -- | Every identifier which is not a symbol is an object variable.
@@ -179,6 +184,8 @@ plainScope sig =
     , scopeContext = const Nothing
     , scopeApplied = \n _ -> Left (n <> " takes no arguments")
     , scopeAppliedAtom = \n _ -> Left (n <> " takes no arguments")
+    , scopeAppliedTerm = \n _ -> Left (n <> " takes no arguments")
+    , scopeSchemaParameter = const Nothing
     }
 
 -- | A syntax error. Render it for a human with @displayException@.
@@ -387,7 +394,9 @@ resolveTerm sc raw = do
       Nothing
         | n == "_" -> Left "a wildcard cannot be applied"
         | null arguments -> fmap Named <$> scopeTerm sc (T.unpack n)
-        | otherwise -> elaboration (Left (AppliedVariable n))
+        | otherwise -> do
+            args <- traverse (go env) arguments
+            scopeAppliedTerm sc (T.unpack n) args
     application _ (hd, _) = elaboration (Left (InvalidApplicationHead hd))
 
     checkArity :: T.Text -> Natural -> [x] -> Either String ()
@@ -421,7 +430,8 @@ resolveTerm sc raw = do
           Just (E.SomeFunction (fun :: E.Function m)) | Just Refl <- testEquality (sNat @m) (sNat @2) -> function fun
           _ -> search cs
 
-    -- A schema parameter: a symbol of the parameter arity, or a lambda of it.
+    -- A schema parameter: a symbol of the parameter arity, an abstract
+    -- function of it the scope provides, or a lambda of it.
     parameter :: E.Env -> T.Text -> Natural -> E.EqTerm T.Text -> Either String F.SomeFunction
     parameter env sName pArity = \case
       E.NameET p -> case Map.lookup p env of
@@ -430,7 +440,12 @@ resolveTerm sc raw = do
             elaboration (Left (SchemaArgumentArityMismatch p pArity (natVal (Proxy @k))))
           F.SomeFunction <$> function fun
         Just _ -> elaboration (Left (SchemaArgumentIsSchema p))
-        Nothing -> elaboration (Left (UnknownName p))
+        Nothing -> case scopeSchemaParameter sc (T.unpack p) of
+          Just (F.SomeFunction (fun :: F.Function k)) -> do
+            unless (natVal (Proxy @k) == pArity) $
+              elaboration (Left (SchemaArgumentArityMismatch p pArity (natVal (Proxy @k))))
+            pure (F.SomeFunction fun)
+          Nothing -> elaboration (Left (UnknownName p))
       E.LamET hints body -> do
         unless (fromIntegral (length hints) == pArity) $
           elaboration (Left (LambdaArityMismatch sName pArity (fromIntegral (length hints))))

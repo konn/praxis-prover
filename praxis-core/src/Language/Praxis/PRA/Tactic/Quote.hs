@@ -20,9 +20,10 @@ by Defeq t t; Subst x t s (x = t); Id
 
 As a declaration, every @theorem@ becomes a binding of type @'Proof' a@ and
 every @rule@ a function from its binders, in order, to a @'Proof' a@: a
-@var@ is an @a@, a @term@ a @'Term' a@, an @atom@ an @'Atomic' a@, a
-@formula@ a @'Formula' a@, a @ctx@ a @'Multiset' ('Formula' a)@ and a premise
-a @'Proof' a@.  As an expression, @[pra| sequent by tactic |]@ is a @'Proof'
+@var@ is an @a@, a @term@ a @'Term' a@, a @term@ with parameters an
+@'Abstraction' a@, an @atom@ an @'Atomic' a@, a @formula@ a @'Formula' a@, a
+@ctx@ a @'Multiset' ('Formula' a)@ and a premise a @'Proof' a@.  As an
+expression, @[pra| sequent by tactic |]@ is a @'Proof'
 a@.  'pra' reads its terms over the 'builtin' signature; 'praQuoter' builds a
 quoter over another signature, which must be bound in a module of its own by
 the stage restriction, with its codes recorded by 'symbolNamed' so that the
@@ -122,8 +123,8 @@ import Data.String (IsString, fromString)
 import Data.Text qualified as T
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
-import GHC.TypeNats (KnownNat, SomeNat (..), someNatVal)
-import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, Loc (..), Name, Q, Type, joinCode, location, mkName, nameBase, newName, putDoc, unTypeCode, unsafeCodeCoerce)
+import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal)
+import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, Loc (..), Name, Q, Type, joinCode, litT, location, mkName, nameBase, newName, numTyLit, putDoc, unTypeCode, unsafeCodeCoerce)
 import Language.Haskell.TH.Datatype (ConstructorInfo (..), DatatypeInfo (..), reifyDatatype)
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
@@ -259,8 +260,8 @@ schemaScope sig metas params =
     , scopeTerm = \n -> case lookup n metas of
         Nothing -> Right (Var (Obj n))
         Just s
-          | s `elem` [R.VarS, R.TermS] -> Right (Var (Meta s n))
           | Just ps <- lookup n params -> Left (n <> " takes " <> show (length ps) <> " arguments")
+          | s `elem` [R.VarS, R.TermS] -> Right (Var (Meta s n))
           | otherwise -> Left (n <> " is a " <> sortName s <> " metavariable, not a term")
     , scopeAtomic = \n -> case (lookup n metas, lookup n params) of
         (Just R.AtomS, Nothing) -> Just (encodeMeta R.AtomS n)
@@ -277,6 +278,18 @@ schemaScope sig metas params =
           if s == R.AtomS
             then Right p
             else Left (n <> " is a formula metavariable, but stands where an atom is required; declare it an atom")
+    , -- A term metavariable with parameters applied is an abstract function applied.
+      scopeAppliedTerm = \n args -> case (lookup n metas, lookup n params) of
+        (Just R.TermS, Just ps)
+          | length args /= length ps -> Left (n <> " takes " <> show (length ps) <> " arguments")
+          | otherwise -> case abstractFunction n ps of
+              F.SomeFunction f -> maybe (Left ("internal: the arguments of " <> n)) Right (App f <$> SV.fromList' args)
+        (Just R.TermS, Nothing) -> Left (n <> " takes no arguments")
+        (Just s, _) -> Left (n <> " is a " <> sortName s <> " metavariable, not a term")
+        (Nothing, _) -> Left (n <> " is not a metavariable")
+    , scopeSchemaParameter = \n -> case (lookup n metas, lookup n params) of
+        (Just R.TermS, Just ps) -> Just (abstractFunction n ps)
+        _ -> Nothing
     }
   where
     applied n args = case lookup n metas of
@@ -310,12 +323,13 @@ praQuoterIn :: Library -> QuasiQuoter
 praQuoterIn lib =
   QuasiQuoter
     { quoteExp = \src -> do
-        env <- either (fail . displayException) pure (signatureKernelEnv sig)
+        env <- either (fail . displayException) pure (signatureEnv sig)
         (_, lemmas) <- inScope
         (goal, tac) <- either (fail . displayException) pure (parseGoalIn (lemmaSorts lemmas) (schemaScope sig [] []) src)
         proof <- either (fail . renderSchemaTacticError sig) pure (proveOpenWith env (fmap entryLemma lemmas) Map.empty goal tac)
-        (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty lemmas) proof)
-        pure body
+        sigName <- newName "sig"
+        (body, flags) <- runWriterT (liftProof (LiftEnv sig sigName Map.empty Map.empty Map.empty lemmas) proof)
+        signatureBinding sig sigName flags (pure body)
     , quoteDec = \src -> do
         (declared, lemmas) <- inScope
         (header, decls) <- either (fail . displayException) pure (parseQuoteIn (lemmaSorts lemmas) (schemaScope sig) src)
@@ -407,24 +421,24 @@ Certify a declaration, given the lemmas it may appeal to, without generating
 anything: the checked proof, and the lemma the declaration is for those
 after it.
 -}
-checkDecl :: F.KernelEnv -> Map String (Lemma SchemaName) -> Decl SchemaName -> Either (TacticError SchemaName) (Free (Step SchemaName) String, Lemma SchemaName)
-checkDecl kernel lemmas decl = do
+checkDecl :: Env -> Map String (Lemma SchemaName) -> Decl SchemaName -> Either (TacticError SchemaName) (Free (Step SchemaName) String, Lemma SchemaName)
+checkDecl env lemmas decl = do
   let prems = Map.fromList [(n, s) | PremiseBinder n s <- declBinders decl]
       fresh = Map.fromList (declSides decl)
-  checked <- proveOpenDeclared kernel lemmas prems fresh (declGoal decl) (declTactic decl)
+  checked <- proveOpenDeclared env lemmas prems fresh (declGoal decl) (declTactic decl)
   pure (checked, declLemma decl)
 
 -- | Compile a declaration to its binding, given the lemmas it may appeal to and how to name its binding globally; also the lemma it is for those after it.
 compileDecl :: Signature -> (String -> Name) -> Map String LemmaEntry -> Decl SchemaName -> Q ([Dec], LemmaEntry)
 compileDecl sig global lemmas decl = do
-  kernel <- either (fail . displayException) pure (signatureKernelEnv sig)
+  env0 <- either (fail . displayException) pure (signatureEnv sig)
   let dname = declName decl
       binders = declBinders decl
       metas = binderMetas binders
       prems = Map.fromList [(n, s) | PremiseBinder n s <- binders]
   unless (startsLower dname) $
     fail ("pra: " <> dname <> " is not a Haskell variable name")
-  (checked, lemma) <- either (fail . renderSchemaTacticError sig) pure (checkDecl kernel (fmap entryLemma lemmas) decl)
+  (checked, lemma) <- either (fail . renderSchemaTacticError sig) pure (checkDecl env0 (fmap entryLemma lemmas) decl)
 
   -- One parameter per binder, in order.
   params <- traverse (newName . stem . fst) (binderParams binders)
@@ -438,10 +452,11 @@ compileDecl sig global lemmas decl = do
       internal = sort [s | Obj s <- HS.toList (proofNames proof), not (Obj s `HS.member` stated)]
       runtimeFresh = not (null metas) && not (null internal)
   internalNames <- traverse (newName . stem) internal
+  sigName <- newName "sig"
   let objParams
         | runtimeFresh = Map.fromList (zip internal internalNames)
         | otherwise = Map.empty
-      env = LiftEnv sig metaParams premParams objParams lemmas
+      env = LiftEnv sig sigName metaParams premParams objParams lemmas
 
   (body, flags) <- runWriterT (liftProof env proof)
   usedName <- newName "used"
@@ -455,14 +470,14 @@ compileDecl sig global lemmas decl = do
       flags'
         | runtimeFresh = Set.insert NeedsFresh (Set.insert NeedsIsString flags)
         | otherwise = flags
-      body' = QTH.letBindings freshDecs (pure body)
+      body' = signatureBinding sig sigName flags' (QTH.letBindings freshDecs (pure body))
 
   a <- newName "a"
   let constraints =
         [[t|Fresh $(QTH.varT a)|] | NeedsFresh `Set.member` flags']
           <> [[t|Hashable $(QTH.varT a)|] | NeedsHashable `Set.member` flags', NeedsFresh `Set.notMember` flags']
           <> [[t|IsString $(QTH.varT a)|] | NeedsIsString `Set.member` flags']
-      paramTypes = [binderType a b | b <- binders, _ <- binderNames b]
+      paramTypes = concatMap (binderTypes a) binders
       ty = QTH.forallType [a] constraints (foldr (\p r -> [t|$p -> $r|]) [t|Proof $(QTH.varT a)|] paramTypes)
       name = mkName dname
 
@@ -493,6 +508,19 @@ binderNames :: Binder a -> [String]
 binderNames = \case
   MetaBinder ns _ -> map fst ns
   PremiseBinder n _ -> [n]
+
+-- | The type of the parameter for each name a binder declares: a term metavariable with parameters is an 'Abstraction'.
+binderTypes :: Name -> Binder a -> [Q Type]
+binderTypes a = \case
+  MetaBinder ns R.TermS -> [if null ps then [t|Term $(QTH.varT a)|] else [t|Abstraction $(QTH.varT a)|] | (_, ps) <- ns]
+  b@(MetaBinder ns _) -> binderType a b <$ ns
+  b -> [binderType a b]
+
+-- | The signature bound at run time, for the instances of schemas a proof rebuilds at a function, when it needs it.
+signatureBinding :: Signature -> Name -> Set Flag -> Q Exp -> Q Exp
+signatureBinding sig sigName flags body
+  | NeedsSignature `Set.member` flags = QTH.letBindings [(sigName, unTypeCode (liftSignature sig))] body
+  | otherwise = body
 
 binderType :: Name -> Binder a -> Q Type
 binderType a = \case
@@ -577,6 +605,8 @@ figure sig decl =
 
 data LiftEnv = LiftEnv
   { leSig :: Signature
+  , leSignature :: Name
+  -- ^ the signature bound at run time, when a proof needs it
   , leMeta :: Map (R.Sort, String) Name
   , lePremise :: Map String Name
   , leObj :: Map String Name
@@ -586,7 +616,7 @@ data LiftEnv = LiftEnv
   }
 
 -- | A constraint the binding of a proof carries, for the name type it is polymorphic in.
-data Flag = NeedsHashable | NeedsIsString | NeedsFresh
+data Flag = NeedsHashable | NeedsIsString | NeedsFresh | NeedsSignature
   deriving (Show, Eq, Ord, Lift)
 
 type L = WriterT (Set Flag) Q
@@ -635,10 +665,25 @@ liftTerm env = go . canonicalise
       Succ :$ args -> do
         t <- go (SV.sIndex [od|0|] args)
         pure [||suc $$t||]
-      App f args -> do
-        applied <- lift (functionCode (leSig env) f)
-        as <- traverse go args
-        pure [||App $$applied $$(liftSizedWith id as)||]
+      -- A term metavariable with parameters applied is its abstraction at
+      -- the arguments; an instance of a schema at one is the schema
+      -- instantiated again at the function of the abstraction, at run time.
+      App f args
+        | Just (p, _) <- abstractName f -> do
+            a <- metaParam env R.TermS p
+            as <- traverse go (toList args)
+            pure [||abstractionAt $$a $$(listCode as)||]
+        | Just inst <- schemaInstanceOf (leSig env) f
+        , Just (p, _) <- abstractParameter inst -> do
+            a <- metaParam env R.TermS p
+            as <- traverse go (toList args)
+            need NeedsSignature
+            let schema = instanceName inst
+            pure [||instantiateSchemaAt $$(boundName (leSignature env)) schema $$a $$(listCode as)||]
+        | otherwise -> do
+            applied <- lift (functionCode (leSig env) f)
+            as <- traverse go args
+            pure [||App $$applied $$(liftSizedWith id as)||]
 
 -- | A function of the signature, by the Haskell name it records.
 functionCode :: (KnownNat n) => Signature -> F.Function n -> Q (Code Q (F.Function n))
@@ -709,9 +754,36 @@ liftArg :: LiftEnv -> Arg SchemaName -> L Exp
 liftArg env = \case
   ArgVar v -> liftName env v >>= lift . unTypeCode
   ArgTerm t -> liftTerm env t >>= lift . unTypeCode
+  ArgFun a -> liftAbstraction env a >>= lift . unTypeCode
   ArgAtom p -> liftAtom env p >>= lift . unTypeCode
   ArgForm f -> liftFormula env f >>= lift . unTypeCode
   ArgCtx g -> liftContext env g >>= lift . unTypeCode
+
+{- |
+The argument for a term metavariable with parameters: its parameters are
+names, its body and captured terms are lifted, and its function is lifted as
+it is when it is closed; when it is a term metavariable of the rule being
+compiled, it is the function of that argument at run time, with what it
+captures; and when it was compiled from a body mentioning metavariables, it
+is compiled again at run time from the body instantiated.
+-}
+liftAbstraction :: LiftEnv -> Abstraction SchemaName -> LCode (Abstraction W)
+liftAbstraction env (Abstraction params body fun captured) = do
+  params' <- traverse (liftName env) params
+  body' <- liftTerm env body
+  captured' <- traverse (liftTerm env) captured
+  case fun of
+    F.SomeFunction f
+      | Just (q, _) <- abstractName f -> do
+          a <- metaParam env R.TermS q
+          pure [||Abstraction $$(listCode params') $$body' (abstractionFunction $$a) ($$(listCode captured') <> abstractionCaptured $$a)||]
+      | null (F.opaqueCalls (F.functionProgram f)) ->
+          pure [||Abstraction $$(listCode params') $$body' $$(liftSomeFunction fun) $$(listCode captured')||]
+      | otherwise -> pure [||abstraction $$(listCode params') $$body'||]
+
+liftSomeFunction :: F.SomeFunction -> Code Q F.SomeFunction
+liftSomeFunction (F.SomeFunction (f :: F.Function n)) =
+  unsafeCodeCoerce [|F.SomeFunction ($(unTypeCode (liftTyped f)) :: F.Function $(litT (numTyLit (toInteger (natVal (Proxy @n))))))|]
 
 liftProof :: LiftEnv -> Free (Step SchemaName) String -> L Exp
 liftProof env proof = do
