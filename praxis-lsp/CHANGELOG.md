@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
 - The language server.
 - A VS Code extension, in `editors/vscode` of the repository, which
   highlights `.pra` and `.prf` files and runs the server for them.
+- The unfolding lemmas of `builtin` are in scope in a `.pra` document:
+  `exact add_S`, `rewrite sub_S in H1`, `cong sub_S`.
 
 ### Changed
 

@@ -69,6 +69,7 @@ module Language.Praxis.PRA.Tactic (
   Failure (..),
   renderTacticError,
   renderTacticErrorWith,
+  renderProofErrorReason,
 
   -- * Names
   Fresh (..),
@@ -1909,14 +1910,7 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       ArgForm f -> renderFormulaWith (closed >=> hook) sig (renderHole name) f
       ArgCtx g -> renderContextWith (closed >=> hook) sig (renderHole name) g
 
-    side = \case
-      EqualityCheckFailed s t -> rt s <> " and " <> rt t <> " are not definitionally equal"
-      DefinitionResolutionFailed err -> displayException err
-      TermEigenVariableViolation x t -> name x <> " occurs in " <> rt t
-      AssumptionEigenVariableViolation x g -> name x <> " occurs in the context " <> rc g
-      MissingAssumption f g -> rf f <> " is not among " <> rc g
-      AssumptionMismatch g h -> "the contexts " <> rc g <> " and " <> rc h <> " differ"
-      ConsequentMismatch f g -> "expected the succedent " <> rf f <> ", found " <> rf g
+    side = renderProofErrorReason sig name hook
 
     label r = R.ruleLabel (ruleSpec r) <> ": "
     succedentOf r = let _ R.:|- s = R.ruleConclusion (ruleSpec r) in R.renderFormPat s
@@ -1928,3 +1922,18 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
     rs = renderSequentWith hook sig name
     rtp = renderTerm sig (renderHole name)
     rap = renderAtomicWith (closed >=> hook) sig (renderHole name)
+
+-- | Render the reason the checker gave for rejecting a step, naming symbols through the signature, and an atom the hook names as that name.
+renderProofErrorReason :: Signature -> (a -> String) -> (Atomic a -> Maybe String) -> ProofErrorReason a -> String
+renderProofErrorReason sig name hook = \case
+  EqualityCheckFailed s t -> rt s <> " and " <> rt t <> " are not definitionally equal"
+  DefinitionResolutionFailed err -> displayException err
+  TermEigenVariableViolation x t -> name x <> " occurs in " <> rt t
+  AssumptionEigenVariableViolation x g -> name x <> " occurs in the context " <> rc g
+  MissingAssumption f g -> rf f <> " is not among " <> rc g
+  AssumptionMismatch g h -> "the contexts " <> rc g <> " and " <> rc h <> " differ"
+  ConsequentMismatch f g -> "expected the succedent " <> rf f <> ", found " <> rf g
+  where
+    rt = renderTerm sig name
+    rf = renderFormulaWith hook sig name
+    rc = renderContextWith hook sig name

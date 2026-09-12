@@ -110,6 +110,7 @@ library
     Language.Praxis.PRA.Tactic
     Language.Praxis.PRA.Tactic.Parser
     Language.Praxis.PRA.Tactic.Quote
+    Language.Praxis.PRA.Tactic.Unfolding
 
   -- cabal-gild: discover src --include=src/**/Internal.hs --include=src/**/Internal/**/*.hs
   other-modules:

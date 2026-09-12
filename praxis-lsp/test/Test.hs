@@ -42,6 +42,9 @@ tests =
     , testCase "a file of definitions is checked" $ do
         analyse Prf "double 0 = 0\ndouble (S n) = S (S (double n))\n" @?= []
         map reportSeverity (analyse Prf "double 0 = 0\ndouble (S n) = S (S (doubled n))\n") @?= [DiagnosticSeverity_Error]
+    , testCase "the unfolding lemmas of the builtin definitions are in scope" $ do
+        analyse Pra "theorem addSucc : |- y + S x = S (y + x)\nby exact add_S\n\ntheorem subSucc : x - S y = 3 |- prd (x - y) = 3\nby rewrite sub_S in H1; Id\n" @?= []
+        hoverAt "theorem addSucc : |- y + S x = S (y + x)\nby exact add_S\n" 2 4 @?= Just "|- y + S x = S (y + x)"
     ]
   where
     proofs :: Text

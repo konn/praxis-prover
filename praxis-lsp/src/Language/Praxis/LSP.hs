@@ -6,9 +6,10 @@ rules, as 'Language.Praxis.PRA.Tactic.Quote.praFile' splices them, and
 @.prf@ files of definitions, as 'Language.Praxis.PRA.PrimitiveRecursion.Quote.prfFile'
 does.
 
-A @.pra@ document is read over the 'builtin' signature, each declaration a
-lemma for those after it, as the quasiquoter reads it; every declaration is
-checked, and a failure is a diagnostic at the tactic which failed, a @sorry@
+A @.pra@ document is read over the 'builtin' signature, with the unfolding
+lemmas of 'builtin' in scope and each declaration a lemma for those after it,
+as the quasiquoter reads it; every declaration is checked, and a failure is a
+diagnostic at the tactic which failed, a @sorry@
 an information diagnostic listing the goal it stopped at.  Hovering over a
 tactic shows the goal it faces, found by running the proof with that tactic
 replaced by @sorry@.  A @.prf@ document is checked as the quasiquoter checks
@@ -27,6 +28,7 @@ module Language.Praxis.LSP (
 
 import Control.Exception (displayException)
 import Control.Monad.IO.Class (liftIO)
+import Data.Bifunctor (bimap)
 import Data.Char (isSpace)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
@@ -47,7 +49,8 @@ import Language.Praxis.PRA.Signature (signatureKernelEnv)
 import Language.Praxis.PRA.Syntax.Parser (syntaxErrorPosition)
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
-import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
+import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaName, renderSchemaTacticError, schemaScope)
+import Language.Praxis.PRA.Tactic.Unfolding (renderUnfoldingError, unfoldingLemmas)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeExtension)
 
@@ -174,13 +177,15 @@ even when its proof fails; one which fails is reported, at the tactic which fail
 known, and a @sorry@ as information with the goal it stopped at.
 -}
 analysePra :: Text -> [Report]
-analysePra text = case parseQuoteIn Map.empty (schemaScope builtin) (T.unpack text) of
-  Left err ->
-    let (line, column) = syntaxErrorPosition err
-     in [Report line column DiagnosticSeverity_Error (T.pack (displayException err))]
-  Right (_, decls) -> case signatureKernelEnv builtin of
-    Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack (displayException err))]
-    Right kernel -> go kernel Map.empty decls
+analysePra text = case builtinLemmas of
+  Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack err)]
+  Right base -> case parseQuoteIn (lemmaSorts base) (schemaScope builtin) (T.unpack text) of
+    Left err ->
+      let (line, column) = syntaxErrorPosition err
+       in [Report line column DiagnosticSeverity_Error (T.pack (displayException err))]
+    Right (_, decls) -> case signatureKernelEnv builtin of
+      Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack (displayException err))]
+      Right kernel -> go kernel base decls
   where
     go _ _ [] = []
     go kernel lemmas (d : ds) = case checkDecl kernel lemmas d of
@@ -197,6 +202,14 @@ analysePra text = case parseQuoteIn Map.empty (schemaScope builtin) (T.unpack te
       (l, ':' : rest) | all (`elem` ['0' .. '9']) l, (c, ':' : ' ' : msg) <- break (== ':') rest, all (`elem` ['0' .. '9']) c, not (null c) -> msg
       _ -> s
 
+-- | The lemmas in scope before any declaration: the unfolding lemmas of 'builtin'.
+builtinLemmas :: Either String (Map String (Lemma SchemaName))
+builtinLemmas = bimap (renderUnfoldingError builtin renderSchemaName) (fmap certifiedLemma) (unfoldingLemmas (schemaScope builtin [] []))
+
+-- | What the parser needs of the lemmas: the sorts of their arguments.
+lemmaSorts :: Map String (Lemma SchemaName) -> Lemmas
+lemmaSorts = fmap (map snd . lemmaMetas)
+
 {- |
 The goal at a position of a @.pra@ document: that of the innermost tactic
 which starts at or before the position, found by running its declaration
@@ -204,7 +217,8 @@ with that tactic replaced by @sorry@.
 -}
 hoverAt :: Text -> Int -> Int -> Maybe Text
 hoverAt text line column = do
-  (_, decls) <- either (const Nothing) Just (parseQuoteIn Map.empty (schemaScope builtin) (T.unpack text))
+  base <- either (const Nothing) Just builtinLemmas
+  (_, decls) <- either (const Nothing) Just (parseQuoteIn (lemmaSorts base) (schemaScope builtin) (T.unpack text))
   kernel <- either (const Nothing) Just (signatureKernelEnv builtin)
   -- The last declaration with a tactic at or before the position, and that tactic.
   (before, d, target) <-
@@ -213,7 +227,7 @@ hoverAt text line column = do
       | (before, d) <- reverse (zip (prefixes decls) decls)
       , Just loc <- [locBefore (declTactic d)]
       ]
-  let lemmas = certified kernel before
+  let lemmas = certified kernel base before
       stubbed = d {declTactic = replaceAt target Sorry (declTactic d)}
   case checkDecl kernel lemmas stubbed of
     Left (TacticError _ goal Unfinished) -> Just (renderGoal goal)
@@ -230,9 +244,9 @@ hoverAt text line column = do
         )
     unlines' = foldr1 (\a b -> a <> "\n" <> b)
 
--- | The lemmas of the declarations, in order: as certified, or by statement alone when the proof fails.
-certified :: KernelEnv -> [Decl SchemaName] -> Map String (Lemma SchemaName)
-certified kernel = foldl step Map.empty
+-- | The lemmas of the declarations after those given, in order: as certified, or by statement alone when the proof fails.
+certified :: KernelEnv -> Map String (Lemma SchemaName) -> [Decl SchemaName] -> Map String (Lemma SchemaName)
+certified kernel base = foldl step base
   where
     step lemmas d = case checkDecl kernel lemmas d of
       Right (_, lemma) -> Map.insert (declName d) lemma lemmas

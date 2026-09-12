@@ -84,6 +84,14 @@ where the sides of the goal differ, @rewrite zeroMinus in H@ at the first
 subterm of @H@ that @0 - t@ matches, and @symmetry@ takes a closed equation;
 the instance is cut in and proved by the lemma.
 
+The equations the symbols of the signature were defined by are lemmas as
+well, their unfolding lemmas: one per clause, stating it under no hypotheses,
+named by the symbol and the shape of the patterns the clause matches on —
+@add_0 : |- n + 0 = n@, @add_S : |- n + S m = S (n + m)@, and @lt : |- (n < m)
+= sgn (m - n)@ for a clause matching on nothing; see
+"Language.Praxis.PRA.Tactic.Unfolding".  A declaration of the same name
+shadows one.
+
 @sorry@ abandons the proof at its goal, which the error then reports; neither
 @|@, @try@ nor @repeat@ catches it, so a script may end in @sorry@ to see
 where it stands.

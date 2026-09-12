@@ -110,6 +110,21 @@ and this project adheres to the
   `formula` metavariable, so `rule r (A : formula) (Γ : ctx) : A, Γ |- A by
   assumption` certifies, as does generalized induction under a `formula`
   metavariable.
+- Unfolding lemmas: the equations a function was defined by are lemmas in
+  scope wherever its signature is, one per clause, stated as the theorem
+  `|- f p₁ … pₙ = e` with the pattern variables free and proved by `Defeq`,
+  which the checker verifies against the definitions; nothing is trusted.
+  `Language.Praxis.PRA.Tactic.Unfolding` states and certifies them. A lemma
+  is named by its symbol and the shape of the patterns its clause matches
+  on, `add_0`, `add_S`, `sub_S`, `ifte_0`, `h_SS`, or by the symbol alone
+  for a clause matching on nothing, `lt`; a declaration of the same name
+  shadows it, and two clauses which would be named alike are an error.
+  `exact add_S`, `rewrite sub_S in H1` and `cong sub_S` use them as any
+  lemma stating an equation. A `Symbol` records its clauses,
+  `symbolEquations`, which `compileDefinitions` sets and a spliced signature
+  keeps; the quasiquoter splices an appeal to one as the proof itself, a
+  `LemmaEntry` now carrying a `LemmaSource`. `Language.Praxis.PRA.Syntax.Parser`
+  exports `resolveTerm`, and `Language.Praxis.PRA.Tactic` `renderProofErrorReason`.
 
 ### Changed
 

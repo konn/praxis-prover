@@ -8,7 +8,8 @@ A 'Language.Praxis.PRA.PrimitiveRecursion.PRFCode' is structural: a code has
 no name, only a shape.  Any concrete syntax for terms therefore needs a table
 saying which code @plus@ stands for and at which arity, and that table is a
 'Signature'.  A symbol may also record the Haskell binding its code lives in,
-which is what the quasiquoter refers to in the code it splices.
+which is what the quasiquoter refers to in the code it splices, and the
+equations it was defined by, which are its unfolding lemmas.
 
 Besides plain symbols, a signature names schemas, which are instantiated at
 a parameter function of a fixed arity, and variadic schemas, whose parameter
@@ -25,6 +26,7 @@ module Language.Praxis.PRA.Signature (
   symbolNamed,
   functionSymbol,
   functionSymbolNamed,
+  definedBy,
   symbolArity,
   applySymbol,
 
@@ -81,6 +83,7 @@ import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal, type (+), type 
 import Language.Haskell.TH.Syntax (Name)
 import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error (SchemaError (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Syntax (Term (..))
 import Numeric.Natural (Natural)
@@ -106,6 +109,11 @@ data Symbol = Symbol
   , symbolFunction :: !F.SomeFunction
   , symbolHaskellName :: !(Maybe Name)
   -- ^ the Haskell binding holding the code, for spliced code to refer to
+  , symbolEquations :: ![Equation T.Text]
+  {- ^ the clauses the symbol was defined by, in source order, when it was
+  defined by equations: its unfolding lemmas, which
+  "Language.Praxis.PRA.Tactic.Unfolding" states and proves
+  -}
   }
   deriving (Show, Eq)
 
@@ -118,13 +126,23 @@ A symbol which also records where the code is bound in Haskell, so that the
 quasiquoter can splice a reference to it: @'symbolNamed' "plus" \'plus plus@.
 -}
 symbolNamed :: (KnownNat n) => String -> Name -> PRFCode n -> Symbol
-symbolNamed n hs c = Symbol n (F.SomeFunction (F.Primitive c)) (Just hs)
+symbolNamed n hs c = Symbol n (F.SomeFunction (F.Primitive c)) (Just hs) []
 
 functionSymbol :: (KnownNat n) => String -> F.Function n -> Symbol
-functionSymbol n f = Symbol n (F.SomeFunction f) Nothing
+functionSymbol n f = Symbol n (F.SomeFunction f) Nothing []
 
 functionSymbolNamed :: (KnownNat n) => String -> Name -> F.Function n -> Symbol
-functionSymbolNamed n hs f = Symbol n (F.SomeFunction f) (Just hs)
+functionSymbolNamed n hs f = Symbol n (F.SomeFunction f) (Just hs) []
+
+{- |
+The symbol with the equations it was defined by, in source order.  Each is an
+unfolding lemma of the symbol, which "Language.Praxis.PRA.Tactic.Unfolding"
+states and proves: the compiler of
+"Language.Praxis.PRA.PrimitiveRecursion.Environment" records them, and a
+signature spliced by the quasiquoter keeps them.
+-}
+definedBy :: [Equation T.Text] -> Symbol -> Symbol
+definedBy eqs sym = sym {symbolEquations = eqs}
 
 symbolArity :: Symbol -> Natural
 symbolArity sym = case symbolFunction sym of

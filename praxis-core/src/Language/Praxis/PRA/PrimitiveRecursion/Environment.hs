@@ -34,6 +34,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error (ElaborationError, SchemaError (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (signatureEnv)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation, VariadicTemplate (..))
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax qualified as E
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic (instanceName)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Signature qualified as Sig
@@ -100,7 +101,11 @@ compileDefinitionsWith qualify env equations = do
   kernel <-
     first KernelFailure $
       F.extendKernelEnv parent [F.Definition (F.DefId (qualify name)) code | (name, ElaboratedDefinition _ code _ _ _) <- Map.toList defs]
-  let entries = [Sig.functionSymbol (T.unpack name) (F.Defined (F.DefId (qualify name) `asIdOf` code)) | (name, ElaboratedDefinition _ code _ _ _) <- Map.toList defs]
+  -- The symbol of a definition records its clauses, which are its unfolding lemmas.
+  let entries =
+        [ Sig.definedBy [eq | eq <- equations, E.name eq == fname] (Sig.functionSymbol (T.unpack fname) (F.Defined (F.DefId (qualify fname) `asIdOf` code)))
+        | (fname, ElaboratedDefinition _ code _ _ _) <- Map.toList defs
+        ]
       schemaEntries = [schemaSymbolOf (T.unpack name) sch | (name, sch) <- Map.toList schs]
       variadicEntries = [templateSymbol tmpl extended | tmpl <- Map.elems templates]
       blockSig = Sig.withKernelEnv kernel (Sig.signatureWithVariadicSchemas entries schemaEntries variadicEntries)

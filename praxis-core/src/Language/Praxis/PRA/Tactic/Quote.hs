@@ -38,6 +38,11 @@ instantiated to the goal as "Language.Praxis.PRA.Tactic" describes, and the
 spliced proof refers to its binding.  The lemmas of every quote in a module
 are in scope for the quotes after it, through a registry local to the module.
 
+The equations the symbols of the signature were defined by are lemmas too,
+the unfolding lemmas of "Language.Praxis.PRA.Tactic.Unfolding": @add_0@,
+@add_S@, @lt@ and so on, which a declaration of the same name shadows.  An
+appeal to one is spliced as the proof itself, @Defeq@ on the instance.
+
 To reach them from another module, a quote opens with @library name@: the
 quasiquoter then also binds @name :: 'Library'@, the lemmas in scope at the
 end of the quote — the quoter's own and every declaration of the module so
@@ -77,6 +82,7 @@ module Language.Praxis.PRA.Tactic.Quote (
   -- * Libraries
   Library (..),
   LemmaEntry (..),
+  LemmaSource (..),
   Flag (..),
 
   -- * Checking
@@ -96,6 +102,7 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.Strict (WriterT, runWriterT, tell)
 import Data.Char (isLower)
 import Data.Foldable (toList)
+import Data.Functor.Foldable (cata)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
 import Data.HashSet (HashSet)
@@ -104,6 +111,7 @@ import Data.Hashable (Hashable (..))
 import Data.List (intercalate, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (mapMaybe)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Proxy (Proxy (..))
@@ -135,6 +143,7 @@ import Language.Praxis.PRA.Syntax.Parser (Scope (..))
 import Language.Praxis.PRA.Syntax.Pretty
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
+import Language.Praxis.PRA.Tactic.Unfolding (renderUnfoldingError, unfoldingLemmas)
 import Language.Praxis.TH.Internal qualified as QTH
 
 -- * Schematic names
@@ -302,26 +311,27 @@ praQuoterIn lib =
   QuasiQuoter
     { quoteExp = \src -> do
         env <- either (fail . displayException) pure (signatureKernelEnv sig)
-        lemmas <- inScope
+        (_, lemmas) <- inScope
         (goal, tac) <- either (fail . displayException) pure (parseGoalIn (lemmaSorts lemmas) (schemaScope sig [] []) src)
         proof <- either (fail . renderSchemaTacticError sig) pure (proveOpenWith env (fmap entryLemma lemmas) Map.empty goal tac)
         (body, _) <- runWriterT (liftProof (LiftEnv sig Map.empty Map.empty Map.empty lemmas) proof)
         pure body
     , quoteDec = \src -> do
-        lemmas <- inScope
+        (declared, lemmas) <- inScope
         (header, decls) <- either (fail . displayException) pure (parseQuoteIn (lemmaSorts lemmas) (schemaScope sig) src)
         loc <- location
         let global occ = mkNameG_v (loc_package loc) (loc_module loc) occ
-        (decs, known, new) <-
+        (decs, new) <-
           foldM
-            ( \(acc, known, new) decl -> do
-                (ds, entry) <- compileDecl sig global known decl
-                pure (acc <> ds, Map.insert (declName decl) entry known, Map.insert (declName decl) entry new)
+            ( \(acc, new) decl -> do
+                (ds, entry) <- compileDecl sig global (new `Map.union` lemmas) decl
+                pure (acc <> ds, Map.insert (declName decl) entry new)
             )
-            ([], lemmas, Map.empty)
+            ([], Map.empty)
             decls
         registry <- registeredLemmas
         putQ (LemmaRegistry (Map.union new registry))
+        let known = new `Map.union` declared
         libraryDecs <- case header of
           Nothing -> pure []
           Just name -> do
@@ -339,8 +349,13 @@ praQuoterIn lib =
     }
   where
     sig = librarySignature lib
-    -- The module's own lemmas shadow the library's.
-    inScope = (`Map.union` libraryLemmas lib) <$> registeredLemmas
+    -- The lemmas declared, the module's own shadowing the library's, and with
+    -- them the unfolding lemmas of the signature, which any declaration shadows.
+    inScope = do
+      declared <- (`Map.union` libraryLemmas lib) <$> registeredLemmas
+      unfolding <- either (fail . ("pra: " <>) . renderUnfoldingError sig renderSchemaName) pure (unfoldingLemmas (schemaScope sig [] []))
+      pure (declared, declared `Map.union` Map.map inline unfolding)
+    inline c = LemmaEntry (Inline (certifiedProof c [] [])) (certifiedLemma c)
     startsLower = \case
       c : _ -> isLower c || c == '_'
       [] -> False
@@ -361,12 +376,18 @@ data Library = Library
 -- | The lemmas the quotes of the current module have certified so far; a private type keeps it apart from other state.
 newtype LemmaRegistry = LemmaRegistry (Map String LemmaEntry)
 
--- | A certified lemma: its binding, by its global name, its statement, and the constraints the binding carries, which an appeal to it inherits.
+-- | A lemma in scope: where an appeal to it takes its proof from, and its statement.
 data LemmaEntry = LemmaEntry
-  { entryName :: !Name
+  { entrySource :: !LemmaSource
   , entryLemma :: !(Lemma SchemaName)
-  , entryFlags :: !(Set Flag)
   }
+
+-- | Where an appeal to a lemma takes its proof from.
+data LemmaSource
+  = -- | the binding of a declaration, by its global name, and the constraints the binding carries, which an appeal inherits
+    Declared !Name !(Set Flag)
+  | -- | a proof known here, instantiated at the appeal and spliced in place: that of an unfolding lemma
+    Inline !(Proof SchemaName)
 
 registeredLemmas :: Q (Map String LemmaEntry)
 registeredLemmas = maybe Map.empty (\(LemmaRegistry m) -> m) <$> getQ
@@ -451,7 +472,7 @@ compileDecl sig global lemmas decl = do
       [ QTH.signature name ty
       , QTH.function name [(map D.DVarP params, body')]
       ]
-  pure (decs, LemmaEntry (global dname) lemma flags')
+  pure (decs, LemmaEntry (Declared (global dname) flags') lemma)
   where
     startsLower = \case
       c : _ -> isLower c || c == '_'
@@ -717,26 +738,33 @@ liftProof env proof = do
           args' <- traverse (liftArg env) args
           subs' <- traverse go subs
           lift (foldl (\f x -> [|$f $(pure x)|]) (QTH.conE con) (args' <> subs'))
-        -- The lemma's binding at the arguments, then the free variables of
-        -- its statement substituted, then the weakening: what 'proveWith' does.
         Free (LemmaStep appeal subs) -> do
           entry <- maybe (failL ("no lemma named " <> appealName appeal)) pure (Map.lookup (appealName appeal) (leLemmas env))
-          mapM_ need (Set.toList (entryFlags entry))
-          args' <- traverse (liftArg env) (appealArgs appeal)
-          subs' <- traverse go subs
-          let applied = foldl (\f x -> [|$f $(pure x)|]) (QTH.varE (entryName entry)) (args' <> subs')
-          substituted <- case appealSubst appeal of
-            [] -> pure applied
-            pairs -> do
-              need NeedsFresh
-              pairs' <- traverse liftPair pairs
-              pure [|substProof $(QTH.listE pairs') $applied|]
-          if MS.population (appealWeakening appeal) == 0
-            then lift substituted
-            else do
-              need NeedsFresh
-              extra <- liftContext env (appealWeakening appeal)
-              lift [|weakenProof $(unTypeCode extra) $substituted|]
+          case entrySource entry of
+            -- The lemma's binding at the arguments, then the free variables of
+            -- its statement substituted, then the weakening: what 'proveWith' does.
+            Declared binding flags -> do
+              mapM_ need (Set.toList flags)
+              args' <- traverse (liftArg env) (appealArgs appeal)
+              subs' <- traverse go subs
+              let applied = foldl (\f x -> [|$f $(pure x)|]) (QTH.varE binding) (args' <> subs')
+              substituted <- case appealSubst appeal of
+                [] -> pure applied
+                pairs -> do
+                  need NeedsFresh
+                  pairs' <- traverse liftPair pairs
+                  pure [|substProof $(QTH.listE pairs') $applied|]
+              if MS.population (appealWeakening appeal) == 0
+                then lift substituted
+                else do
+                  need NeedsFresh
+                  extra <- liftContext env (appealWeakening appeal)
+                  lift [|weakenProof $(unTypeCode extra) $substituted|]
+            -- A proof known here is instantiated here, and spliced as the steps it is made of.
+            Inline proof -> do
+              unless (null (appealArgs appeal) && null subs) $
+                failL (appealName appeal <> " is spliced in place, so it takes neither arguments nor premises")
+              go (cata (Free . RuleStep) (weakenProof (appealWeakening appeal) (substProof (appealSubst appeal) proof)))
       -- A free variable of the lemma is the name its proof spells it by, whatever the current proof calls its own.
       liftPair (v, t) = do
         v' <- case v of
@@ -753,10 +781,13 @@ liftProof env proof = do
 -- | A library as an expression: the signature and every lemma, its binding by its global name.
 liftLibrary :: Library -> Code Q Library
 liftLibrary (Library sig lemmas) =
-  [||Library $$(liftSignature sig) (Map.fromList $$(listCode (map entry (Map.toList lemmas))))||]
+  [||Library $$(liftSignature sig) (Map.fromList $$(listCode (mapMaybe entry (Map.toList lemmas))))||]
   where
-    entry (n, LemmaEntry name lemma flags) =
-      [||($$(liftTyped n), LemmaEntry $$(liftTyped name) $$(liftLemma sig lemma) (Set.fromList $$(liftTyped (Set.toList flags))))||]
+    entry (n, LemmaEntry source lemma) = case source of
+      Declared name flags ->
+        Just [||($$(liftTyped n), LemmaEntry (Declared $$(liftTyped name) (Set.fromList $$(liftTyped (Set.toList flags)))) $$(liftLemma sig lemma))||]
+      -- An unfolding lemma is the signature's; the quoter over the library states it again.
+      Inline _ -> Nothing
 
 liftLemma :: Signature -> Lemma SchemaName -> Code Q (Lemma SchemaName)
 liftLemma sig (Lemma metas premises goal bound) =

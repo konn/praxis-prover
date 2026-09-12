@@ -12,10 +12,14 @@ module Language.Praxis.PRA.TacticTest (tacticTests) where
 
 import Control.Exception (displayException)
 import Data.Foldable (toList)
+import Data.List (sort)
 import Data.Map.Strict qualified as Map
 import Data.Sized (pattern Nil, pattern (:<))
+import Data.Text qualified as T
 import Language.Praxis.PRA.Pattern (Hole (..))
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..), builtin)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (parseEquations)
+import Language.Praxis.PRA.PrimitiveRecursion.Environment (blockSignature, compileDefinitions, compiledEnvironment)
 import Language.Praxis.PRA.PrimitiveRecursion.Examples (mult, plus)
 import Language.Praxis.PRA.PrimitiveRecursion.Function (emptyKernelEnv)
 import Language.Praxis.PRA.Proof
@@ -27,6 +31,7 @@ import Language.Praxis.PRA.Syntax.Pretty
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
 import Language.Praxis.PRA.Tactic.Quote (SchemaName (..), checkDecl, renderSchemaTacticError, schemaScope)
+import Language.Praxis.PRA.Tactic.Unfolding
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -52,6 +57,7 @@ tacticTests =
     , equationTests
     , parameterTests
     , eigenTests
+    , unfoldingTests
     ]
 
 sig :: Signature
@@ -922,3 +928,71 @@ eigenTests =
           Left err -> assertBool (renderSchemaTacticError builtin err) (ok (errorFailure err))
           Right _ -> assertFailure "certified"
         _ -> assertFailure "expected one declaration"
+
+unfoldingTests :: TestTree
+unfoldingTests =
+  testGroup
+    "unfolding lemmas"
+    [ testCase "every clause of a definition is a lemma, named by the patterns it matches on" $ do
+        lemmas <- builtinUnfoldings
+        let names = Map.keys lemmas
+        mapM_
+          (\n -> assertBool (n <> " is missing") (n `elem` names))
+          ["add_0", "add_S", "mul_0", "mul_S", "sub_0", "sub_S", "sgn_S", "sgn_0", "prd_0", "prd_S", "isZero_0", "isZero_S", "ifte_0", "ifte_S", "triangle_0", "triangle_S", "lt", "le", "pair", "cons", "projW", "godelPi1", "godelPi2", "lft", "rgt"]
+        assertBool "a variadic schema has no unfolding lemma" (all (\n -> n /= "mu" && take 3 n /= "mu_") names)
+    , testCase "a lemma states its clause under no hypotheses, proved by Defeq" $ do
+        lemmas <- builtinUnfoldings
+        let statement n = renderSequent builtin id (lemmaGoal (certifiedLemma (lemmas Map.! n)))
+        statement "add_0" @?= "|- n + 0 = n"
+        statement "add_S" @?= "|- n + S m = S (n + m)"
+        statement "sub_S" @?= "|- n - S m = prd (n - m)"
+        statement "lt" @?= "|- (n < m) = sgn (m - n)"
+        statement "ifte_S" @?= "|- (if S n then t else e) = t"
+        statement "projW" @?= "|- projW z = μ i < S z. z < triangle (i + 1)"
+        case certifiedProof (lemmas Map.! "add_S") [] [] of
+          Defeq _ _ (Id _ _) -> pure ()
+          p -> assertFailure ("not Defeq, then Id: " <> show p)
+        kenv <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+        mapM_ (\c -> inferConclusionIn kenv (certifiedProof c [] []) @?= Right (lemmaGoal (certifiedLemma c))) (Map.elems lemmas)
+    , testCase "the lemmas are used as any lemma stating an equation" $ do
+        lemmas <- builtinUnfoldings
+        mapM_
+          (provesBuiltin lemmas)
+          [ "|- n + S m = S (n + m) by exact add_S"
+          , "|- 3 + S x = S (3 + x) by exact add_S"
+          , "a = 0 |- n + 0 = n by exact add_0"
+          , "x - S y = 3 |- prd (x - y) = 3 by rewrite sub_S in H1; Id"
+          , "|- sgn (n - S m) = sgn (prd (n - m)) by cong sub_S"
+          , "|- (a < b) = sgn (b - a) by exact lt"
+          , "|- S n - S m = n - m by induction m { calc (S n - 1) = n - 0 } { calc (S n - S (S m')) = prd (S n - S m') by exact sub_S = prd (n - m') by cong H1 = n - S m' }"
+          ]
+    , testCase "the shapes of nested and several patterns, and a variable renamed apart from a symbol" $ do
+        defs <- compiled "g 0 0 = 1; g 0 (S m) = 2; g (S n) m = 3; h (S (S n)) = n; h (S 0) = 0; h 0 = 0; k x y = x; c = 0; f c = S c"
+        us <- either (assertFailure . renderUnfoldingError defs id) pure (unfoldings (plainScope defs))
+        map unfoldingName us @?= ["c", "f", "g_0_0", "g_0_S", "g_S_m", "h_SS", "h_S0", "h_0", "k"]
+        map (renderSequent defs id . unfoldingStatement) us
+          @?= ["|- c = 0", "|- f c' = S c'", "|- g 0 0 = 1", "|- g 0 (S m) = 2", "|- g (S n) m = 3", "|- h (S (S n)) = n", "|- h 1 = 0", "|- h 0 = 0", "|- k x y = x"]
+        lemmas <- either (assertFailure . renderUnfoldingError defs id) pure (unfoldingLemmas (plainScope defs))
+        Map.keys lemmas @?= sort (map unfoldingName us)
+    , testCase "two lemmas named alike are an error" $ do
+        defs <- compiled "k_S n = n; k 0 = 0; k (S n) = 1"
+        case unfoldingLemmas (plainScope defs) of
+          Left (NameTaken "k_S" fs) -> sort fs @?= ["k", "k_S"]
+          Left err -> assertFailure (renderUnfoldingError defs id err)
+          Right _ -> assertFailure "certified"
+    ]
+  where
+    builtinUnfoldings = either (assertFailure . renderUnfoldingError builtin id) pure (unfoldingLemmas (plainScope builtin))
+    compiled src = do
+      eqs <- either (assertFailure . displayException) pure (parseEquations (T.pack src))
+      block <- either (assertFailure . displayException) pure (compileDefinitions (compiledEnvironment mempty) eqs)
+      pure (blockSignature block)
+
+-- | Prove the script over the builtin signature, with lemmas to appeal to, and check the proof against its definitions.
+provesBuiltin :: Map.Map String (Certified String) -> String -> Assertion
+provesBuiltin lemmas src = do
+  kenv <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+  (goal, tac) <- parsed (parseGoalIn (lemmaSortsOf lemmas) (plainScope builtin) src)
+  case proveWith kenv lemmas goal tac of
+    Left err -> assertFailure (renderTacticError builtin id err)
+    Right p -> inferConclusionIn kenv p @?= Right (goalSequent goal)

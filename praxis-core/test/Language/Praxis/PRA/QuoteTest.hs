@@ -186,6 +186,27 @@ by calc (t < 0) = sgn (0 - t) = sgn 0 by cong zeroMinus = 0
 theorem zeroMinusUsed : 0 - x = y |- y = 0
 by rewrite zeroMinus in H1; symmetry (0 = y); Id
 
+-- The equations of the signature's definitions are lemmas, named by the patterns they match on.
+theorem addSuccUnfolded : |- n + S m = S (n + m)
+by exact add_S
+
+theorem subSuccInHypothesis : x - S y = 3 |- prd (x - y) = 3
+by rewrite sub_S in H1; Id
+
+theorem ltUnfolded : |- (a < b) = sgn (b - a)
+by exact lt
+
+rule addSuccUnder (Γ : ctx) (t u : term) : Γ |- t + S u = S (t + u)
+by exact add_S
+
+theorem sgnSubSucc : |- sgn (n - S m) = sgn (prd (n - m))
+by cong sub_S
+
+theorem succSubSuccUnfolded : |- S n - S m = n - m
+by induction m
+   { calc (S n - 1) = n - 0 }
+   { calc (S n - S (S m')) = prd (S n - S m') by exact sub_S = prd (n - m') by cong H1 = n - S m' }
+
 -- A metavariable with a parameter: induction as a derived rule, and an appeal to it.
 rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula) (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t)
   where n ∉ Γ, t
@@ -215,6 +236,15 @@ by induction t as n
      }
      { assumption }
    }
+|]
+
+-- A declaration shadows the unfolding lemma of its name, for the declarations after it.
+[pra|
+theorem add_S : |- 1 = 1
+by refl
+
+theorem shadowed : |- 1 = 1
+by exact add_S
 |]
 
 quoteTests :: TestTree
@@ -319,6 +349,18 @@ quoteTests =
         inferConclusionIn kenv zeroMinusUsed @?= Right (sequentMu "0 - x = y |- y = 0")
         inferConclusionIn kenv plusZeroRightByInd @?= Right (sequentMu "|- y + 0 = y")
         inferConclusionIn kenv (indUnder (ctxMu ["a = 0"]) (Lit 5)) @?= Right (sequentMu "3 = 3, a = 0 |- 5 + 0 = 5")
+    , testCase "the unfolding lemmas of the signature are in scope, and spliced in place" $ do
+        kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
+        inferConclusionIn kenv addSuccUnfolded @?= Right (sequentMu "|- n + S m = S (n + m)")
+        inferConclusionIn kenv subSuccInHypothesis @?= Right (sequentMu "x - S y = 3 |- prd (x - y) = 3")
+        inferConclusionIn kenv ltUnfolded @?= Right (sequentMu "|- (a < b) = sgn (b - a)")
+        inferConclusionIn kenv (addSuccUnder (ctxMu ["a = 0"]) (Lit 2) (Var "z")) @?= Right (sequentMu "a = 0 |- 2 + S z = S (2 + z)")
+        inferConclusionIn kenv sgnSubSucc @?= Right (sequentMu "|- sgn (n - S m) = sgn (prd (n - m))")
+        inferConclusionIn kenv succSubSuccUnfolded @?= Right (sequentMu "|- S n - S m = n - m")
+        case addSuccUnfolded :: Proof String of
+          Defeq _ _ (Id _ _) -> pure ()
+          p -> assertFailure ("not spliced in place: " <> show p)
+        inferConclusion shadowed @?= Right (sequentMu "|- 1 = 1")
     , testCase "a formula metavariable under Id is the identity expanded at the instance" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         let compound = atomMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)"

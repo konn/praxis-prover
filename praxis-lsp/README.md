@@ -10,9 +10,10 @@ It speaks the Language Server Protocol over standard input and output:
 cabal run praxis-lsp
 ```
 
-A `.pra` document is read over the `builtin` signature, each declaration a
-lemma for those after it, as the quasiquoter reads it. Every declaration is
-checked as it is edited: a tactic which fails is an error at its position,
+A `.pra` document is read over the `builtin` signature, with the unfolding
+lemmas of `builtin` in scope and each declaration a lemma for those after it,
+as the quasiquoter reads it. Every declaration is checked as it is edited: a
+tactic which fails is an error at its position,
 and a `sorry` an information diagnostic listing the goal it stopped at, with
 the hypotheses by name. Hovering over a tactic shows the goal it faces, found
 by running the proof with that tactic replaced by `sorry`. A `.prf` document

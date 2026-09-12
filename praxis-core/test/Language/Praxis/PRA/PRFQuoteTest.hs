@@ -212,6 +212,15 @@ prfQuoteTests =
             y = App f ((PR.Succ :$ (Lit 0 SV.:< SV.Nil)) SV.:< SV.Nil) :: Term String
         x @?= y
         hash x @?= hash y
+    , testCase "a quoted signature records the clauses of its definitions" $ do
+        plusClauses <- expectRight (parseEquations "plus n 0 = n; plus n (S m) = S (plus n m)")
+        fmap Sig.symbolEquations (Sig.lookupSymbol "plus" basic) @?= Just plusClauses
+        fmap Sig.symbolEquations (Sig.lookupSymbol "plus" extended) @?= Just plusClauses
+        cubeClauses <- expectRight (parseEquations "cube n = pow n 3")
+        fmap Sig.symbolEquations (Sig.lookupSymbol "cube" imported) @?= Just cubeClauses
+        fmap Sig.symbolEquations (Sig.lookupSymbol "rawPower" lifted) @?= Just []
+        fmap (length . Sig.symbolEquations) (Sig.lookupSymbol "sub" PR.builtin) @?= Just 2
+        Sig.lookupSymbol "mu" PR.builtin @?= Nothing
     , environmentTests
     , layoutTests
     ]

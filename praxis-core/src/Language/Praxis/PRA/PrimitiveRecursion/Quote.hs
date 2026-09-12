@@ -19,7 +19,8 @@ support module and import that quasiquoter where it is used, as for
 boundaries. Expression, pattern and type quotes are deliberately unsupported.
 Parsing, coverage, recursion and dependency checking run during compilation;
 the generated signature contains precompiled programs and checks its table
-invariants when first demanded. Calls are never recursively expanded here.
+invariants when first demanded, and records the clauses of every definition,
+its unfolding lemmas. Calls are never recursively expanded here.
 -}
 module Language.Praxis.PRA.PrimitiveRecursion.Quote (
   prf,
@@ -357,11 +358,14 @@ liftSignature sig = TH.joinCode do
     ||]
   where
     definition (F.Definition ident code) = [||F.Definition $$(liftTyped ident) $$(liftAtArity [t|F.Program|] code)||]
-    entry sym = case Sig.symbolFunction sym of
+    entry sym = definedBy (Sig.symbolEquations sym) case Sig.symbolFunction sym of
       F.SomeFunction (fun :: F.Function n) -> case (fun, Sig.symbolHaskellName sym) of
         (F.Primitive _, Just binding) -> [||Sig.symbolNamed $$(liftTyped (Sig.symbolName sym)) $$(liftTyped binding) $$(reference binding (F.Primitive @n))||]
         (_, Just binding) -> [||Sig.functionSymbolNamed $$(liftTyped (Sig.symbolName sym)) $$(liftTyped binding) $$(reference binding (id @(F.Function n)))||]
         (_, Nothing) -> [||Sig.functionSymbol $$(liftTyped (Sig.symbolName sym)) $$(liftAtArity [t|F.Function|] fun)||]
+    -- The clauses a symbol was defined by are data; a spliced signature keeps them, for its unfolding lemmas.
+    definedBy [] code = code
+    definedBy eqs code = [||Sig.definedBy $$(liftTyped eqs) $$code||]
     schemaEntry (Sig.SchemaSymbol name (inst :: F.Function k -> F.Function n) hs) = case hs of
       Just binding -> [||Sig.schemaSymbolNamed $$(liftTyped name) $$(liftTyped binding) $$(referenceSchema binding (id @(F.Function k -> F.Function n)))||]
       Nothing -> [||Sig.schemaSymbol @k @n $$(liftTyped name) $$(referenceSchema (TH.mkName name) (id @(F.Function k -> F.Function n)))||]

@@ -80,6 +80,7 @@ module Language.Praxis.PRA.Syntax.Parser (
   parseTermPattern,
   parseAtomicPattern,
   parseFormulaPattern,
+  resolveTerm,
 
   -- * The parsers
   Parser,
