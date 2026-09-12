@@ -93,6 +93,15 @@ and this project adheres to the
   occurrence of it; the `Schematic` class gains `metaApplied`, `Bindings`
   keep the names placeholders must avoid, and `Language.Praxis.PRA.Proof.Transform`
   exports `substFormula` and `substAtomic`, which the spliced rule uses.
+- Eigenvariable conditions, declared: `rule … : Γ |- P(t) where n ∉ Γ, t`,
+  or `where n not free in Γ, t`, states which metavariables the `var`
+  metavariable `n` is not free in, as the figures of the primitive rules do.
+  An induction on `n` in the proof is accepted only where the declaration
+  covers every metavariable of its context, its term and its motive, but
+  one `n` parameterizes, and `NotDeclaredFresh` says what to add; the
+  eigenvariables of a lemma are the ones declared, no longer inferred from
+  its proof. `Decl` carries `declSides`, and `proveOpenDeclared` and
+  `runTacticDeclared` take the declarations.
 - `Language.Praxis.PRA.Proof.Transform`: `substProof` and `weakenProof`,
   the substitution and weakening of a proof, renaming the variables its steps
   bind apart; the spliced proof of an appeal to a theorem is built with them.

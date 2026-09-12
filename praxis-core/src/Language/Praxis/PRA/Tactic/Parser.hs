@@ -17,7 +17,8 @@ The textual syntax of tactics, and of the declarations which use them.
 >
 > quote   ::= [library ident] {decl}       -- the header names a binding for the lemmas in scope
 > decl    ::= theorem ident : sequent by tactic
->           | rule ident {binder} : sequent by tactic
+>           | rule ident {binder} : sequent [where side {and side}] by tactic
+> side    ::= ident not free in ident {, ident}   -- an eigenvariable condition; ∉ for not free in
 > binder  ::= ( param {param} : sort )      -- metavariables
 > param   ::= ident [( ident {, ident} )]   -- with the var metavariables it takes as parameters
 >           | ( ident : sequent )           -- a premise, for exact
@@ -49,6 +50,14 @@ n)) : Γ |- P(t)@.  Appealing to such a rule infers @P@ by abstracting the
 argument in the goal, every occurrence of it, as @induction@ does; the
 argument itself, @t@ here, must be given or determined elsewhere, and a
 @var@ parameter given as an argument names the eigenvariable.
+
+A rule declares its eigenvariable conditions after its conclusion: @where n
+not free in Γ, t@, or @where n ∉ Γ, t@, for a @var@ metavariable @n@ and
+metavariables of the rule.  An induction on @n@ in the proof is accepted
+only where the declaration covers every metavariable of its context, its
+term and its motive, but one @n@ parameterizes; and an appeal to the rule
+instantiates @n@ apart from the goal and the other arguments, as for the
+eigenvariable of a primitive rule.
 
 @exact@ names a premise of the rule being proved, a hypothesis which is the
 succedent, or a lemma: a theorem or rule declared earlier, whose
@@ -113,6 +122,7 @@ module Language.Praxis.PRA.Tactic.Parser (
 import Control.Monad (forM_, unless)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Language.Praxis.PRA.Pattern (Hole (..))
 import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Rule qualified as R
@@ -130,7 +140,7 @@ tacticKeywords :: [String]
 tacticKeywords =
   map (R.ruleLabel . ruleSpec) [minBound .. maxBound]
     <> words "refl symmetry rewrite in cong induction as on assumption exact calc have skip sorry try repeat"
-    <> words "theorem rule library by var term atom formula ctx"
+    <> words "theorem rule library by where var term atom formula ctx"
 
 -- | Reserve the words of the tactic language in a scope.
 withTacticScope :: Scope a -> Scope a
@@ -183,19 +193,21 @@ binderParameters bs = [(n, ps) | MetaBinder ns _ <- bs, (n, ps) <- ns, not (null
 data Decl a = Decl
   { declName :: !String
   , declBinders :: ![Binder a]
+  , declSides :: ![(String, [String])]
+  -- ^ eigenvariable conditions: a @var@ metavariable, and the metavariables it is not free in
   , declGoal :: !(Goal a)
   , declTactic :: !(Tactic a)
   }
   deriving (Show, Eq)
 
--- | The lemma a declaration states, once proved; it binds no metavariable, as far as the statement tells.
+-- | The lemma a declaration states, once proved; its eigenvariables are the ones its conditions declare.
 declLemma :: (Schematic a) => Decl a -> Lemma a
 declLemma d =
   Lemma
     { lemmaMetas = binderMetas (declBinders d)
     , lemmaPremises = [(n, s) | PremiseBinder n s <- declBinders d]
     , lemmaGoal = goalSequent (declGoal d)
-    , lemmaBound = []
+    , lemmaBound = map fst (declSides d)
     }
 
 -- | The lemmas a script may appeal to, each with the sorts of its metavariables in the order of its binders.
@@ -250,14 +262,32 @@ declP lemmas mkScope = theoremP <|> ruleP
       keywordP "theorem"
       name <- nameP
       symbolP ":"
-      uncurry (Decl name []) <$> goalP lemmas (mkScope [] [])
+      uncurry (Decl name [] []) <$> goalP lemmas (mkScope [] [])
     ruleP = do
       keywordP "rule"
       name <- nameP
       binders <- bindersP []
       symbolP ":"
-      uncurry (Decl name binders) <$> goalP lemmas (mkScope (binderMetas binders) (binderParameters binders))
+      let metas = binderMetas binders
+          sc0 = mkScope metas (binderParameters binders)
+          sc = withTacticScope sc0
+      (hs, c) <- hypothesesP sc
+      sides <- option [] (keywordP "where" *> sideP metas sc `sepBy1` keywordP "and")
+      keywordP "by"
+      Decl name binders sides (mkGoal hs c) <$> tacticP lemmas sc0
     nameP = identifierP (withTacticScope (mkScope [] []))
+
+    -- An eigenvariable condition: a var metavariable of the rule, not free in metavariables of the rule.
+    sideP metas sc = do
+      o <- getOffset
+      x <- identifierP sc
+      unless (lookup x metas == Just R.VarS) $
+        region (setErrorOffset o) (fail (x <> " is not a var metavariable of the rule"))
+      (keywordP "not" *> keywordP "free" *> keywordP "in") <|> symbolP "∉"
+      targets <- identifierP sc `sepBy1` commaP
+      forM_ targets \m ->
+        unless (isJust (lookup m metas)) $ fail (m <> " is not a metavariable of the rule")
+      pure (x, targets)
 
     bindersP :: [Binder a] -> Parser [Binder a]
     bindersP acc =

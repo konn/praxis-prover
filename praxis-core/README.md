@@ -227,6 +227,7 @@ derived rule can speak of a formula at several arguments:
 [pra|
 rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula)
   (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t)
+  where n ∉ Γ, t
 by Ind n (P(n)) t { exact base } { exact step }
 
 theorem plusZeroRight' : |- y + 0 = y
@@ -238,6 +239,13 @@ Appealing to such a rule infers `P` by abstracting the argument in the
 goal, every occurrence of it, as `induction` does; the argument, `y` here,
 must be given or determined elsewhere, and giving the `var` parameter names
 the eigenvariable the premises see.
+
+The clause `where n ∉ Γ, t`, or `where n not free in Γ, t`, declares the
+eigenvariable conditions of a rule, as the figures of the primitive rules
+state theirs: an induction on `n` in the proof is accepted only where the
+declaration covers every metavariable of its context, its term and its
+motive, and an appeal instantiates `n` apart from the goal and the other
+arguments.
 
 A lemma cut in serves a congruence step of a calculation:
 

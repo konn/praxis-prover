@@ -188,6 +188,7 @@ by rewrite zeroMinus in H1; symmetry (0 = y); Id
 
 -- A metavariable with a parameter: induction as a derived rule, and an appeal to it.
 rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula) (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t)
+  where n ∉ Γ, t
 by Ind n (P(n)) t { exact base } { exact step }
 
 theorem plusZeroRightByInd : |- y + 0 = y

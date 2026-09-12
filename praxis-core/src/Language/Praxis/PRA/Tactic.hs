@@ -53,8 +53,10 @@ module Language.Praxis.PRA.Tactic (
   proveOpen,
   proveOpenIn,
   proveOpenWith,
+  proveOpenDeclared,
   runTactic,
   runTacticWith,
+  runTacticDeclared,
   Leaf (..),
   Step (..),
   Appeal (..),
@@ -480,6 +482,8 @@ data Failure a
     LemmaNotEquation !String !(Sequent a)
   | -- | variables of the equation of a lemma which its use does not determine
     Undetermined !String ![a]
+  | -- | induction on a var metavariable the rule does not declare not free in the metavariables listed
+    NotDeclaredFresh !String ![String]
   | -- | the eigenvariable given to 'Induction' occurs in the goal
     NotFresh !a
   | -- | 'Assumption' on a succedent absent from the context
@@ -589,8 +593,17 @@ proveOpenIn env = proveOpenWith env Map.empty
 
 -- | 'proveOpenIn', with lemmas to appeal to.
 proveOpenWith :: (Schematic a) => KernelEnv -> Map String (Lemma a) -> Map String (Sequent a) -> Goal a -> Tactic a -> Either (TacticError a) (Free (Step a) String)
-proveOpenWith env lemmas prems goal t = do
-  p <- runTacticWith env lemmas prems t goal
+proveOpenWith env lemmas prems = proveOpenDeclared env lemmas prems Map.empty
+
+{- |
+'proveOpenWith', for a rule declaring eigenvariable conditions: for each
+@var@ metavariable, the metavariables it is not free in.  An induction on
+such a metavariable is accepted only where the declaration covers every
+metavariable of its context, its term and its motive.
+-}
+proveOpenDeclared :: (Schematic a) => KernelEnv -> Map String (Lemma a) -> Map String (Sequent a) -> Map String [String] -> Goal a -> Tactic a -> Either (TacticError a) (Free (Step a) String)
+proveOpenDeclared env lemmas prems fresh goal t = do
+  p <- runTacticDeclared env lemmas prems fresh t goal
   let opens = [g | Open g <- toList p]
   unless (null opens) $ Left (TacticError Nothing goal (Unsolved opens))
   let p' =
@@ -657,7 +670,11 @@ runTactic = runTacticWith emptyKernelEnv Map.empty
 
 -- | 'runTactic', with definitions and lemmas.
 runTacticWith :: forall a. (Schematic a) => KernelEnv -> Map String (Lemma a) -> Map String (Sequent a) -> Tactic a -> Goal a -> Either (TacticError a) (Partial a)
-runTacticWith env lemmas prems = go noHints
+runTacticWith env lemmas prems = runTacticDeclared env lemmas prems Map.empty
+
+-- | 'runTacticWith', with the eigenvariable conditions the rule being proved declares.
+runTacticDeclared :: forall a. (Schematic a) => KernelEnv -> Map String (Lemma a) -> Map String (Sequent a) -> Map String [String] -> Tactic a -> Goal a -> Either (TacticError a) (Partial a)
+runTacticDeclared env lemmas prems fresh = go noHints
   where
     go :: Hints -> Tactic a -> Goal a -> Either (TacticError a) (Partial a)
     go hints tac goal = case tac of
@@ -699,7 +716,12 @@ runTacticWith env lemmas prems = go noHints
           | hypothesisFormula h == c -> plain (go noHints Assumption goal)
           | otherwise -> failWith (HypothesisMismatch d (hypothesisFormula h))
         (Nothing, Nothing, Nothing) -> failWith (UnknownPremise d)
-      Apply name args -> first (TacticError Nothing goal) (applyRule env hints name args goal)
+      Apply name args -> do
+        p <- first (TacticError Nothing goal) (applyRule env hints name args goal)
+        case p of
+          Free (RuleStep (IndF x motive t _ _)) -> first (TacticError Nothing goal) (eigenDeclared x motive t)
+          _ -> pure ()
+        pure p
       Refl -> plain case c of
         Atm p@(s :=== t)
           | isNothing (metaAtom p) ->
@@ -908,6 +930,17 @@ runTacticWith env lemmas prems = go noHints
           instantiateFormula n (bFree b) b (Atm p) >>= \case
             Atm q -> Right q
             _ -> Left (Malformed ("the instance of " <> n <> " is not an atom"))
+
+        -- Induction on a var metavariable needs the rule to declare it not
+        -- free in every metavariable of the context, the term and the motive,
+        -- but one it parameterizes.
+        eigenDeclared :: a -> Formula a -> Term a -> Either (Failure a) ()
+        eigenDeclared x motive t = case metaName x of
+          Just (R.VarS, n) -> do
+            let needed = nub (concatMap (metasIn n) (map hypothesisFormula (goalHypotheses goal) <> [motive]) <> termMetas n t)
+                missing = filter (`notElem` Map.findWithDefault [] n fresh) needed
+            unless (null missing) $ Left (NotDeclaredFresh n missing)
+          _ -> pure ()
 
     continue k =
       fmap join . traverse \case
@@ -1561,6 +1594,21 @@ metaParameters lemma =
     , not (null pairs)
     ]
 
+-- | The metavariables a formula mentions, but a var metavariable given, and a metavariable it parameterizes.
+metasIn :: (Schematic a) => String -> Formula a -> [String]
+metasIn n f = concatMap atomMetas (atomsOf f)
+  where
+    atomMetas p = case metaAtom p of
+      Just (_, m)
+        | n `elem` map fst (metaApplied p) -> argMetas p
+        | otherwise -> m : argMetas p
+      Nothing -> let s :=== u = p in termMetas n s <> termMetas n u
+    argMetas p = concat [termMetas n a | (_, a) <- metaApplied p]
+
+-- | The metavariables a term mentions, but the one given.
+termMetas :: (Schematic a) => String -> Term a -> [String]
+termMetas n t = [m | v <- toList t, Just (_, m) <- [metaName v], m /= n]
+
 -- | The atoms of a formula, in order.
 atomsOf :: Formula a -> [Atomic a]
 atomsOf = \case
@@ -1799,6 +1847,7 @@ renderTacticErrorWith sig name hook = intercalate "\n" . render
       NoCongruence (u :=== v) _ -> "cong: no hypothesis rewrites " <> rt u <> " into " <> rt v
       LemmaNotEquation n s -> n <> " does not state an equation, so it cannot stand for a hypothesis; it proves " <> rs s
       Undetermined n vs -> "cannot instantiate " <> intercalate ", " (map name vs) <> " of " <> n <> " from where it is used; state the instance with have"
+      NotDeclaredFresh n ms -> "induction on " <> n <> " needs " <> n <> " not free in " <> intercalate ", " ms <> "; declare it in the rule, where " <> n <> " ∉ " <> intercalate ", " ms
       NotFresh x -> "induction: " <> name x <> " occurs in the goal"
       NotInContext f -> "assumption: " <> rf f <> " is not in the context"
       UnknownPremise d -> "exact: no premise, lemma or hypothesis named " <> d

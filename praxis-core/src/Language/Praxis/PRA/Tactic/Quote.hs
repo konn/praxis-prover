@@ -389,8 +389,9 @@ after it.
 checkDecl :: F.KernelEnv -> Map String (Lemma SchemaName) -> Decl SchemaName -> Either (TacticError SchemaName) (Free (Step SchemaName) String, Lemma SchemaName)
 checkDecl kernel lemmas decl = do
   let prems = Map.fromList [(n, s) | PremiseBinder n s <- declBinders decl]
-  checked <- proveOpenWith kernel lemmas prems (declGoal decl) (declTactic decl)
-  pure (checked, (declLemma decl) {lemmaBound = boundVarMetas checked})
+      fresh = Map.fromList (declSides decl)
+  checked <- proveOpenDeclared kernel lemmas prems fresh (declGoal decl) (declTactic decl)
+  pure (checked, declLemma decl)
 
 -- | Compile a declaration to its binding, given the lemmas it may appeal to and how to name its binding globally; also the lemma it is for those after it.
 compileDecl :: Signature -> (String -> Name) -> Map String LemmaEntry -> Decl SchemaName -> Q ([Dec], LemmaEntry)
@@ -516,15 +517,6 @@ proofNames = iter step . fmap (const HS.empty)
               <> subs
           )
 
--- | The metavariables of sort @var@ a proof binds as eigenvariables.
-boundVarMetas :: Free (Step SchemaName) h -> [String]
-boundVarMetas = iter step . fmap (const [])
-  where
-    step = \case
-      RuleStep s@(IndF (Meta R.VarS x) _ _ _ _) -> x : concat (toList s)
-      RuleStep s -> concat (toList s)
-      LemmaStep _ subs -> concat subs
-
 {- |
 Alpha-rename the variable bound by each substitution template.  Renaming the
 whole proof would also change free occurrences in the statement and premises;
@@ -549,7 +541,9 @@ figure sig decl =
     ["A " <> kind <> " certified by the tactic script it was declared with:", "", "@"]
       <> [haddockEscape above | not (null above)]
       <> [haddockEscape (replicate width '-' <> " " <> declName decl)]
-      <> [haddockEscape below, "@"]
+      <> [haddockEscape below]
+      <> [haddockEscape ("where " <> intercalate ", and " [x <> " is not free in " <> intercalate ", " ts | (x, ts) <- declSides decl] <> ".") | not (null (declSides decl))]
+      <> ["@"]
   where
     kind = if null (declBinders decl) then "theorem" else "derived rule"
     render = renderSequentWith (schemaHook sig) sig renderSchemaName

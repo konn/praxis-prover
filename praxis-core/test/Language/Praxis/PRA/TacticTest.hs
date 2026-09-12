@@ -51,6 +51,7 @@ tacticTests =
     , haveTests
     , equationTests
     , parameterTests
+    , eigenTests
     ]
 
 sig :: Signature
@@ -827,7 +828,7 @@ parameterTests =
         refuses "rule r (n : var) (P(n) : formula) : |- P(n, n) by sorry"
         refuses "rule r (n : var) (A : formula) : |- A(n) by sorry"
     , testCase "the goal at a sorry shows the metavariable applied" $ do
-        decls <- parsed (parseDecls (schemaScope builtin) "rule courseOfValue (n : var) (t : term) (Γ : ctx) (P(n) : formula) (H : n < t, Γ |- P(n)) : Γ |- P(t)\nby sorry")
+        decls <- parsed (parseDecls (schemaScope builtin) "rule courseOfValue (n : var) (t : term) (Γ : ctx) (P(n) : formula) (H : n < t, Γ |- P(n)) : Γ |- P(t) where n ∉ Γ, t\nby sorry")
         env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
         case decls of
           [d] -> case checkDecl env Map.empty d of
@@ -865,8 +866,59 @@ parameterTests =
         (const (assertFailure ("accepted: " <> src)))
         (parseDecls (schemaScope builtin) src)
     ind = do
-      decls <- parsed (parseDecls (schemaScope builtin) "rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula) (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t)\nby Ind n (P(n)) t { exact base } { exact step }")
+      decls <- parsed (parseDecls (schemaScope builtin) "rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula) (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t) where n ∉ Γ, t\nby Ind n (P(n)) t { exact base } { exact step }")
       env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
       case decls of
         [d] -> either (assertFailure . renderSchemaTacticError builtin) (\(_, lemma) -> pure (env, lemma)) (checkDecl env Map.empty d)
+        _ -> assertFailure "expected one declaration"
+
+eigenTests :: TestTree
+eigenTests =
+  testGroup
+    "eigenvariable conditions"
+    [ testCase "the where clause parses, in either spelling, and names the eigenvariables of the lemma" $ do
+        decls <- parsed (parseDecls (schemaScope builtin) (indSource "where n not free in Γ, t"))
+        map declSides decls @?= [[("n", ["Γ", "t"])]]
+        decls' <- parsed (parseDecls (schemaScope builtin) (indSource "where n ∉ Γ, t"))
+        map declSides decls' @?= [[("n", ["Γ", "t"])]]
+        lemma <- checked (indSource "where n ∉ Γ, t")
+        lemmaBound lemma @?= ["n"]
+        lemmaBound (declLemma (head decls')) @?= ["n"]
+    , testCase "induction on a var metavariable needs the declaration to cover the context, the term and the motive" $ do
+        failsCheck (indSource "") \case
+          NotDeclaredFresh "n" ["Γ", "t"] -> True
+          _ -> False
+        failsCheck (indSource "where n ∉ Γ") \case
+          NotDeclaredFresh "n" ["t"] -> True
+          _ -> False
+        failsCheck (indSource "where n ∉ t") \case
+          NotDeclaredFresh "n" ["Γ"] -> True
+          _ -> False
+    , testCase "the clause names a var metavariable, not free in metavariables of the rule" $ do
+        refuses (indSource "where t ∉ Γ")
+        refuses (indSource "where n ∉ Δ")
+        refuses (indSource "where n ∉ Γ, t and n ∉")
+        decls <- parsed (parseDecls (schemaScope builtin) (indSource "where n ∉ Γ and n ∉ t"))
+        map declSides decls @?= [[("n", ["Γ"]), ("n", ["t"])]]
+    ]
+  where
+    indSource clause = "rule ind (n : var) (t : term) (Γ : ctx) (P(n) : formula) (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t) " <> clause <> "\nby Ind n (P(n)) t { exact base } { exact step }"
+    refuses src =
+      either
+        (const (pure ()))
+        (const (assertFailure ("accepted: " <> src)))
+        (parseDecls (schemaScope builtin) src)
+    checked src = do
+      decls <- parsed (parseDecls (schemaScope builtin) src)
+      env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+      case decls of
+        [d] -> either (assertFailure . renderSchemaTacticError builtin) (pure . snd) (checkDecl env Map.empty d)
+        _ -> assertFailure "expected one declaration"
+    failsCheck src ok = do
+      decls <- parsed (parseDecls (schemaScope builtin) src)
+      env <- either (assertFailure . displayException) pure (signatureKernelEnv builtin)
+      case decls of
+        [d] -> case checkDecl env Map.empty d of
+          Left err -> assertBool (renderSchemaTacticError builtin err) (ok (errorFailure err))
+          Right _ -> assertFailure "certified"
         _ -> assertFailure "expected one declaration"
