@@ -1,0 +1,289 @@
+library lemmas
+
+theorem succSubSucc : |- S n - S m = n - m
+by
+  induction m
+  { 
+    Defeq (S n - 1) (n - 0);
+    Id
+  }
+  {
+    Defeq (S n - S (S m')) (prd (S n - S m'));
+    rewrite (S n - S m' = n - m') in (S n - S (S m') = prd (S n - S m'));
+    Defeq (prd (n - m')) (n - S m');
+    rewrite (prd (n - m') = n - S m') in (S n - S (S m') = prd (n - m'));
+    Id
+  }
+
+theorem ltSucc : |- t < S t
+by
+  induction t as n
+  { Defeq (0 < 1) 1; Id }
+  {
+    have H: (S (S n) - S n = S n - n)
+      { exact succSubSucc };
+    calc
+      (S n < S (S n))
+        = sgn (S (S n) - S n)
+        = sgn (S n - n)
+          by cong H
+        = (n < S n)
+        = 1
+          by exact H1
+  }
+
+theorem succLtSuccIffLt  : |- (t < u) = (S t < S u)
+by 
+  Defeq (S t < S u) (sgn (S u - S t));
+  have H: (S u - S t = u - t) { exact succSubSucc };
+  symmetry H as H5;
+  calc
+    (t < u)
+      = sgn (u - t)
+      = sgn (S u - S t)    by cong H5
+      = (S t < S u)
+
+theorem zeroMinus : |- 0 - t = 0
+by
+  induction t as n
+  {
+    calc (0 - 0) = 0
+  }
+  {
+    calc (0 - S n)
+    = prd (0 - n)
+    = prd 0 by cong H1
+    = 0
+  }
+
+theorem ltZeroIsZero: |- (t < 0) = 0
+by
+  have H: (0 - t = 0) { exact zeroMinus };
+  calc
+    (t < 0)
+    = sgn (0 - t)
+    = sgn 0
+      by cong H
+    = 0
+
+theorem unfoldSuccLtSucc : |- (S t < S u) = (t < u)
+by have H: ((t < u) = (S t < S u)) { exact succLtSuccIffLt };
+   symmetry H as H2;
+   exact H2
+
+theorem zeroLtSucc : |- 0 < S t by refl
+
+theorem triangleZero : |- triangle 0 = 0 by refl
+
+theorem triangleSucc : |- triangle (S t) = triangle t + S t by refl
+
+theorem addZero : |- t + 0 = t by refl
+theorem addSucc : |- t + S u = S (t + u) by refl
+
+theorem zeroAdd : |- 0 + t = t
+by induction t as n
+{
+  calc (0 + 0) = 0
+}
+{
+  calc (0 + S n) 
+      = S (0 + n)
+      = S n by cong H1
+}
+
+theorem succAdd : |- S t + u = S (t + u)
+by induction u as m
+{
+  calc 
+    (S t + 0) = S t = S (t + 0)
+}
+{
+  calc (S t + S m)
+      = S (S t + m)
+      = S (S (t + m)) by cong H1
+      = S (t + S m)
+}
+
+theorem leqRefl : |- t <= t
+by calc
+  (t <= t)
+  = t < S t
+  = 1
+    by exact ltSucc
+
+
+theorem subSelf : |- t - t = 0
+by induction t as n
+  { refl }
+  { calc (S n - S n) = (n - n) by exact succSubSucc = 0 by exact H1 }
+
+theorem zeroOrSucc : |- n = 0 \/ n = S (prd n)
+by induction n as m
+  { DisjR2; refl }
+  { DisjR1; refl }
+
+theorem addAssoc : |- (a + b) + c = a + (b + c)
+by induction c as m
+  { refl }
+  { calc ((a + b) + S m) = (S ((a + b) + m)) = (S (a + (b + m))) by cong H1 = (a + (b + S m)) }
+
+theorem addSubCancel : |- (a + b) - a = b
+by induction a as n
+  { calc ((0 + b) - 0) = (0 + b) = b by exact zeroAdd }
+  { calc ((S n + b) - S n) = (S (n + b) - S n) by cong succAdd = ((n + b) - n) by exact succSubSucc = b by exact H1 }
+
+rule addSuccNe (x y : term) (Γ : ctx) (A : formula) : x + S y = x, Γ |- A
+by induction x as n IH H
+  { have : (S (0 + y) = 0) { calc (S (0 + y)) = (0 + S y) = 0 by exact H }; SuccNonZero }
+  { ImplL on IH
+    { have G: (S (S (n + y)) = S n) { calc (S (S (n + y))) = (S (S n + y)) by cong succAdd = (S n + S y) = (S n) by exact H };
+      SuccInj on G as G2;
+      calc (n + S y) = (S (n + y)) = n by exact G2 }
+    { assumption } }
+
+-- The iteration, for P(t, u) := t + (u - t) = u \/ u + (t - u) = t.
+theorem subCasesFrom : (t - k) + ((u - k) - (t - k)) = u - k \/ (u - k) + ((t - k) - (u - k)) = t - k |- t + (u - t) = u \/ u + (t - u) = t
+by induction k as j IH H
+  { DisjL on H as L R
+    { DisjR2; calc (t + (u - t)) = ((t - 0) + ((u - 0) - (t - 0))) = (u - 0) by exact L = u }
+    { DisjR1; calc (u + (t - u)) = ((u - 0) + ((t - 0) - (u - 0))) = (t - 0) by exact R = t } }
+  { ImplL on IH
+    { have Z1: (t - j = 0 \/ t - j = S (prd (t - j))) { exact zeroOrSucc };
+      DisjL on Z1 as Z1a Z1b
+      { DisjR2; calc ((t - j) + ((u - j) - (t - j))) = (0 + ((u - j) - 0)) by cong Z1a = (0 + (u - j)) = (u - j) by exact zeroAdd }
+      { have Z2: (u - j = 0 \/ u - j = S (prd (u - j))) { exact zeroOrSucc };
+        DisjL on Z2 as Z2a Z2b
+        { DisjR1; calc ((u - j) + ((t - j) - (u - j))) = (0 + ((t - j) - 0)) by cong Z2a = (0 + (t - j)) = (t - j) by exact zeroAdd }
+        { DisjL on H as L R
+          { DisjR2;
+            calc ((t - j) + ((u - j) - (t - j)))
+              = (S (prd (t - j)) + ((u - j) - S (prd (t - j)))) by cong Z1b
+              = (S (prd (t - j)) + (S (prd (u - j)) - S (prd (t - j)))) by cong Z2b
+              = (S (prd (t - j)) + (prd (u - j) - prd (t - j))) by cong succSubSucc
+              = (S (prd (t - j) + (prd (u - j) - prd (t - j)))) by exact succAdd
+              = (S ((t - S j) + ((u - S j) - (t - S j))))
+              = (S (u - S j)) by cong L
+              = (S (prd (u - j)))
+              = (u - j) by cong Z2b }
+          { DisjR1;
+            calc ((u - j) + ((t - j) - (u - j)))
+              = (S (prd (u - j)) + ((t - j) - S (prd (u - j)))) by cong Z2b
+              = (S (prd (u - j)) + (S (prd (t - j)) - S (prd (u - j)))) by cong Z1b
+              = (S (prd (u - j)) + (prd (t - j) - prd (u - j))) by cong succSubSucc
+              = (S (prd (u - j) + (prd (t - j) - prd (u - j)))) by exact succAdd
+              = (S ((u - S j) + ((t - S j) - (u - S j))))
+              = (S (t - S j)) by cong R
+              = (S (prd (t - j)))
+              = (t - j) by cong Z1b } } } }
+    { assumption } }
+
+theorem subCases : |- t + (u - t) = u \/ u + (t - u) = t
+by have C: ((t - t) + ((u - t) - (t - t)) = u - t \/ (u - t) + ((t - t) - (u - t)) = t - t)
+     { DisjR2; calc ((t - t) + ((u - t) - (t - t))) = (0 + ((u - t) - 0)) by cong subSelf = (0 + (u - t)) = (u - t) by exact zeroAdd };
+   exact subCasesFrom
+
+-- triangle (t + k) is triangle t plus something, and strictly more when k = S k'.
+theorem triangleLe : |- triangle t + (triangle (t + k) - triangle t) = triangle (t + k)
+by induction k as j
+  { calc (triangle t + (triangle (t + 0) - triangle t)) = (triangle t + (triangle t - triangle t)) = (triangle t + 0) by cong subSelf = (triangle t) = (triangle (t + 0)) }
+  { calc (triangle t + (triangle (t + S j) - triangle t))
+      = (triangle t + ((triangle (t + j) + S (t + j)) - triangle t))
+      = (triangle t + (((triangle t + (triangle (t + j) - triangle t)) + S (t + j)) - triangle t)) by cong H1
+      = (triangle t + ((triangle t + ((triangle (t + j) - triangle t) + S (t + j))) - triangle t)) by cong addAssoc
+      = (triangle t + ((triangle (t + j) - triangle t) + S (t + j))) by cong addSubCancel
+      = ((triangle t + (triangle (t + j) - triangle t)) + S (t + j)) by cong addAssoc
+      = (triangle (t + j) + S (t + j)) by cong H1
+      = (triangle (t + S j)) }
+
+rule triangleInjAdd (t k : term) (Γ : ctx) (A : formula) : triangle t = triangle (t + S k), Γ |- A
+by have E: (triangle t + (triangle (t + k) - triangle t) = triangle (t + k)) { exact triangleLe };
+   have F: (triangle t + S ((triangle (t + k) - triangle t) + (t + k)) = triangle t)
+     { calc (triangle t + S ((triangle (t + k) - triangle t) + (t + k)))
+         = (triangle t + ((triangle (t + k) - triangle t) + S (t + k)))
+         = ((triangle t + (triangle (t + k) - triangle t)) + S (t + k)) by cong addAssoc
+         = (triangle (t + k) + S (t + k)) by cong E
+         = (triangle (t + S k))
+         = (triangle t) by cong H1 };
+   exact addSuccNe
+
+theorem triangleInj : (triangle t = triangle u) |- (t = u)
+by have C: (t + (u - t) = u \/ u + (t - u) = t) { exact subCases };
+   DisjL on C as L R
+   { have Z: (u - t = 0 \/ u - t = S (prd (u - t))) { exact zeroOrSucc };
+     DisjL on Z as Za Zb
+     { calc t = (t + 0) = (t + (u - t)) by cong Za = u by exact L }
+     { have E: (triangle t = triangle (t + S (prd (u - t))))
+         { calc (triangle t) = (triangle u) by exact H1 = (triangle (t + (u - t))) by cong L = (triangle (t + S (prd (u - t)))) by cong Zb };
+       exact triangleInjAdd } }
+   { have Z: (t - u = 0 \/ t - u = S (prd (t - u))) { exact zeroOrSucc };
+     DisjL on Z as Za Zb
+     { calc t = (u + (t - u)) by cong R = (u + 0) by cong Za = u }
+     { have E: (triangle u = triangle (u + S (prd (t - u))))
+         { calc (triangle u) = (triangle t) by cong H1 = (triangle (u + (t - u))) by cong R = (triangle (u + S (prd (t - u)))) by cong Zb };
+       exact triangleInjAdd } }
+
+theorem pairInjL : (pair t u = pair t' u') |- (t = t') 
+by 
+  induction u
+  { induction u'
+    { sorry }
+    { sorry }
+  }
+  { sorry 
+  }
+
+
+-- Course-of-values induction, specialized to holdsBelow: p is a term-level
+-- predicate, a term metavariable with a parameter, and holdsBelow {p} n = 1
+-- says p is nonzero below n.  The step is the only premise; an appeal infers
+-- p by abstracting t in the goal, 0 < p(t), and its instance of holdsBelow
+-- takes the other variables of the goal as further arguments.
+
+rule cvInduction (n : var) (t : term) (Γ : ctx) (p(n) : term)
+  (step : holdsBelow {p} n = 1, Γ |- 0 < p(n))
+  : Γ |- 0 < p(t)
+  where n ∉ Γ, t
+by Cut (holdsBelow {p} (S t) = 1)
+  { Ind n (holdsBelow {p} n = 1) (S t)
+      { refl }
+      { Cut (0 < p(n))
+          { exact step }
+          { have Z: (p(n) = 0 \/ p(n) = S (prd (p(n)))) { exact zeroOrSucc };
+            DisjL on Z as Za Zb
+            { have F: (0 = 1) { calc 0 = (0 < 0) = (0 < p(n)) by cong Za = 1 by exact H2 };
+              symmetry F as F1; SuccNonZero }
+            { calc (holdsBelow {p} (S n))
+                = (if p(n) then holdsBelow {p} n else 0)
+                = (if S (prd (p(n))) then holdsBelow {p} n else 0) by cong Zb
+                = (holdsBelow {p} n)
+                = 1 by exact H1 } } } }
+  { have Z: (p(t) = 0 \/ p(t) = S (prd (p(t)))) { exact zeroOrSucc };
+    DisjL on Z as Za Zb
+    { have F: (0 = 1)
+        { calc 0 = (if 0 then holdsBelow {p} t else 0)
+                 = (if p(t) then holdsBelow {p} t else 0) by cong Za
+                 = (holdsBelow {p} (S t))
+                 = 1 by exact H1 };
+      symmetry F as F1; SuccNonZero }
+    { calc (0 < p(t)) = (0 < S (prd (p(t)))) by cong Zb = 1 } }
+
+-- What p nonzero below S k says at k: the lookup, for the step of an induction.
+rule belowAt (n : var) (k : term) (Γ : ctx) (p(n) : term) : holdsBelow {p} (S k) = 1, Γ |- 0 < p(k)
+by have Z: (p(k) = 0 \/ p(k) = S (prd (p(k)))) { exact zeroOrSucc };
+   DisjL on Z as Za Zb
+   { have F: (0 = 1)
+       { calc 0 = (if 0 then holdsBelow {p} k else 0)
+                = (if p(k) then holdsBelow {p} k else 0) by cong Za
+                = (holdsBelow {p} (S k))
+                = 1 by exact H1 };
+     symmetry F as F1; SuccNonZero }
+   { calc (0 < p(k)) = (0 < S (prd (p(k)))) by cong Zb = 1 }
+
+-- t < S t by course-of-values induction: the step gets p nonzero below m.
+theorem ltSuccByCv : |- 0 < (t < S t)
+by exact cvInduction m t
+   { calc (0 < (m < S m)) = (0 < 1) by cong ltSucc = 1 }
+
+-- The lookup, at an instance capturing a variable of the goal.
+theorem belowAtUsed : holdsBelow {λ i j. i < S j} (S k) x = 1 |- 0 < (k < S x)
+by exact belowAt _ k

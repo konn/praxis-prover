@@ -28,11 +28,15 @@ module Language.Praxis.PRA.PrimitiveRecursion (
   godelPi2,
   lft,
   rgt,
+  holdsBelow,
+  and,
+  eq,
   builtin,
 ) where
 
 import Language.Praxis.PRA.PrimitiveRecursion.Code
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
+import Prelude hiding (and)
 
 [prf|
   environment builtin
@@ -62,6 +66,8 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
   isZero 0 = 1
   isZero (S n) = 0
 
+  eq n m = isZero ((n - m) + (m - n))
+
   ifte 0 t e = e
   ifte (S n) t e = t
 
@@ -85,4 +91,13 @@ import Language.Praxis.PRA.PrimitiveRecursion.Quote (prf)
 
   lft p = godelPi1 (prd p)
   rgt p = godelPi2 (prd p)
+
+  holdsBelow {P} 0 $[xs] = 1
+  holdsBelow {P} (S n) $[xs] =
+    if P n $[xs] 
+      then holdsBelow {P} n $[xs] 
+      else 0
+  
+  and 0 m = 0
+  and (S n) m = m
 |]
