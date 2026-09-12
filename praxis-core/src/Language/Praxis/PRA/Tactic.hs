@@ -220,7 +220,7 @@ nameHypotheses conclusion dischargedNames stated given = do
     allocate inUse counter (n : names) k
       | n `elem` inUse = Left (NameInUse n)
       | otherwise = do
-          (ns, names', counter') <- allocate (n : inUse) (bump n counter) names (k - 1)
+          (ns, names', counter') <- allocate (n : inUse) (bumpPast n counter) names (k - 1)
           pure (n : ns, names', counter')
     allocate inUse counter [] k
       | n `elem` inUse = allocate inUse (counter + 1) [] k
@@ -229,9 +229,19 @@ nameHypotheses conclusion dischargedNames stated given = do
           pure (n : ns, names', counter')
       where
         n = "H" <> show counter
-    bump n counter = case n of
-      'H' : ds | not (null ds), all isDigit ds -> max counter (read ds + 1)
-      _ -> counter
+
+-- | The counter moved past a name of the engine's own form, @H<n>@.
+bumpPast :: String -> Int -> Int
+bumpPast n counter = case n of
+  'H' : ds | not (null ds), all isDigit ds -> max counter (read ds + 1)
+  _ -> counter
+
+{- |
+Reserve the names given for a later step: the counter of the goal is moved
+past them, so that a step before it does not take them.
+-}
+reserve :: [String] -> Goal a -> Goal a
+reserve names goal = goal {goalFresh = foldr bumpPast (goalFresh goal) names}
 
 -- * Tactics
 
@@ -675,8 +685,8 @@ runTacticWith env lemmas prems = go noHints
         t :=== s <- select sel
         unless (null (hintOn hints)) $ failWith NothingToName
         let x = freshen (goalNames (goalSequent goal)) anyName
-        -- The name given is for the symmetric equation, which Subst introduces.
-        go noHints (applyWith DefeqRule [term t, term t]) goal
+        -- The name given is for the symmetric equation, which Subst introduces; Defeq must not take it.
+        go noHints (applyWith DefeqRule [term t, term t]) (reserve (hintAs hints) goal)
           >>= continue (go hints (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (Var x :=== t)]))
       Rewrite eqSel hSel -> do
         t :=== s <- select eqSel

@@ -621,6 +621,12 @@ namingTests =
     , testCase "symmetry and rewrite select by name" $ do
         proves "t = s |- s = t by symmetry H1; Id"
         proves "t = s, plus t 0 = 3 |- plus s 0 = 3 by rewrite H1 in H2; Id"
+    , testCase "a name given to symmetry is not taken by its Defeq step" $ do
+        proves "t = s |- s = t by symmetry H1 as H2; exact H2"
+        (goal, tac) <- parsed (parseGoal sc "t = s |- s = t by symmetry H1 as H2; sorry")
+        case prove goal tac of
+          Right _ -> assertFailure "proved"
+          Left err -> renderTacticError sig id err @?= "1:38: sorry: the proof stops here\n  H1 : t = s\n  H3 : t = t\n  H2 : s = t\n  |- s = t"
     , testCase "on picks the principal formula" $
         proves "a = 0 ==> b = 0, c = 0 ==> b = 0, c = 0 |- b = 0 by ImplL on H2 { Id } { Id }"
     , testCase "as names what a step introduces, and exact closes by a hypothesis" $ do
