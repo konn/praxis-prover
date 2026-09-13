@@ -49,7 +49,7 @@ import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTact
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
-import Language.Praxis.Surface.Engine (EngineError (..), Knowledge (..), Unfolding (..), proveTheorem)
+import Language.Praxis.Surface.Engine (Closure, EngineError (..), Knowledge (..), Unfolding (..), proveClosure, proveTheorem)
 import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), renderQualName)
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
@@ -136,10 +136,11 @@ data Run = Run
   , runCertified :: ![Text]
   , runMembers :: !(Map Text [(Int, Text)])
   , runUnfoldings :: ![Unfolding]
+  , runClosures :: !(Map Text Closure)
   }
 
 runItems :: Fixities -> Env -> Core -> [Item] -> Checked
-runItems fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty []) items)
+runItems fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [] Map.empty) items)
   where
     finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r))
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}
@@ -164,13 +165,27 @@ runItems fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [
                 Right core' ->
                   let r2 = certifyAll (fdSpan fd) (r1 {runCore = core'}) lemmas
                       certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
-                   in r2 {runUnfoldings = runUnfoldings r2 <> certified}
+                   in closure fd (r2 {runUnfoldings = runUnfoldings r2 <> certified})
       ITheorem td ->
         let name = T.unpack (renderQualName (thmQual (tdInfo td)))
-            knowledge = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r)
-         in case proveTheorem knowledge td of
+         in case proveTheorem (knowledge r) td of
               Left (EngineError sp msg) -> report sp SevError msg r
               Right decls -> certifyTheorem td name r decls
+
+    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r)
+
+    -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
+    closure fd r = case proveClosure (knowledge r) fd of
+      Left (EngineError sp msg) -> report sp SevError ("internal: the closure of " <> T.unpack (renderQualName (funQual (fdInfo fd))) <> ": " <> msg) r
+      Right Nothing -> r
+      Right (Just (cl, decls)) -> certifyClosure fd cl r decls
+    certifyClosure fd cl r = \case
+      [] -> r {runClosures = Map.insert (funCore (fdInfo fd)) cl (runClosures r)}
+      (name, text) : rest ->
+        let r1 = emit text r
+         in case certifyDecl text (runCore r1) of
+              Right core' -> certifyClosure fd cl (r1 {runCore = core'}) rest
+              Left err -> report (fdSpan fd) SevError ("internal: the generated lemma " <> T.unpack name <> " did not certify: " <> err) r1
 
     -- A theorem's declarations, the auxiliary ones first; the first failure is the theorem's.
     certifyTheorem td name r = \case

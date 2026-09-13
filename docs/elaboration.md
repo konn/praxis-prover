@@ -162,6 +162,19 @@ f … (C x̄) …  = cvrec {B} (C x̄) ȳ            by exact f.#def
              = body                           by cong f.#def       (each recursive call)
 ```
 
+**Closure lemmas.** A function whose result is of a data type has
+`f.#closed : 0 < A₁.is x₁, … |- 0 < T.is (f x̄)`, a hypothesis for each
+argument of a data type: its results are members. The engine proves it
+(`Engine.proveClosure`) by induction on the argument the clauses match on,
+each case the membership of the clause's body once `f.unfold-C` rewrites the
+application. That membership is a hypothesis, the induction hypothesis at a
+recursive call, `C.#intro` at a constructor, or `g.#closed` at another
+function, each after the memberships of what it is applied to
+(`Engine.membershipProof`). A body whose membership is not established that
+way leaves the function without a closure lemma: say, a field of a type
+parameter, which shape membership does not check, returned where a data type
+is expected.
+
 ## The definitional-equality discipline
 
 Measured while designing this: `refl` on `app (C x xs) m = <its unfolding>`
@@ -337,6 +350,17 @@ definitional equality only on what remains (functions applied to variables).
 **`calc`** is the core's `calc`, each step's justification translated in the
 step's goal. A recursive call in a proof term names the induction hypothesis
 at its argument; a lemma name is `exact`, `cong e` is `cong`.
+
+A lemma applied to arguments, `app-nil (rev xs)`, is appealed to the same
+way, and the core finds its instance. Before the appeal, the engine proves
+each membership the lemma's statement needs at those arguments that no
+hypothesis states, by `membershipProof`, and adds it as a hypothesis. The
+core's `cong` takes a lemma under hypotheses too, and discharges them where
+it appeals to the instance.
+
+A motive which is the truth of a term, `0 < u` — the membership of a closure
+lemma — is its own code, `[[0 < u]] = u`, so the induction script neither
+reflects nor reifies it.
 
 ## Classes
 

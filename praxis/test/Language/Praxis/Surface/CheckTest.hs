@@ -45,6 +45,11 @@ checkTests =
         c <- checkFile "test/data/generic.px"
         errors c @?= []
         checkedTheorems c @?= ["Generic.mconcat-single", "Generic.mconcat-copy", "Generic.single-five"]
+    , testCase "a function's closure lemma gives the membership of its results, and a lemma applies at them" $ do
+        c <- checkFile "test/data/closure.px"
+        errors c @?= []
+        checkedTheorems c @?= ["Closure.app-nil", "Closure.rev-app-nil", "Closure.cons-app-nil", "Closure.twice-rev"]
+        mapM_ (\f -> assertBool ("the closure of " <> f) (any (("theorem u_Closure_s" <> T.pack f <> "_s_x23_closed :") `T.isPrefixOf`) (checkedCore c))) ["app", "rev"]
     , testCase "a false theorem, a non-structural recursion, a sorry and an appeal to a failed theorem are refused" $ do
         c <- checkFile "test/data/bad.px"
         checkedTheorems c @?= []

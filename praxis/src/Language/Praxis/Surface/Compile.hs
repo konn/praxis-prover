@@ -40,6 +40,7 @@ module Language.Praxis.Surface.Compile (
   compileFunction,
   functionLemma,
   dictionaryCT,
+  ownDictionary,
   ruleBinders,
 ) where
 

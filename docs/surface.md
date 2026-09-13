@@ -257,6 +257,12 @@ and `case`; their translations are the next step of the engine.
 unfolding lemmas wherever a function meets a constructor, then compared,
 the core's definitional equality taking only what is left.
 
+A lemma applies at any arguments of its types: `app-nil (rev xs)` proves
+`app (rev xs) Nil ≡ rev xs`. A value of a data type the lemma quantifies over
+must be a member of that type. For an argument built from constructors and
+functions this follows from their introduction and closure lemmas, generated
+for every constructor and for every function whose result is of a data type.
+
 ## Tooling
 
 - `praxis check [--dump-core] FILE.px…` checks modules and prints every
@@ -271,11 +277,12 @@ Implemented: the whole grammar above; data types, including higher-kinded
 parameters and nested and mutually referring types; functions matching on one
 argument, each constructor once, structurally recursive with unchanged other
 arguments; classes with superclasses, and their instances for data types and
-`Nat`, each use of a method resolved at the type it is used at; theorems by
-clauses on one value, by `calc`, and by the tactics listed; `.px`
-diagnostics. Planned, in order: constraints on type variables, `Monoid a =>
-…`, compiled to schemas over the methods, generic theorems over them, laws of
-classes and instances with contexts; goal display in hover, the
+`Nat`, each use of a method resolved at the type it is used at; functions
+and theorems under constraints, schemas and rules over the methods they use;
+theorems by clauses on one value, by `calc`, and by the tactics listed, a
+lemma applying at any arguments through the closure lemmas of functions;
+`.px` diagnostics. Planned, in order: laws of classes and instances with
+contexts; goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
 `if` in terms, nested patterns and matching on several arguments, matching
 and recursion on `Nat`, overlapping first-match clauses, mutual recursion and

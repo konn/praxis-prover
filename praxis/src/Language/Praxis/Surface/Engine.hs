@@ -41,8 +41,10 @@ module Language.Praxis.Surface.Engine (
 
   -- * Proving
   Unfolding (..),
+  Closure (..),
   Knowledge (..),
   proveTheorem,
+  proveClosure,
   EngineError (..),
 ) where
 
@@ -51,13 +53,13 @@ import Control.Monad (forM, forM_, unless)
 import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
 import Data.Void (absurd)
-import Language.Praxis.Surface.Compile (ruleBinders)
+import Language.Praxis.Surface.Compile (functionLemma, ownDictionary, ruleBinders)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (ctorLemma, dataLemma)
@@ -127,6 +129,17 @@ data Unfolding = Unfolding
   , unfoldingRhs :: !CT
   }
 
+{- |
+The closure lemma of a function, @f.#closed@: its core name, the membership
+predicate each argument needs, none for an argument of @Nat@ or of a type
+parameter, and the predicate of the result.
+-}
+data Closure = Closure
+  { closureLemma :: !Text
+  , closureArgs :: ![Maybe Text]
+  , closureResult :: !Text
+  }
+
 -- | What the engine knows of the module so far.
 data Knowledge = Knowledge
   { knowEnv :: !Env
@@ -139,6 +152,8 @@ data Knowledge = Knowledge
   the inversion
   -}
   , knowUnfoldings :: ![Unfolding]
+  , knowClosures :: !(Map Text Closure)
+  -- ^ the closure lemma of each function which has one, by the function's core name
   }
 
 data EngineError = EngineError !Span !String
@@ -198,6 +213,56 @@ proveTheorem k td = do
       PWild -> True
       _ -> False
     counter = id
+
+{- |
+The closure lemma of a function whose result is of a data type, @f.#closed@:
+the memberships of its arguments of data types give the membership of its
+result.  It is proved by induction on the argument its clauses match on,
+each case the membership of the clause's body once its unfolding lemma
+rewrites the application, and outright when they match on none; the
+declarations, the auxiliary ones first.  Nothing when the result is not of a
+data type, or when the membership of a body cannot be established, as for a
+field whose type's membership does not constrain it.
+-}
+proveClosure :: Knowledge -> FunDef -> Either EngineError (Maybe (Closure, [(Text, Text)]))
+proveClosure k fd = case fdResult fd of
+  TData dn _
+    | Just resultIs <- Map.lookup dn (knowMembership k) -> attempt resultIs
+  _ -> Right Nothing
+  where
+    info = fdInfo fd
+    sp = fdSpan fd
+    names = ["x" <> T.pack (show i) | i <- [0 .. length (fdArgs fd) - 1]]
+    cores = map mangleVariable names
+    argIs = [case t of TData n _ -> Map.lookup n (knowMembership k); _ -> Nothing | t <- fdArgs fd]
+    thm = TheoremInfo (funQual info <> [Ident "#closed"]) (functionLemma info "#closed") cores (fdArgs fd)
+    columns = nub [i | fc <- fdClauses fd, (i, PCon {}) <- zip [0 ..] (fcPatterns fc)]
+    attempt resultIs = do
+      let applied = apps (Global (Ref RefFunction (funCore info))) (map Var cores <> ownDictionary (funSlots info))
+          hyps = [HMember p v | (v, Just p) <- zip cores argIs]
+          g0 = Goal (zip (map hname [1 ..]) hyps) (Rel RelLt (Nat 0) (App (Global (Ref RefBuiltin resultIs)) applied)) (zip names (zip cores (fdArgs fd))) [] [] (funSlots info)
+          done out = do
+            decl <- either (Left . EngineError sp) Right (declaration (thmCore thm) g0 (outTactic out))
+            Right (Just (Closure (thmCore thm) argIs resultIs, outAux out <> [(thmCore thm, runBuilder decl)]))
+      case columns of
+        [] -> either (const (Right Nothing)) (done . closed) (caseTactic g0)
+        [c] | isJust (argIs !! c) -> do
+          (cases, finish) <- induction k thm 0 g0 sp (names !! c) []
+          case traverse caseTactic cases of
+            Left _ -> Right Nothing
+            Right tacs -> finish (map closed tacs) >>= done
+        _ -> Right Nothing
+    -- A case: the membership of the body the unfolding lemma rewrites the application to.
+    caseTactic g = case goalConcl g of
+      Rel RelLt (Nat 0) m -> do
+        ct <- termCT CVar m
+        (tac, ct') <- maybe (Left "no unfolding lemma rewrites the application") Right (unfoldStep k ct)
+        (p, body) <- case ct' of
+          CSym p [b] -> Right (p, b)
+          _ -> Left "internal: a membership of another shape"
+        proof <- membershipProof k g p body
+        Right ("calc (lt 0 " <> render ct <> ") = (lt 0 " <> render ct' <> ") by " <> tac <> " = 1 by (" <> proof <> ")")
+      _ -> Left "internal: not a membership"
 
 {- |
 The declaration of a goal proved by a core tactic: a theorem, or, when the
@@ -261,23 +326,28 @@ termProof k info n g le@(Located sp e) = case e of
   R.EProof rhs -> proveRhs k info n g (Located sp rhs)
   _ -> case spineOf le of
     (Located _ (R.EName (QName [] (Ident w))), [arg]) | w `elem` ["cong", "congr"] -> do
-      name <- evidence k info g arg
-      pure (closed ("cong " <> fromText name))
+      (name, pre) <- evidence k info g arg
+      pure (closed (pre <> "cong " <> fromText name))
     (Located _ (R.EName (QName [] (Ident w))), []) | w `elem` ["rfl", "refl"] -> closed <$> rflTactic k g sp
     _ -> do
-      name <- evidence k info g le
-      pure (closed ("exact " <> fromText name))
+      (name, pre) <- evidence k info g le
+      pure (closed (pre <> "exact " <> fromText name))
 
--- | The name, in the core, of what a proof term refers to: a hypothesis, an induction hypothesis, a lemma.
-evidence :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError Text
+{- |
+The name, in the core, of what a proof term refers to — a hypothesis, an
+induction hypothesis, a lemma — and the tactic to run before appealing to
+it: the memberships a lemma needs at its arguments, which no hypothesis
+states, proved and added as hypotheses, where the appeal finds them.
+-}
+evidence :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError (Text, Builder)
 evidence k info g le = case spineOf le of
   (Located sp (R.EName q), args) -> case q of
     QName [] (Ident w)
-      | null args, Just h <- lookup w (goalNames g) -> Right h
+      | null args, Just h <- lookup w (goalNames g) -> Right (h, "")
     _ -> case resolve (knowEnv k) q of
       GTheorem t : _
-        | thmQual t == thmQual info -> recursive sp args
-        | otherwise -> Right (thmCore t)
+        | thmQual t == thmQual info -> (,"") <$> recursive sp args
+        | otherwise -> (thmCore t,) <$> appealMemberships k g t args
       _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (R.qnameText q)))
   (Located sp _, _) -> Left (EngineError sp "a proof term: a hypothesis or a lemma, applied")
   where
@@ -288,6 +358,56 @@ evidence k info g le = case spineOf le of
         , Just ih <- lookup core (goalIH g) ->
             Right ih
       _ -> Left (EngineError sp "a recursive call must be at a field of the value matched on, which has an induction hypothesis")
+
+{- |
+The memberships an appeal to a theorem at its arguments needs: for each of
+its values of a data type given an argument, the membership of the argument,
+unless a hypothesis states it, proved and added as a hypothesis.
+-}
+appealMemberships :: Knowledge -> Goal -> TheoremInfo -> [Located R.Expr] -> Either EngineError Builder
+appealMemberships k g t args =
+  mconcat <$> forM (zip args (thmMembered t)) \(arg, ty) -> case ty of
+    TData dn _ | Just p <- Map.lookup dn (knowMembership k) -> do
+      e <- term k g arg
+      ct <- either (Left . EngineError (location arg)) Right (termCT CVar e)
+      if hasMembership g p ct
+        then Right ""
+        else do
+          proof <- either (Left . EngineError (location arg)) Right (membershipProof k g p ct)
+          Right ("have (" <> membershipText p ct <> ") { " <> proof <> " }; ")
+    _ -> Right ""
+
+-- | Whether a hypothesis of the goal states the membership of the term by the predicate, as the core writes it.
+hasMembership :: Goal -> Text -> CT -> Bool
+hasMembership g p t = any (either (const False) ((== wanted) . runBuilder) . hypText . snd) (goalHyps g)
+  where
+    wanted = runBuilder (membershipText p t)
+
+{- |
+A proof that a term is in a data type, by its membership predicate: the
+hypothesis stating it; for a constructor applied, its introduction, after
+the memberships of the fields its type checks; for a function applied, its
+closure lemma, after the memberships of its arguments.  None for anything
+else, such as a field whose type's membership does not constrain it.
+-}
+membershipProof :: Knowledge -> Goal -> Text -> CT -> Either String Builder
+membershipProof k g p t
+  | hasMembership g p t = Right "assumption"
+  | otherwise = case t of
+      CSym f args
+        | Just c <- ctorByCore (knowEnv k) f -> do
+            pre <- needs [(args !! j, q) | (j, q) <- Map.findWithDefault [] f (knowMembers k), j < length args]
+            Right (pre <> "exact " <> fromText (ctorLemma c "intro"))
+        | Just cl <- Map.lookup f (knowClosures k)
+        , closureResult cl == p -> do
+            pre <- needs [(a, q) | (a, Just q) <- zip args (closureArgs cl)]
+            Right (pre <> "exact " <> fromText (closureLemma cl))
+      _ -> Left ("the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function")
+  where
+    needs pairs = mconcat <$> traverse one [(a, q) | (a, q) <- pairs, not (hasMembership g q a)]
+    one (a, q) = do
+      inner <- membershipProof k g q a
+      Right ("have (" <> membershipText q a <> ") { " <> inner <> " }; ")
 
 spineOf :: Located R.Expr -> (Located R.Expr, [Located R.Expr])
 spineOf = go []
@@ -320,12 +440,12 @@ runTactics k info n g0 sp tacs0 = do
         R.TRefl -> (\x -> (closed x, more)) <$> rflTactic k g tsp
         R.TAssumption -> Right (closed "assumption", more)
         R.TSorry -> Left (EngineError tsp ("sorry: the goal is\n" <> T.unpack (renderGoal (knowEnv k) g)))
-        R.TExact e -> (\x -> (closed ("exact " <> fromText x), more)) <$> evidence k info g e
-        R.TCong (Just e) -> (\x -> (closed ("cong " <> fromText x), more)) <$> evidence k info g e
+        R.TExact e -> (\(x, pre) -> (closed (pre <> "exact " <> fromText x), more)) <$> evidence k info g e
+        R.TCong (Just e) -> (\(x, pre) -> (closed (pre <> "cong " <> fromText x), more)) <$> evidence k info g e
         R.TCong Nothing -> Right (closed "cong", more)
         R.TTerm e -> case unLocated e of
           R.EProof rhs -> (,more) <$> proveRhs k info n g (Located tsp rhs)
-          _ -> (\x -> (closed ("(exact " <> fromText x <> " | cong " <> fromText x <> ")"), more)) <$> evidence k info g e
+          _ -> (\(x, pre) -> (closed (pre <> "(exact " <> fromText x <> " | cong " <> fromText x <> ")"), more)) <$> evidence k info g e
         R.TCalc c -> (,more) <$> calcProof k info n g tsp c
         R.TFocus inner -> do
           out <- runTactics k info n g tsp inner
@@ -405,13 +525,16 @@ rflTactic k g sp = case goalConcl g of
   _ -> Left (EngineError sp "rfl: the goal is not an equation")
   where
     ct e = either (Left . EngineError sp) Right (termCT CVar e)
-    reductions t = case step t of
+    reductions t = case unfoldStep k t of
       Nothing -> []
       Just (lemma, t') -> (lemma, t') : reductions t'
-    step t = case redex t of
-      Just (u, lemma, u') -> Just (lemma, replaceCT (\x -> if x == u then Just u' else Nothing) t)
-      Nothing -> Nothing
-    -- The first application, outermost, which an unfolding lemma rewrites.
+
+-- | The term rewritten by an unfolding lemma at its first application, outermost, which one rewrites, with the tactic doing it.
+unfoldStep :: Knowledge -> CT -> Maybe (Builder, CT)
+unfoldStep k t0 = case redex t0 of
+  Just (u, lemma, u') -> Just (lemma, replaceCT (\x -> if x == u then Just u' else Nothing) t0)
+  Nothing -> Nothing
+  where
     redex t = case [(t, "cong " <> fromText (unfoldingLemma uf), rhs) | uf <- knowUnfoldings k, Just rhs <- [instanceOf uf t]] of
       x : _ -> Just x
       [] -> case t of
@@ -508,9 +631,7 @@ substTy args = \case
 mkScript :: Knowledge -> (Int -> Text) -> DataInfo -> Text -> Text -> Text -> Text -> Expr Text -> [(Text, Expr Text)] -> Either String Builder
 mkScript k auxName dat isCore t memberHyp m motive reverted = do
   let at x = motive >>= \w -> if w == t then x else Var w
-      code x = do
-        f <- formula (at x)
-        pure ("[[" <> f <> "]]")
+      code x = codeOf (at x)
   codeM <- code (Var m)
   codeT <- code (Var t)
   inversion <- inversionText
@@ -529,11 +650,14 @@ mkScript k auxName dat isCore t memberHyp m motive reverted = do
         <> fromText t
         <> " { "
         <> step
-        <> " } }; have R: ((lt 0 "
+        <> " } }; have "
+        <> (if ownCode then "R1" else "R")
+        <> ": ((lt 0 "
         <> codeT
         <> ") = 1) { exact impElim on C "
         <> fromText memberHyp
-        <> " }; reflect R as R1; "
+        <> " }; "
+        <> (if ownCode then "" else "reflect R as R1; ")
         <> finishText
     )
   where
@@ -605,7 +729,8 @@ mkScript k auxName dat isCore t memberHyp m motive reverted = do
               <> fromText m
               <> " "
               <> f
-              <> " }; have IHd"
+              <> " }; have "
+              <> (if ownCode then "IHr" else "IHd")
               <> fromDec j
               <> ": ((lt 0 "
               <> codeF
@@ -613,11 +738,8 @@ mkScript k auxName dat isCore t memberHyp m motive reverted = do
               <> fromDec j
               <> " "
               <> kname
-              <> " }; reflect IHd"
-              <> fromDec j
-              <> " as IHr"
-              <> fromDec j
-              <> "; "
+              <> " }; "
+              <> (if ownCode then "" else "reflect IHd" <> fromDec j <> " as IHr" <> fromDec j <> "; ")
           )
       caseFormula <- formula (motiveAt (fromCT applied))
       let splitConj h = case mems of
@@ -629,19 +751,25 @@ mkScript k auxName dat isCore t memberHyp m motive reverted = do
       pure \h ->
         splitConj h
           <> mconcat ihs
-          <> "have A: "
+          <> (if ownCode then "have A1: " else "have A: ")
           <> caseFormula
           <> " { exact "
           <> fromText (auxName i)
-          <> " }; reify A as A1; calc (lt 0 "
+          <> (if ownCode then " }; calc (lt 0 " else " }; reify A as A1; calc (lt 0 ")
           <> codeM
           <> ") = (lt 0 "
           <> codeCase
           <> ") by cong Km = 1 by exact A1"
     motiveAt x = motive >>= \w -> if w == t then x else Var w
-    motiveCode x = do
-      f <- formula (motiveAt (fromCT x))
-      pure ("[[" <> f <> "]]")
+    motiveCode x = codeOf (motiveAt (fromCT x))
+    -- The truth of a term, 0 < u, is its own code, u: reflect and reify have nothing to do on it.
+    ownCode = case stripLocations motive of
+      Rel RelLt (Nat 0) (Nat 0) -> False
+      Rel RelLt (Nat 0) _ -> True
+      _ -> False
+    codeOf e = case stripLocations e of
+      Rel RelLt (Nat 0) u | ownCode -> render <$> termCT CVar u
+      _ -> (\f -> "[[" <> f <> "]]") <$> formula e
     finishing = case reverted of
       [] -> Right "exact R1"
       _ -> Right (implEliminations "R1" (map fst reverted))

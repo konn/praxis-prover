@@ -133,6 +133,11 @@ data TheoremInfo = TheoremInfo
   , thmCore :: !Text
   , thmBinders :: ![Text]
   -- ^ the core variables of its statement, in the order of its binders
+  , thmMembered :: ![Ty]
+  {- ^ the types of its binders, in order, when its statement gives each
+  value of a data type the hypothesis of its membership; none for a lemma
+  which holds for all codes
+  -}
   }
   deriving stock (Show)
 
@@ -260,12 +265,13 @@ addFunction env name sch arity slots = (env', info)
 
 {- |
 Add a theorem, at the qualified name given, whose core name is derived from
-it; a top-level one is also a top-level name.
+it, with the types of its values when its statement gives them memberships;
+a top-level one is also a top-level name.
 -}
-addTheorem :: Env -> QualName -> [Text] -> (Env, TheoremInfo)
-addTheorem env q binders = (env', info)
+addTheorem :: Env -> QualName -> [Text] -> [Ty] -> (Env, TheoremInfo)
+addTheorem env q binders membered = (env', info)
   where
-    info = TheoremInfo q (coreOf q) binders
+    info = TheoremInfo q (coreOf q) binders membered
     top = case drop (length (envModule env)) q of
       [n] | take (length (envModule env)) q == envModule env -> Map.insert n q
       _ -> id

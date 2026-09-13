@@ -319,8 +319,8 @@ registerUnfoldings info fcs env = foldl register env (zip3 [1 :: Int ..] (unfold
     register e (i, n, fc) =
       let binders' = map (mangleVariable . fst) (fcVars fc)
           alias = Ident ("eq_" <> T.pack (show i))
-          (e1, thm) = addTheorem e (funQual info <> [Ident n]) binders'
-          (e2, eqI) = addTheorem e1 (funQual info <> [alias]) binders'
+          (e1, thm) = addTheorem e (funQual info <> [Ident n]) binders' []
+          (e2, eqI) = addTheorem e1 (funQual info <> [alias]) binders' []
        in addNamespaceMember (funQual info) alias (thmQual eqI) (addNamespaceMember (funQual info) (Ident n) (thmQual thm) e2)
 
 {- |
@@ -425,7 +425,7 @@ elabDecl fx env sp name ty0 clauses = do
       -- The theorem is over the places of its dictionary its statement uses.
       let (used, prop) = prunePlaces full prop0
           q = qualify env [name]
-          (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys)
+          (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys)
       pcs <- forM clauses \c -> runTC (elabProofClause fx env (map snd binderTys) c)
       pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp used))
     else do

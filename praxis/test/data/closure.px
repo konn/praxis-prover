@@ -1,0 +1,35 @@
+module Closure where
+
+data List a = Nil | a : List a
+
+infixr 5 :
+
+app : List a -> List a -> List a
+app Nil ys = ys
+app (x : xs) ys = x : app xs ys
+
+rev : List a -> List a
+rev Nil = Nil
+rev (x : xs) = app (rev xs) (x : Nil)
+
+app-nil : (xs : List a) -> app xs Nil ≡ xs
+app-nil Nil = rfl
+app-nil (x : xs) = calc
+  app (x : xs) Nil
+  = x : app xs Nil
+  = x : xs := by cong (app-nil xs)
+
+-- At the result of a function: the membership the lemma needs is the function's closure.
+rev-app-nil : (xs : List a) -> app (rev xs) Nil ≡ rev xs
+rev-app-nil xs = app-nil (rev xs)
+
+-- At a constructor applied: its introduction, after the closure of what it is applied to.
+cons-app-nil : (y : a) -> (xs : List a) -> app (y : rev xs) Nil ≡ y : rev xs
+cons-app-nil y xs = app-nil (y : rev xs)
+
+-- By congruence, at the instance the arguments give.
+twice-rev : (xs : List a) -> app (app (rev xs) Nil) Nil ≡ rev xs
+twice-rev xs = calc
+  app (app (rev xs) Nil) Nil
+  = app (rev xs) Nil := by cong (app-nil (app (rev xs) Nil))
+  = rev xs := app-nil (rev xs)
