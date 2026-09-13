@@ -48,7 +48,7 @@ import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.Elab
-import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
+import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData)
 import Language.Praxis.Surface.Engine (Closure, EngineError (..), Knowledge (..), Unfolding (..), proveClosure, proveTheorem)
 import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), renderQualName)
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityError)
@@ -86,8 +86,8 @@ data Core = Core
   , coreSignature :: !Signature
   , coreEnv :: !PRA.Env
   , coreLemmas :: !(Map String (PRA.Lemma SchemaName))
-  , coreMembership :: !(Map Text Text)
-  -- ^ the membership predicate of each data type encoded, by its qualified name
+  , coreMembership :: !(Map Text (Text, [Int]))
+  -- ^ the membership predicate of each data type encoded, by its qualified name, with the parameters it takes the predicates of
   }
 
 initialCore :: Prelude -> Core
@@ -134,7 +134,7 @@ data Run = Run
   , runReports :: ![Report]
   , runText :: ![Text]
   , runCertified :: ![Text]
-  , runMembers :: !(Map Text [(Int, Text)])
+  , runMembers :: !(Map Text [(Int, FieldPred)])
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
   }
@@ -149,12 +149,12 @@ runItems fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [
     step r = \case
       IFailed (ElabError sp msg) -> report sp SevError msg r
       IData info sp ->
-        let Encoded eqns lemmas members = encodeData (`Map.lookup` coreMembership (runCore r)) info
+        let Encoded eqns lemmas members params = encodeData (`Map.lookup` coreMembership (runCore r)) info
             r1 = foldl (flip emit) r eqns
          in case addDefinitions eqns (runCore r1) of
               Left err -> report sp SevError ("the encoding of " <> T.unpack (renderQualName (dataQual info)) <> " was rejected: " <> err) r1
               Right core' ->
-                let core'' = core' {coreMembership = Map.insert (renderQualName (dataQual info)) (dataIs info) (coreMembership core')}
+                let core'' = core' {coreMembership = Map.insert (renderQualName (dataQual info)) (dataIs info, params) (coreMembership core')}
                  in certifyAll sp (r1 {runCore = core'', runMembers = Map.union (Map.fromList members) (runMembers r1)}) lemmas
       IFun fd -> case compileFunction env fd of
         Left err -> report (fdSpan fd) SevError (T.unpack (renderQualName (funQual (fdInfo fd))) <> ": " <> err) r

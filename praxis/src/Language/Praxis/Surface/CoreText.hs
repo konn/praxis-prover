@@ -33,7 +33,10 @@ module Language.Praxis.Surface.CoreText (
   -- * From the surface
   termCT,
   propText,
+  Pred (..),
   membershipText,
+  predicateParam,
+  parameterPredicate,
   valueVar,
 
   -- * Builders
@@ -207,9 +210,30 @@ propText fresh var = go var
       _ -> Left "not a proposition"
     paren t = "(" <> t <> ")"
 
--- | The hypothesis that a term is in a data type, by its membership predicate: @0 < T.is x@.
-membershipText :: Text -> CT -> Builder
-membershipText isCore x = "((lt 0 " <> render (CSym isCore [x]) <> ") = 1)"
+{- |
+A membership predicate: a symbol, with the parameters of its schema, the
+predicates of the parameters of its type: @T.is {p}@, a type parameter's own
+@w_2@, or @anyIs@, which every code satisfies.
+-}
+data Pred = Pred !Text ![CT]
+  deriving stock (Show, Eq)
+
+-- | The hypothesis that a term is a member by a predicate: @0 < T.is {p} x@.
+membershipText :: Pred -> CT -> Builder
+membershipText (Pred p ps) x = "((lt 0 " <> render (CSym p (ps <> [x])) <> ") = 1)"
+
+-- | A predicate standing as the parameter of a schema.
+predicateParam :: Pred -> CT
+predicateParam (Pred p ps)
+  | null ps = CStatic p
+  | otherwise = CPartial p ps 1
+
+-- | The predicate a parameter of a schema stands for.
+parameterPredicate :: CT -> Pred
+parameterPredicate = \case
+  CStatic p -> Pred p []
+  CPartial p ps _ -> Pred p ps
+  _ -> Pred "anyIs" []
 
 -- * Builders
 

@@ -52,7 +52,7 @@ checkTests =
     , testCase "an instance under a context takes the context's dictionary, passed at the instances of known types" $ do
         c <- checkFile "test/data/contexts.px"
         errors c @?= []
-        checkedTheorems c @?= ["Contexts.pair-sum", "Contexts.pair-mconcat", "Contexts.nested-sum", "Contexts.Pointed-Nat.plus-zero", "Contexts.Pointed-Option.plus-zero"]
+        checkedTheorems c @?= ["Contexts.pair-sum", "Contexts.pair-mconcat", "Contexts.nested-sum", "Contexts.Pointed-Nat.plus-zero", "Contexts.Pointed-Option.plus-zero", "Contexts.Pointed-Pair.plus-zero", "Contexts.plus-zero-twice", "Contexts.twice-pair", "Contexts.twice-pair-generic"]
     , testCase "an instance proves every law of its class, and its proofs are checked" $ do
         c <- checkFile "test/data/laws-bad.px"
         checkedTheorems c @?= ["LawsBad.fine"]
@@ -62,7 +62,8 @@ checkTests =
         c <- checkFile "test/data/closure.px"
         errors c @?= []
         checkedTheorems c @?= ["Closure.app-nil", "Closure.rev-app-nil", "Closure.cons-app-nil", "Closure.twice-rev"]
-        mapM_ (\f -> assertBool ("the closure of " <> f) (any (("theorem u_Closure_s" <> T.pack f <> "_s_x23_closed :") `T.isPrefixOf`) (checkedCore c))) ["app", "rev"]
+        -- A rule over the predicate of the type parameter of its list.
+        mapM_ (\f -> assertBool ("the closure of " <> f) (any (("rule u_Closure_s" <> T.pack f <> "_s_x23_closed ") `T.isPrefixOf`) (checkedCore c))) ["app", "rev"]
     , testCase "a false theorem, a non-structural recursion, a sorry and an appeal to a failed theorem are refused" $ do
         c <- checkFile "test/data/bad.px"
         checkedTheorems c @?= []

@@ -27,7 +27,10 @@ normalisation does not terminate in reasonable time.
 -}
 module Language.Praxis.Surface.Encode (
   Encoded (..),
+  FieldPred (..),
+  ParamPred (..),
   encodeData,
+  paramName,
 
   -- * Names of the generated lemmas
   ctorLemma,
@@ -37,6 +40,7 @@ module Language.Praxis.Surface.Encode (
   membershipLambda,
 ) where
 
+import Data.List (nub, sort)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -45,15 +49,88 @@ import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
-import Language.Praxis.Surface.Types (Ty (..))
+import Language.Praxis.Surface.Types (Kind (..), Ty (..))
 
 -- | What a data type is in the core: its definitions, and its lemmas with their declarations, in order.
 data Encoded = Encoded
   { encodedEquations :: ![Text]
   , encodedLemmas :: ![(Text, Text)]
-  , encodedMembers :: ![(Text, [(Int, Text)])]
-  -- ^ for each constructor, by its core name, the fields whose membership its branch of the predicate checks, with the predicate
+  , encodedMembers :: ![(Text, [(Int, FieldPred)])]
+  -- ^ for each constructor, by its core name, the fields whose membership its branch of the predicate checks, with their predicates
+  , encodedParams :: ![Int]
+  -- ^ the parameters of the type whose predicates its own takes, those its fields' memberships use
   }
+
+{- |
+The membership a field of a constructor has: by the predicate of a parameter
+of its type, or by a data type's predicate, its own or one encoded before, at
+predicates of those parameters in turn.
+-}
+data FieldPred = FieldParam !Int | FieldData !Text ![ParamPred]
+  deriving stock (Show, Eq)
+
+-- | A predicate standing as the parameter of a data type's: a parameter's own, every code's, or a data type's at predicates in turn.
+data ParamPred = ParamOf !Int | ParamAny | ParamData !Text ![ParamPred]
+  deriving stock (Show, Eq)
+
+-- | The parameter of a data type's predicate standing for the predicate of the type's parameter at that index.
+paramName :: Int -> Text
+paramName i = "p" <> T.pack (show i)
+
+-- | The parameters of a data type of kind @Type@, which a predicate may be given for.
+firstOrderParams :: DataInfo -> [Int]
+firstOrderParams d = [i | (i, (_, KType)) <- zip [0 ..] (dataParams d)]
+
+{- |
+The memberships of a constructor's fields, by their predicates: a field of a
+parameter by the parameter's predicate; a field of the type itself, at its
+own parameters, by the type's own predicate, at the parameters given; a
+field of a data type encoded before, by its predicate at the predicates of
+its arguments.  A field of @Nat@, of a higher-kinded parameter, of a type
+encoded later, or of the type itself at other arguments, is not constrained.
+-}
+fieldPreds :: (Text -> Maybe (Text, [Int])) -> DataInfo -> [Int] -> CtorInfo -> [(Int, FieldPred)]
+fieldPreds known d own c = catMaybes (zipWith one [0 ..] (ctorFields c))
+  where
+    self = renderQualName (dataQual d)
+    fo = firstOrderParams d
+    uniform = [TParam i [] | i <- [0 .. length (dataParams d) - 1]]
+    one j = \case
+      TParam i [] | i `elem` fo -> Just (j, FieldParam i)
+      TData n targs
+        | n == self, targs == uniform -> Just (j, FieldData (dataIs d) (map ParamOf own))
+        | n /= self, Just (p, used) <- known n -> Just (j, FieldData p [param (targs !! u) | u <- used, u < length targs])
+      _ -> Nothing
+    param = \case
+      TParam i [] | i `elem` fo -> ParamOf i
+      TData n targs | n /= self, Just (p, used) <- known n -> ParamData p [param (targs !! u) | u <- used, u < length targs]
+      _ -> ParamAny
+
+-- | The parameters a data type's predicate takes: those its fields' memberships use, in order.
+predicateParams :: (Text -> Maybe (Text, [Int])) -> DataInfo -> [Int]
+predicateParams known d = sort (nub [i | c <- dataCtors d, (_, fp) <- fieldPreds known d [] c, i <- ofField fp])
+  where
+    ofField = \case
+      FieldParam i -> [i]
+      FieldData _ ps -> concatMap ofParam ps
+    ofParam = \case
+      ParamOf i -> [i]
+      ParamAny -> []
+      ParamData _ ps -> concatMap ofParam ps
+
+-- | A predicate standing as a parameter, as the core writes it.
+paramCT :: ParamPred -> CT
+paramCT = \case
+  ParamOf i -> CStatic (paramName i)
+  ParamAny -> CStatic "anyIs"
+  ParamData p [] -> CStatic p
+  ParamData p ps -> CPartial p (map paramCT ps) 1
+
+-- | A field's predicate applied to a term: the code whose truth is the term's membership.
+fieldCode :: FieldPred -> CT -> CT
+fieldCode fp x = case fp of
+  FieldParam i -> CSym (paramName i) [x]
+  FieldData p ps -> CSym p (map paramCT ps <> [x])
 
 raw :: Segment -> Text
 raw = \case
@@ -80,7 +157,7 @@ The membership predicate's step, over @k@ and its history @h@: the dispatch
 on the tag, each branch the exact shape and the memberships of the fields.
 The predicates of the data types already encoded are given by name.
 -}
-membershipBody :: (Text -> Maybe Text) -> DataInfo -> CT -> CT -> CT
+membershipBody :: (Text -> Maybe (Text, [Int])) -> DataInfo -> CT -> CT -> CT
 membershipBody known d k h = ifChain (hdT k) (map branch (dataCtors d))
   where
     branch c = case fieldMemberships known d c k h of
@@ -92,41 +169,72 @@ membershipBody known d k h = ifChain (hdT k) (map branch (dataCtors d))
       m : ms -> CSym "conj" [m, conjs ms]
       [] -> CNum 1
 
--- | The memberships a constructor's fields contribute, in order: the field's index and the code of its membership.
-fieldMemberships :: (Text -> Maybe Text) -> DataInfo -> CtorInfo -> CT -> CT -> [(Int, CT)]
-fieldMemberships known d c k h = catMaybes (zipWith one [0 ..] (ctorFields c))
+{- |
+The memberships a constructor's fields contribute, in order: the field's
+index and the code of its membership, a field of the type itself through the
+history.
+-}
+fieldMemberships :: (Text -> Maybe (Text, [Int])) -> DataInfo -> CtorInfo -> CT -> CT -> [(Int, CT)]
+fieldMemberships known d c k h = [(j, code j fp) | (j, fp) <- fieldPreds known d (predicateParams known d) c]
   where
-    self = renderQualName (dataQual d)
-    one j = \case
-      TData n _
-        | n == self -> Just (j, CSym "at" [h, k, fieldT j k])
-        | Just isCore <- known n -> Just (j, CSym isCore [fieldT j k])
-      _ -> Nothing
+    code j = \case
+      FieldData p _ | p == dataIs d -> CSym "at" [h, k, fieldT j k]
+      fp -> fieldCode fp (fieldT j k)
 
 -- | The step function of the membership predicate, as a schema parameter.
-membershipLambda :: (Text -> Maybe Text) -> DataInfo -> Text
+membershipLambda :: (Text -> Maybe (Text, [Int])) -> DataInfo -> Text
 membershipLambda known d = runBuilder ("{λ k h. " <> render (membershipBody known d (CVar "k") (CVar "h")) <> "}")
 
 {- |
 The definitions and lemmas of a data type, given the membership predicates
-of the data types encoded before it.
+of the data types encoded before it, with the parameters each takes.  The
+type's own predicate takes the predicates of the parameters its fields'
+memberships use, @T.is {p0} n@, and its lemmas are then rules over them.
 -}
-encodeData :: (Text -> Maybe Text) -> DataInfo -> Encoded
-encodeData known d = Encoded equations lemmas members
+encodeData :: (Text -> Maybe (Text, [Int])) -> DataInfo -> Encoded
+encodeData known d = Encoded equations lemmas members params
   where
     ctors = dataCtors d
     isCore = dataIs d
+    params = predicateParams known d
+    -- The predicate at its parameters, applied: the code whose truth is the membership of x.
+    isAt x = CSym isCore ([CStatic (paramName i) | i <- params] <> [x])
+    paramsHead = if null params then "" else " {" <> intercalateB ", " (map (fromText . paramName) params) <> "}"
+    -- A membership code at another term: through the history, the type's own predicate there; any other, its predicate applied there.
+    onField code v = case code of
+      CSym "at" _ -> isAt v
+      CSym p as@(_ : _) -> CSym p (take (length as - 1) as <> [v])
+      other -> other
+    lt0eq1 x = "((lt 0 " <> render x <> ") = 1)"
+    -- A lemma about the predicate: a theorem, or, when it takes parameters, a rule over them, its variables term metavariables.
+    lemma name vars hyps statement proof
+      | null params = theorem name hyps statement proof
+      | otherwise =
+          let vs = nub (concatMap varsCT vars)
+           in runBuilder
+                ( "rule "
+                    <> fromText name
+                    <> " (z_1 : var)"
+                    <> mconcat [" (" <> fromText (paramName i) <> "(z_1) : term)" | i <- params]
+                    <> (if null vs then "" else " (" <> unwordsB (map fromText vs) <> " : term)")
+                    <> " : "
+                    <> intercalateB ", " hyps
+                    <> " |- "
+                    <> statement
+                    <> "\nby "
+                    <> proof
+                )
     lam = membershipLambda known d
     -- An equation's left side is the name and its arguments, unparenthesised.
     equations =
-      [ runBuilder (unwordsB (map fromText (ctorCore c : params)) <> " = " <> render (consSeq (toInteger (ctorIndex c)) (map CVar params)))
+      [ runBuilder (unwordsB (map fromText (ctorCore c : fields)) <> " = " <> render (consSeq (toInteger (ctorIndex c)) (map CVar fields)))
       | c <- ctors
-      , let params = ["a" <> T.pack (show j) | j <- [0 .. length (ctorFields c) - 1]]
+      , let fields = ["a" <> T.pack (show j) | j <- [0 .. length (ctorFields c) - 1]]
       ]
-        <> [runBuilder (fromText isCore <> " n = " <> if null ctors then "0" else "cvrec " <> fromText lam <> " n")]
+        <> [runBuilder (fromText isCore <> paramsHead <> " n = " <> if null ctors then "0" else "cvrec " <> fromText lam <> " n")]
 
     lemmas = concatMap ctorLemmas ctors <> collapses <> membership <> map intro ctors <> [inversion]
-    members = [(ctorCore c, [(j, memberOf code) | (j, code) <- fieldMemberships known d c (CVar "k") (CVar "h")]) | c <- ctors]
+    members = [(ctorCore c, fieldPreds known d params c) | c <- ctors]
 
     {- The memberships of its fields |- 0 < T.is (C x̄): the code of every
     value is a member, the premise of the adequacy of statements.  The
@@ -146,7 +254,7 @@ encodeData known d = Encoded equations lemmas members
           shapeCode = CSym "eq" [applied, CSym (ctorCore c) [fieldT j applied | j <- [0 .. k - 1]]]
           -- the shape, its fields rewritten to the variables one by one
           shapes = scanl (\s j -> replaceCT (\u -> if u == fieldT j applied then Just (vs !! j) else Nothing) s) shapeCode [0 .. k - 1]
-          isApplied = CSym isCore [applied]
+          isApplied = isAt applied
           name = ctorLemma c "intro"
           fieldLemma' j = fromText (ctorLemma c ("field-" <> T.pack (show j)))
           lt0 x = "(lt 0 " <> render x <> ")"
@@ -215,13 +323,13 @@ encodeData known d = Encoded equations lemmas members
                     <> " by cong A"
                     <> show' idx
                     <> " = "
-                    <> lt0 (CSym isCore [vs !! j])
+                    <> lt0 (isAt (vs !! j))
                     <> " by cong "
                     <> fromText (dataLemma d "is-def")
                     <> " = 1 by exact H"
                     <> show' idx
                     <> " }; "
-            CSym p [_] ->
+            CSym _ (_ : _) ->
               "have M"
                 <> show' idx
                 <> ": ("
@@ -229,7 +337,7 @@ encodeData known d = Encoded equations lemmas members
                 <> " = 1) { calc "
                 <> lt0 code
                 <> " = "
-                <> lt0 (CSym p [vs !! j])
+                <> lt0 (onField code (vs !! j))
                 <> " by cong "
                 <> fieldLemma' j
                 <> " = 1 by exact H"
@@ -262,10 +370,11 @@ encodeData known d = Encoded equations lemmas members
               <> lt0 br
               <> " by cong W = 1 by exact B"
        in ( name
-          , theorem
+          , lemma
               name
-              [membershipText (memberOf code) (vs !! j) | (j, code) <- mems]
-              (membershipText isCore applied)
+              vs
+              [lt0eq1 (onField code (vs !! j)) | (j, code) <- mems]
+              (lt0eq1 isApplied)
               (unfold <> shape <> mconcat (zipWith member [1 ..] mems) <> conclude)
           )
 
@@ -349,21 +458,17 @@ encodeData known d = Encoded equations lemmas members
     membership
       | null ctors = []
       | otherwise =
-          [ (dataLemma d "is-def", theorem (dataLemma d "is-def") [] (eqn (CSym isCore [n]) (cvrecAt n)) "refl")
-          , (dataLemma d "is-beta", theorem (dataLemma d "is-beta") [] (eqn (cvrecAt n) (membershipBody known d n (histAt' n))) "refl")
+          [ (dataLemma d "is-def", lemma (dataLemma d "is-def") [n] [] (eqn (isAt n) (cvrecAt n)) "refl")
+          , (dataLemma d "is-beta", lemma (dataLemma d "is-beta") [n] [] (eqn (cvrecAt n) (membershipBody known d n (histAt' n))) "refl")
           ]
 
     -- 0 < T.is t |- the disjunction of the shapes t may have, with the memberships of their fields.
-    inversion = (dataLemma d "inversion", theorem (dataLemma d "inversion") [membershipText isCore t] (disjunction (map disjunct ctors)) script)
+    inversion = (dataLemma d "inversion", lemma (dataLemma d "inversion") [t] [lt0eq1 (isAt t)] (disjunction (map disjunct ctors)) script)
     disjunct c =
       let fs = [fieldT j t | j <- [0 .. length (ctorFields c) - 1]]
           eqT = "(" <> render t <> " = " <> render (CSym (ctorCore c) fs) <> ")"
-          mems = [membershipText (memberOf m) (fieldT j t) | (j, m) <- fieldMemberships known d c t (histAt' t)]
+          mems = [lt0eq1 (onField m (fieldT j t)) | (j, m) <- fieldMemberships known d c t (histAt' t)]
        in conjunction (eqT : mems)
-    memberOf = \case
-      CSym "at" _ -> isCore
-      CSym other _ -> other
-      _ -> isCore
     disjunction = \case
       [] -> "_|_"
       [x] -> x
@@ -384,14 +489,14 @@ encodeData known d = Encoded equations lemmas members
       other -> other
 
     script
-      | null ctors = "have V: (" <> render (CSym isCore [t]) <> " = 0) { refl }; have W: ((lt 0 0) = 1) { calc (lt 0 0) = (lt 0 " <> render (CSym isCore [t]) <> ") by cong V = 1 by exact H1 }; exact zeroPosAbsurd"
+      | null ctors = "have V: (" <> render (isAt t) <> " = 0) { refl }; have W: ((lt 0 0) = 1) { calc (lt 0 0) = (lt 0 " <> render (isAt t) <> ") by cong V = 1 by exact H1 }; exact zeroPosAbsurd"
       | otherwise =
           "have V0: ("
-            <> render (CSym isCore [t])
+            <> render (isAt t)
             <> " = "
             <> render body
             <> ") { calc "
-            <> render (CSym isCore [t])
+            <> render (isAt t)
             <> " = "
             <> render (cvrecAt t)
             <> " by exact "
@@ -402,7 +507,7 @@ encodeData known d = Encoded equations lemmas members
             <> fromText (dataLemma d "is-beta")
             <> " }; "
             <> caseAt 0
-    isT = render (CSym isCore [t])
+    isT = render (isAt t)
     caseAt i
       | i == length ctors =
           "have W: ((lt 0 0) = 1) { calc (lt 0 0) = (lt 0 " <> isT <> ") by cong V" <> show' i <> " = 1 by exact H1 }; exact zeroPosAbsurd"
@@ -534,9 +639,9 @@ encodeData known d = Encoded equations lemmas members
                 <> ") { exact histAt }; have M"
                 <> show' idx
                 <> ": "
-                <> membershipText isCore f
+                <> lt0eq1 (isAt f)
                 <> " { calc (lt 0 "
-                <> render (CSym isCore [f])
+                <> render (isAt f)
                 <> ") = (lt 0 "
                 <> render (cvrecAt f)
                 <> ") by cong "
@@ -548,7 +653,7 @@ encodeData known d = Encoded equations lemmas members
                 <> " = 1 by exact K"
                 <> show' idx
                 <> " }; "
-            _ -> "have M" <> show' idx <> ": " <> membershipText (memberOf code) (fieldT j t) <> " { exact K" <> show' idx <> " }; "
+            _ -> "have M" <> show' idx <> ": " <> lt0eq1 code <> " { exact K" <> show' idx <> " }; "
           conclude = case mems of
             [] -> "exact E"
             _ -> conjR ("E" : ["M" <> show' idx | idx <- [1 .. length mems]])

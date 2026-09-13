@@ -293,7 +293,7 @@ compileFunction env fd = do
     -- A lemma: a theorem, or, for a function under constraints, a rule over the parameters of its schema, its variables all term metavariables.
     lemma name vs lhs rhs proof
       | null statics = runBuilder ("theorem " <> fromText name <> " : |- " <> equation lhs rhs <> "\nby " <> proof)
-      | otherwise = runBuilder ("rule " <> fromText name <> ruleBinders statics (nub (concatMap varsCT vs)) <> " : |- " <> equation lhs rhs <> "\nby " <> proof)
+      | otherwise = runBuilder ("rule " <> fromText name <> ruleBinders [(staticName j, slotArity s) | (j, s) <- zip [1 :: Int ..] statics] (nub (concatMap varsCT vs)) <> " : |- " <> equation lhs rhs <> "\nby " <> proof)
     calc lhs steps = "calc " <> render lhs <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
     unfoldings triples =
       concat
@@ -346,20 +346,18 @@ compileFunction env fd = do
       Right (CSym "at" [h, k, fieldT field k])
 
 {- |
-The binders of a rule over the parameters of a schema — the places of a
-dictionary taking arguments, abstract functions of their arities — and over
-the variables given, as term metavariables: a lemma with metavariables has
-no free variables of its own.
+The binders of a rule over the parameters of a schema, by their names and
+arities — the places of a dictionary taking arguments, abstract functions —
+and over the variables given, as term metavariables: a lemma with
+metavariables has no free variables of its own.
 -}
-ruleBinders :: [Slot] -> [Text] -> Builder
+ruleBinders :: [(Text, Int)] -> [Text] -> Builder
 ruleBinders statics vs =
-  " ("
-    <> unwordsB (map fromText zs)
-    <> " : var)"
-    <> mconcat [" (" <> fromText (staticName j) <> "(" <> intercalateB ", " (map fromText (take (slotArity s) zs)) <> ") : term)" | (j, s) <- zip [1 :: Int ..] statics]
+  (if null zs then "" else " (" <> unwordsB (map fromText zs) <> " : var)")
+    <> mconcat [" (" <> fromText n <> "(" <> intercalateB ", " (map fromText (take a zs)) <> ") : term)" | (n, a) <- statics]
     <> (if null vs then "" else " (" <> unwordsB (map fromText vs) <> " : term)")
   where
-    zs = ["z_" <> T.pack (show i) | i <- [1 .. maximum (map slotArity statics)]]
+    zs = ["z_" <> T.pack (show i) | i <- [1 .. maximum (0 : map snd statics)]]
 
 -- | Whether a body calls the function.
 callsSelf :: Text -> Scope Int Expr Void -> Bool

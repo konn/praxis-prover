@@ -49,11 +49,12 @@ module Language.Praxis.Surface.Engine (
 ) where
 
 import Bound (instantiate)
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (forM, forM_, guard, unless)
+import Data.Char (isAlphaNum)
 import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -62,7 +63,7 @@ import Data.Void (absurd)
 import Language.Praxis.Surface.Compile (functionLemma, ownDictionary, ruleBinders)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
-import Language.Praxis.Surface.Encode (ctorLemma, dataLemma)
+import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), ctorLemma, dataLemma)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
@@ -73,10 +74,10 @@ import Language.Praxis.Surface.Types (Ty (..), firstOrder)
 
 -- * Goals
 
--- | A hypothesis: a proposition, or the membership of a variable in a data type, by its predicate.
+-- | A hypothesis: a proposition, or the membership of a variable, by a predicate.
 data Hyp
   = HProp !(Expr Text)
-  | HMember !Text !Text
+  | HMember !Pred !Text
   deriving stock (Show)
 
 {- |
@@ -111,7 +112,7 @@ data GoalPremise = GoalPremise
   { gpPremise :: !Premise
   , gpName :: !Text
   , gpBinder :: !Builder
-  , gpClosure :: !(Maybe (Text, [Maybe Text], Text))
+  , gpClosure :: !(Maybe (Text, [Maybe Pred], Pred))
   }
 
 -- | The goal as a core sequent.
@@ -146,23 +147,25 @@ data Unfolding = Unfolding
   }
 
 {- |
-The closure lemma of a function, @f.#closed@: its core name, the membership
-predicate each argument needs, none for an argument of @Nat@ or of a type
-parameter, and the predicate of the result.
+The closure lemma of a function, @f.#closed@: its core name, and the types
+of its arguments and of its result, over the function's type parameters,
+whose predicates the lemma is a rule over.
 -}
 data Closure = Closure
   { closureLemma :: !Text
-  , closureArgs :: ![Maybe Text]
-  , closureResult :: !Text
+  , closureArgTys :: ![Ty]
+  , closureResultTy :: !Ty
+  , closurePremisesOf :: ![Premise]
+  -- ^ the premises of the rule it is: the closures of the methods of the function's dictionary
   }
 
 -- | What the engine knows of the module so far.
 data Knowledge = Knowledge
   { knowEnv :: !Env
   , knowFixities :: !Fixities
-  , knowMembership :: !(Map Text Text)
-  -- ^ the membership predicate of a data type, by its qualified name
-  , knowMembers :: !(Map Text [(Int, Text)])
+  , knowMembership :: !(Map Text (Text, [Int]))
+  -- ^ the membership predicate of a data type, by its qualified name, and the parameters whose predicates it takes
+  , knowMembers :: !(Map Text [(Int, FieldPred)])
   {- ^ for each constructor, by its core name, the fields its type's
   membership checks, with their predicates: the conjuncts of its branch of
   the inversion
@@ -186,28 +189,36 @@ types, and none for @Nat@ or a type parameter; its proposition is split at
 its top-level implications into hypotheses and a conclusion.  A value must be
 of a first-order type, the types the encoding gives a meaning to.
 -}
-statementGoal :: Map Text Text -> TheoremDef -> Either String Goal
+statementGoal :: Map Text (Text, [Int]) -> TheoremDef -> Either String Goal
 statementGoal membership td = do
   let names = map fst (tdBinders td)
   unless (length names == length (nub names)) $
     Left "a theorem's value binders must have distinct names"
   forM_ (tdBinders td) \(n, t) ->
     unless (firstOrder t) $ Left ("the value " <> T.unpack n <> " is not of a first-order type")
-  premises <- traverse premise (zip [1 :: Int ..] (tdPremises td))
+  premises <- renderPremises predicate (tdPremises td)
   pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> map HProp antecedents)] conclusion vars [] [] (tdSlots td) premises)
   where
     vars = [(n, (mangleVariable n, t)) | (n, t) <- tdBinders td]
     prop = instantiate (\i -> Var (fst (snd (vars !! i)))) (fmap absurd (tdProp td))
     (antecedents, conclusion) = implications prop
-    -- The predicate the values of a type are members by: a data type's, or,
-    -- for a type parameter a class with laws constrains, its own, a place of
-    -- the dictionary.
+    -- The predicate the values of a type are members by: a data type's, at
+    -- the predicates of its arguments, or a type parameter's own, a place of
+    -- the dictionary; none for Nat, every code.
     predicate = \case
-      TData dn _ -> Map.lookup dn membership
-      TParam i [] -> lookup (membershipSlot i) (zip (tdSlots td) [n | Ref _ n <- placeRefs (tdSlots td)])
-      _ -> Nothing
+      TNat -> Nothing
+      t -> predicateOf membership (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip (tdSlots td) [n | Ref _ n <- placeRefs (tdSlots td)])) t
     members = [HMember p v | (_, (v, t)) <- vars, Just p <- [predicate t]]
-    -- A premise, its values the rule's own variables, each with its membership.
+
+{- |
+The premises of a rule, as a goal proved in it has them, by the predicates
+of types given: each named, with its binder, its values the rule's own
+variables, each with its membership; and a closure with the place of its
+method and the predicates of its arguments and its result.
+-}
+renderPremises :: (Ty -> Maybe Pred) -> [PremiseDef] -> Either String [GoalPremise]
+renderPremises predicate pds = traverse premise (zip [1 :: Int ..] pds)
+  where
     premise (k, pd) = do
       let name = (case pdPremise pd of PLaw {} -> "law_"; PClosure {} -> "closed_") <> T.pack (show k)
           locals = ["l_" <> T.pack (show j) | j <- [0 .. length (pdBinders pd) - 1]]
@@ -225,7 +236,7 @@ statementGoal membership td = do
       pure (GoalPremise (pdPremise pd) name binder closure)
 
 -- | The text of a theorem's core statement: 'statementGoal' as a sequent.
-theoremStatement :: Map Text Text -> TheoremDef -> Either String Text
+theoremStatement :: Map Text (Text, [Int]) -> TheoremDef -> Either String Text
 theoremStatement membership td = runBuilder <$> (goalSequent =<< statementGoal membership td)
 
 -- * Theorems
@@ -265,25 +276,35 @@ data type, or when the membership of a body cannot be established, as for a
 field whose type's membership does not constrain it.
 -}
 proveClosure :: Knowledge -> FunDef -> Either EngineError (Maybe (Closure, [(Text, Text)]))
-proveClosure k fd = case fdResult fd of
-  TData dn _
-    | Just resultIs <- Map.lookup dn (knowMembership k) -> attempt resultIs
+proveClosure k fd = case (fdResult fd, predicate (fdResult fd)) of
+  (TData _ _, Just (Pred resultIs ps)) -> attempt resultIs ps
+  (TParam _ [], Just (Pred resultIs ps)) -> attempt resultIs ps
   _ -> Right Nothing
   where
     info = fdInfo fd
     sp = fdSpan fd
     names = ["x" <> T.pack (show i) | i <- [0 .. length (fdArgs fd) - 1]]
     cores = map mangleVariable names
-    argIs = [case t of TData n _ -> Map.lookup n (knowMembership k); _ -> Nothing | t <- fdArgs fd]
+    -- The predicates of the function's type parameters: parameters of the lemma's rule, after its dictionary's.
+    vars = nub (concatMap valueVariables (fdResult fd : fdArgs fd))
+    dict = funSlots info <> [membershipSlot i | i <- vars, membershipSlot i `notElem` funSlots info]
+    predicate = \case
+      TNat -> Nothing
+      t -> predicateOf (knowMembership k) (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip dict [n | Ref _ n <- placeRefs dict])) t
+    argIs = map predicate (fdArgs fd)
     thm = TheoremInfo (funQual info <> [Ident "#closed"]) (functionLemma info "#closed") cores (fdArgs fd) [] [] Nothing
     columns = nub [i | fc <- fdClauses fd, (i, PCon {}) <- zip [0 ..] (fcPatterns fc)]
-    attempt resultIs = do
+    -- Under constraints with laws, the closures of the dictionary's methods are premises.
+    pds = closurePremises (knowEnv k) dict
+    attempt resultIs ps = do
+      premises <- either (Left . EngineError sp) Right (renderPremises predicate pds)
       let applied = apps (Global (Ref RefFunction (funCore info))) (map Var cores <> ownDictionary (funSlots info))
           hyps = [HMember p v | (v, Just p) <- zip cores argIs]
-          g0 = Goal (zip (map hname [1 ..]) hyps) (Rel RelLt (Nat 0) (App (Global (Ref RefBuiltin resultIs)) applied)) (zip names (zip cores (fdArgs fd))) [] [] (funSlots info) []
+          concl = Rel RelLt (Nat 0) (apps (Global (Ref RefBuiltin resultIs)) (map fromCT ps <> [applied]))
+          g0 = Goal (zip (map hname [1 ..]) hyps) concl (zip names (zip cores (fdArgs fd))) [] [] dict premises
           done out = do
             decl <- either (Left . EngineError sp) Right (declaration (thmCore thm) g0 (outTactic out))
-            Right (Just (Closure (thmCore thm) argIs resultIs, outAux out <> [(thmCore thm, runBuilder decl)]))
+            Right (Just (Closure (thmCore thm) (fdArgs fd) (fdResult fd) (map pdPremise pds), outAux out <> [(thmCore thm, runBuilder decl)]))
       case columns of
         [] -> either (const (Right Nothing)) (done . closed) (caseTactic g0)
         [c] | isJust (argIs !! c) -> do
@@ -298,7 +319,7 @@ proveClosure k fd = case fdResult fd of
         ct <- termCT CVar m
         (tac, ct') <- maybe (Left "no unfolding lemma rewrites the application") Right (unfoldStep k ct)
         (p, body) <- case ct' of
-          CSym p [b] -> Right (p, b)
+          CSym p as | b : rest <- reverse as -> Right (Pred p (reverse rest), b)
           _ -> Left "internal: a membership of another shape"
         proof <- membershipProof k g p body
         Right ("calc (lt 0 " <> render ct <> ") = (lt 0 " <> render ct' <> ") by " <> tac <> " = 1 by (" <> proof <> ")")
@@ -312,9 +333,31 @@ taking arguments — a rule over them, its variables term metavariables.
 declaration :: Text -> Goal -> Builder -> Either String Builder
 declaration name g tac = do
   stmt <- goalSequent g
-  pure case staticSlots (goalDict g) of
-    [] -> "theorem " <> fromText name <> " : " <> stmt <> "\nby " <> tac
-    statics -> "rule " <> fromText name <> ruleBinders statics (sequentVars g) <> mconcat [" " <> gpBinder p | p <- goalPremises g] <> " : " <> stmt <> "\nby " <> tac
+  params <- ruleParams g
+  pure case params of
+    [] | null (goalPremises g) -> "theorem " <> fromText name <> " : " <> stmt <> "\nby " <> tac
+    _ -> "rule " <> fromText name <> ruleBinders params (sequentVars g) <> mconcat [" " <> gpBinder p | p <- goalPremises g] <> " : " <> stmt <> "\nby " <> tac
+
+{- |
+The parameters of the rule a goal is declared as, by their names and
+arities: the places of its dictionary taking arguments which its statement
+or its premises mention.  The predicate of a type parameter no value's
+predicate takes is none.
+-}
+ruleParams :: Goal -> Either String [(Text, Int)]
+ruleParams g = do
+  stmt <- goalSequent g
+  let places = [(n, slotArity s) | (s, Ref _ n) <- zip (goalDict g) (placeRefs (goalDict g)), slotArity s > 0]
+      tokens = T.split (\ch -> not (isAlphaNum ch || ch == '_')) (runBuilder (stmt <> mconcat [gpBinder p | p <- goalPremises g]))
+  pure [(n, a) | (n, a) <- places, n `elem` tokens]
+
+-- | The arguments of an appeal giving a rule's parameters as the goal's own: the var metavariables they take, then each applied to them.
+staticArgs :: [(Text, Int)] -> Builder
+staticArgs = \case
+  [] -> ""
+  ps ->
+    let zs = ["z_" <> T.pack (show i) | i <- [1 .. maximum (map snd ps)]]
+     in " " <> unwordsB (map fromText zs) <> mconcat [" (" <> fromText n <> " " <> unwordsB (map fromText (take a zs)) <> ")" | (n, a) <- ps]
 
 -- | The variables of a goal's sequent: its free variables, and the values of its dictionary it mentions.
 sequentVars :: Goal -> [Text]
@@ -518,21 +561,51 @@ assignment binders args = foldl (\m (b, a) -> go m b a) Map.empty (zip binders a
 
 {- |
 The predicate the values of a type are members by, in a goal: a data type's,
-@anyIs@ for @Nat@, and for a type parameter of the goal's theorem which a
-class with laws constrains, its own, a place of the goal's dictionary.
+at the predicates of its arguments; @anyIs@ for @Nat@; and a type parameter
+of the goal's theorem's own, a place of the goal's dictionary.
 -}
-typePredicate :: Knowledge -> Goal -> Ty -> Maybe Text
-typePredicate k g = \case
-  TData dn _ -> Map.lookup dn (knowMembership k)
-  TNat -> Just "anyIs"
-  TParam j [] -> lookup (membershipSlot j) (zip (goalDict g) [n | Ref _ n <- placeRefs (goalDict g)])
-  _ -> Nothing
+typePredicate :: Knowledge -> Goal -> Ty -> Maybe Pred
+typePredicate k g = predicateOf (knowMembership k) (\j -> (\n -> Pred n []) <$> lookup (membershipSlot j) (zip (goalDict g) [n | Ref _ n <- placeRefs (goalDict g)]))
+
+{- |
+The predicate the values of a type are members by, the predicates of type
+parameters as given: a data type's, at the predicates of its arguments, of
+those whose predicates it takes, every code's for an argument with none;
+@anyIs@ for @Nat@; a type parameter's own.
+-}
+predicateOf :: Map Text (Text, [Int]) -> (Int -> Maybe Pred) -> Ty -> Maybe Pred
+predicateOf membership param = go
+  where
+    go = \case
+      TData dn targs -> do
+        (p, used) <- Map.lookup dn membership
+        pure (Pred p [predicateParam (fromMaybe anyPred (go =<< lookup u (zip [0 ..] targs))) | u <- used])
+      TNat -> Just anyPred
+      TParam j [] -> param j
+      _ -> Nothing
+
+-- | The predicate every code satisfies: the membership of @Nat@.
+anyPred :: Pred
+anyPred = Pred "anyIs" []
+
+-- | A field's predicate at the predicates of its type's parameters, given for those its type's predicate takes.
+fieldPredicate :: [Int] -> [CT] -> FieldPred -> Pred
+fieldPredicate used ps = \case
+  FieldParam i -> parameterPredicate (param i)
+  FieldData p pps -> Pred p (map paramAt pps)
+  where
+    param i = fromMaybe (predicateParam anyPred) (lookup i (zip used ps))
+    paramAt = \case
+      ParamOf i -> param i
+      ParamAny -> predicateParam anyPred
+      ParamData p [] -> CStatic p
+      ParamData p pps -> CPartial p (map paramAt pps) 1
 
 {- |
 The memberships of the arguments given, by the predicates given: each which
 no hypothesis states, proved and added as a hypothesis.
 -}
-memberships :: Knowledge -> Goal -> [(Located R.Expr, Expr Text, Maybe Text)] -> Either EngineError Builder
+memberships :: Knowledge -> Goal -> [(Located R.Expr, Expr Text, Maybe Pred)] -> Either EngineError Builder
 memberships k g args =
   mconcat <$> forM [(arg, e, p) | (arg, e, Just p) <- args] \(arg, e, p) -> do
     ct <- either (Left . EngineError (location arg)) Right (termCT CVar e)
@@ -563,13 +636,15 @@ premiseBlocks k g sp t assign = mconcat <$> traverse block (thmPremises t)
             nested <- premiseBlocks k g sp t' (Map.fromList (zip [0 ..] (typeArgs ty)))
             Right (exactly (thmCore t') <> nested)
           _ -> unknown
-        PClosure mq i -> fmap exactly $ case Map.lookup i assign of
-          Just (TParam j []) -> own (PClosure mq j)
-          Just TNat -> Right "anyIsMember"
-          Just ty@(TData dn _) -> do
+        PClosure mq i -> case Map.lookup i assign of
+          Just (TParam j []) -> exactly <$> own (PClosure mq j)
+          Just TNat -> Right "exact anyIsMember"
+          Just ty@(TData dn targs) -> do
             inst <- instanceOf mq dn
             f <- maybe (Left (EngineError sp "internal: the instance has no function for the method")) Right (Map.lookup mq (instFunctions inst))
-            maybe (Left (EngineError sp ("the function of " <> T.unpack (renderQualName mq) <> " at " <> T.unpack (maybe "" id (headOf ty)) <> " has no closure lemma: its results are not known to be members"))) (Right . closureLemma) (Map.lookup (funCore f) (knowClosures k))
+            cl <- maybe (Left (EngineError sp ("the function of " <> T.unpack (renderQualName mq) <> " at " <> T.unpack (maybe "" id (headOf ty)) <> " has no closure lemma: its results are not known to be members"))) Right (Map.lookup (funCore f) (knowClosures k))
+            -- Under a context, its closure lemma has premises of its own, at the type's arguments.
+            either (Left . EngineError sp) Right (closureTactic k g cl (Map.fromList [(u, pr) | (u, arg) <- zip [0 ..] targs, Just pr <- [typePredicate k g arg]]))
           _ -> unknown
     -- The instance of the class of a law or a method for the head of a type.
     instanceOf q h = do
@@ -587,7 +662,7 @@ premiseBlocks k g sp t assign = mconcat <$> traverse block (thmPremises t)
     unknown = Left (EngineError sp (T.unpack (renderQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances"))
 
 -- | Whether a hypothesis of the goal states the membership of the term by the predicate, as the core writes it.
-hasMembership :: Goal -> Text -> CT -> Bool
+hasMembership :: Goal -> Pred -> CT -> Bool
 hasMembership g p t = any (either (const False) ((== wanted) . runBuilder) . hypText . snd) (goalHyps g)
   where
     wanted = runBuilder (membershipText p t)
@@ -599,23 +674,26 @@ the memberships of the fields its type checks; for a function applied, its
 closure lemma, after the memberships of its arguments.  None for anything
 else, such as a field whose type's membership does not constrain it.
 -}
-membershipProof :: Knowledge -> Goal -> Text -> CT -> Either String Builder
+membershipProof :: Knowledge -> Goal -> Pred -> CT -> Either String Builder
 membershipProof k g p t
   | hasMembership g p t = Right "assumption"
-  | p == "anyIs" = Right "exact anyIsMember"
+  | p == anyPred = Right "exact anyIsMember"
   -- A method of the goal's dictionary applied: the goal's premise stating its closure.
   | (name, argPs) : _ <- [(gpName gp, ps) | gp <- goalPremises g, Just (place, ps, result) <- [gpClosure gp], result == p, headName == Just place] = do
       pre <- needs [(a, q) | (a, Just q) <- zip operands argPs]
       Right (pre <> "exact " <> fromText name)
   | otherwise = case t of
       CSym f args
-        | Just c <- ctorByCore (knowEnv k) f -> do
-            pre <- needs [(args !! j, q) | (j, q) <- Map.findWithDefault [] f (knowMembers k), j < length args]
+        | Just c <- ctorByCore (knowEnv k) f
+        , Pred _ ps <- p
+        , Just (_, used) <- Map.lookup (renderQualName (ctorData c)) (knowMembership k) -> do
+            pre <- needs [(args !! j, fieldPredicate used ps fp) | (j, fp) <- Map.findWithDefault [] f (knowMembers k), j < length args]
             Right (pre <> "exact " <> fromText (ctorLemma c "intro"))
         | Just cl <- Map.lookup f (knowClosures k)
-        , closureResult cl == p -> do
-            pre <- needs [(a, q) | (a, Just q) <- zip args (closureArgs cl)]
-            Right (pre <> "exact " <> fromText (closureLemma cl))
+        , Just (given, argPs) <- argumentsOf cl -> do
+            pre <- needs [(a, q) | (a, Just q) <- zip args argPs]
+            appeal <- closureTactic k g cl given
+            Right (pre <> appeal)
       _ -> Left ("the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function")
   where
     headName = case t of
@@ -625,10 +703,56 @@ membershipProof k g p t
     operands = case t of
       CSym _ as -> as
       _ -> []
+    -- The predicates a function's closure lemma needs of its arguments, at the
+    -- predicates of the type parameters the result's gives: none when it does
+    -- not give them all.
+    argumentsOf cl = do
+      given <- case (closureResultTy cl, p) of
+        (TData dn targs, Pred q ps)
+          | Just (q', used) <- Map.lookup dn (knowMembership k)
+          , q' == q ->
+              Just (Map.fromList [(j, parameterPredicate c) | (u, c) <- zip used ps, Just (TParam j []) <- [lookup u (zip [0 ..] targs)]])
+        (TParam j [], _) -> Just (Map.singleton j p)
+        _ -> Nothing
+      guard (all (`Map.member` given) (concatMap valueVariables (closureArgTys cl)))
+      Just (given, [if ty == TNat then Nothing else predicateOf (knowMembership k) (`Map.lookup` given) ty | ty <- closureArgTys cl])
     needs pairs = mconcat <$> traverse one [(a, q) | (a, q) <- pairs, not (hasMembership g q a)]
     one (a, q) = do
       inner <- membershipProof k g q a
       Right ("have (" <> membershipText q a <> ") { " <> inner <> " }; ")
+
+{- |
+The appeal to a function's closure lemma, its premises proved in turn, at
+the predicates its type parameters are at: the closure of each method of its
+dictionary is the goal's own premise at one of the goal's type parameters,
+@anyIsMember@ at @Nat@, and at a data type the closure lemma of the
+instance's function, with its premises in turn.
+-}
+closureTactic :: Knowledge -> Goal -> Closure -> Map Int Pred -> Either String Builder
+closureTactic k g cl given = (\blocks -> "exact " <> fromText (closureLemma cl) <> mconcat blocks) <$> traverse block (closurePremisesOf cl)
+  where
+    block = \case
+      PClosure mq i ->
+        (\b -> " { " <> b <> " }") <$> case Map.lookup i given of
+          Just q
+            | q == anyPred -> Right "exact anyIsMember"
+            | Just j <- ownParam q ->
+                maybe (Left ("no premise states the closure of " <> T.unpack (renderQualName mq) <> " here")) (Right . ("exact " <>) . fromText . gpName) (find ((== PClosure mq j) . gpPremise) (goalPremises g))
+            | Pred isCore ps <- q
+            , (dn, used) : _ <- [(dn, used) | (dn, (p', used)) <- Map.toList (knowMembership k), p' == isCore] -> do
+                f <- maybe (Left ("no instance's function for " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn)) Right $ do
+                  GMethod m <- Map.lookup mq (envGlobals (knowEnv k))
+                  inst <- Map.lookup (methodClass m, dn) (envInstances (knowEnv k))
+                  Map.lookup mq (instFunctions inst)
+                cl' <- maybe (Left ("the function of " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn <> " has no closure lemma")) Right (Map.lookup (funCore f) (knowClosures k))
+                -- The instance's type parameters are its type's, in order.
+                closureTactic k g cl' (Map.fromList [(u, parameterPredicate c) | (u, c) <- zip used ps])
+          _ -> Left ("the predicate of the type parameter " <> show i <> " of a closure is not known")
+      PLaw {} -> Left "internal: a law among the premises of a closure"
+    -- The type parameter of the goal's theorem a predicate is the own one of.
+    ownParam = \case
+      Pred w [] -> listToMaybe [slotParam s | (s, Ref _ n) <- zip (goalDict g) (placeRefs (goalDict g)), isMembershipSlot s, n == w]
+      _ -> Nothing
 
 spineOf :: Located R.Expr -> (Located R.Expr, [Located R.Expr])
 spineOf = go []
@@ -802,8 +926,11 @@ induction k info _ g sp v _ = do
     TData dn targs -> maybe (Left (EngineError sp ("not a data type: " <> T.unpack dn))) (\d -> Right (d, targs)) (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
     _ -> Left (EngineError sp (T.unpack v <> " is not of a data type"))
   let self = renderQualName (dataQual dat)
-  isCore <- maybe (Left (EngineError sp "the data type has no membership predicate")) Right (Map.lookup self (knowMembership k))
-  memberHyp <- maybe (Left (EngineError sp (T.unpack v <> " has no membership hypothesis"))) (Right . fst) (find (isMember isCore core . snd) (goalHyps g))
+  (isCore, used) <- maybe (Left (EngineError sp "the data type has no membership predicate")) Right (Map.lookup self (knowMembership k))
+  -- The value's membership, and the predicates of its type's parameters it is at.
+  (memberHyp, valuePs) <- maybe (Left (EngineError sp (T.unpack v <> " has no membership hypothesis"))) Right (listToMaybe [(h, ps) | (h, HMember (Pred p ps) x) <- goalHyps g, p == isCore, x == core])
+  let isAt x = CSym isCore (valuePs <> [x])
+      fieldPred = fieldPredicate used valuePs
   let mentions = \case
         HProp p -> core `elem` foldr (:) [] p
         HMember _ x -> x == core
@@ -815,7 +942,7 @@ induction k info _ g sp v _ = do
         let fields = [(core <> "_" <> T.pack (show j), substTy typeArgs fty) | (j, fty) <- zip [0 :: Int ..] (ctorFields c)]
             fieldVar j = fst (fields !! j)
             recursive = [fieldVar j | (j, TData dn _) <- zip [0 ..] (ctorFields c), dn == self]
-            members = [HMember p (fieldVar j) | (j, p) <- Map.findWithDefault [] (ctorCore c) (knowMembers k)]
+            members = [HMember (fieldPred fp) (fieldVar j) | (j, fp) <- Map.findWithDefault [] (ctorCore c) (knowMembers k)]
             ihs = [HProp (at (Var fv)) | fv <- recursive]
             hyps = members <> ihs <> map snd kept
             ihCore i = hname (length members + i)
@@ -833,17 +960,17 @@ induction k info _ g sp v _ = do
           decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
           pure (outAux o <> [(auxName i, runBuilder decl)])
         -- The auxiliary theorems are rules with the goal's premises, which the goal's discharge.
+        -- Their parameters are the goal's, given, since a case need not determine them.
+        params <- traverse (either (Left . EngineError sp) Right . ruleParams) goals
         let blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
-        script <- either (Left . EngineError sp) Right (mkScript k auxName blocks dat isCore core memberHyp eigen motive reverted)
+            appeal i = "exact " <> fromText (auxName i) <> staticArgs (params !! i) <> blocks
+        script <- either (Left . EngineError sp) Right (mkScript k appeal dat isAt fieldPred core memberHyp eigen motive reverted)
         pure (Out script (concat auxDecls))
   pure (goals, finish)
   where
     raw = \case
       Ident t -> t
       Op t -> t
-    isMember isCore core = \case
-      HMember c x -> c == isCore && x == core
-      _ -> False
 
 -- | The parameters of a data type's field types replaced by the type's arguments.
 substTy :: [Ty] -> Ty -> Ty
@@ -855,8 +982,8 @@ substTy args = \case
   t -> t
 
 -- | The core script of an induction, the auxiliary theorems of its cases named as given.
-mkScript :: Knowledge -> (Int -> Text) -> Builder -> DataInfo -> Text -> Text -> Text -> Text -> Expr Text -> [(Text, Expr Text)] -> Either String Builder
-mkScript k auxName blocks dat isCore t memberHyp m motive reverted = do
+mkScript :: Knowledge -> (Int -> Builder) -> DataInfo -> (CT -> CT) -> (FieldPred -> Pred) -> Text -> Text -> Text -> Expr Text -> [(Text, Expr Text)] -> Either String Builder
+mkScript k appeal dat isAt fieldPred t memberHyp m motive reverted = do
   let at x = motive >>= \w -> if w == t then x else Var w
       code x = codeOf (at x)
   codeM <- code (Var m)
@@ -864,11 +991,11 @@ mkScript k auxName blocks dat isCore t memberHyp m motive reverted = do
   inversion <- inversionText
   branches <- forM (zip [0 ..] (dataCtors dat)) \(i, c) -> branch i c
   let split = splitDisj "I" branches
-      step = "have Q: (((lt 0 " <> render (CSym isCore [CVar m]) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> fromText (dataLemma dat "inversion") <> " }; " <> split <> " }; exact impIntro"
+      step = "have Q: (((lt 0 " <> render (isAt (CVar m)) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> fromText (dataLemma dat "inversion") <> " }; " <> split <> " }; exact impIntro"
   finishText <- finishing
   pure
     ( "have C: ((lt 0 (imp "
-        <> render (CSym isCore [CVar t])
+        <> render (isAt (CVar t))
         <> " "
         <> codeT
         <> ")) = 1) { exact cvInduction "
@@ -893,7 +1020,7 @@ mkScript k auxName blocks dat isCore t memberHyp m motive reverted = do
     membersOf c = Map.findWithDefault [] (ctorCore c) (knowMembers k)
     disjunct c = do
       let eqT = "(" <> fromText m <> " = " <> render (ctorApplied c) <> ")"
-          mems = [membershipText p (fieldT j m') | (j, p) <- membersOf c]
+          mems = [membershipText (fieldPred p) (fieldT j m') | (j, p) <- membersOf c]
       pure (conjunction (eqT : mems))
     conjunction = \case
       [x] -> x
@@ -949,7 +1076,7 @@ mkScript k auxName blocks dat isCore t memberHyp m motive reverted = do
               <> " }; have IHc"
               <> fromDec j
               <> ": ((lt 0 (imp "
-              <> render (CSym isCore [fieldT j m'])
+              <> render (isAt (fieldT j m'))
               <> " "
               <> codeF
               <> ")) = 1) { exact belowElim _ "
@@ -980,9 +1107,8 @@ mkScript k auxName blocks dat isCore t memberHyp m motive reverted = do
           <> mconcat ihs
           <> (if ownCode then "have A1: " else "have A: ")
           <> caseFormula
-          <> " { exact "
-          <> fromText (auxName i)
-          <> blocks
+          <> " { "
+          <> appeal i
           <> (if ownCode then " }; calc (lt 0 " else " }; reify A as A1; calc (lt 0 ")
           <> codeM
           <> ") = (lt 0 "

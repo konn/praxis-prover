@@ -32,6 +32,8 @@ module Language.Praxis.Surface.Elab (
   elabModule,
   placeRefs,
   classClosure,
+  valueVariables,
+  closurePremises,
 
   -- * Names of generated lemmas
   unfoldingNames,
@@ -363,9 +365,8 @@ elabInstance fx env sp idl = do
       prop0 <- runTC (elabProp e ctx0 (lawBody l) >>= resolveMethods e full)
       -- Under the context: the places its statement uses, the membership
       -- predicates of the type variables its values are of, and the premises they give.
-      let used = globalsOf prop0
-          kept = [s | (s, r) <- zip full (placeRefs full), r `elem` used || (isMembershipSlot s && TParam (slotParam s) [] `elem` map snd binderTys)]
-          prop = keepPlaces full kept prop0
+      let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
+          prop = keepPlaces full' kept prop0
           premises = premisesFor e given kept
           q = iq <> [lawSeg]
           (e1, info) = addTheorem e q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (Just (toScope (fmap B prop)))
@@ -568,9 +569,8 @@ elabDecl fx env sp name ty0 clauses = do
       prop0 <- runTC (elabProp env ctx0 body >>= resolveMethods env full)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
-      let used = globalsOf prop0
-          kept = [s | (s, r) <- zip full (placeRefs full), r `elem` used || (isMembershipSlot s && TParam (slotParam s) [] `elem` map snd binderTys)]
-          prop = keepPlaces full kept prop0
+      let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
+          prop = keepPlaces full' kept prop0
           premises = premisesFor env given kept
           q = qualify env [name]
           (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (Just (toScope (fmap B prop)))
@@ -634,7 +634,8 @@ premisesFor :: Env -> [(ClassInfo, Int)] -> [Slot] -> [PremiseDef]
 premisesFor env given kept = laws <> closures
   where
     places = zip kept (placeRefs kept)
-    lawful = [slotParam s | s <- kept, isMembershipSlot s]
+    -- The type parameters a class with laws constrains, whose predicate is kept: what laws and closures are about.
+    lawful = [i | i <- nub [j | (cls, j) <- given, any (not . null . classLaws) (classClosure env cls)], membershipSlot i `elem` kept]
     laws =
       [ PremiseDef (PLaw (lawQual l) i) (map (atParam i . snd) (lawBinders l)) (toScope (mapGlobals (\r -> Map.findWithDefault r r table) body))
       | i <- lawful
@@ -648,11 +649,35 @@ premisesFor env given kept = laws <> closures
       | (s, r) <- places
       , not (isMembershipSlot s)
       , let i = slotParam s
+      , i `elem` lawful
       , Just isRef <- [lookup (membershipSlot i) places]
       , Just (GMethod m) <- [Map.lookup (slotMethod s) (envGlobals env)]
       , let (args, result) = arrows (schemeType (methodScheme m))
       , result == TParam 0 []
       ]
+
+{- |
+The closures of the methods of a dictionary, at the type parameters whose
+predicates it has: for each method returning its class's parameter, of a
+class which a class with laws extends, that its results are members.  What
+the closure lemma of a function under constraints takes as premises.
+-}
+closurePremises :: Env -> [Slot] -> [PremiseDef]
+closurePremises env slots =
+  [ PremiseDef (PClosure (slotMethod s) i) (map (atParam i) args) (toScope (Rel RelLt (Nat 0) (App (Global isRef) (apps (Global r) [Var (B k) | k <- [0 .. length args - 1]]))))
+  | (s, r) <- places
+  , not (isMembershipSlot s)
+  , let i = slotParam s
+  , Just isRef <- [lookup (membershipSlot i) places]
+  , Just (GMethod m) <- [Map.lookup (slotMethod s) (envGlobals env)]
+  , lawful (methodClass m)
+  , let (args, result) = arrows (schemeType (methodScheme m))
+  , result == TParam 0 []
+  ]
+  where
+    places = zip slots (placeRefs slots)
+    classes = [c | GClass c <- Map.elems (envGlobals env)]
+    lawful q = or [q `elem` map classQual closure && any (not . null . classLaws) closure | c <- classes, let closure = classClosure env c]
 
 -- | A type over a class's parameter at a type parameter of a theorem: the class's parameter that one, and a type variable of a method's own no data type.
 atParam :: Int -> Ty -> Ty
@@ -704,6 +729,30 @@ pruneDictionary info fcs = (kept, map prune fcs)
       Global r -> Global (renamed r)
       other -> other
     renamed r = Map.findWithDefault r r renumber
+
+{- |
+The places a theorem is over: those of its dictionary its statement uses,
+and the membership predicate of each type parameter of kind @Type@ one of
+its values mentions, added after the dictionary's when no constraint gave
+one; with the dictionary so extended.  Its values have their memberships by
+those predicates, the parameters' own, which an appeal instantiates.
+-}
+theoremPlaces :: [Slot] -> Expr a -> [Ty] -> ([Slot], [Slot])
+theoremPlaces full0 prop0 tys = (full, kept)
+  where
+    vars = nub (concatMap valueVariables tys)
+    full = full0 <> [membershipSlot i | i <- vars, membershipSlot i `notElem` full0]
+    used = globalsOf prop0
+    kept = [s | (s, r) <- zip full (placeRefs full), r `elem` used || (isMembershipSlot s && slotParam s `elem` vars)]
+
+-- | The type parameters a type mentions at kind @Type@, whose predicates the memberships of its values may take.
+valueVariables :: Ty -> [Int]
+valueVariables = \case
+  TParam i [] -> [i]
+  TParam _ ts -> concatMap valueVariables ts
+  TData _ ts -> concatMap valueVariables ts
+  TArrow a b -> valueVariables a <> valueVariables b
+  _ -> []
 
 -- | A statement over the places of a dictionary, over those kept alone, renumbered.
 keepPlaces :: [Slot] -> [Slot] -> Expr a -> Expr a

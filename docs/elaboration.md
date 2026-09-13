@@ -104,12 +104,18 @@ library of praxis-core.
   `C.#def : |- C x̄ = cons i …` (by `refl`, over variables),
   `C.#tag : |- hd (C x̄) = i`, `C.#field-j : |- hd (tl^(j+1) (C x̄)) = x_j`,
   `C.#lt-j : |- x_j < C x̄` (from `ltConsL`, `ltConsR`, `ltTrans`).
-- **Membership** `T.is n = cvrec {λ k h. dispatch} n`: the dispatch on the tag
-  checks, in the branch of `Cᵢ`, that the code is *exactly* `Cᵢ` applied to its
-  fields (no junk) and the membership of the fields of `T` itself (by the
-  history, `at h k field`) and of data types encoded before. It is *shape*
-  membership: fields of a type parameter, of `Nat` or of a later type are
-  unconstrained.
+- **Membership** `T.is {p̄} n = cvrec {λ k h. dispatch} n`, over the
+  predicates `p̄` of the type's parameters its fields use. In the branch of
+  `Cᵢ` the dispatch on the tag checks that the code is *exactly* `Cᵢ` applied
+  to its fields (no junk). It also checks the fields:
+  - a field of a parameter satisfies the parameter's predicate, `pᵢ field`;
+  - a field of `T` itself is a member, through the history, `at h k field`;
+  - a field of a data type encoded before is a member of it at the
+    predicates of its arguments, `U.is {λ y. V.is {p} y} field`.
+
+  Fields of `Nat`, of a higher-kinded parameter, of a later type, or of `T` at
+  other arguments are unconstrained. When the predicate takes parameters,
+  the lemmas below are rules over them.
 - **`T.#is-def`, `T.#is-beta`** unfold the predicate at a variable, and
   `T.#collapse-i` collapses a dispatch at tag `i` over variables.
 - **Introduction** `C.#intro : 0 < U₁.is x_{j₁}, … |- 0 < T.is (C x̄)`, a
@@ -125,9 +131,10 @@ library of praxis-core.
   `collapseT/F`, `conjElim1/2`, `eqElim`, and `histAt` with `C.#lt-j` for the
   recursive fields. Induction rests on it.
 
-Which fields contribute a membership conjunct is recorded
-(`encodedMembers`) and is the single source both the inversion and the proof
-engine read: they cannot disagree.
+Which fields contribute a membership conjunct, and by which predicate, is
+recorded (`encodedMembers`, a `FieldPred` over the type's parameters). It is
+the single source both the inversion and the proof engine read: they cannot
+disagree.
 
 ## Functions
 
@@ -162,18 +169,19 @@ f … (C x̄) …  = cvrec {B} (C x̄) ȳ            by exact f.#def
              = body                           by cong f.#def       (each recursive call)
 ```
 
-**Closure lemmas.** A function whose result is of a data type has
-`f.#closed : 0 < A₁.is x₁, … |- 0 < T.is (f x̄)`, a hypothesis for each
-argument of a data type: its results are members. The engine proves it
-(`Engine.proveClosure`) by induction on the argument the clauses match on,
-each case the membership of the clause's body once `f.unfold-C` rewrites the
-application. That membership is a hypothesis, the induction hypothesis at a
-recursive call, `C.#intro` at a constructor, or `g.#closed` at another
-function, each after the memberships of what it is applied to
-(`Engine.membershipProof`). A body whose membership is not established that
-way leaves the function without a closure lemma: say, a field of a type
-parameter, which shape membership does not check, returned where a data type
-is expected.
+**Closure lemmas.** A function whose result is of a data type or of a type
+parameter has `f.#closed : 0 < A₁.is {p̄} x₁, … |- 0 < T.is {p̄} (f x̄)`, a
+hypothesis for each argument with a predicate. It is a rule over the
+predicates of the function's type parameters: its results are members. The
+engine proves it (`Engine.proveClosure`) by induction on the argument the
+clauses match on, each case the membership of the clause's body once
+`f.unfold-C` rewrites the application. That membership is a hypothesis, the
+induction hypothesis at a recursive call, `C.#intro` at a constructor, or
+`g.#closed` at another function, each after the memberships of what it is
+applied to (`Engine.membershipProof`). Under constraints with laws, the
+closures of the dictionary's methods are premises, and an appeal discharges
+them as it does a theorem's. A body whose membership is not established that
+way leaves the function without a closure lemma.
 
 ## The definitional-equality discipline
 
@@ -201,13 +209,19 @@ A theorem `{ā} → (x₁ : T₁) → … → A` becomes, by `Engine.statementGo
 core sequent
 
 ```
-0 < T₁.is x₁, …, H₁, …, Hₘ |- C
+0 < T₁.is {p̄₁} x₁, …, H₁, …, Hₘ |- C
 ```
 
-where `A = H₁ → … → Hₘ → C`: the values are free variables (the Π₁ reading
-of a PRA theorem), each of a data type with its membership hypothesis (none
-for `Nat` or a type parameter), and top-level implications become
-hypotheses. Type parameters are erased. Propositions translate connective by
+where `A = H₁ → … → Hₘ → C`, and top-level implications become hypotheses.
+The values are free variables (the Π₁ reading of a PRA theorem), each with
+the membership hypothesis of its type's predicate. A data type's predicate
+is at the predicates of its arguments, `0 < List.is {w_1} xs`. A type
+parameter's is its own, `0 < w_1 x`. A value of `Nat` has none: its
+predicate, the prelude's `anyIs n = 1`, holds of every code. A type
+parameter's predicate is a parameter of the theorem's rule, so a theorem over
+a type parameter is a rule over its predicate. An appeal instantiates it at
+the predicate of the type the parameter stands for. Type parameters are
+otherwise erased. Propositions translate connective by
 connective (`CoreText.propText`):
 
 | surface | core |
@@ -263,8 +277,8 @@ per declaration:
   unfolding lemmas `f.unfold-C`;
 - **(I)** codes are injective with distinct tags: `C.#tag` gives a code's
   tag, `C.#field-j` each field;
-- **(M)** the code of every value is a member: `C.#intro`, by induction on the
-  value.
+- **(M)** the code of every value of `T τ̄` is a member by `T.is` at the
+  predicates of `τ̄`: `C.#intro`, by induction on the value.
 
 The proof is three inductions over finite objects.
 
@@ -277,9 +291,10 @@ The proof is three inductions over finite objects.
    (I), since `e` is injective at each type; comparisons and bounded
    quantifiers range over ℕ on both sides; the connectives are the same. It
    is an equivalence, so it holds under `¬` and `→` at any depth.
-3. *The sequent.* The kernel's soundness gives the numeric instance at `e∘ρ`.
-   Its membership hypotheses hold there by (M), its other hypotheses by 2
-   exactly when the surface ones do, so its conclusion holds, and by 2 the
+3. *The sequent.* The kernel's soundness gives the numeric instance at `e∘ρ`,
+   the rule's predicates at those of the types its type parameters stand
+   for. Its membership hypotheses hold there by (M), its other hypotheses by
+   2 exactly when the surface ones do. So its conclusion holds, and by 2 the
    surface conclusion.
 
 Each step is an induction on syntax or on finite trees, and a free-variable
@@ -291,11 +306,13 @@ them all, so a uniform statement would need evaluators indexed by fuel — and
 nothing would be gained: a formal proof would rest on a semantics written
 down by hand, as this one does.
 
-Membership is *shape* membership, which may be wider than the codes of a
-type (a field of a type parameter is unconstrained). It appears only as a
-hypothesis on a theorem's values, where a wider predicate gives the core
-statement more instances, not fewer: sound, and incomplete where a statement
-needs the finer typing. Full membership predicates are planned.
+Membership checks the fields of a type parameter by the parameter's
+predicate. It does not check those of a higher-kinded parameter, of `Nat`,
+of a later type, or of the type itself at other arguments, so it may be
+wider than the codes of a type. It appears only as a hypothesis on a
+theorem's values, where a wider predicate gives the core statement more
+instances, not fewer: sound, and incomplete where a statement needs the
+finer typing.
 
 ### Testing the translation
 
@@ -433,12 +450,11 @@ parameter. An instance proves it as a theorem at its type, the dictionary's
 places its functions: `Pointed-List.plus-zero : 0 < List.is x |-
 Pointed-List.plus x Pointed-List.zero = x`, a statement of § Statements.
 
-A type variable which a class with laws constrains has a place of its own in
-a theorem's dictionary: `#is`, the membership predicate of the type it stands
-for, a parameter of the theorem's rule of one argument, say `w_2`. The
-theorem's values of that type have the hypothesis `0 < w_2 x`, as the values
-of a data type have theirs. Its rule has premises over variables of their
-own (see [pra-and-prf.md](pra-and-prf.md)):
+A type variable a theorem's values mention has a place of its own in the
+theorem's dictionary: `#is`, the membership predicate of the type it stands
+for, a parameter of the theorem's rule of one argument, say `w_2`
+(§ Statements). Where a class with laws constrains the variable, the rule
+has premises over variables of their own (see [pra-and-prf.md](pra-and-prf.md)):
 
 - each law of the classes constraining the variable whose methods its
   statement uses, `(law_1 ∀ l_0 : 0 < w_2 l_0 |- w_1 l_0 d0 = l_0)`;
@@ -475,9 +491,10 @@ asked of members.
    variables only.
 3. Values are first-order: no field, theorem value, argument or result of
    function type, and every application complete.
-4. The code of every value of a data type is a member (`C.#intro`), and
-   membership hypotheses stand only on a theorem's values, where a wider
-   predicate only strengthens the statement.
+4. The code of every value of a data type is a member at the predicates of
+   its type's arguments (`C.#intro`), and membership hypotheses stand only on
+   a theorem's values, where a wider predicate only strengthens the
+   statement.
 5. Unfolding lemmas hold for all codes.
 6. The inversion lemma and the engine read the same record of which fields
    carry memberships.

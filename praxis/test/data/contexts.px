@@ -70,3 +70,28 @@ instance Pointed a => Pointed (Option a) where
   plus (Some x) y = Some x
   plus-zero None = rfl
   plus-zero (Some x) = rfl
+
+-- The law under the context, at the fields of type a: the context's law holds of them,
+-- members of a, as the membership of a pair of a says.
+instance Pointed a => Pointed (Pair a) where
+  zero = MkPair zero zero
+  plus (MkPair x y) q = MkPair (plus x (first q)) (plus y (second q))
+  plus-zero (MkPair x y) = calc
+    plus (MkPair x y) zero
+    = MkPair (plus x zero) (plus y zero)
+    = MkPair x (plus y zero) := by cong (plus-zero x)
+    = MkPair x y := by cong (plus-zero y)
+
+plus-zero-twice : Pointed a => (x : a) -> plus (plus x zero) zero ≡ x
+plus-zero-twice x = calc
+  plus (plus x zero) zero
+  = plus x zero := plus-zero (plus x zero)
+  = x := plus-zero x
+
+-- At an instance under a context: its law and the closures of its functions, under their own premises at Nat.
+twice-pair : (p : Pair Nat) -> plus (plus p zero) zero ≡ p
+twice-pair p = plus-zero-twice p
+
+-- Under the class again: the instance's premises are the goal's own.
+twice-pair-generic : Pointed a => (p : Pair a) -> plus (plus p zero) zero ≡ p
+twice-pair-generic p = plus-zero-twice p

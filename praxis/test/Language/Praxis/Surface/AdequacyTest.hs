@@ -23,6 +23,12 @@ On random values,
 
 The codes themselves are out of reach: the membership of a code unrolls a
 course-of-values history one level for every number below it.
+
+A membership predicate takes the predicates of its type's parameters, and a
+statement over a type parameter is a rule over the parameter's predicate.
+The values are generated with their type parameters at @Nat@, whose
+predicate every code satisfies, and each field well typed: there, the shape
+of a code decides its membership, and a type parameter's predicate holds.
 -}
 module Language.Praxis.Surface.AdequacyTest (adequacyTests) where
 
@@ -44,8 +50,9 @@ import Language.Praxis.PRA.Signature (Signature, signatureKernelEnv)
 import Language.Praxis.PRA.Syntax.Parser (parseTerm, plainScope)
 import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..), checkSource)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
-import Language.Praxis.Surface.CoreText (CT (..))
+import Language.Praxis.Surface.CoreText (CT (..), isParameter)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule)
+import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
 import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), renderQualName)
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
@@ -60,7 +67,7 @@ import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, eleme
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
 import Test.Tasty.QuickCheck (testProperty)
-import Text.Megaparsec (Parsec, between, choice, eof, errorBundlePretty, many, parse, sepBy, try)
+import Text.Megaparsec (Parsec, between, choice, eof, errorBundlePretty, many, parse, sepBy, some, try)
 import Text.Megaparsec.Char (alphaNumChar, char, letterChar, space, string)
 import Text.Megaparsec.Char.Lexer qualified as L
 
@@ -90,7 +97,8 @@ certifies = testCase "adequacy.px: its data types and functions certify, with an
   src <- TIO.readFile path
   let c = checkSource p path src
   [T.unpack m | Report _ SevError m <- checkedReports c, not ("sorry" `T.isInfixOf` m)] @?= []
-  length [() | t <- checkedCore c, "theorem" `T.isPrefixOf` t, "#intro :" `T.isInfixOf` demangle t] @?= 8
+  -- A theorem, or a rule over the predicates of its type's parameters.
+  length [() | t <- checkedCore c, keyword : name : _ <- [T.words (demangle t)], keyword `elem` ["theorem", "rule"], "#intro" `T.isSuffixOf` name] @?= 8
 
 -- * The module
 
@@ -106,8 +114,8 @@ data Loaded = Loaded
   -- ^ the core names of the constructors
   , ldPredicates :: !(Map Text DataInfo)
   -- ^ the data types, by the core names of their membership predicates
-  , ldMembership :: !(Map Text Text)
-  -- ^ the membership predicates, by the qualified names of the data types
+  , ldMembership :: !(Map Text (Text, [Int]))
+  -- ^ the membership predicates, by the qualified names of the data types, with the parameters whose predicates they take
   , ldUnfoldings :: !(Map Text [(CT, CT)])
   -- ^ the sides of the unfolding lemmas of each function, by its core name
   , ldBuiltin :: Text -> [Natural] -> Natural
@@ -136,7 +144,7 @@ load path = do
       , ldOrder = map (renderQualName . dataQual) datas
       , ldCtors = Set.fromList [ctorCore c | d <- datas, c <- dataCtors d]
       , ldPredicates = Map.fromList [(dataIs d, d) | d <- datas]
-      , ldMembership = Map.fromList [(renderQualName (dataQual d), dataIs d) | d <- datas]
+      , ldMembership = foldl (\m d -> Map.insert (renderQualName (dataQual d)) (dataIs d, encodedParams (encodeData (`Map.lookup` m) d)) m) Map.empty datas
       , ldUnfoldings = Map.fromList unfoldings
       , ldBuiltin = builtin
       }
@@ -329,13 +337,23 @@ termP :: P CT
 termP =
   choice
     [ CNum <$> lexeme L.decimal
-    , between (symbol "(") (symbol ")") (CSym <$> nameP <*> many termP)
+    , between (symbol "(") (symbol ")") (CSym <$> nameP <*> many (parameterP <|> termP))
     , atom <$> nameP
     ]
   where
     atom n
       | any (`T.isPrefixOf` n) ["v_", "b_"] = CVar n
       | otherwise = CSym n []
+    -- The parameter of a schema: a symbol, or a predicate at parameters of its own, closed over its argument.
+    parameterP = between (symbol "{") (symbol "}") (lambdaP <|> (CStatic <$> nameP))
+    lambdaP = do
+      _ <- symbol "λ"
+      _ <- some nameP
+      _ <- symbol "."
+      body <- termP
+      case body of
+        CSym f args -> pure (CPartial f (filter isParameter args) 1)
+        _ -> fail "a λ which is no predicate applied"
 
 nameP :: P Text
 nameP = lexeme (T.pack <$> ((:) <$> letterChar <*> many (alphaNumChar <|> char '_')))
@@ -359,10 +377,14 @@ evalCore ld = go
       CNum n -> CN n
       CSym f as
         | Set.member f (ldCtors ld) -> CK f (map (go env) as)
-        | Just d <- Map.lookup f (ldPredicates ld), [x] <- as -> CN (if member ld d (go env x) then 1 else 0)
+        -- A predicate at its parameters, applied: of a generated value, its shape decides it.
+        | Just d <- Map.lookup f (ldPredicates ld), x : _ <- reverse as -> CN (if member ld d (go env x) then 1 else 0)
+        -- A type parameter's predicate, a parameter of the statement's rule: at Nat, where values are generated, every code satisfies it.
+        | "w_" `T.isPrefixOf` f -> CN 1
         | Just eqs <- Map.lookup f (ldUnfoldings ld) -> unfold eqs (map (go env) as)
         | otherwise -> CN (ldBuiltin ld f (map (numeral . go env) as))
       CRaw t -> error ("raw text in a statement: " <> T.unpack t)
+      c -> error ("a parameter of a schema standing as a value: " <> show c)
     unfold eqs vs = case [(s, rhs) | (CSym _ ps, rhs) <- eqs, Just s <- [matchCodes ps vs]] of
       (s, rhs) : _ -> go s rhs
       [] -> error "no unfolding lemma applies"
@@ -417,10 +439,10 @@ holds ld env = \case
           Forall -> all at (takeWhile (< n) [0 ..])
           Exists -> any at (takeWhile (< n) [0 ..])
 
--- | A membership hypothesis: @0 < T.is x@.
+-- | A membership hypothesis: @0 < T.is {p} x@, or @0 < w x@ by a type parameter's predicate.
 isMembership :: Loaded -> Formula -> Bool
 isMembership ld = \case
-  FEq (CSym "lt" [CNum 0, CSym p [_]]) (CNum 1) -> Map.member p (ldPredicates ld)
+  FEq (CSym "lt" [CNum 0, CSym p (_ : _)]) (CNum 1) -> Map.member p (ldPredicates ld) || "w_" `T.isPrefixOf` p
   _ -> False
 
 -- * The properties
