@@ -424,4 +424,3 @@ encodeData known d = Encoded equations lemmas members
     ltT a b = "((lt " <> render a <> " " <> render b <> ") = 1)"
     show' :: (Show s) => s -> Text
     show' = T.pack . show
-

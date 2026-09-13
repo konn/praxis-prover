@@ -158,4 +158,3 @@ propText fresh var = go var
 -- | The hypothesis that a term is in a data type, by its membership predicate: @0 < T.is x@.
 membershipText :: Text -> CT -> Text
 membershipText isCore x = "((lt 0 " <> render (CSym isCore [x]) <> ") = 1)"
-

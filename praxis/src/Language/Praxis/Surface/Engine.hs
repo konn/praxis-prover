@@ -43,19 +43,19 @@ module Language.Praxis.Surface.Engine (
 ) where
 
 import Bound (instantiate)
-import Control.Monad (forM, unless, when, zipWithM)
-import Data.List (find, foldl', nub)
+import Control.Monad (forM, unless)
+import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (absurd)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
-import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Encode (ctorLemma, dataLemma)
 import Language.Praxis.Surface.Env
+import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span)

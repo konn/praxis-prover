@@ -5,7 +5,7 @@ Tokens and layout of the surface language.
 
 Whitespace includes line comments, @--@ to the end of the line (a run of
 dashes not followed by another operator character), and nestable block
-comments @{- … -}@.
+comments @{\- … -\}@.
 
 Identifiers are alphanumeric segments joined by single dashes, as in Agda:
 @append-nil@, @unfold-Nil@; so binary minus needs spaces around it.  The
@@ -71,11 +71,11 @@ import Control.Monad.Reader (ReaderT, asks, local, runReaderT)
 import Control.Monad.State.Strict (State, get, put, runState)
 import Data.Char (isAlpha, isAlphaNum, isAscii, isDigit, isPunctuation, isSymbol)
 import Data.Functor (($>))
+import Data.List.NonEmpty (NonEmpty (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.Surface.Syntax.Raw
-import Data.List.NonEmpty (NonEmpty (..))
 import Text.Megaparsec hiding (State, token)
 import Text.Megaparsec.Char (char, space1, string)
 import Text.Megaparsec.Char.Lexer qualified as L

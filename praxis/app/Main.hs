@@ -1,6 +1,6 @@
 {-# LANGUAGE ApplicativeDo #-}
-{-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NoFieldSelectors #-}
 
 module Main (main) where
 
