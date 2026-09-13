@@ -1,4 +1,6 @@
 {-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE NoFieldSelectors #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Main (main) where
 
@@ -24,9 +26,9 @@ data CheckOptions = CheckOptions
 
 main :: IO ()
 main = do
-  Check opts <- execParser (info (commandP <**> versionP <**> helper) (fullDesc <> header "praxis - a finitistic prover over primitive recursive arithmetic"))
+  Check CheckOptions {..} <- execParser (info (commandP <**> versionP <**> helper) (fullDesc <> header "praxis - a finitistic prover over primitive recursive arithmetic"))
   p <- either (\e -> hPutStrLn stderr ("the prelude did not certify: " <> e) *> exitFailure) pure prelude
-  oks <- mapM (checkFile p (dumpCore opts)) (files opts)
+  oks <- mapM (checkFile p dumpCore) files
   if and oks then exitSuccess else exitFailure
 
 commandP :: Parser Command
@@ -37,16 +39,16 @@ commandP =
 
 checkP :: Parser CheckOptions
 checkP = do
-  dump <-
+  dumpCore <-
     switch $
       long "dump-core"
         <> help "Print the core text generated, prf definitions and pra declarations, before the reports"
-  paths <-
+  files <-
     some . strArgument $
       metavar "FILE.px..."
         <> action "file"
         <> help "The modules to check"
-  pure CheckOptions {dumpCore = dump, files = paths}
+  pure CheckOptions {..}
 
 versionP :: Parser (a -> a)
 versionP = infoOption (showVersion version) (long "version" <> help "Show the version")
