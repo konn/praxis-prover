@@ -37,6 +37,10 @@ checkTests =
         checkedTheorems c @?= ["ClassesBad.fine"]
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
         mapM_ (\(n, l) -> assertBool ("an error for " <> n) (l `elem` lines')) [("superclass", 12 :: Int), ("second", 19), ("other", 25), ("generic", 28), ("ambiguous", 32), ("pair", 38)]
+    , testCase "a function under a constraint is a schema over the methods it uses, at the instances of known types" $ do
+        c <- checkFile "test/data/constrained.px"
+        errors c @?= []
+        checkedTheorems c @?= ["Constrained.sum-three", "Constrained.flatten", "Constrained.triple-two", "Constrained.twice-sum"]
     , testCase "a false theorem, a non-structural recursion, a sorry and an appeal to a failed theorem are refused" $ do
         c <- checkFile "test/data/bad.px"
         checkedTheorems c @?= []

@@ -1,0 +1,52 @@
+module Constrained where
+
+data List a = Nil | a : List a
+
+infixr 5 :
+
+class Semigroup a where
+  (<>) : a -> a -> a
+
+infixr 4 <>
+
+class Semigroup a => Monoid a where
+  mempty : a
+
+instance Semigroup Nat where
+  (<>) x y = x + y
+
+instance Monoid Nat where
+  mempty = 0
+
+instance Semigroup (List a) where
+  (<>) Nil ys = ys
+  (<>) (x : xs) ys = x : (xs <> ys)
+
+instance Monoid (List a) where
+  mempty = Nil
+
+-- A function under a constraint: a schema over the methods of the monoid.
+mconcat : Monoid a => List a -> a
+mconcat Nil = mempty
+mconcat (x : xs) = x <> mconcat xs
+
+-- A function under a constraint, calling another at its own type.
+twice : Monoid a => List a -> a
+twice xs = mconcat xs <> mconcat xs
+
+-- Of its constraint, it uses one method: its dictionary is that method alone.
+triple : Monoid a => a -> a
+triple x = x <> (x <> x)
+
+-- At known types, the dictionaries of the instances.
+sum-three : mconcat (1 : 2 : 3 : Nil) ≡ 6
+sum-three = rfl
+
+flatten : mconcat ((1 : Nil) : (2 : 3 : Nil) : Nil) ≡ 1 : 2 : 3 : Nil
+flatten = rfl
+
+triple-two : triple 2 ≡ 6
+triple-two = rfl
+
+twice-sum : twice (1 : 2 : Nil) ≡ 6
+twice-sum = rfl

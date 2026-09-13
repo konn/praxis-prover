@@ -49,11 +49,11 @@ module Language.Praxis.Surface.Elab (
   ElabError (..),
 ) where
 
-import Bound (Scope, Var (..), toScope)
+import Bound (Scope, Var (..), fromScope, toScope)
 import Control.Monad (foldM, forM, forM_, unless, when, zipWithM)
 import Control.Monad.Except (throwError)
 import Control.Monad.State.Strict (StateT, evalStateT)
-import Data.List (elemIndex, find, nub)
+import Data.List (elemIndex, find, nub, nubBy)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, maybeToList)
 import Data.Text (Text)
@@ -323,12 +323,14 @@ registerUnfoldings info fcs env = foldl register env (zip3 [1 :: Int ..] (unfold
 
 {- |
 Solve the constraints the uses of methods raised, now that the types are
-known: each use becomes the function of its method in the instance of its
-class for the type it is used at.  A method at a type not known, or at a type
-variable, is an error: constraints on type variables are not supported yet.
+known.  At a known type, a use is the function of its method in the instance
+of its class for that type.  At a type parameter a dictionary is given for,
+it is a place of that dictionary: a parameter of the enclosing function's
+schema, or a value it takes.  A method at a type not known, or at a type
+parameter no constraint gives it for, is an error.
 -}
-resolveMethods :: Env -> Expr a -> TC (Expr a)
-resolveMethods env e = do
+resolveMethods :: Env -> [Slot] -> Expr a -> TC (Expr a)
+resolveMethods env givens e = do
   ws <- takeWanted
   chosen <- forM ws \w -> do
     m <- case Map.lookup (wantedMethod w) (envGlobals env) of
@@ -338,16 +340,27 @@ resolveMethods env e = do
     let name = T.unpack (segmentText (last (methodQual m)))
         cls = T.unpack (segmentText (last (methodClass m)))
         at h = case Map.lookup (methodClass m, h) (envInstances env) >>= Map.lookup (methodQual m) . instFunctions of
-          Just f -> pure (wantedPlaceholder w, funCore f)
+          -- The placeholder keeps its kind: a function passed on, or one applied.
+          Just f -> pure (wantedPlaceholder w, \(Ref k _) -> Ref k (funCore f))
           Nothing -> failAt (wantedSpan w) ("no instance of " <> cls <> " for " <> T.unpack (last (T.splitOn "." h)) <> ", where " <> name <> " is used")
     case t of
       TNat -> at "Nat"
       TData dn _ -> at dn
-      TParam _ _ -> failAt (wantedSpan w) (name <> " at a type variable: a constraint " <> cls <> " on it is not supported yet")
+      TParam j _ -> case givenPlace givens (methodQual m) j of
+        Just r -> pure (wantedPlaceholder w, const r)
+        Nothing -> failAt (wantedSpan w) (name <> " at a type variable: it needs a constraint " <> cls <> " on the variable")
       TMeta _ -> failAt (wantedSpan w) ("the type " <> name <> " is used at is ambiguous")
       TArrow _ _ -> failAt (wantedSpan w) (name <> " at a function type")
   let table = Map.fromList chosen
-  pure (mapGlobals (\r -> maybe r (Ref RefFunction) (Map.lookup (refName r) table)) e)
+  pure (mapGlobals (\r -> maybe r ($ r) (Map.lookup (refName r) table)) e)
+
+-- | The place of a dictionary for a method at a type parameter: a parameter of the schema, by its name, or a value, by its position.
+givenPlace :: [Slot] -> QualName -> Int -> Maybe Ref
+givenPlace givens method j = case break (\s -> slotMethod s == method && slotParam s == j) givens of
+  (before, s : _)
+    | slotArity s > 0 -> Just (Ref RefStatic (staticName (1 + length (staticSlots before))))
+    | otherwise -> Just (Ref RefValueParam (T.pack (show (length (valueSlots before)))))
+  _ -> Nothing
 
 resolved :: Fixities -> Located R.Expr -> Either ElabError (Located R.Expr)
 resolved fx e = either (\err -> let (sp, msg) = renderFixityError err in Left (ElabError sp msg)) Right (resolveExpr fx e)
@@ -387,13 +400,17 @@ rawSpine = go []
 elabDecl :: Fixities -> Env -> Span -> Segment -> Located R.Expr -> [R.Clause] -> Either ElabError (Env, Item)
 elabDecl fx env sp name ty0 clauses = do
   ty <- resolved fx ty0
-  let (implicits, rest) = implicitBinders ty
+  let (outer, ty1) = constraintsOf ty
+      (implicits, rest0) = implicitBinders ty1
+      (inner, rest) = constraintsOf rest0
+      constraints = outer <> inner
       (binders, body) = valueBinders rest
       freeVars = nub (concatMap (typeVariables env) (map snd binders <> [body | not (isProp body)]))
       params = [(n, KType) | n <- implicits] <> [(v, KType) | v <- freeVars, v `notElem` implicits]
       paramNames = map fst params
   if isProp body
     then do
+      unless (null constraints) $ Left (ElabError sp "a theorem under constraints: not supported yet")
       -- Statement lowering names each value by its binder. Distinct values
       -- must never acquire the same core variable and share memberships.
       _ <- foldM checkBinder [] (map fst binders)
@@ -402,7 +419,7 @@ elabDecl fx env sp name ty0 clauses = do
         unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a theorem quantifies over values, which are first-order"))
         pure (n, bty)
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
-      prop <- runTC (elabProp env ctx0 body >>= resolveMethods env)
+      prop <- runTC (elabProp env ctx0 body >>= resolveMethods env [])
       let q = qualify env [name]
           (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys)
       pcs <- forM clauses \c -> runTC (elabProofClause fx env (map snd binderTys) c)
@@ -410,15 +427,86 @@ elabDecl fx env sp name ty0 clauses = do
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       fty <- elabType env paramNames body
+      full <- dictionaryOf env paramNames constraints
       let (args, result) = arrows fty
-          (env1, info) = addFunction env name (Scheme params fty) (length args)
+          scheme = Scheme params fty
+          (env1, info1) = addFunction env name scheme (length args) full
       unless (all firstOrder (result : args)) $ Left (ElabError (location body) "a function of functions: its arguments and its result are values, which are first-order")
-      fcs <- forM clauses \c -> runTC (elabFunClause fx env1 info args result c)
-      pure (registerUnfoldings info fcs env1, IFun (FunDef info args result fcs sp))
+      fcs1 <- forM clauses \c -> runTC (elabFunClause fx env1 info1 args result c)
+      -- The function takes the places of its dictionary its clauses use.
+      let (used, fcs) = pruneDictionary info1 fcs1
+          (env2, info) = addFunction env name scheme (length args) used
+      pure (registerUnfoldings info fcs env2, IFun (FunDef info args result fcs sp))
   where
     checkBinder seen (Located nsp n)
       | n `elem` seen = Left (ElabError nsp ("the variable " <> T.unpack n <> " is bound twice"))
       | otherwise = Right (n : seen)
+
+-- | Constraints in front of a type, @C a => …@: the constraints, and the type under them.
+constraintsOf :: Located R.Expr -> ([R.TyConstraint], Located R.Expr)
+constraintsOf = \case
+  Located _ (R.EConstrained cs body) -> let (more, b) = constraintsOf body in (cs <> more, b)
+  e -> ([], e)
+
+{- |
+The dictionary constraints on a signature's type parameters give: each
+method of each class constraining a parameter and of its superclasses, at
+that parameter, once.
+-}
+dictionaryOf :: Env -> [Text] -> [R.TyConstraint] -> Either ElabError [Slot]
+dictionaryOf env params cs = do
+  given <- forM cs \(Located qsp q, Located vsp v) -> do
+    cls <- case [c | GClass c <- resolve env q] of
+      c : _ -> pure c
+      [] -> Left (ElabError qsp ("not a class: " <> T.unpack (qnameText q)))
+    i <- maybe (Left (ElabError vsp ("a constraint on " <> T.unpack v <> ", which is no type variable of the signature"))) Right (elemIndex v params)
+    pure (cls, i)
+  pure (nub [Slot (methodQual m) i (methodArity m) | (cls, i) <- given, c <- closure cls, m <- classMethods c])
+  where
+    -- A class after its superclasses, each once.
+    closure c = nubBy (\x y -> classQual x == classQual y) (concat [closure s | q <- classSuperclasses c, Just (GClass s) <- [Map.lookup q (envGlobals env)]] <> [c])
+
+-- | The references to the places of a dictionary: its parameters, by their names, and its values, by their positions.
+placeRefs :: [Slot] -> [Ref]
+placeRefs = go 1 (0 :: Int)
+  where
+    go _ _ [] = []
+    go j k (s : ss)
+      | slotArity s > 0 = Ref RefStatic (staticName j) : go (j + 1) k ss
+      | otherwise = Ref RefValueParam (T.pack (show k)) : go j (k + 1) ss
+
+{- |
+The dictionary a function's clauses use, and the clauses over it: the places
+they refer to, but in the dictionary their recursive calls pass on, which is
+the whole; the places kept renumbered, and the recursive calls passing on
+those alone.  The code of an instance of a schema is recognised by the calls
+of its parameters, so a schema must use each of them.
+-}
+pruneDictionary :: FunInfo -> [FunClause] -> ([Slot], [FunClause])
+pruneDictionary info fcs = (kept, map prune fcs)
+  where
+    full = funSlots info
+    self = funCore info
+    arity = funArity info
+    refs = placeRefs full
+    used = nub (concatMap (usedIn . fromScope . fcBody) fcs)
+    keep = [r `elem` used | r <- refs]
+    kept = [s | (s, True) <- zip full keep]
+    renumber = Map.fromList (zip [r | (r, True) <- zip refs keep] (placeRefs kept))
+    prune fc = fc {fcBody = toScope (rewrite (fromScope (fcBody fc)))}
+    usedIn :: Expr x -> [Ref]
+    usedIn e = case spine e of
+      (Global (Ref _ n), as) | n == self -> concatMap usedIn (take arity as)
+      (h, as) -> [r | Global r <- [h], r `elem` refs] <> concatMap usedIn as
+    rewrite :: Expr x -> Expr x
+    rewrite e = case spine e of
+      (Global (Ref k n), as) | n == self -> apps (Global (Ref k n)) (map rewrite (take arity as) <> [Global (renamed r) | (Global r, True) <- zip (drop arity as) keep])
+      (h, as) -> apps (headRenamed h) (map rewrite as)
+    headRenamed :: Expr y -> Expr y
+    headRenamed = \case
+      Global r -> Global (renamed r)
+      other -> other
+    renamed r = Map.findWithDefault r r renumber
 
 {- |
 The names of the unfolding lemmas of a function, one per clause: @unfold-@
@@ -473,6 +561,7 @@ isProp (Located _ e) = case e of
   R.EQuant {} -> True
   R.EArrow _ b -> isProp b
   R.EPi _ b -> isProp b
+  R.EConstrained _ b -> isProp b
   _ -> False
 
 opText :: Located R.Operator -> Text
@@ -516,7 +605,7 @@ elabFunClause fx env info args result (R.Clause lhs0 (Located rsp rhs)) = do
   body <- case rhs of
     R.RExpr e -> do
       e' <- liftE (resolved fx e)
-      checkTerm env [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' result >>= resolveMethods env
+      checkTerm env [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' result >>= resolveMethods env (funSlots info)
     _ -> failAt rsp "a function's clause is a term, not a proof"
   pure (FunClause pats vars (toScope (fmap B body)) (R.spanning (location lhs) rsp))
 
@@ -647,7 +736,7 @@ checkTerm env ctx le@(Located sp e) expected = case e of
   _ -> uncurry application (rawSpine le)
   where
     application hd args = do
-      (h, hty, arity) <- headOf hd
+      (h, hty, arity, dict) <- headOf hd
       -- Values are first-order: a function or a constructor is applied in full, never passed or returned.
       when (length args < arity) $ failAt sp ("applied to " <> show (length args) <> " of its " <> show arity <> " arguments: a function is not a value, so it is applied in full")
       case drop arity args of
@@ -655,7 +744,8 @@ checkTerm env ctx le@(Located sp e) expected = case e of
         [] -> pure ()
       (res, resTy) <- applyArgs h hty args
       unifyAt sp expected resTy
-      pure (At (Irrelevant sp) res)
+      -- The dictionary of a function under constraints follows its arguments.
+      pure (At (Irrelevant sp) (apps res dict))
     applyArgs h hty = \case
       [] -> pure (h, hty)
       a : rest -> do
@@ -670,12 +760,12 @@ checkTerm env ctx le@(Located sp e) expected = case e of
           _ -> failAt (location a) "applied to too many arguments"
         a' <- checkTerm env ctx a dom
         applyArgs (App h a') cod rest
-    -- The head of an application, its type, and the number of arguments it takes.
+    -- The head of an application, its type, the number of arguments it takes, and the dictionary it takes after them.
     headOf (Located hsp h) = case h of
-      R.EName (QName [] (Ident n)) | Just (v, t) <- lookup n ctx -> pure (Var v, t, 0)
+      R.EName (QName [] (Ident n)) | Just (v, t) <- lookup n ctx -> pure (Var v, t, 0, [])
       R.EName q -> resolveHead hsp q
-      R.ENat n -> pure (Nat n, TNat, 0)
-      R.EParen x -> (\(e', t) -> (e', t, 0)) <$> inferTerm env ctx x
+      R.ENat n -> pure (Nat n, TNat, 0, [])
+      R.EParen x -> (\(e', t) -> (e', t, 0, [])) <$> inferTerm env ctx x
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
     resolveHead hsp q = case builtin q of
       Just b -> pure b
@@ -697,13 +787,17 @@ checkTerm env ctx le@(Located sp e) expected = case e of
             | otherwise -> typed g
     typed = \case
       GFun f -> do
-        (t, _) <- instantiateScheme (funScheme f)
-        pure (Global (Ref RefFunction (funCore f)), t, funArity f)
+        (t, metas) <- instantiateScheme (funScheme f)
+        -- Each place of its dictionary a placeholder, until the type its class is at is known.
+        dict <- forM (funSlots f) \s -> do
+          placeholder <- wantInstance (slotMethod s) (metas !! slotParam s) sp
+          pure (Global (Ref (if slotArity s > 0 then RefStatic else RefFunction) placeholder))
+        pure (Global (Ref RefFunction (funCore f)), t, funArity f, dict)
       GCtor c -> case dataOfCtor env c of
         Just d -> do
           let result = TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. length (dataParams d) - 1]]
           (t, _) <- instantiateScheme (Scheme (dataParams d) (foldr TArrow result (ctorFields c)))
-          pure (Global (Ref RefConstructor (ctorCore c)), t, length (ctorFields c))
+          pure (Global (Ref RefConstructor (ctorCore c)), t, length (ctorFields c), [])
         Nothing -> failAt sp "internal: a constructor of no data type"
       -- A method stands for a placeholder until the type its class is at is known.
       GMethod m -> do
@@ -711,7 +805,7 @@ checkTerm env ctx le@(Located sp e) expected = case e of
         placeholder <- case metas of
           c : _ -> wantInstance (methodQual m) c sp
           [] -> failAt sp "internal: a method of no class"
-        pure (Global (Ref RefFunction placeholder), t, methodArity m)
+        pure (Global (Ref RefFunction placeholder), t, methodArity m, [])
       GTheorem t -> failAt sp (T.unpack (renderQualName (thmQual t)) <> " is a theorem, not a term")
       GData d -> failAt sp (T.unpack (renderQualName (dataQual d)) <> " is a type, not a term")
       GClass c -> failAt sp (T.unpack (renderQualName (classQual c)) <> " is a class, not a term")
@@ -725,8 +819,8 @@ checkTerm env ctx le@(Located sp e) expected = case e of
       GCtor _ -> True
       _ -> False
     builtin = \case
-      QName [] (Ident n) | n `elem` ["S", "suc"] -> Just (Global (Ref RefBuiltin "S"), TArrow TNat TNat, 1)
-      QName [] (Op o) | Just core <- lookup o arithmetic -> Just (Global (Ref RefBuiltin core), TArrow TNat (TArrow TNat TNat), 2)
+      QName [] (Ident n) | n `elem` ["S", "suc"] -> Just (Global (Ref RefBuiltin "S"), TArrow TNat TNat, 1, [])
+      QName [] (Op o) | Just core <- lookup o arithmetic -> Just (Global (Ref RefBuiltin core), TArrow TNat (TArrow TNat TNat), 2, [])
       _ -> Nothing
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
 

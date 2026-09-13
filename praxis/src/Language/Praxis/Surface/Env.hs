@@ -23,6 +23,10 @@ module Language.Praxis.Surface.Env (
   ClassInfo (..),
   MethodInfo (..),
   InstanceInfo (..),
+  Slot (..),
+  staticSlots,
+  valueSlots,
+  staticName,
   Global (..),
   globalQualName,
   globalCore,
@@ -89,8 +93,35 @@ data FunInfo = FunInfo
   , funScheme :: !Scheme
   , funArity :: !Int
   , funCore :: !Text
+  , funSlots :: ![Slot]
+  -- ^ its dictionary, in order: the methods its constraints give it which it uses
   }
   deriving stock (Show)
+
+{- |
+A place of a function's dictionary: a method of a class at one of the
+function's type parameters, and the method's arity.  A method taking
+arguments is a parameter of the function's schema, 'staticName'; one taking
+none, a value, is an argument after the function's own.
+-}
+data Slot = Slot
+  { slotMethod :: !QualName
+  , slotParam :: !Int
+  , slotArity :: !Int
+  }
+  deriving stock (Show, Eq)
+
+-- | The places of a dictionary which are the parameters of a schema: the methods taking arguments.
+staticSlots :: [Slot] -> [Slot]
+staticSlots = filter ((> 0) . slotArity)
+
+-- | The places of a dictionary which are values: the methods taking no argument.
+valueSlots :: [Slot] -> [Slot]
+valueSlots = filter ((== 0) . slotArity)
+
+-- | The name of the schema parameter of a function at its place among the parameters, from 1.
+staticName :: Int -> Text
+staticName j = "w_" <> T.pack (show j)
 
 {- |
 A theorem, or a lemma the elaborator generated: its core name, and the
@@ -213,12 +244,12 @@ addData env name params ctors = (env', info)
         , envDisplay = Map.union (Map.fromList ((dataIs info, renderQualName (q <> [Ident "is"])) : [(ctorCore c, segmentText (last (ctorQual c))) | c <- dataCtors info])) (envDisplay env)
         }
 
--- | Add a function; it opens a namespace for its lemmas.
-addFunction :: Env -> Segment -> Scheme -> Int -> (Env, FunInfo)
-addFunction env name sch arity = (env', info)
+-- | Add a function, with its dictionary; it opens a namespace for its lemmas.
+addFunction :: Env -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)
+addFunction env name sch arity slots = (env', info)
   where
     q = qualify env [name]
-    info = FunInfo q sch arity (coreOf q)
+    info = FunInfo q sch arity (coreOf q) slots
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)
@@ -270,7 +301,7 @@ addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> (Env, FunI
 addInstanceFunction env instance' method sch arity = (env', info)
   where
     q = instance' <> [method]
-    info = FunInfo q sch arity (coreOf q)
+    info = FunInfo q sch arity (coreOf q) []
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)

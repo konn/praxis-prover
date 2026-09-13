@@ -352,6 +352,27 @@ with their unfolding lemmas. The instance comes into scope before its
 clauses, so a method may recur through itself, or use another method of the
 instance.
 
+A function under constraints takes a dictionary: the methods it uses of the
+classes constraining its type variables and of their superclasses. The
+elaborator keeps only the places its clauses refer to, because an instance
+of a schema is recognised by the calls of its parameters, so a schema must
+use each. A method taking arguments is a parameter of the function's prf
+schema, `w_1`; a method taking none, a value, is an argument after the
+function's own. So `mconcat xs` at `List Nat` is `mconcat
+{Semigroup-List.(<>)} xs Monoid-List.mempty` in the core, and in `mconcat`'s
+own clauses `x <> mconcat xs` is `w_1 x (mconcat {w_1} xs d0)`. A recursive
+call passes the dictionary on unchanged, which the compiler checks:
+primitive recursion keeps the parameters of a schema. The unfolding lemmas of
+such a function are rules over the parameters of its schema, their variables
+term metavariables, proved once by the same chain as any function's. An
+appeal, by `exact`, `cong` or `rfl`, instantiates them at the methods of
+instances.
+
+For adequacy, a function under constraints at a known type denotes the
+function its clauses define with the instances' methods in place of the
+classes'. Premise (U) holds for its core term, an instance of its schema, as
+its rules instantiated at those methods state.
+
 The translation of statements therefore never meets a method. A certified
 statement mentions the functions of the instances chosen, which
 `praxis check --dump-core` shows, and § Statements and their adequacy

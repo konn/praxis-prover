@@ -33,6 +33,7 @@ module Language.Praxis.Surface.CoreText (
   termCT,
   propText,
   membershipText,
+  valueVar,
 
   -- * Builders
   intercalateB,
@@ -40,7 +41,7 @@ module Language.Praxis.Surface.CoreText (
 ) where
 
 import Bound (Var (..), fromScope)
-import Data.List (intersperse)
+import Data.List (intersperse, partition)
 import Data.Text (Text)
 import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec)
 import Language.Praxis.Surface.Syntax
@@ -48,22 +49,37 @@ import Numeric.Natural (Natural)
 
 -- * Core terms
 
--- | A core term, to be written out: a variable, a symbol applied, a numeral, or text as it is, such as a schema instance.
+{- |
+A core term, to be written out: a variable, a symbol applied, a numeral, text
+as it is, such as a schema instance, or a function standing as the parameter
+of a schema, among the arguments of the schema it is passed to.
+-}
 data CT
   = CVar !Text
   | CSym !Text ![CT]
   | CNum !Natural
   | CRaw !Text
+  | CStatic !Text
   deriving stock (Show, Eq)
 
--- | The text of a term, every application parenthesised.
+{- |
+The text of a term, every application parenthesised; the parameters of a
+schema, in braces, right after its name, as the core writes an instance.
+-}
 render :: CT -> Builder
 render = \case
   CVar v -> fromText v
   CNum n -> fromUnboundedDec n
   CSym f [] -> fromText f
-  CSym f args -> "(" <> unwordsB (fromText f : map render args) <> ")"
+  CSym f args ->
+    let (statics, others) = partition isStatic args
+     in "(" <> unwordsB (fromText f : map render (statics <> others)) <> ")"
   CRaw t -> "(" <> fromText t <> ")"
+  CStatic f -> "{" <> fromText f <> "}"
+  where
+    isStatic = \case
+      CStatic _ -> True
+      _ -> False
 
 hdT, tlT :: CT -> CT
 hdT x = CSym "hd" [x]
@@ -98,6 +114,10 @@ varsCT = \case
 
 -- * From the surface
 
+-- | The variable of the value of a dictionary at a position, as a lemma or a statement names it: the mangled @#d0@, @#d1@, ….
+valueVar :: Text -> Text
+valueVar k = "v__x23_d" <> k
+
 {- |
 The core term of a surface term: constructors and functions by their core
 symbols, @S@ and the arithmetic of @Nat@ by the builtin ones.  Only
@@ -110,6 +130,9 @@ termCT var = go
       (Var v, []) -> Right (var v)
       (Var _, _ : _) -> Left "a variable applied to arguments"
       (Nat n, []) -> Right (CNum n)
+      -- A function passed as the parameter of a schema, in braces; a value of a dictionary, its variable.
+      (Global (Ref RefStatic core), []) -> Right (CStatic core)
+      (Global (Ref RefValueParam k), []) -> Right (CVar (valueVar k))
       (Global (Ref _ core), args) -> CSym core <$> traverse go args
       (h, _) -> Left ("no core term for " <> shape h)
     shape = \case

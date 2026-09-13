@@ -350,7 +350,7 @@ calcProof k info n g sp (R.Calc first steps) = do
 term :: Knowledge -> Goal -> Located R.Expr -> Either EngineError (Expr Text)
 term k g e0 = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) ctx e >>= resolveMethods (knowEnv k) . fst))
+  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) ctx e >>= resolveMethods (knowEnv k) [] . fst))
   where
     ctx = [(n, (v, t)) | (n, (v, t)) <- goalVars g]
 
@@ -397,14 +397,23 @@ rflTactic k g sp = case goalConcl g of
       Nothing : xs -> firstJust xs
     instanceOf uf t = do
       s <- match (unfoldingLhs uf) t []
-      pure (replaceCT (\case CVar v -> lookup v s; _ -> Nothing) (unfoldingRhs uf))
+      pure (instantiated s (unfoldingRhs uf))
+    -- A lemma's variables, and the parameters of its schema, bound where it matches.
     match p t s = case (p, t) of
-      (CVar v, _) -> case lookup v s of
-        Just u -> if u == t then Just s else Nothing
-        Nothing -> Just ((v, t) : s)
+      (CVar v, _) -> bind v t s
+      (CStatic v, CStatic _) -> bind v t s
       (CSym f ps, CSym f' ts) | f == f', length ps == length ts -> foldl' (\acc (x, y) -> acc >>= match x y) (Just s) (zip ps ts)
       (CNum a, CNum b) | a == b -> Just s
       _ -> Nothing
+    bind v t s = case lookup v s of
+      Just u -> if u == t then Just s else Nothing
+      Nothing -> Just ((v, t) : s)
+    -- A side of a lemma at the bindings: a parameter of its schema, applied, is the function bound to it.
+    instantiated s = \case
+      CVar v -> fromMaybe (CVar v) (lookup v s)
+      CStatic v -> fromMaybe (CStatic v) (lookup v s)
+      CSym f args -> CSym (case lookup f s of Just (CStatic fn) -> fn; _ -> f) (map (instantiated s) args)
+      other -> other
 
 -- * Induction
 
@@ -621,6 +630,7 @@ fromCT = \case
   CSym f args -> apps (Global (Ref RefBuiltin f)) (map fromCT args)
   CNum n -> Nat n
   CRaw t -> Global (Ref RefBuiltin t)
+  CStatic t -> Global (Ref RefStatic t)
 
 -- * By clauses
 

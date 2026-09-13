@@ -154,9 +154,23 @@ instance, `Semigroup-List.(<>)` — `lists.(<>)` for `instance lists : Monoid
 A use of a method is resolved once the types of its declaration are known:
 it is the function of the instance of its class for the type it is used at.
 `2 <> 3` is `Semigroup-Nat.(<>) 2 3`, and `mempty <> xs`, at `List Nat`,
-is `Semigroup-List.(<>) Monoid-List.mempty xs`. A method at a type not known,
-or at a type variable, is refused for now: constraints on type variables,
-`Monoid a => List a -> a`, come next, and laws after them.
+is `Semigroup-List.(<>) Monoid-List.mempty xs`.
+
+A function may constrain its type variables, `mconcat : Monoid a => List a
+-> a` (or `(C a, D b) => …`, in front of the signature or after its
+implicit binders). In its clauses, a method at a constrained variable is the
+one the caller's instance provides:
+
+```
+mconcat : Monoid a => List a -> a
+mconcat Nil      = mempty
+mconcat (x : xs) = x <> mconcat xs
+```
+
+A call at a known type passes the instances' methods; a call at a
+constrained variable passes on the caller's own. A method at a type not
+known, or at a variable no constraint is on, is refused. Theorems under
+constraints come next, and laws after them.
 
 ## Types
 

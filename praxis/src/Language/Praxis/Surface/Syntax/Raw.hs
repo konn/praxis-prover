@@ -244,6 +244,8 @@ data Expr
     EQuant !Quantifier ![Binder] !(Maybe (Located Operator, Located Expr)) !(Located Expr)
   | -- | a proof where a term is expected: @by …@, @calc …@
     EProof !Rhs
+  | -- | @C a => T@, @(C a, D b) => T@: a type under constraints on its type variables
+    EConstrained ![TyConstraint] !(Located Expr)
   deriving stock (Show, Eq)
 
 -- | An infix operator as written: a symbol, or a name in backquotes.

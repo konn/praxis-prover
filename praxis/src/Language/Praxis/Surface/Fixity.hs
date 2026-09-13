@@ -155,6 +155,7 @@ resolveExpr fx = go
       EArrow a b -> Located sp <$> (EArrow <$> go a <*> go b)
       EQuant q bs bound body ->
         Located sp <$> (EQuant q <$> traverse binder bs <*> traverse (traverse go) bound <*> go body)
+      EConstrained cs body -> Located sp . EConstrained cs <$> go body
       _ -> pure (Located sp e)
     element = \case
       Operand x -> Operand <$> go x

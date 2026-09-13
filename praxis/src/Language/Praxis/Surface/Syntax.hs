@@ -85,6 +85,15 @@ data RefKind
     RefType
   | -- | a symbol of the core, such as the arithmetic of @Nat@
     RefBuiltin
+  | {- | a function standing as the parameter of a schema: the method of an
+    instance a dictionary passes, or a parameter of the enclosing function's
+    own dictionary, applied or passed on
+    -}
+    RefStatic
+  | {- | a value of the enclosing function's dictionary, a method taking no
+    argument, by its position among the dictionary's values
+    -}
+    RefValueParam
   deriving stock (Show, Eq, Ord)
 
 -- | A global name, fully qualified by its module and namespaces: @Data.List.List.Nil@.

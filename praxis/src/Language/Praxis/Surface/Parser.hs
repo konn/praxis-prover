@@ -218,7 +218,15 @@ arrowTok :: Parser ()
 arrowTok = symbol "->" <|> symbol "→"
 
 exprP :: Parser (Located Expr)
-exprP = piP <|> quantP <|> lamP <|> ifP <|> caseP <|> proofP <|> arrowP <?> "expression"
+exprP = constrainedP <|> piP <|> quantP <|> lamP <|> ifP <|> caseP <|> proofP <|> arrowP <?> "expression"
+
+-- | A type under constraints on its type variables, @C a => T@ or @(C a, D b) => T@.
+constrainedP :: Parser (Located Expr)
+constrainedP = do
+  start <- position
+  cs <- try (constraintsP <* symbol "=>")
+  body <- exprP
+  spanned start (EConstrained cs body)
 
 -- | Binders before an arrow, @{a : Type} (xs : List a) -> B@.
 piP :: Parser (Located Expr)
