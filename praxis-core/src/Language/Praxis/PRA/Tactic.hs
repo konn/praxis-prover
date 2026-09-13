@@ -53,7 +53,7 @@ module Language.Praxis.PRA.Tactic (
   signatureEnv,
 
   -- * Abstract functions
-  abstractParameter,
+  abstractParameters,
 
   -- * Running
   prove,
@@ -86,7 +86,7 @@ module Language.Praxis.PRA.Tactic (
 import Control.Applicative ((<|>))
 import Control.Exception (displayException)
 import Control.Lens ((^?))
-import Control.Monad (foldM, forM_, join, unless, when, (>=>))
+import Control.Monad (foldM, forM_, join, unless, when, zipWithM, (>=>))
 import Control.Monad.Free (Free (..))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, put)
@@ -125,7 +125,7 @@ import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Proof.Transform (argNames, substAtomic, substFormula, substProof, weakenProof)
 import Language.Praxis.PRA.Reflection (CodeView (..), codeView, comparisonSymbol, decodeFormula, encodeFormula)
 import Language.Praxis.PRA.Rule qualified as R
-import Language.Praxis.PRA.Signature (SchemaInstance (..), Signature, Symbol (..), applySchemaNamed, applySymbol, decompileFunction, instanceName, schemaInstanceOf, signatureKernelEnv)
+import Language.Praxis.PRA.Signature (SchemaInstance (..), Signature, Symbol (..), applySchemaAt, applySymbol, decompileFunction, instanceName, schemaInstanceOf, signatureKernelEnv)
 import Language.Praxis.PRA.Syntax
 import Language.Praxis.PRA.Syntax.Pretty
 
@@ -1878,22 +1878,19 @@ matchTermL sig cons b pat t = case canonicalise pat of
           Just (b', slots) ->
             Matched b' {bFuns = Map.insert n (abstraction (map fst slots) (foldl (\u (v, arg) -> abstractTerm arg v u) t slots)) (bFuns b')}
     | Just inst <- schemaInstanceOf sig f
-    , Just (n, params) <- abstractParameter inst -> case Map.lookup n (bFuns b) of
-        Just _ -> compareBound
-        Nothing -> case canonicalise t of
-          App g us
-            | Just inst' <- schemaInstanceOf sig g
-            , instanceName inst' == instanceName inst
-            , instanceExtras inst' >= instanceExtras inst
-            , (fixed, captured) <- splitAt (length (SV.toList ps)) (SV.toList us) ->
-                case matchAll (matchTermL sig cons) b (zip (SV.toList ps) fixed) of
-                  Matched b' ->
-                    let (b'', vs) = parameterPlaceholders b' params
-                     in case decompileFunction (instanceParameter inst') (map Var vs <> captured) of
-                          Just body -> Matched b'' {bFuns = Map.insert n (Abstraction vs body (instanceParameter inst') captured) (bFuns b'')}
-                          Nothing -> Mismatch
-                  other -> other
-          _ -> Mismatch
+    , any isJust (abstractParameters inst) ->
+        if all (maybe True ((`Map.member` bFuns b) . fst)) (abstractParameters inst)
+          then compareBound
+          else case canonicalise t of
+            App g us
+              | Just inst' <- schemaInstanceOf sig g
+              , instanceName inst' == instanceName inst
+              , instanceExtras inst' >= instanceExtras inst
+              , (fixed, captured) <- splitAt (length (SV.toList ps)) (SV.toList us) ->
+                  case matchAll (matchTermL sig cons) b (zip (SV.toList ps) fixed) of
+                    Matched b' -> bindParameters captured b' (zip3 (abstractParameters inst) (instanceParameters inst) (instanceParameters inst'))
+                    other -> other
+            _ -> Mismatch
     | otherwise -> case canonicalise t of
         App (g :: Function m) us -> case TE.testEquality (sNat @n) (sNat @m) of
           Just TE.Refl
@@ -1906,6 +1903,26 @@ matchTermL sig cons b pat t = case canonicalise pat of
       Just u
         | u == t -> Matched b
         | otherwise -> Mismatch
+
+    -- Each abstract function of the pattern's instance not yet bound is the
+    -- goal's parameter in its place, capturing the goal's further arguments;
+    -- every other parameter must be the goal's.
+    bindParameters captured = bindEach
+      where
+        bindEach bs = \case
+          [] -> Matched bs
+          (Just (m, params), _, theirs) : rest -> case Map.lookup m (bFuns bs) of
+            Nothing ->
+              let (bs', vs) = parameterPlaceholders bs params
+               in case decompileFunction theirs (map Var vs <> captured) of
+                    Just body -> bindEach bs' {bFuns = Map.insert m (Abstraction vs body theirs captured) (bFuns bs')} rest
+                    Nothing -> Mismatch
+            Just a
+              | abstractionFunction a == theirs && abstractionCaptured a == captured -> bindEach bs rest
+              | otherwise -> Mismatch
+          (Nothing, mine, theirs) : rest
+            | mine == theirs -> bindEach bs rest
+            | otherwise -> Mismatch
 
 matchAll :: (Bindings a -> x -> y -> Match a) -> Bindings a -> [(x, y)] -> Match a
 matchAll m = foldM' \b (x, y) -> m b x y
@@ -2010,10 +2027,10 @@ boundTerm sig b = go
             xs' <- traverse go (toList xs)
             applyAbstraction a xs'
         | Just inst <- schemaInstanceOf sig f
-        , Just (n, _) <- abstractParameter inst -> do
-            a <- Map.lookup n (bFuns b)
+        , any isJust (abstractParameters inst) -> do
+            params <- boundParameters (`Map.lookup` bFuns b) inst
             xs' <- traverse go (toList xs)
-            either (const Nothing) Just (applySchemaNamed sig (instanceName inst) (abstractionFunction a) (xs' <> abstractionCaptured a))
+            either (const Nothing) Just (applySchemaAt sig (instanceName inst) params xs')
         | otherwise -> App f <$> traverse go xs
 
 -- | The parameters of each metavariable of a lemma's statement, where it is applied: an atom or formula metavariable, or a term metavariable, an abstract function.
@@ -2057,10 +2074,17 @@ metasIn n f = concatMap atomMetas (atomsOf f)
 termMetas :: (Schematic a) => String -> Term a -> [String]
 termMetas n t = [m | v <- toList t, Just (_, m) <- [metaName v], m /= n] <> [m | (m, ps) <- functionMetas t, n `notElem` ps]
 
--- | The abstract function an instance of a schema is at, with its parameters.
-abstractParameter :: SchemaInstance -> Maybe (String, [String])
-abstractParameter inst = case instanceParameter inst of
-  F.SomeFunction f -> abstractName f
+-- | For each parameter of an instance of a schema, in order, the abstract function it is, with its parameters, if it is one.
+abstractParameters :: SchemaInstance -> [Maybe (String, [String])]
+abstractParameters inst = [abstractName f | F.SomeFunction f <- instanceParameters inst]
+
+-- | The parameters of an instance of a schema, in order, each abstract function among them as the lookup binds it.
+boundParameters :: (Monad m) => (String -> m (Abstraction a)) -> SchemaInstance -> m [Either F.SomeFunction (Abstraction a)]
+boundParameters look inst = zipWithM param (instanceParameters inst) (abstractParameters inst)
+  where
+    param p = \case
+      Nothing -> pure (Left p)
+      Just (n, _) -> Right <$> look n
 
 -- | Replace every occurrence of the term by the variable, throughout a term.
 abstractTerm :: (Eq a) => Term a -> a -> Term a -> Term a
@@ -2169,10 +2193,11 @@ instantiateFormula sig name sigma b = instF
             xs' <- traverse instT (toList xs)
             maybe (Left (Malformed (n <> " applied to " <> show (length xs') <> " arguments in " <> name))) Right (applyAbstraction a xs')
         | Just inst <- schemaInstanceOf sig f
-        , Just (n, _) <- abstractParameter inst -> do
-            a <- look R.TermS n (bFuns b)
+        , any isJust (abstractParameters inst) -> do
+            params <- boundParameters (\n -> look R.TermS n (bFuns b)) inst
             xs' <- traverse instT (toList xs)
-            first (CannotCapture name n . displayException) (applySchemaNamed sig (instanceName inst) (abstractionFunction a) (xs' <> abstractionCaptured a))
+            let metas = unwords [n | Just (n, _) <- abstractParameters inst]
+            first (CannotCapture name metas . displayException) (applySchemaAt sig (instanceName inst) params xs')
         | otherwise -> App f <$> traverse instT xs
 
     -- The parameters of an applied metavariable, substituted by its arguments at once.

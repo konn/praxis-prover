@@ -275,18 +275,21 @@ emitDefinition qualify (ElaboratedDefinition ident (_ :: F.Program n) _ _ _) =
     [t|F.Function $(arityType @n)|]
     (unTypeCode (liftTyped (F.Defined (F.DefId (qualify ident)) :: F.Function n)))
 
+-- | A schema is a curried function of its parameters, each at its arity, substituted for its calls in the code.
 emitSchema :: (T.Text -> T.Text) -> ElaboratedSchema -> TH.Q [TH.Dec]
-emitSchema _ (ElaboratedSchema ident params pArity (ElaboratedDefinition _ (code :: F.Program n) _ _ _)) =
-  case someNatVal pArity of
-    SomeNat (_ :: Proxy k) -> do
-      let name = TH.mkName (T.unpack ident)
-          paramName = TH.mkName "p"
-          targetParam = case params of (p : _) -> p; [] -> "P"
-          ty = [t|F.Function $(arityType @k) -> F.Function $(arityType @n)|]
-          body = [|F.Inline (substProgram (F.DefId targetParam) (F.functionProgram $(TH.varE paramName)) $(unTypeCode (liftAtArity [t|F.Program|] code)))|]
-      sigDec <- QTH.signature name ty
-      funDec <- QTH.function name [([D.DVarP paramName], body)]
-      pure [sigDec, funDec]
+emitSchema _ (ElaboratedSchema ident params arities (ElaboratedDefinition _ (code :: F.Program n) _ _ _)) = do
+  let name = TH.mkName (T.unpack ident)
+      paramNames = [TH.mkName ("p" <> show i) | i <- [1 .. length params]]
+      ty = foldr (\a rest -> [t|F.Function $(naturalType a) -> $rest|]) [t|F.Function $(arityType @n)|] arities
+      substituted =
+        foldr
+          (\(p, pName) inner -> [|substProgram (F.DefId p) (F.functionProgram $(TH.varE pName)) $inner|])
+          (unTypeCode (liftAtArity [t|F.Program|] code))
+          (zip params paramNames)
+      body = [|F.Inline $substituted|]
+  sigDec <- QTH.signature name ty
+  funDec <- QTH.function name [(map D.DVarP paramNames, body)]
+  pure [sigDec, funDec]
 
 {- | A variadic schema is a function of its parameter, polymorphic in that
 parameter's arity @m@; an instance has arity @m@ shifted by the constant
@@ -368,9 +371,24 @@ liftSignature sig = TH.joinCode do
     -- The clauses a symbol was defined by are data; a spliced signature keeps them, for its unfolding lemmas.
     definedBy [] code = code
     definedBy eqs code = [||Sig.definedBy $$(liftTyped eqs) $$code||]
-    schemaEntry (Sig.SchemaSymbol name (inst :: F.Function k -> F.Function n) hs) = case hs of
-      Just binding -> [||Sig.schemaSymbolNamed $$(liftTyped name) $$(liftTyped binding) $$(referenceSchema binding (id @(F.Function k -> F.Function n)))||]
-      Nothing -> [||Sig.schemaSymbol @k @n $$(liftTyped name) $$(referenceSchema (TH.mkName name) (id @(F.Function k -> F.Function n)))||]
+    -- A schema is rebuilt from its curried binding, whose type the splice
+    -- site checks: each parameter is taken at the arity of its place, and
+    -- the binding applied to them all.
+    schemaEntry sch = TH.unsafeCodeCoerce do
+      let name = Sig.schemaSymbolName sch
+          arities = Sig.schemaSymbolParamArities sch
+          binding = fromMaybe (TH.mkName name) (Sig.schemaSymbolHaskellName sch)
+      ps <- traverse (\i -> TH.newName ("p" <> show i)) [1 .. length arities]
+      qs <- traverse (\i -> TH.newName ("q" <> show i)) [1 .. length arities]
+      others <- TH.newName "others"
+      let taken = [TH.bindS (TH.varP q) [|Sig.parameterAt @($(naturalType a)) $(lift name) $(TH.varE p)|] | (p, q, a) <- zip3 ps qs arities]
+          applied = TH.noBindS [|pure (F.SomeFunction $(foldl TH.appE (TH.varE binding) (map TH.varE qs)))|]
+          instantiate =
+            TH.lamCaseE
+              [ TH.match (TH.listP [TH.conP 'F.SomeFunction [TH.varP p] | p <- ps]) (TH.normalB (TH.doE (taken <> [applied]))) []
+              , TH.match (TH.varP others) (TH.normalB [|Left (Sig.SchemaParameterCountMismatch (T.pack $(lift name)) $(lift (length arities)) (length $(TH.varE others)))|]) []
+              ]
+      [|(Sig.schemaSymbolWith $(lift name) $(lift arities) $(lift (Sig.schemaSymbolArity sch)) $instantiate) {Sig.schemaSymbolHaskellName = $(lift (Sig.schemaSymbolHaskellName sch))}|]
     -- The instances of a variadic schema are recovered from its polymorphic
     -- binding, whose type the splice site checks; the shape of that type is
     -- determined by the recorded arities alone.
@@ -390,8 +408,6 @@ liftSignature sig = TH.joinCode do
     -- its arity here; the splice site checks the actual Haskell binding again.
     reference :: TH.Name -> (a -> F.Function n) -> TH.Code TH.Q a
     reference binding _ = TH.unsafeCodeCoerce (QTH.varE binding)
-    referenceSchema :: TH.Name -> (a -> (F.Function k -> F.Function n)) -> TH.Code TH.Q a
-    referenceSchema binding _ = TH.unsafeCodeCoerce (QTH.varE binding)
 
 listCode :: [TH.Code TH.Q a] -> TH.Code TH.Q [a]
 listCode = foldr (\x xs -> [||$$x : $$xs||]) [||[]||]

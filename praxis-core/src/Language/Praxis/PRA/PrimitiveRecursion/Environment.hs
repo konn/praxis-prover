@@ -26,10 +26,8 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Proxy (Proxy (..))
 import Data.Text qualified as T
-import Data.Type.Equality (testEquality, (:~:) (Refl))
-import Data.Type.Natural (sNat)
 import GHC.Generics (Generic)
-import GHC.TypeNats (SomeNat (..), someNatVal)
+import GHC.TypeNats (natVal)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Compile
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error (ElaborationError, SchemaError (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (signatureEnv)
@@ -117,19 +115,8 @@ compileDefinitionsWith qualify env equations = do
 
 -- | The symbol of a compiled schema, instantiating it by program substitution.
 schemaSymbolOf :: String -> ElaboratedSchema -> Sig.SchemaSymbol
-schemaSymbolOf name sch@(ElaboratedSchema _ _ _ (ElaboratedDefinition _ (_ :: F.Program n) _ _ _)) =
-  case someNatVal (compiledSchemaParamArity sch) of
-    SomeNat (_ :: Proxy k) ->
-      Sig.schemaSymbol
-        name
-        ( \(p :: F.Function k) ->
-            case instantiateSchemaFunction sch (F.SomeFunction p) of
-              Right (F.SomeFunction (res :: F.Function m)) ->
-                case testEquality (sNat @m) (sNat @n) of
-                  Just Refl -> res
-                  Nothing -> error "Instantiated schema arity mismatch"
-              Left err -> error (displayException err)
-        )
+schemaSymbolOf name sch@(ElaboratedSchema _ _ arities (ElaboratedDefinition _ (_ :: F.Program n) _ _ _)) =
+  Sig.schemaSymbolWith name arities (natVal (Proxy @n)) (instantiateSchemaFunction sch)
 
 {- | The symbol of a variadic template, whose instances are elaborated on
 demand in the given signature. The template's own name is removed from the

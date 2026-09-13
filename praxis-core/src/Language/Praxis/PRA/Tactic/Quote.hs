@@ -112,7 +112,7 @@ import Data.Hashable (Hashable (..))
 import Data.List (intercalate, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Proxy (Proxy (..))
@@ -666,36 +666,49 @@ liftTerm env = go . canonicalise
             a <- metaParam env R.TermS p
             as <- traverse go (toList args)
             pure [||abstractionAt $$a $$(listCode as)||]
+        -- An instance of a schema at such metavariables, or at closures
+        -- calling them: each is instantiated again at run time, and the
+        -- other parameters are kept.  A closure, as a body over its own
+        -- parameters, is abstracted again from the body instantiated, as an
+        -- argument for such a metavariable is, so that caller and callee
+        -- meet in the same closure; the arguments it captured, which a
+        -- variadic instance takes last, are captured again with it.
         | Just inst <- schemaInstanceOf (leSig env) f
-        , Just (p, _) <- abstractParameter inst -> do
-            a <- metaParam env R.TermS p
-            as <- traverse go (toList args)
-            need NeedsSignature
-            let schema = instanceName inst
-            pure [||instantiateSchemaAt $$(boundName (leSignature env)) schema $$a $$(listCode as)||]
-        -- An instance of a schema at a closure calling an abstract function:
-        -- the closure, as a body over its own parameters, is abstracted again
-        -- at run time from the body instantiated, as an argument for such a
-        -- metavariable is, so that caller and callee meet in the same closure.
-        | Just inst <- schemaInstanceOf (leSig env) f
-        , F.SomeFunction (g :: F.Function k) <- instanceParameter inst
-        , not (null (F.opaqueCalls (F.functionProgram g))) -> do
-            let extras = fromIntegral (instanceExtras inst)
+        , params <- zip (instanceParameters inst) (abstractParameters inst)
+        , any opaque params -> do
+            let extras = if any closure params then fromIntegral (instanceExtras inst) else 0
                 (fixed, captured) = splitAt (length (toList args) - extras) (toList args)
-                own = fromIntegral (natVal (Proxy @k)) - extras
-                slots = [Obj ("«slot" <> show i <> "»") | i <- [0 .. own - 1 :: Int]]
-            body <- maybe (failL ("the parameter of an instance of " <> instanceName inst <> " does not decompile")) pure (decompileFunction (instanceParameter inst) (map Var slots <> captured))
-            body' <- go body
+            params' <- traverse (parameter inst extras captured) params
             fixed' <- traverse go fixed
-            params' <- traverse (liftName env) slots
             need NeedsSignature
-            need NeedsHashable
             let schema = instanceName inst
-            pure [||instantiateSchemaAt $$(boundName (leSignature env)) schema (abstraction $$(listCode params') $$body') $$(listCode fixed')||]
+            pure [||instantiateSchemaAt $$(boundName (leSignature env)) schema $$(listCode params') $$(listCode fixed')||]
         | otherwise -> do
             applied <- lift (functionCode (leSig env) f)
             as <- traverse go args
             pure [||App $$applied $$(liftSizedWith id as)||]
+
+    -- A parameter an abstract function stands for or calls, and one which calls without being one.
+    opaque (F.SomeFunction g, abstract) = isJust abstract || not (null (F.opaqueCalls (F.functionProgram g)))
+    closure p@(_, abstract) = opaque p && not (isJust abstract)
+
+    -- A parameter of an instance, as it is at run time.
+    parameter inst extras captured = \case
+      (_, Just (p, _)) -> do
+        a <- metaParam env R.TermS p
+        pure [||Right $$a||]
+      (F.SomeFunction (g :: F.Function k), Nothing)
+        | not (null (F.opaqueCalls (F.functionProgram g))) -> do
+            let own = fromIntegral (natVal (Proxy @k)) - extras
+                slots = [Obj ("«slot" <> show i <> "»") | i <- [0 .. own - 1 :: Int]]
+            body <- maybe (failL ("a parameter of an instance of " <> instanceName inst <> " does not decompile")) pure (decompileFunction (F.SomeFunction g) (map Var slots <> captured))
+            body' <- go body
+            params' <- traverse (liftName env) slots
+            need NeedsHashable
+            pure [||Right (abstraction $$(listCode params') $$body')||]
+        | otherwise -> do
+            code <- lift (functionCode (leSig env) g)
+            pure [||Left (F.SomeFunction $$code)||]
 
 -- | A function of the signature, by the Haskell name it records.
 functionCode :: (KnownNat n) => Signature -> F.Function n -> Q (Code Q (F.Function n))

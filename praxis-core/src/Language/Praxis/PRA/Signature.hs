@@ -35,8 +35,8 @@ module Language.Praxis.PRA.Signature (
   SchemaSymbol (..),
   schemaSymbol,
   schemaSymbolNamed,
-  schemaSymbolParamArity,
-  schemaSymbolArity,
+  schemaSymbolWith,
+  parameterAt,
   applySchemaSymbol,
   SchemaError (..),
 
@@ -74,13 +74,14 @@ module Language.Praxis.PRA.Signature (
   instanceName,
   schemaInstanceOf,
   applySchemaNamed,
+  applySchemaAt,
   instantiateSchemaAt,
   decompileProgram,
   decompileFunction,
 ) where
 
 import Control.Exception (displayException)
-import Control.Monad (foldM, guard, when)
+import Control.Monad (foldM, forM_, guard, when)
 import Data.Foldable (toList)
 import Data.List (find)
 import Data.Map.Strict (Map)
@@ -167,10 +168,23 @@ applySymbol sym args = case symbolFunction sym of
     | fromIntegral (length args) == natVal (Proxy @n) -> App fun <$> SV.fromList' args
     | otherwise -> Nothing
 
--- | A schema symbol that can be instantiated with a concrete function.
-data SchemaSymbol = forall k n. (KnownNat k, KnownNat n) => SchemaSymbol
+{- |
+A schema symbol: a function of functions, its parameters, each of an arity
+of its own.  An instance is the schema's code with the parameters
+substituted for their calls.  A schema recurs with its parameters unchanged,
+so an instance at primitive recursive functions is primitive recursive: a
+schema abbreviates a family of definitions, and adds nothing to PRA.
+-}
+data SchemaSymbol = SchemaSymbol
   { schemaSymbolName :: !String
-  , schemaSymbolFunction :: !(F.Function k -> F.Function n)
+  , schemaSymbolParamArities :: ![Natural]
+  -- ^ the arity of each parameter, in order
+  , schemaSymbolArity :: !Natural
+  -- ^ the arity of every instance
+  , schemaSymbolInstantiate :: [F.SomeFunction] -> Either SchemaError F.SomeFunction
+  {- ^ the instance at parameters of those arities, which 'applySchemaSymbol'
+  checks before it is called
+  -}
   , schemaSymbolHaskellName :: !(Maybe Name)
   }
 
@@ -180,28 +194,40 @@ instance Show SchemaSymbol where
 instance Eq SchemaSymbol where
   s1 == s2 =
     schemaSymbolName s1 == schemaSymbolName s2
-      && schemaSymbolParamArity s1 == schemaSymbolParamArity s2
+      && schemaSymbolParamArities s1 == schemaSymbolParamArities s2
       && schemaSymbolArity s1 == schemaSymbolArity s2
       && schemaSymbolHaskellName s1 == schemaSymbolHaskellName s2
 
-schemaSymbol :: (KnownNat k, KnownNat n) => String -> (F.Function k -> F.Function n) -> SchemaSymbol
-schemaSymbol n f = SchemaSymbol n f Nothing
+-- | A schema of one parameter, from its typed instantiation.
+schemaSymbol :: forall k n. (KnownNat k, KnownNat n) => String -> (F.Function k -> F.Function n) -> SchemaSymbol
+schemaSymbol n f = schemaSymbolWith n [natVal (Proxy @k)] (natVal (Proxy @n)) \case
+  [F.SomeFunction p] -> F.SomeFunction . f <$> parameterAt @k n p
+  ps -> Left (SchemaParameterCountMismatch (T.pack n) 1 (length ps))
 
 schemaSymbolNamed :: (KnownNat k, KnownNat n) => String -> Name -> (F.Function k -> F.Function n) -> SchemaSymbol
-schemaSymbolNamed n hs f = SchemaSymbol n f (Just hs)
+schemaSymbolNamed n hs f = (schemaSymbol n f) {schemaSymbolHaskellName = Just hs}
 
-schemaSymbolParamArity :: SchemaSymbol -> Natural
-schemaSymbolParamArity (SchemaSymbol _ (_ :: F.Function k -> F.Function n) _) = natVal (Proxy @k)
+-- | A schema of the parameter arities and the arity given, from its instantiation at parameters of those arities.
+schemaSymbolWith :: String -> [Natural] -> Natural -> ([F.SomeFunction] -> Either SchemaError F.SomeFunction) -> SchemaSymbol
+schemaSymbolWith n arities arity inst = SchemaSymbol n arities arity inst Nothing
 
-schemaSymbolArity :: SchemaSymbol -> Natural
-schemaSymbolArity (SchemaSymbol _ (_ :: F.Function k -> F.Function n) _) = natVal (Proxy @n)
+-- | A parameter of a schema at the arity a typed instantiation takes it at.
+parameterAt :: forall k m. (KnownNat k, KnownNat m) => String -> F.Function m -> Either SchemaError (F.Function k)
+parameterAt n f = case testEquality (sNat @m) (sNat @k) of
+  Just Refl -> Right f
+  Nothing -> Left (SchemaParameterArityMismatch (T.pack n) (natVal (Proxy @k)) (natVal (Proxy @m)))
 
--- | Instantiate at a parameter, which must have the schema's parameter arity.
-applySchemaSymbol :: SchemaSymbol -> F.SomeFunction -> Either SchemaError F.SomeFunction
-applySchemaSymbol (SchemaSymbol name (inst :: F.Function k -> F.Function n) _) (F.SomeFunction (f :: F.Function m)) =
-  case testEquality (sNat @m) (sNat @k) of
-    Just Refl -> Right (F.SomeFunction (inst f))
-    Nothing -> Left (SchemaParameterArityMismatch (T.pack name) (natVal (Proxy @k)) (natVal (Proxy @m)))
+-- | Instantiate at parameters: as many as the schema has, each of the arity of its place.
+applySchemaSymbol :: SchemaSymbol -> [F.SomeFunction] -> Either SchemaError F.SomeFunction
+applySchemaSymbol sch params = do
+  let name = T.pack (schemaSymbolName sch)
+      arities = schemaSymbolParamArities sch
+  when (length params /= length arities) $
+    Left (SchemaParameterCountMismatch name (length arities) (length params))
+  forM_ (zip arities params) \(expected, F.SomeFunction (_ :: F.Function m)) ->
+    when (natVal (Proxy @m) /= expected) $
+      Left (SchemaParameterArityMismatch name expected (natVal (Proxy @m)))
+  schemaSymbolInstantiate sch params
 
 {- | A schema with a variadic argument group. With @k@ variadic arguments its
 parameter has arity @paramArity + k@ and the instance has arity
@@ -251,13 +277,13 @@ instantiateVariadicSchemaSymbol sym k = do
   inst <- variadicSchemaInstance sym k
   let expectedParam = variadicSchemaParamArity sym + k
       expectedArity = variadicSchemaFixedArity sym + k
-  when (schemaSymbolParamArity inst /= expectedParam || schemaSymbolArity inst /= expectedArity) $
+  when (schemaSymbolParamArities inst /= [expectedParam] || schemaSymbolArity inst /= expectedArity) $
     Left
       ( VariadicInstanceArityMismatch
           (T.pack (variadicSchemaName sym))
           k
-          (schemaSymbolParamArity inst, schemaSymbolArity inst)
-          (expectedParam, expectedArity)
+          (schemaSymbolParamArities inst, schemaSymbolArity inst)
+          ([expectedParam], expectedArity)
       )
   pure inst
 
@@ -269,7 +295,7 @@ applyVariadicSchemaSymbol sym f@(F.SomeFunction (_ :: F.Function m)) = do
   when (arity < least) $
     Left (VariadicParameterTooSmall (T.pack (variadicSchemaName sym)) least arity)
   inst <- instantiateVariadicSchemaSymbol sym (arity - least)
-  applySchemaSymbol inst f
+  applySchemaSymbol inst [f]
 
 {- | Typed application, for spliced bindings whose arities are checked by the
 compiler; the instance's arities are rechecked here and cannot disagree.
@@ -311,7 +337,7 @@ variadicInstanceSame ::
   (forall m. (KnownNat m) => F.Function m -> F.Function m) ->
   Natural ->
   Either SchemaError SchemaSymbol
-variadicInstanceSame n pArity f k = withArity (pArity + k) \(_ :: Proxy m) -> Right (SchemaSymbol n (f @m) Nothing)
+variadicInstanceSame n pArity f k = withArity (pArity + k) \(_ :: Proxy m) -> Right (schemaSymbol n (f @m))
 
 variadicInstancePlus ::
   forall d.
@@ -321,7 +347,7 @@ variadicInstancePlus ::
   (forall m. (KnownNat m) => F.Function m -> F.Function (m + d)) ->
   Natural ->
   Either SchemaError SchemaSymbol
-variadicInstancePlus n pArity f k = withArity (pArity + k) \(_ :: Proxy m) -> Right (SchemaSymbol n (f @m) Nothing)
+variadicInstancePlus n pArity f k = withArity (pArity + k) \(_ :: Proxy m) -> Right (schemaSymbol n (f @m))
 
 variadicInstanceMinus ::
   forall d.
@@ -333,7 +359,7 @@ variadicInstanceMinus ::
   Either SchemaError SchemaSymbol
 variadicInstanceMinus n pArity f k = withArity (pArity + k) \(_ :: Proxy m) ->
   case sNat @d %<=? sNat @m of
-    STrue -> Right (SchemaSymbol n (f @m) Nothing)
+    STrue -> Right (schemaSymbol n (f @m))
     SFalse -> Left (VariadicParameterBelowOffset (T.pack n) (pArity + k) (natVal (Proxy @d)))
 
 -- | A table of symbols and schemas, keyed by name.
@@ -406,12 +432,13 @@ withKernelEnv env (Signature syms schs vars _) = Signature syms schs vars (Right
 
 {- |
 A function which instantiates a schema of the signature: the schema, the
-number of variadic arguments it was instantiated with, and its parameter.
+number of variadic arguments it was instantiated with, and its parameters,
+one for each parameter of the schema, in order; a variadic schema has one.
 -}
 data SchemaInstance = SchemaInstance
   { instanceSchema :: !(Either SchemaSymbol VariadicSchemaSymbol)
   , instanceExtras :: !Natural
-  , instanceParameter :: !F.SomeFunction
+  , instanceParameters :: ![F.SomeFunction]
   }
   deriving (Show, Eq)
 
@@ -420,10 +447,11 @@ instanceName :: SchemaInstance -> String
 instanceName = either schemaSymbolName variadicSchemaName . instanceSchema
 
 {- |
-The schema an inline code instantiates, with its parameter: the code is
-matched against the schema instantiated at a placeholder, whose calls bind
-the parameter.  The variadic schemas are tried first, each at the number of
-variadic arguments the arity of the code leaves, then the plain ones.
+The schema an inline code instantiates, with its parameters: the code is
+matched against the schema instantiated at placeholders, one for each
+parameter, whose calls bind the parameters.  The variadic schemas are tried
+first, each at the number of variadic arguments the arity of the code
+leaves, then the plain ones.
 -}
 schemaInstanceOf :: forall n. (KnownNat n) => Signature -> F.Function n -> Maybe SchemaInstance
 schemaInstanceOf sig = \case
@@ -435,33 +463,44 @@ schemaInstanceOf sig = \case
       guard (arity >= variadicSchemaFixedArity sym)
       let extras = arity - variadicSchemaFixedArity sym
       inst <- either (const Nothing) Just (instantiateVariadicSchemaSymbol sym extras)
-      param <- parameterOf inst code
-      pure (SchemaInstance (Right sym) extras param)
+      params <- parametersOf inst code
+      pure (SchemaInstance (Right sym) extras params)
     plain code sch = do
       guard (schemaSymbolArity sch == arity)
-      param <- parameterOf sch code
-      pure (SchemaInstance (Left sch) 0 param)
+      params <- parametersOf sch code
+      pure (SchemaInstance (Left sch) 0 params)
 
--- | The parameter a code instantiates a schema at, by matching the code against the instantiation at a placeholder.
-parameterOf :: forall n. (KnownNat n) => SchemaSymbol -> F.Program n -> Maybe F.SomeFunction
-parameterOf (SchemaSymbol _ (inst :: F.Function k -> F.Function m) _) code =
-  case testEquality (sNat @m) (sNat @n) of
-    Just Refl -> do
-      let template = F.functionProgram (inst (F.Defined (F.DefId placeholder)))
-      bound <- unify Nothing template code
-      bound
-    Nothing -> Nothing
+{- |
+The parameters a code instantiates a schema at, by matching the code against
+the instantiation at placeholders, one for each parameter.  Every parameter
+is called somewhere in the code, as the compiler requires of a schema's
+clauses, so every placeholder is bound.
+-}
+parametersOf :: forall n. (KnownNat n) => SchemaSymbol -> F.Program n -> Maybe [F.SomeFunction]
+parametersOf sch code = do
+  F.SomeFunction (template :: F.Function m) <- either (const Nothing) Just (applySchemaSymbol sch placeholders)
+  Refl <- testEquality (sNat @m) (sNat @n)
+  bound <- unify Map.empty (F.functionProgram template) code
+  traverse (`Map.lookup` bound) indices
   where
-    placeholder = T.pack "«parameter»"
+    indices = zipWith const [0 ..] (schemaSymbolParamArities sch)
+    placeholders = zipWith placeholder indices (schemaSymbolParamArities sch)
+    placeholder :: Int -> Natural -> F.SomeFunction
+    placeholder i arity = case someNatVal arity of
+      SomeNat (_ :: Proxy k) -> F.SomeFunction (F.Defined (F.DefId (placeholderName i)) :: F.Function k)
+    placeholderName i = T.pack ("«parameter " <> show i <> "»")
+    placeholderIndex ident = lookup ident [(placeholderName i, i) | i <- indices]
 
-    unify :: forall j. (KnownNat j) => Maybe F.SomeFunction -> F.Program j -> F.Program j -> Maybe (Maybe F.SomeFunction)
+    unify :: forall j. (KnownNat j) => Map Int F.SomeFunction -> F.Program j -> F.Program j -> Maybe (Map Int F.SomeFunction)
     unify acc template code' = case (template, code') of
       (F.Call (F.DefId ident), _)
-        | ident == placeholder -> case acc of
-            Nothing -> Just (Just (F.SomeFunction (F.programFunction code')))
-            Just p
-              | p == F.SomeFunction (F.programFunction code') -> Just acc
-              | otherwise -> Nothing
+        | Just i <- placeholderIndex ident ->
+            let found = F.SomeFunction (F.programFunction code')
+             in case Map.lookup i acc of
+                  Nothing -> Just (Map.insert i found acc)
+                  Just p
+                    | p == found -> Just acc
+                    | otherwise -> Nothing
       (F.Base x, F.Base y) | x == y -> Just acc
       (F.Call x, F.Call y) | x == y -> Just acc
       (F.Opaque x, F.Opaque y) | x == y -> Just acc
@@ -474,16 +513,19 @@ parameterOf (SchemaSymbol _ (inst :: F.Function k -> F.Function m) _) code =
       _ -> Nothing
 
 {- |
-The instance of the schema of the name at a parameter, applied to arguments:
-a variadic schema is instantiated at the number of variadic arguments the
-arity of the parameter determines, a plain one at its parameter arity.  The
-arguments must be as many as the arity of the instance.
+The instance of the schema of the name at parameters, applied to arguments:
+a variadic schema, whose one parameter is the only one given, is
+instantiated at the number of variadic arguments the arity of the parameter
+determines, a plain one at its parameter arities.  The arguments must be as
+many as the arity of the instance.
 -}
-applySchemaNamed :: Signature -> String -> F.SomeFunction -> [Term a] -> Either SchemaError (Term a)
-applySchemaNamed sig n param args = do
+applySchemaNamed :: Signature -> String -> [F.SomeFunction] -> [Term a] -> Either SchemaError (Term a)
+applySchemaNamed sig n params args = do
   fun <- case (lookupVariadicSchema n sig, lookupSchema n sig) of
-    (Just sym, _) -> applyVariadicSchemaSymbol sym param
-    (Nothing, Just sch) -> applySchemaSymbol sch param
+    (Just sym, _) -> case params of
+      [param] -> applyVariadicSchemaSymbol sym param
+      _ -> Left (SchemaParameterCountMismatch (T.pack n) 1 (length params))
+    (Nothing, Just sch) -> applySchemaSymbol sch params
     (Nothing, Nothing) -> Left (SchemaNotInSignature (T.pack n))
   case fun of
     F.SomeFunction (f :: F.Function m) -> case SV.fromList' args of
@@ -491,16 +533,26 @@ applySchemaNamed sig n param args = do
       Nothing -> Left (InstanceArgumentCountMismatch (T.pack n) (natVal (Proxy @m)) (fromIntegral (length args)))
 
 {- |
-The instance of the schema of the name at the function of an abstraction,
-applied to the arguments and then to the terms the function captures: what
-a proof spliced for a derived rule builds where the rule had the schema at a
-term metavariable with parameters.  The rule was checked, so a failure is an
-error.
+The instance of the schema of the name at its parameters, some of them the
+functions of abstractions, applied to the arguments and then to the terms
+those abstractions capture, in order: an instance of a schema at term
+metavariables with parameters, once they are bound.  Only a variadic schema
+passes captured terms on, so an abstraction capturing terms is the parameter
+of a variadic schema, or the instance is refused for its arities.
 -}
-instantiateSchemaAt :: Signature -> String -> Abstraction a -> [Term a] -> Term a
-instantiateSchemaAt sig n a args =
+applySchemaAt :: Signature -> String -> [Either F.SomeFunction (Abstraction a)] -> [Term a] -> Either SchemaError (Term a)
+applySchemaAt sig n params args =
+  applySchemaNamed sig n (map (either id abstractionFunction) params) (args <> concatMap (either (const []) abstractionCaptured) params)
+
+{- |
+'applySchemaAt' in a proof spliced for a derived rule, where the rule had the
+schema at term metavariables with parameters.  The rule was checked, so a
+failure is an error.
+-}
+instantiateSchemaAt :: Signature -> String -> [Either F.SomeFunction (Abstraction a)] -> [Term a] -> Term a
+instantiateSchemaAt sig n params args =
   either (\err -> error ("Language.Praxis.PRA.Signature.instantiateSchemaAt: " <> n <> ": " <> displayException err)) id $
-    applySchemaNamed sig n (abstractionFunction a) (args <> abstractionCaptured a)
+    applySchemaAt sig n params args
 
 {- |
 A program applied to the terms in its slots, its compositions unfolded: the

@@ -137,22 +137,23 @@ buildTermAt sig = \name level -> go [] name level . canonicalise
           guard (shownBound == runBuilder (at 2 r))
           pure (paren (level > 0) ("∃ " <> fromString binder <> " < " <> fromText shownBound <> ". " <> go (binder : bound) (either id name) 0 body))
 
-        -- An instance of a schema at its parameter: a symbol or an abstract
-        -- function in braces, or a lambda.
+        -- An instance of a schema at its parameters, each in braces: a
+        -- symbol or an abstract function, or a lambda.
         schemaApplication :: forall n. SchemaInstance -> V n (Term b) -> Maybe Builder
-        schemaApplication inst args = case instanceParameter inst of
-          F.SomeFunction (param :: F.Function k)
-            | Just (p, _) <- abstractName param -> Just (application (schema <> " {" <> fromString p <> "}") args)
-            | Just sym <- symbolOfFunction param sig -> Just (application (schema <> " {" <> fromString (symbolName sym) <> "}") args)
-            | F.Primitive Succ <- param -> Just (application (schema <> " {S}") args)
-            | otherwise -> do
-                let binders = take (fromIntegral (natVal (Proxy @k))) (freshNames (bound <> avoid args))
-                slots <- SV.fromList' (map (Var . Left) binders)
-                let body = decompileProgram slots (F.functionProgram param)
-                    lambda = "{λ " <> unwordsB (map fromString binders) <> ". " <> go (binders <> bound) (either id name) 0 body <> "}"
-                pure (application (schema <> " " <> lambda) args)
+        schemaApplication inst args = do
+          params <- traverse parameter (instanceParameters inst)
+          pure (application (unwordsB (fromString (instanceName inst) : params)) args)
           where
-            schema = fromString (instanceName inst)
+            parameter :: F.SomeFunction -> Maybe Builder
+            parameter (F.SomeFunction (param :: F.Function k))
+              | Just (p, _) <- abstractName param = Just ("{" <> fromString p <> "}")
+              | Just sym <- symbolOfFunction param sig = Just ("{" <> fromString (symbolName sym) <> "}")
+              | F.Primitive Succ <- param = Just "{S}"
+              | otherwise = do
+                  let binders = take (fromIntegral (natVal (Proxy @k))) (freshNames (bound <> avoid args))
+                  slots <- SV.fromList' (map (Var . Left) binders)
+                  let body = decompileProgram slots (F.functionProgram param)
+                  pure ("{λ " <> unwordsB (map fromString binders) <> ". " <> go (binders <> bound) (either id name) 0 body <> "}")
 
         -- The names a binder must avoid: the variables of the arguments, and symbols.
         avoid :: forall n. V n (Term b) -> [String]
@@ -285,7 +286,7 @@ quantifiedAt sig functions name used schema term = case canonicalise term of
   App g gs
     | Just inst <- schemaInstanceOf sig g
     , instanceName inst == schema
-    , F.SomeFunction (param :: F.Function k) <- instanceParameter inst
+    , [F.SomeFunction (param :: F.Function k)] <- instanceParameters inst
     , inline param || functions
     , b : captured <- toList gs
     , fromIntegral (natVal (Proxy @k)) == 1 + length captured

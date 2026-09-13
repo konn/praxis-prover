@@ -14,13 +14,18 @@ import Numeric.Natural (Natural)
 
 data SomeFunction
   = forall n. (KnownNat n) => SomeFunction !(Function n)
-  | SchemaDef !T.Text ![T.Text] !Natural !Natural
-  | ImportedSchema !T.Text !Natural !Natural !(F.SomeFunction -> Either SchemaError F.SomeFunction)
+  | -- | A schema being defined: its name, its parameters with their arities, in order, and its arity.
+    SchemaDef !T.Text ![T.Text] ![Natural] !Natural
+  | {- | A schema of the signature: its name, the arities of its parameters,
+    its arity, and its instantiation at parameters of those arities.
+    -}
+    ImportedSchema !T.Text ![Natural] !Natural !([F.SomeFunction] -> Either SchemaError F.SomeFunction)
   | VariadicDef !VariadicTemplate
   | {- | Name, fixed arity, parameter arity at zero variadic arguments, and
-    the instantiation at a number of variadic arguments.
+    the instantiation at a number of variadic arguments, whose one parameter
+    is the only element of the list it takes.
     -}
-    ImportedVariadic !T.Text !Natural !Natural !(Natural -> Either SchemaError (F.SomeFunction -> Either SchemaError F.SomeFunction))
+    ImportedVariadic !T.Text !Natural !Natural !(Natural -> Either SchemaError ([F.SomeFunction] -> Either SchemaError F.SomeFunction))
 
 instance Show SomeFunction where
   showsPrec d (SomeFunction f) = showParen (d > 10) (showString "SomeFunction " . showsPrec 11 f)

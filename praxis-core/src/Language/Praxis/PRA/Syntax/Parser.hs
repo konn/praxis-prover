@@ -120,7 +120,7 @@ module Language.Praxis.PRA.Syntax.Parser (
 ) where
 
 import Control.Exception (Exception (..))
-import Control.Monad (unless, void)
+import Control.Monad (unless, void, zipWithM)
 import Data.Bifunctor (first)
 import Data.Hashable (Hashable)
 import Data.List (nub)
@@ -374,15 +374,16 @@ resolveTerm sc raw = do
         f <- function fun
         args <- traverse (go env) arguments
         applied f args
-      Just (E.ImportedSchema sName pArity sArity inst) -> case arguments of
-        [] -> elaboration (Left (SchemaArgumentCountMismatch sName 1 0))
-        param : rest -> do
-          checkArity sName sArity rest
-          pFun <- parameter env sName pArity param
-          instantiated <- elaboration (first SchemaFailure (inst pFun))
-          args <- traverse (go env) rest
-          case instantiated of
-            F.SomeFunction instFun -> applied instFun args
+      Just (E.ImportedSchema sName arities sArity inst)
+        | length arguments < length arities -> elaboration (Left (SchemaArgumentCountMismatch sName (length arities) (length arguments)))
+        | otherwise -> do
+            let (params, rest) = splitAt (length arities) arguments
+            checkArity sName sArity rest
+            pFuns <- zipWithM (parameter env sName) arities params
+            instantiated <- elaboration (first SchemaFailure (inst pFuns))
+            args <- traverse (go env) rest
+            case instantiated of
+              F.SomeFunction instFun -> applied instFun args
       Just (E.ImportedVariadic sName fixed _ _) -> elaboration (Left (UnexpandedVariadicApplication sName fixed))
       Just (E.SchemaDef sName _ _ _) -> Left ("internal: a schema definition " <> T.unpack sName <> " in a signature")
       Just (E.VariadicDef tmpl) -> Left ("internal: a template " <> T.unpack (E.templateName tmpl) <> " in a signature")

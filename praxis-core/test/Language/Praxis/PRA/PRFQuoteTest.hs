@@ -66,6 +66,9 @@ import Test.Tasty.HUnit
 
   opExpr a b c = a + b * c
   condExpr a b = if a < b then a else b
+  mixQ {F, G} 0 x = G x
+  mixQ {F, G} (S n) x = F n (mixQ {F} {G} n x)
+  useMixQ n = mixQ {add} {S} n 0
 |]
 
 [rawPRF|
@@ -164,6 +167,10 @@ prfQuoteTests =
         let muLt = mu PR.lt
         F.evalFunction env muLt (3 SV.:< 2 SV.:< SV.Nil) @?= Right 0
         F.evalFunction env muLt (3 SV.:< 0 SV.:< SV.Nil) @?= Right 3
+        -- A schema of a binary and a unary parameter, spliced as a curried binding.
+        F.evalFunction env (mixQ PR.add (F.Primitive PR.Succ)) (3 SV.:< 5 SV.:< SV.Nil) @?= Right 9
+        F.evalFunction env useMixQ (3 SV.:< SV.Nil) @?= Right 4
+        Sig.schemaSymbolParamArities <$> Sig.lookupSchema "mixQ" schemaEnv @?= Just [2, 1]
         builtinKernel <- expectRight (Sig.signatureKernelEnv PR.builtin)
         F.evalFunction builtinKernel PR.projW (0 SV.:< SV.Nil) @?= Right 0
         F.evalFunction builtinKernel PR.projW (1 SV.:< SV.Nil) @?= Right 1

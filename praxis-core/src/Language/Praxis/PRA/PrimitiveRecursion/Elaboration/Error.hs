@@ -34,9 +34,9 @@ data SchemaError
     -}
     VariadicParameterBelowOffset !T.Text !Natural !Natural
   | {- | an instance disagrees with the recorded arities: schema, number of
-    variadic arguments, the (parameter arity, arity) found and expected
+    variadic arguments, the (parameter arities, arity) found and expected
     -}
-    VariadicInstanceArityMismatch !T.Text !Natural !(Natural, Natural) !(Natural, Natural)
+    VariadicInstanceArityMismatch !T.Text !Natural !([Natural], Natural) !([Natural], Natural)
   | {- | the instance of a lifted template could not be elaborated: schema,
     number of variadic arguments, the failure
     -}
@@ -111,6 +111,13 @@ data ElaborationError
     SchemaArgumentCountMismatch !T.Text !Int !Int
   | -- | a schema recurring without its own parameters: schema, parameters
     SchemaAppliedWithoutParameter !T.Text ![T.Text]
+  | {- | a schema recurring at other parameters than its own, in their order:
+    schema, parameters.  Recursion with a function changed is recursion of a
+    higher type, beyond primitive recursion.
+    -}
+    SchemaRecursionChangesParameters !T.Text ![T.Text]
+  | -- | a schema parameter its clauses never mention: schema, parameter
+    SchemaParameterUnused !T.Text !T.Text
   | -- | a pattern variable passed as a schema argument
     SchemaArgumentIsVariable !T.Text
   | -- | a schema passed as a schema argument
@@ -221,6 +228,14 @@ instance Exception ElaborationError where
       "Schema " <> T.unpack schema <> " expects " <> show expected <> " schema argument(s), given " <> show given
     SchemaAppliedWithoutParameter schema params ->
       "Schema " <> T.unpack schema <> " must be applied to its parameter " <> intercalate ", " (map T.unpack params)
+    SchemaRecursionChangesParameters schema params ->
+      "Schema "
+        <> T.unpack schema
+        <> " must recur at its own parameters "
+        <> unwords ["{" <> T.unpack p <> "}" | p <- params]
+        <> ", unchanged and in order: recursion with a function changed is beyond primitive recursion"
+    SchemaParameterUnused schema param ->
+      "The parameter " <> T.unpack param <> " of schema " <> T.unpack schema <> " is never used"
     SchemaArgumentIsVariable p -> "Schema argument " <> quoted (T.unpack p) <> " is a variable, not a function"
     SchemaArgumentIsSchema p -> "Schema argument " <> quoted (T.unpack p) <> " is a schema, not a function"
     SchemaArgumentArityMismatch p expected given ->

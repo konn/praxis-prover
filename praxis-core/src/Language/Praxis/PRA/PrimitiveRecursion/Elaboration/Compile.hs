@@ -67,7 +67,8 @@ deriving instance Show ElaboratedDefinition
 data ElaboratedSchema = ElaboratedSchema
   { compiledSchemaName :: !T.Text
   , compiledSchemaParams :: ![T.Text]
-  , compiledSchemaParamArity :: !Natural
+  , compiledSchemaParamArities :: ![Natural]
+  -- ^ the arity of each parameter, in order
   , compiledSchemaDefinition :: !ElaboratedDefinition
   }
 
@@ -85,7 +86,7 @@ data ElaboratedFamily = ElaboratedFamily
 
 data CompiledSchema = CompiledSchema
   { cSchemaParams :: ![T.Text]
-  , cSchemaParamArity :: !Natural
+  , cSchemaParamArities :: ![Natural]
   , cSchemaArity :: !Natural
   , cSchemaInstantiate :: !([F.SomeFunction] -> Either SchemaError F.SomeFunction)
   }
@@ -101,33 +102,33 @@ substProgram target replacement = go
             Just Refl -> replacement
             Nothing -> F.Call ident
       | otherwise = F.Call ident
+    -- An abstract function, which an earlier parameter may have put here, stays.
+    go (F.Opaque ident) = F.Opaque ident
     go (F.Comp f xs) = F.Comp (go f) (fmap go xs)
     go (F.Rec b s) = F.Rec (go b) (go s)
 
--- | Instantiate a compiled schema by substituting its parameter placeholders.
+{- | Instantiate a compiled schema by substituting its parameter
+placeholders: each parameter, of the arity of its place, for its calls.
+-}
 instantiateLocal ::
   [T.Text] ->
-  Natural ->
+  [Natural] ->
   ElaboratedDefinition ->
   [F.SomeFunction] ->
   Either SchemaError F.SomeFunction
-instantiateLocal params pArity (ElaboratedDefinition self (code :: F.Program sArity) _ _ _) pFuns = do
+instantiateLocal params arities (ElaboratedDefinition self (code :: F.Program sArity) _ _ _) pFuns = do
   unless (length params == length pFuns) (Left (SchemaParameterCountMismatch self (length params) (length pFuns)))
-  instCode <- foldM subst code (zip params pFuns)
+  instCode <- foldM subst code (zip3 params arities pFuns)
   pure (F.SomeFunction (F.Inline instCode :: F.Function sArity))
   where
-    subst curr (paramName, F.SomeFunction (pFun :: F.Function k)) =
-      case someNatVal pArity of
-        SomeNat (_ :: Proxy expectedP) ->
-          case testEquality (sNat @k) (sNat @expectedP) of
-            Just Refl ->
-              Right (substProgram (F.DefId paramName :: F.DefId k) (F.functionProgram pFun) curr)
-            Nothing ->
-              Left (SchemaParameterArityMismatch self pArity (natVal (Proxy @k)))
+    subst curr (paramName, pArity, F.SomeFunction (pFun :: F.Function k))
+      | natVal (Proxy @k) == pArity = Right (substProgram (F.DefId paramName :: F.DefId k) (F.functionProgram pFun) curr)
+      | otherwise = Left (SchemaParameterArityMismatch self pArity (natVal (Proxy @k)))
 
-instantiateSchemaFunction :: ElaboratedSchema -> F.SomeFunction -> Either SchemaError F.SomeFunction
-instantiateSchemaFunction (ElaboratedSchema _ params pArity def) p =
-  instantiateLocal params pArity def [p]
+-- | A compiled schema at its parameters, in order.
+instantiateSchemaFunction :: ElaboratedSchema -> [F.SomeFunction] -> Either SchemaError F.SomeFunction
+instantiateSchemaFunction (ElaboratedSchema _ params arities def) =
+  instantiateLocal params arities def
 
 data SomeProgram = forall n. (KnownNat n) => SomeProgram !(Program n)
 
@@ -326,13 +327,13 @@ elaborateRenamedEquationsWith qualify initial equations =
   fst <$> elaborateRenamedEquationsAndSchemasWith qualify Map.empty initial Set.empty Map.empty equations
 
 -- A schema's parameters are placeholders bound only while compiling its own
--- clauses, at its own parameter arity; other schemas may reuse the names.
+-- clauses, each at its own arity; other schemas may reuse the names.
 elaborateRenamedEquationsAndSchemasWith ::
   (T.Text -> T.Text) ->
   Map T.Text CompiledSchema ->
   Map T.Text SomeProgram ->
   Set.Set T.Text ->
-  Map T.Text ([T.Text], Natural, Natural) ->
+  Map T.Text ([T.Text], [Natural], Natural) ->
   [RenamedEquation] ->
   Either ElaborationError (Map T.Text ElaboratedDefinition, Map T.Text CompiledSchema)
 elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNames schemaMeta equations =
@@ -340,9 +341,10 @@ elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNa
   where
     groups = foldr (\eq -> Map.insertWith (<>) (renamedName eq) [eq]) Map.empty equations
     parameterCodes ident = case Map.lookup ident schemaMeta of
-      Just (params, pArity, _) -> case someNatVal pArity of
-        SomeNat (_ :: Proxy p) -> Map.fromList [(p, SomeProgram (F.Call (F.DefId p :: F.DefId p))) | p <- params]
+      Just (params, arities, _) -> Map.fromList (zipWith parameterCode params arities)
       Nothing -> Map.empty
+    parameterCode p arity = case someNatVal arity of
+      SomeNat (_ :: Proxy k) -> (p, SomeProgram (F.Call (F.DefId p :: F.DefId k)))
     visit active (doneDefs, doneSchemas) ident
       | Map.member ident doneDefs = Right (doneDefs, doneSchemas)
       | Set.member ident active = Left (MutualRecursion ident)
@@ -359,14 +361,14 @@ elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initial schemaNa
             result <- elaborateDefinitionWith doneSchemas' envCodes clauses
             let doneDefs'' = Map.insert ident result doneDefs'
                 doneSchemas'' = case Map.lookup ident schemaMeta of
-                  Just (params, pArity, sArity) ->
+                  Just (params, arities, sArity) ->
                     Map.insert
                       ident
                       ( CompiledSchema
                           { cSchemaParams = params
-                          , cSchemaParamArity = pArity
+                          , cSchemaParamArities = arities
                           , cSchemaArity = sArity
-                          , cSchemaInstantiate = instantiateLocal params pArity result
+                          , cSchemaInstantiate = instantiateLocal params arities result
                           }
                       )
                       doneSchemas'
@@ -411,31 +413,29 @@ elaborateExpanded qualify demands expanded = do
         Map.fromList
           [ ( sName
             , CompiledSchema
-                { cSchemaParams = ["P"]
-                , cSchemaParamArity = pArity
+                { cSchemaParams = ["P" <> T.pack (show i) | i <- zipWith const [1 :: Int ..] arities]
+                , cSchemaParamArities = arities
                 , cSchemaArity = sArity
-                , cSchemaInstantiate = \case
-                    [pArg] -> instFun pArg
-                    pArgs -> Left (SchemaParameterCountMismatch sName 1 (length pArgs))
+                , cSchemaInstantiate = instFun
                 }
             )
-          | (_, ImportedSchema sName pArity sArity instFun) <- Map.toList env'
+          | (_, ImportedSchema sName arities sArity instFun) <- Map.toList env'
           ]
       schemaMeta =
         Map.fromList
-          [ (sName, (params, pArity, sArity))
+          [ (sName, (params, arities, sArity))
           | eq <- equations
           , not (null (schemaParams eq))
           , let sName = name eq
-          , Just (SchemaDef _ params pArity sArity) <- [Map.lookup sName env']
+          , Just (SchemaDef _ params arities sArity) <- [Map.lookup sName env']
           ]
       schemaNames = Map.keysSet schemaMeta
   (defs, _compiledSchemas) <-
     elaborateRenamedEquationsAndSchemasWith qualify externalSchemas initialCodes schemaNames schemaMeta renamed
   let (schemaDefs, regularDefs) = Map.partitionWithKey (\k _ -> Set.member k schemaNames) defs
       toSchema ident def = case Map.lookup ident schemaMeta of
-        Just (params, pArity, _) ->
-          Just (ElaboratedSchema ident params pArity def)
+        Just (params, arities, _) ->
+          Just (ElaboratedSchema ident params arities def)
         _ -> Nothing
       schemas = Map.mapMaybeWithKey toSchema schemaDefs
       instances = expandedInstances expanded

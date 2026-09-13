@@ -309,7 +309,7 @@ instantiate ident k = do
           let instName = instanceName ident k
           modify' \s ->
             s
-              { stEnv = Map.insert instName (ImportedSchema instName (pArity + k) (fixed + k) inst) (stEnv s)
+              { stEnv = Map.insert instName (ImportedSchema instName [pArity + k] (fixed + k) inst) (stEnv s)
               , stDone = Map.insert (ident, k) [] (stDone s)
               , stInstances = Set.insert instName (stInstances s)
               }
@@ -424,7 +424,7 @@ captureSlots ctx env instances = go []
         | Set.member h instances -> 1
         | otherwise -> case Map.lookup h env of
             Just (SchemaDef _ params _ _) -> length params
-            Just ImportedSchema {} -> 1
+            Just (ImportedSchema _ arities _ _) -> length arities
             Just ImportedVariadic {} -> 1
             Just VariadicDef {} -> 1
             _ -> 0

@@ -162,7 +162,7 @@ elaborationTests =
         Sig.variadicSchemaFixedArity sym @?= 1
         Sig.variadicSchemaParamArity sym @?= 1
         inst <- expectRight (Sig.instantiateVariadicSchemaSymbol sym 2)
-        Sig.schemaSymbolParamArity inst @?= 3
+        Sig.schemaSymbolParamArities inst @?= [3]
         Sig.schemaSymbolArity inst @?= 3
         p2 <- maybe (assertFailure "p2") pure (Sig.lookupSymbol "p2" (environmentSignature env))
         p0 <- maybe (assertFailure "p0") pure (Sig.lookupSymbol "p0" (environmentSignature env))

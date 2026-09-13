@@ -10,7 +10,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Rename (
 ) where
 
 import Control.Applicative ((<|>))
-import Control.Monad (foldM, unless)
+import Control.Monad (foldM, forM_, unless, zipWithM)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -48,7 +48,7 @@ signatureEnv sig =
       ( T.pack (Sig.schemaSymbolName sch)
       , ImportedSchema
           (T.pack (Sig.schemaSymbolName sch))
-          (Sig.schemaSymbolParamArity sch)
+          (Sig.schemaSymbolParamArities sch)
           (Sig.schemaSymbolArity sch)
           (Sig.applySchemaSymbol sch)
       )
@@ -85,6 +85,22 @@ findSchemaParamArity param eqs defaultArity =
     spine (f :@ x) xs = spine f (x : xs)
     spine f xs = (f, xs)
 
+-- | Whether a term mentions the name anywhere, under binders too.
+mentionsName :: T.Text -> EqTerm T.Text -> Bool
+mentionsName n = go
+  where
+    go = \case
+      LitET _ -> False
+      NameET m -> m == n
+      BoundET _ _ -> False
+      SplatET _ -> False
+      InfixET l _ r -> go l || go r
+      IfThenElseET c t e -> go c || go t || go e
+      LamET _ body -> go body
+      MuET _ bound body -> go bound || go body
+      QuantET _ _ bound body -> go bound || go body
+      f :@ x -> go f || go x
+
 {- | Collect all definitions before renaming, allowing forward and self references.
 Clauses of a definition must agree on arity. Existing names cannot be redefined.
 Variadic schemas must already have been expanded into their instances.
@@ -95,17 +111,21 @@ equationEnv initial equations = (<> initial) <$> foldM add Map.empty equations
     add env eq
       | Map.member (name eq) initial = Left (FunctionAlreadyDefined (name eq))
       | Just _ <- variadic eq = Left (UnexpandedVariadicClause (name eq))
-      | pName : _ <- schemaParams eq =
+      | params@(_ : _) <- schemaParams eq =
           case Map.lookup (name eq) env of
             Just (SchemaDef _ sParams _ sArity) ->
-              if sArity == arity && sParams == schemaParams eq
+              if sArity == arity && sParams == params
                 then Right env
                 else Left (InconsistentSchemaDefinition (name eq))
             Just _ -> Left (InconsistentDefinition (name eq))
-            Nothing ->
+            Nothing -> do
               let clauses = filter ((== name eq) . name) equations
-                  pArity = findSchemaParamArity pName clauses arity
-               in Right (Map.insert (name eq) (SchemaDef (name eq) (schemaParams eq) pArity arity) env)
+              -- An instance is recognised by its parameters' calls in its code.
+              forM_ params \p ->
+                unless (any (mentionsName p . clause) clauses) $
+                  Left (SchemaParameterUnused (name eq) p)
+              let arities = [findSchemaParamArity p clauses arity | p <- params]
+              Right (Map.insert (name eq) (SchemaDef (name eq) params arities arity) env)
       | Just (SomeFunction (f :: Function n)) <- Map.lookup (name eq) env =
           if natVal (Proxy @n) == arity
             then Right (Map.insert (name eq) (SomeFunction f) env)
@@ -193,17 +213,23 @@ renameTermIn env scope schemaCtx term = case term of
           Left (LambdaCapturesVariable ident)
       | Just (sName, sParams) <- schemaCtx
       , ident == sName ->
-          case arguments of
-            (NameET p : rest)
-              | p `elem` sParams -> do
-                  let expected = natVal (Proxy @n)
-                  if fromIntegral (length rest) /= expected
-                    then Left (ArityMismatch ident expected (fromIntegral (length rest)))
+          case splitAt (length sParams) arguments of
+            (given, rest)
+              | Just names <- traverse (\case NameET p | p `elem` sParams -> Just p; _ -> Nothing) given
+              , length names == length sParams ->
+                  -- The parameters recur unchanged, and in order: recursion
+                  -- changing a function is of a higher type, not primitive.
+                  if names /= sParams
+                    then Left (SchemaRecursionChangesParameters sName sParams)
                     else do
-                      renamed <- traverse recurse rest
-                      case SV.fromList' renamed of
-                        Just xs -> Right (AppFT (Defined sName :: Function n) xs)
-                        Nothing -> Left (invalidVector ident)
+                      let expected = natVal (Proxy @n)
+                      if fromIntegral (length rest) /= expected
+                        then Left (ArityMismatch ident expected (fromIntegral (length rest)))
+                        else do
+                          renamed <- traverse recurse rest
+                          case SV.fromList' renamed of
+                            Just xs -> Right (AppFT (Defined sName :: Function n) xs)
+                            Nothing -> Left (invalidVector ident)
             _ -> Left (SchemaAppliedWithoutParameter sName sParams)
       | Just someFun <- Map.lookup ident env -> case someFun of
           SomeFunction (fun :: Function m) -> do
@@ -215,22 +241,23 @@ renameTermIn env scope schemaCtx term = case term of
                 case SV.fromList' renamed of
                   Just xs -> Right (AppFT fun xs)
                   Nothing -> Left (invalidVector ident)
-          SchemaDef sName sParams pArity sArity ->
-            renameSchemaApp sName sParams pArity sArity
-          ImportedSchema sName pArity sArity _ ->
-            renameSchemaApp sName ["P"] pArity sArity
+          SchemaDef sName _ arities sArity ->
+            renameSchemaApp sName arities sArity
+          ImportedSchema sName arities sArity _ ->
+            renameSchemaApp sName arities sArity
           VariadicDef tmpl -> Left (UnexpandedVariadicApplication ident (templateFixedArity tmpl))
           ImportedVariadic _ fixed _ _ -> Left (UnexpandedVariadicApplication ident fixed)
       | otherwise -> Left (UnknownName ident)
       where
         invalidVector sName = InternalError ("renameTerm: invalid argument vector for " <> T.unpack sName)
-        renameSchemaApp sName sParams pArity sArity = do
-          let numParams = length sParams
+        -- The leading arguments are the schema's parameters, each of the arity of its place.
+        renameSchemaApp sName arities sArity = do
+          let numParams = length arities
           if length arguments < numParams
             then Left (SchemaArgumentCountMismatch sName numParams (length arguments))
             else do
               let (paramArgs, realArgs) = splitAt numParams arguments
-              pArgs <- traverse (schemaArgument sName pArity) paramArgs
+              pArgs <- zipWithM (schemaArgument sName) arities paramArgs
               if fromIntegral (length realArgs) /= sArity
                 then Left (ArityMismatch sName sArity (fromIntegral (length realArgs)))
                 else do
@@ -281,14 +308,16 @@ renameEquation env eq
       Just (VariadicDef tmpl) -> Left (SchemaAlreadyDefined (templateName tmpl))
       Just (ImportedVariadic sName _ _ _) -> Left (SchemaAlreadyDefined sName)
       Just (SomeFunction (_ :: Function n)) -> renameWithArity (Proxy @n) env Nothing
-      Just (SchemaDef sName sParams pArity sArity) ->
+      Just (SchemaDef sName sParams arities sArity) ->
         case someNatVal sArity of
-          SomeNat (_ :: Proxy n) -> case someNatVal pArity of
-            SomeNat (_ :: Proxy p) ->
-              let envWithParam =
-                    foldr (\p m -> Map.insert p (SomeFunction (Defined p :: Function p)) m) env sParams
-               in renameWithArity (Proxy @n) envWithParam (Just (sName, sParams))
+          SomeNat (_ :: Proxy n) ->
+            let envWithParams = foldr (uncurry bindParameter) env (zip sParams arities)
+             in renameWithArity (Proxy @n) envWithParams (Just (sName, sParams))
   where
+    -- A schema parameter is a function of its own arity while the clauses are renamed.
+    bindParameter p arity m = case someNatVal arity of
+      SomeNat (_ :: Proxy k) -> Map.insert p (SomeFunction (Defined p :: Function k)) m
+
     renameWithArity ::
       forall n.
       (KnownNat n) =>

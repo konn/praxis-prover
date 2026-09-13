@@ -38,13 +38,20 @@ mu {P} (S n) $[xs] = if mu {P} n $[xs] < n then mu {P} n $[xs] else if P n $[xs]
    recurse on one argument, on its predecessor, with the other arguments
    unchanged; it becomes `Rec`. Other cycles are rejected.
 
-A **schema** `f {P} x̄` takes a function parameter `P` of a fixed arity; its
-instance at a function is the code with `P` substituted. A **variadic
-schema** also passes extra arguments through to `P`, which is how a closure
-captures variables: a λ must be closed, and μ, ∀ and ∃ capture the maximal
-subterms of their body not mentioning the bound variable (canonical closure
-conversion), so that substituting into a captured term yields the same code
-again.
+A **schema** `f {P, Q} x̄` takes function parameters, each of the arity of
+its first application in the clauses, and is applied as `f {p} {q} t̄`, a
+symbol or a closed λ in each place; its instance is the code with them
+substituted. A schema uses each of its parameters, and recurs with them
+unchanged and in order. An instance at primitive recursive functions is
+then a primitive recursive definition: schemas abbreviate families of
+definitions and add nothing to PRA. A recursion changing a function
+parameter, `iter {F} (S n) x = iter {λ y. F (F y)} n x`, is recursion of a
+higher type, which defines Ackermann's function, and is refused. A
+**variadic schema** takes one parameter and also passes extra arguments
+through to it, which is how a closure captures variables: a λ must be
+closed, and μ, ∀ and ∃ capture the maximal subterms of their body not
+mentioning the bound variable (canonical closure conversion), so that
+substituting into a captured term yields the same code again.
 
 `Signature` (`PRA.Signature`) names the results: plain symbols (with the
 Haskell binding their code lives in, for splicing, and the equations they were
@@ -76,7 +83,8 @@ A **theorem** is a sequent with free variables. A **rule** is schematic:
 it binds metavariables of sorts `var`, `term`, `atom`, `formula` and `ctx`
 (a formula or term metavariable may take `var` parameters, `P(n)`; a term one
 with parameters is an *abstract function* `p(n)` and may stand as a schema
-parameter, `holdsBelow {p} n`), premises (named sequents, usable only at
+parameter, `holdsBelow {p} n`, in any of a schema's places, `mix {f} {g} n
+x`), premises (named sequents, usable only at
 exactly their stated shape), and eigenvariable conditions `where n ∉ Γ, t`.
 
 **Tactics** (`Tactic.hs`, grammar in `Tactic/Parser.hs`) are deliberately

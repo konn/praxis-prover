@@ -268,7 +268,7 @@ compilerTests =
         case Map.lookup "myMu" (familySchemas fam) of
           Nothing -> assertFailure "schema 'myMu' not found in familySchemas"
           Just muSchema -> do
-            inst <- expectRight (instantiateSchemaFunction muSchema (F.SomeFunction PR.lt))
+            inst <- expectRight (instantiateSchemaFunction muSchema [F.SomeFunction PR.lt])
             case inst of
               F.SomeFunction (muLt :: F.Function n) -> case testEquality (sNat @n) (sNat @2) of
                 Just Refl -> do
@@ -280,7 +280,7 @@ compilerTests =
                     Nothing -> assertFailure "bad vector"
                     Just vec -> F.evalFunction kernel muLt vec @?= Right 3
                 Nothing -> assertFailure "unexpected instantiated function arity"
-            wrongArity <- expectLeft (instantiateSchemaFunction muSchema (F.SomeFunction PR.sgn))
+            wrongArity <- expectLeft (instantiateSchemaFunction muSchema [F.SomeFunction PR.sgn])
             wrongArity @?= SchemaParameterArityMismatch "myMu" 2 1
     ]
   where
