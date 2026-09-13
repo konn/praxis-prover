@@ -1,0 +1,54 @@
+module Laws where
+
+data List a = Nil | a : List a
+
+infixr 5 :
+
+class Pointed a where
+  zero : a
+  plus : a -> a -> a
+  plus-zero : (x : a) -> plus x zero ≡ x
+
+-- Each instance proves the laws of its class, at its type.
+instance Pointed Nat where
+  zero = 0
+  plus x y = x + y
+  plus-zero x = rfl
+
+app : List a -> List a -> List a
+app Nil ys = ys
+app (x : xs) ys = x : app xs ys
+
+instance Pointed (List a) where
+  zero = Nil
+  plus xs ys = app xs ys
+  plus-zero Nil = rfl
+  plus-zero (x : xs) = calc
+    plus (x : xs) zero
+    = x : plus xs zero
+    = x : xs := by cong (plus-zero xs)
+
+-- Under the class, its law is a premise, which every instance discharges.
+plus-zero-twice : Pointed a => (x : a) -> plus (plus x zero) zero ≡ x
+plus-zero-twice x = calc
+  plus (plus x zero) zero
+  = plus x zero := plus-zero (plus x zero)
+  = x := plus-zero x
+
+-- An appeal under the class to a theorem under it: the goal's premises discharge its own.
+plus-zero-thrice : Pointed a => (x : a) -> plus (plus (plus x zero) zero) zero ≡ x
+plus-zero-thrice x = calc
+  plus (plus (plus x zero) zero) zero
+  = plus x zero := by cong (plus-zero-twice x)
+  = x := plus-zero x
+
+-- At the instances, the laws proved there.
+twice-nat : (n : Nat) -> plus (plus n zero) zero ≡ n
+twice-nat n = plus-zero-twice n
+
+twice-list : (xs : List Nat) -> plus (plus xs zero) zero ≡ xs
+twice-list xs = plus-zero-twice xs
+
+-- A law at a known type is the theorem proving it there.
+list-law : (xs : List Nat) -> plus xs zero ≡ xs
+list-law xs = plus-zero xs

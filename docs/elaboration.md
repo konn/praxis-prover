@@ -414,6 +414,46 @@ applies unchanged. That an instance is the only one of its class for its type
 is what makes the choice the one the reader of the source predicts; soundness
 does not depend on it.
 
+**Laws.** A law of a class is a statement over the class's dictionary at its
+parameter. An instance proves it as a theorem at its type, the dictionary's
+places its functions: `Pointed-List.plus-zero : 0 < List.is x |-
+Pointed-List.plus x Pointed-List.zero = x`, a statement of § Statements.
+
+A type variable which a class with laws constrains has a place of its own in
+a theorem's dictionary: `#is`, the membership predicate of the type it stands
+for, a parameter of the theorem's rule of one argument, say `w_2`. The
+theorem's values of that type have the hypothesis `0 < w_2 x`, as the values
+of a data type have theirs. Its rule has premises over variables of their
+own (see [pra-and-prf.md](pra-and-prf.md)):
+
+- each law of the classes constraining the variable whose methods its
+  statement uses, `(law_1 ∀ l_0 : 0 < w_2 l_0 |- w_1 l_0 d0 = l_0)`;
+- the closure of each method it uses returning the variable's type,
+  `(closed_3 ∀ l_0 l_1 : 0 < w_2 l_0, 0 < w_2 l_1 |- 0 < w_2 (w_1 l_0 l_1))`,
+  or `(closed_2 : |- 0 < w_2 d0)` for a value.
+
+In the proof, a law applied at values of the variable is its premise,
+`exact law_1`, and the membership of a method's result the closure premise
+(`Engine.membershipProof`). A law about a method the statement does not use
+is no premise: an appeal could not tell which function it is at. An appeal
+at an instance, `plus-zero-twice xs` at `List Nat`, instantiates the
+membership predicate by `List.is`, or by the prelude's `anyIs n = 1` at
+`Nat`, and discharges the premises. It uses the instance's proofs of the
+laws, the closure lemmas of its functions, and `anyIsMember : |- 0 < anyIs
+n` at `Nat`. An appeal at a type variable of a caller under the same class
+uses the caller's own premises. The engine states the instance of an appeal
+by `cong`, `have (eq) { exact … }; cong (eq)`, so that its membership
+hypotheses are the arguments'.
+
+For adequacy: the rule states its sequent at every instantiation of its
+abstract functions, the membership predicate among them, under its
+premises. At an instance, the premises are the instance's laws and the
+closure of its methods, each certified. So the theorem's sequent holds
+there, its values members as § Statements reads them; at `Nat`, `anyIs`
+takes every value. An instance's laws are statements of § Statements, whose
+values have memberships, and the premises state them so: a law is only ever
+asked of members.
+
 ## Invariants, collected
 
 1. Every name the surface hands to the core is mangled into `u_…`/`v_…`.
@@ -434,4 +474,6 @@ does not depend on it.
    induction.
 10. Methods never reach the core: each use is the function of the instance
     of its class for the type it is used at, the only instance of its class
-    for that type.
+    for that type, or a place of a dictionary, a parameter of a schema or a
+    rule. A law is likewise the theorem proving it at an instance, or a
+    premise of a rule.

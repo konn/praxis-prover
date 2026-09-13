@@ -27,8 +27,11 @@ module Language.Praxis.Surface.Elab (
   FunDef (..),
   FunClause (..),
   TheoremDef (..),
+  PremiseDef (..),
   ProofClause (..),
   elabModule,
+  placeRefs,
+  classClosure,
 
   -- * Names of generated lemmas
   unfoldingNames,
@@ -55,7 +58,7 @@ import Control.Monad.Except (throwError)
 import Control.Monad.State.Strict (StateT, evalStateT)
 import Data.List (elemIndex, find, nub, nubBy)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust, maybeToList)
+import Data.Maybe (fromMaybe, isJust, maybeToList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -103,7 +106,24 @@ data TheoremDef = TheoremDef
   , tdClauses :: ![ProofClause]
   , tdSpan :: !Span
   , tdSlots :: ![Slot]
-  -- ^ the dictionary of its constraints: the places its statement uses
+  {- ^ the dictionary of its constraints: the places its statement uses, and
+  the membership predicate of each type parameter one of its values is of
+  -}
+  , tdPremises :: ![PremiseDef]
+  -- ^ the premises of the rule it is: the laws and closures its places give
+  }
+
+{- |
+A premise of a theorem under constraints, as the dictionary's places state
+it: a law of a class at a type parameter, or the closure of a method there,
+over values of the types given.
+-}
+data PremiseDef = PremiseDef
+  { pdPremise :: !Premise
+  , pdBinders :: ![Ty]
+  -- ^ the types of the values it quantifies over, over the theorem's type parameters
+  , pdProp :: !(Scope Int Expr Void)
+  -- ^ its proposition, over those values, its methods the theorem's places
   }
 
 -- | A clause of a proof: a pattern per binder, the variables they bind, and the proof, elaborated where it is used.
@@ -233,16 +253,32 @@ elabClass fx env cd = do
     case [c | GClass c <- resolve env q] of
       c : _ -> pure (classQual c)
       [] -> Left (ElabError qsp ("not a class: " <> T.unpack (qnameText q)))
-  methods <- forM (R.classMembers cd) \(Located msp m, ty0) -> do
-    ty <- resolved fx ty0
-    when (isProp ty) $ Left (ElabError msp "a law of a class: laws are not supported yet")
+  members <- forM (R.classMembers cd) \(Located msp m, ty0) -> (msp,m,) <$> resolved fx ty0
+  methods <- forM [x | x@(_, _, ty) <- members, not (isProp ty)] \(msp, m, ty) -> do
     let params = a : filter (/= a) (nub (typeVariables env ty))
     t <- elabType env params ty
     let (args, result) = arrows t
     unless (all firstOrder (result : args)) $ Left (ElabError msp "a method of functions: its arguments and its result are values, which are first-order")
     unless (0 `elem` tyParams t) $ Left (ElabError msp ("the method does not mention the class's parameter " <> T.unpack a))
     pure (m, Scheme [(p, KType) | p <- params] t, length args)
-  pure (fst (addClass env (Ident (unLocated (R.className cd))) supers methods))
+  let (env1, info) = addClass env (Ident (unLocated (R.className cd))) supers methods
+      slots = [Slot (methodQual m) 0 (methodArity m) | c <- classClosure env1 info, m <- classMethods c]
+  -- A law: a statement over values of the parameter and of types over it, its methods the places of the class's dictionary.
+  laws <- forM [x | x@(_, _, ty) <- members, isProp ty] \(msp, m, ty) -> do
+    let (binders, body) = valueBinders ty
+        names = map (unLocated . fst) binders
+    unless (length names == length (nub names)) $ Left (ElabError msp "a law's values must have distinct names")
+    binderTys <- forM binders \(Located nsp n, t) -> do
+      bty <- elabType env1 [a] t
+      unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a law quantifies over values, which are first-order"))
+      pure (n, bty)
+    prop <- runTC (elabProp env1 [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body >>= resolveMethods env1 slots)
+    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots)
+  pure (addLaws (classQual info) laws env1)
+
+-- | A class after its superclasses, each once.
+classClosure :: Env -> ClassInfo -> [ClassInfo]
+classClosure env c = nubBy (\x y -> classQual x == classQual y) (concat [classClosure env s | q <- classSuperclasses c, Just (GClass s) <- [Map.lookup q (envGlobals env)]] <> [c])
 
 {- |
 An instance: of a class declared before it, for a data type applied to
@@ -278,14 +314,18 @@ elabInstance fx env sp idl = do
   let clauses = [c | Located _ c <- R.instanceClauses idl]
       methodName m = last (methodQual m)
   forM_ clauses \c -> case clauseHead c of
-    Just n | n `elem` map methodName (classMethods cls) -> pure ()
-    _ -> Left (ElabError (location (R.clauseLhs c)) ("a clause for no method of " <> T.unpack className'))
+    Just n | n `elem` map methodName (classMethods cls) <> map (last . lawQual) (classLaws cls) -> pure ()
+    _ -> Left (ElabError (location (R.clauseLhs c)) ("a clause for no method or law of " <> T.unpack className'))
   let atType m = case methodScheme m of
         Scheme mparams mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) (atInstance headTy (length vars) mty)
       declare (e, fs) m = let (e', f) = addInstanceFunction e iq (methodName m) (atType m) (methodArity m) in (e', fs <> [(m, f)])
       (env1, funs) = foldl declare (env, []) (classMethods cls)
-      env2 = addInstance env1 (InstanceInfo iq (classQual cls) headName (Map.fromList [(methodQual m, f) | (m, f) <- funs]))
-  foldM (define clauses) (env2, []) funs
+      functions = Map.fromList [(methodQual m, f) | (m, f) <- funs]
+      env2 = addInstance env1 (InstanceInfo iq (classQual cls) headName functions Map.empty)
+  (env3, items) <- foldM (define clauses) (env2, []) funs
+  -- Each law, a theorem at the instance's type, its methods the instance's functions for them.
+  (env4, lawItems, proved) <- foldM (prove headTy vars headName iq clauses) (env3, [], Map.empty) (classLaws cls)
+  pure (addInstance env4 (InstanceInfo iq (classQual cls) headName functions proved), items <> lawItems)
   where
     clauseHead c = either (const Nothing) Just (resolveExpr fx (R.clauseLhs c)) >>= fmap fst . lhsParts
     define clauses (e, items) (m, f) = do
@@ -294,6 +334,23 @@ elabInstance fx env sp idl = do
       when (null mine) $ Left (ElabError sp ("no clauses for the method " <> T.unpack (segmentText (last (methodQual m)))))
       fcs <- forM mine \c -> runTC (elabFunClause fx e f args result c)
       pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f args result fcs sp)])
+    prove headTy vars headName iq clauses (e, items, proved) l = do
+      let lawSeg = last (lawQual l)
+          mine = [c | c <- clauses, clauseHead c == Just lawSeg]
+          binderTys = [(n, atInstance headTy (length vars) t) | (n, t) <- lawBinders l]
+          function s = case Map.lookup (slotMethod s) (envGlobals e) of
+            Just (GMethod m) -> Map.lookup (methodClass m, headName) (envInstances e) >>= Map.lookup (slotMethod s) . instFunctions
+            _ -> Nothing
+      when (null mine) $ Left (ElabError sp ("no proof of the law " <> T.unpack (segmentText lawSeg)))
+      table <- forM (zip (lawSlots l) (placeRefs (lawSlots l))) \(s, r) -> case function s of
+        Just f -> pure (r, Ref RefFunction (funCore f))
+        Nothing -> Left (ElabError sp ("internal: no function for the method " <> T.unpack (renderQualName (slotMethod s)) <> " at this instance"))
+      let prop = mapGlobals (\r -> fromMaybe r (lookup r table)) (fromScope (lawProp l))
+          q = iq <> [lawSeg]
+          (e1, info) = addTheorem e q (map (mangleVariable . fst) binderTys) (map snd binderTys) [] [] (Just (toScope prop))
+          e2 = addNamespaceMember iq lawSeg q e1
+      pcs <- forM mine \c -> runTC (elabProofClause fx e2 (map snd binderTys) c)
+      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys (toScope prop) pcs sp [] [])], Map.insert (lawQual l) info proved)
 
 -- | A method's type at an instance: the class's parameter the instance's type, over its @n@ variables, and the method's own variables after them.
 atInstance :: Ty -> Int -> Ty -> Ty
@@ -319,8 +376,8 @@ registerUnfoldings info fcs env = foldl register env (zip3 [1 :: Int ..] (unfold
     register e (i, n, fc) =
       let binders' = map (mangleVariable . fst) (fcVars fc)
           alias = Ident ("eq_" <> T.pack (show i))
-          (e1, thm) = addTheorem e (funQual info <> [Ident n]) binders' []
-          (e2, eqI) = addTheorem e1 (funQual info <> [alias]) binders' []
+          (e1, thm) = addTheorem e (funQual info <> [Ident n]) binders' [] [] [] Nothing
+          (e2, eqI) = addTheorem e1 (funQual info <> [alias]) binders' [] [] [] Nothing
        in addNamespaceMember (funQual info) alias (thmQual eqI) (addNamespaceMember (funQual info) (Ident n) (thmQual thm) e2)
 
 {- |
@@ -420,14 +477,19 @@ elabDecl fx env sp name ty0 clauses = do
         unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a theorem quantifies over values, which are first-order"))
         pure (n, bty)
       full <- dictionaryOf env paramNames constraints
+      given <- constraintClasses env paramNames constraints
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
       prop0 <- runTC (elabProp env ctx0 body >>= resolveMethods env full)
-      -- The theorem is over the places of its dictionary its statement uses.
-      let (used, prop) = prunePlaces full prop0
+      -- The theorem is over the places of its dictionary its statement uses,
+      -- and the membership predicate of each type parameter one of its values is of.
+      let used = globalsOf prop0
+          kept = [s | (s, r) <- zip full (placeRefs full), r `elem` used || (isMembershipSlot s && TParam (slotParam s) [] `elem` map snd binderTys)]
+          prop = keepPlaces full kept prop0
+          premises = premisesFor env given kept
           q = qualify env [name]
-          (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys)
+          (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (Just (toScope (fmap B prop)))
       pcs <- forM clauses \c -> runTC (elabProofClause fx env (map snd binderTys) c)
-      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp used))
+      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises))
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       fty <- elabType env paramNames body
@@ -455,20 +517,65 @@ constraintsOf = \case
 {- |
 The dictionary constraints on a signature's type parameters give: each
 method of each class constraining a parameter and of its superclasses, at
-that parameter, once.
+that parameter, once; and, after them, the membership predicate of each
+parameter a class with laws constrains.
 -}
 dictionaryOf :: Env -> [Text] -> [R.TyConstraint] -> Either ElabError [Slot]
 dictionaryOf env params cs = do
-  given <- forM cs \(Located qsp q, Located vsp v) -> do
-    cls <- case [c | GClass c <- resolve env q] of
-      c : _ -> pure c
-      [] -> Left (ElabError qsp ("not a class: " <> T.unpack (qnameText q)))
-    i <- maybe (Left (ElabError vsp ("a constraint on " <> T.unpack v <> ", which is no type variable of the signature"))) Right (elemIndex v params)
-    pure (cls, i)
-  pure (nub [Slot (methodQual m) i (methodArity m) | (cls, i) <- given, c <- closure cls, m <- classMethods c])
+  given <- constraintClasses env params cs
+  let methods = nub [Slot (methodQual m) i (methodArity m) | (cls, i) <- given, c <- classClosure env cls, m <- classMethods c]
+      lawful = nub [i | (cls, i) <- given, any (not . null . classLaws) (classClosure env cls)]
+  pure (methods <> map membershipSlot lawful)
+
+-- | The classes constraints put on a signature's type parameters, each with the parameter it constrains.
+constraintClasses :: Env -> [Text] -> [R.TyConstraint] -> Either ElabError [(ClassInfo, Int)]
+constraintClasses env params cs = forM cs \(Located qsp q, Located vsp v) -> do
+  cls <- case [c | GClass c <- resolve env q] of
+    c : _ -> pure c
+    [] -> Left (ElabError qsp ("not a class: " <> T.unpack (qnameText q)))
+  i <- maybe (Left (ElabError vsp ("a constraint on " <> T.unpack v <> ", which is no type variable of the signature"))) Right (elemIndex v params)
+  pure (cls, i)
+
+{- |
+The premises of a theorem over the places of a dictionary kept: for each
+type parameter whose membership predicate is kept, each law of the classes
+constraining it whose methods are kept too, and the closure of each method
+kept there whose result is of the parameter's type.  A law about a method
+the statement does not use is not a premise, for an appeal could not tell
+which function it is at.
+-}
+premisesFor :: Env -> [(ClassInfo, Int)] -> [Slot] -> [PremiseDef]
+premisesFor env given kept = laws <> closures
   where
-    -- A class after its superclasses, each once.
-    closure c = nubBy (\x y -> classQual x == classQual y) (concat [closure s | q <- classSuperclasses c, Just (GClass s) <- [Map.lookup q (envGlobals env)]] <> [c])
+    places = zip kept (placeRefs kept)
+    lawful = [slotParam s | s <- kept, isMembershipSlot s]
+    laws =
+      [ PremiseDef (PLaw (lawQual l) i) (map (atParam i . snd) (lawBinders l)) (toScope (mapGlobals (\r -> Map.findWithDefault r r table) body))
+      | i <- lawful
+      , l <- nubBy (\x y -> lawQual x == lawQual y) [l | (cls, j) <- given, j == i, c <- classClosure env cls, l <- classLaws c]
+      , let body = fromScope (lawProp l)
+            mine = [(s, r) | (s, r) <- zip (lawSlots l) (placeRefs (lawSlots l)), r `elem` globalsOf body]
+      , Just table <- [Map.fromList <$> traverse (\(s, r) -> (r,) <$> lookup s {slotParam = i} places) mine]
+      ]
+    closures =
+      [ PremiseDef (PClosure (slotMethod s) i) (map (atParam i) args) (toScope (Rel RelLt (Nat 0) (App (Global isRef) (apps (Global r) [Var (B k) | k <- [0 .. length args - 1]]))))
+      | (s, r) <- places
+      , not (isMembershipSlot s)
+      , let i = slotParam s
+      , Just isRef <- [lookup (membershipSlot i) places]
+      , Just (GMethod m) <- [Map.lookup (slotMethod s) (envGlobals env)]
+      , let (args, result) = arrows (schemeType (methodScheme m))
+      , result == TParam 0 []
+      ]
+
+-- | A type over a class's parameter at a type parameter of a theorem: the class's parameter that one, and a type variable of a method's own no data type.
+atParam :: Int -> Ty -> Ty
+atParam i = \case
+  TParam 0 ts -> TParam i (map (atParam i) ts)
+  TParam _ _ -> TNat
+  TData n ts -> TData n (map (atParam i) ts)
+  TArrow a b -> TArrow (atParam i a) (atParam i b)
+  t -> t
 
 -- | The references to the places of a dictionary: its parameters, by their names, and its values, by their positions.
 placeRefs :: [Slot] -> [Ref]
@@ -512,15 +619,11 @@ pruneDictionary info fcs = (kept, map prune fcs)
       other -> other
     renamed r = Map.findWithDefault r r renumber
 
--- | The places of a dictionary a statement refers to, and the statement over those alone, renumbered.
-prunePlaces :: [Slot] -> Expr a -> ([Slot], Expr a)
-prunePlaces full e = (kept, mapGlobals (\r -> Map.findWithDefault r r renumber) e)
+-- | A statement over the places of a dictionary, over those kept alone, renumbered.
+keepPlaces :: [Slot] -> [Slot] -> Expr a -> Expr a
+keepPlaces full kept = mapGlobals (\r -> Map.findWithDefault r r renumber)
   where
-    refs = placeRefs full
-    used = [r | r <- globalsOf e, r `elem` refs]
-    keep = [r `elem` used | r <- refs]
-    kept = [s | (s, True) <- zip full keep]
-    renumber = Map.fromList (zip [r | (r, True) <- zip refs keep] (placeRefs kept))
+    renumber = Map.fromList (zip [r | (s, r) <- zip full (placeRefs full), s `elem` kept] (placeRefs kept))
 
 {- |
 The names of the unfolding lemmas of a function, one per clause: @unfold-@
@@ -821,6 +924,7 @@ checkTerm env ctx le@(Located sp e) expected = case e of
           [] -> failAt sp "internal: a method of no class"
         pure (Global (Ref RefFunction placeholder), t, methodArity m, [])
       GTheorem t -> failAt sp (T.unpack (renderQualName (thmQual t)) <> " is a theorem, not a term")
+      GLaw l -> failAt sp (T.unpack (renderQualName (lawQual l)) <> " is a law, not a term")
       GData d -> failAt sp (T.unpack (renderQualName (dataQual d)) <> " is a type, not a term")
       GClass c -> failAt sp (T.unpack (renderQualName (classQual c)) <> " is a class, not a term")
       GInstance i -> failAt sp (T.unpack (renderQualName (instQual i)) <> " is an instance, not a term")

@@ -55,3 +55,6 @@ by induction t as m
 -- collapse a dispatch without normalising its branches.
 theorem collapseT : |- (if 1 then a else b) = a by refl
 theorem collapseF : |- (if 0 then a else b) = b by refl
+
+-- Every code is a member of Nat: what a law or a closure at Nat is given for the membership of a value.
+theorem anyIsMember : |- 0 < anyIs n by refl

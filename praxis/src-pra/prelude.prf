@@ -20,3 +20,6 @@ hist {F} (S n) $[xs] = cons (F n (hist {F} n $[xs]) $[xs]) (hist {F} n $[xs])
 
 -- Course-of-values recursion: F at n, given the history below n.
 cvrec {F} n $[xs] = F n (hist {F} n $[xs]) $[xs]
+
+-- The membership predicate of Nat, whose values are every code.
+anyIs n = 1

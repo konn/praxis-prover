@@ -1,0 +1,28 @@
+module LawsBad where
+
+data List a = Nil | a : List a
+
+infixr 5 :
+
+class Pointed a where
+  zero : a
+  plus : a -> a -> a
+  plus-zero : (x : a) -> plus x zero ≡ x
+
+-- No proof of the law.
+instance Pointed Nat where
+  zero = 0
+  plus x y = x + y
+
+app : List a -> List a -> List a
+app Nil ys = ys
+app (x : xs) ys = x : app xs ys
+
+-- A proof of the law which does not prove it.
+instance Pointed (List a) where
+  zero = Nil
+  plus xs ys = app xs ys
+  plus-zero xs = rfl
+
+fine : (xs : List Nat) -> app Nil xs ≡ xs
+fine xs = rfl

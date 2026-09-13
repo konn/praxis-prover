@@ -22,11 +22,15 @@ module Language.Praxis.Surface.Env (
   TheoremInfo (..),
   ClassInfo (..),
   MethodInfo (..),
+  LawInfo (..),
   InstanceInfo (..),
   Slot (..),
   staticSlots,
   valueSlots,
   staticName,
+  membershipSlot,
+  isMembershipSlot,
+  Premise (..),
   Global (..),
   globalQualName,
   globalCore,
@@ -40,6 +44,7 @@ module Language.Praxis.Surface.Env (
   addFunction,
   addTheorem,
   addClass,
+  addLaws,
   addInstanceFunction,
   addInstance,
   addNamespaceMember,
@@ -52,12 +57,15 @@ module Language.Praxis.Surface.Env (
   displayName,
 ) where
 
+import Bound (Scope)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Void (Void)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
+import Language.Praxis.Surface.Syntax (Expr)
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), segmentText)
 import Language.Praxis.Surface.Types (Kind, Scheme, Ty)
 
@@ -124,6 +132,27 @@ staticName :: Int -> Text
 staticName j = "w_" <> T.pack (show j)
 
 {- |
+The place of a dictionary for the membership predicate of a type parameter
+which a class with laws constrains: a parameter of the schema, of one
+argument, which the values of that type are members by.
+-}
+membershipSlot :: Int -> Slot
+membershipSlot i = Slot [Ident "#is"] i 1
+
+isMembershipSlot :: Slot -> Bool
+isMembershipSlot s = slotMethod s == [Ident "#is"]
+
+{- |
+A premise of a theorem under constraints: a law of a class at one of the
+theorem's type parameters, or the closure of a method there, that its
+results are members of the parameter's type.
+-}
+data Premise
+  = PLaw !QualName !Int
+  | PClosure !QualName !Int
+  deriving stock (Show, Eq)
+
+{- |
 A theorem, or a lemma the elaborator generated: its core name, and the
 number of values its statement quantifies over, which an application of it
 in a proof may give as arguments, in order.
@@ -138,14 +167,38 @@ data TheoremInfo = TheoremInfo
   value of a data type the hypothesis of its membership; none for a lemma
   which holds for all codes
   -}
+  , thmSlots :: ![Slot]
+  -- ^ the dictionary of its constraints, the places its statement uses
+  , thmPremises :: ![Premise]
+  -- ^ the premises of the rule it is, in order: laws and closures at its type parameters
+  , thmStatement :: !(Maybe (Scope Int Expr Void))
+  -- ^ its proposition, over its binders, its methods the places of 'thmSlots'; none for a generated lemma
   }
   deriving stock (Show)
 
--- | A class: its superclasses, by their qualified names, and its methods, in order.
+-- | A class: its superclasses, by their qualified names, its methods, in order, and its laws.
 data ClassInfo = ClassInfo
   { classQual :: !QualName
   , classSuperclasses :: ![QualName]
   , classMethods :: ![MethodInfo]
+  , classLaws :: ![LawInfo]
+  }
+  deriving stock (Show)
+
+{- |
+A law of a class: a statement each instance proves, over values of the
+class's parameter and of types over it, whose methods are the places of the
+class's dictionary at its parameter.
+-}
+data LawInfo = LawInfo
+  { lawQual :: !QualName
+  , lawClass :: !QualName
+  , lawBinders :: ![(Text, Ty)]
+  -- ^ the values it quantifies over, their types over the class's parameter alone
+  , lawProp :: !(Scope Int Expr Void)
+  -- ^ its proposition, over the binders, its methods the places of 'lawSlots'
+  , lawSlots :: ![Slot]
+  -- ^ the dictionary of the class at its parameter: each method of it and of its superclasses
   }
   deriving stock (Show)
 
@@ -171,6 +224,8 @@ data InstanceInfo = InstanceInfo
   , instClass :: !QualName
   , instHead :: !Text
   , instFunctions :: !(Map QualName FunInfo)
+  , instLaws :: !(Map QualName TheoremInfo)
+  -- ^ the theorem proving each law of the class at the instance's type, by the law's qualified name
   }
   deriving stock (Show)
 
@@ -181,6 +236,7 @@ data Global
   | GTheorem !TheoremInfo
   | GClass !ClassInfo
   | GMethod !MethodInfo
+  | GLaw !LawInfo
   | GInstance !InstanceInfo
   deriving stock (Show)
 
@@ -192,6 +248,7 @@ globalQualName = \case
   GTheorem t -> thmQual t
   GClass c -> classQual c
   GMethod m -> methodQual m
+  GLaw l -> lawQual l
   GInstance i -> instQual i
 
 -- | The core name of a global: its symbol, or its lemma; a class, a method and an instance have none of their own.
@@ -268,10 +325,10 @@ Add a theorem, at the qualified name given, whose core name is derived from
 it, with the types of its values when its statement gives them memberships;
 a top-level one is also a top-level name.
 -}
-addTheorem :: Env -> QualName -> [Text] -> [Ty] -> (Env, TheoremInfo)
-addTheorem env q binders membered = (env', info)
+addTheorem :: Env -> QualName -> [Text] -> [Ty] -> [Slot] -> [Premise] -> Maybe (Scope Int Expr Void) -> (Env, TheoremInfo)
+addTheorem env q binders membered slots premises statement = (env', info)
   where
-    info = TheoremInfo q (coreOf q) binders membered
+    info = TheoremInfo q (coreOf q) binders membered slots premises statement
     top = case drop (length (envModule env)) q of
       [n] | take (length (envModule env)) q == envModule env -> Map.insert n q
       _ -> id
@@ -290,13 +347,26 @@ addClass :: Env -> Segment -> [QualName] -> [(Segment, Scheme, Int)] -> (Env, Cl
 addClass env name supers methods = (env', info)
   where
     q = qualify env [name]
-    info = ClassInfo q supers [MethodInfo (q <> [m]) q sch arity | (m, sch, arity) <- methods]
+    info = ClassInfo q supers [MethodInfo (q <> [m]) q sch arity | (m, sch, arity) <- methods] []
     env' =
       env
         { envGlobals = foldr (\m -> Map.insert (methodQual m) (GMethod m)) (Map.insert q (GClass info) (envGlobals env)) (classMethods info)
         , envTop = foldr (\(m, _, _) -> Map.insert m (q <> [m])) (Map.insert name q (envTop env)) methods
         , envNamespaces = Map.insertWith Map.union q (Map.fromList [(m, q <> [m]) | (m, _, _) <- methods]) (envNamespaces env)
         }
+
+-- | Add the laws of a class: each, as a method is, a top-level name and a member of the class's namespace.
+addLaws :: QualName -> [LawInfo] -> Env -> Env
+addLaws cq laws env =
+  env
+    { envGlobals = foldr (\l -> Map.insert (lawQual l) (GLaw l)) (Map.adjust withLaws cq (envGlobals env)) laws
+    , envTop = foldr (\l -> Map.insert (last (lawQual l)) (lawQual l)) (envTop env) laws
+    , envNamespaces = Map.insertWith Map.union cq (Map.fromList [(last (lawQual l), lawQual l) | l <- laws]) (envNamespaces env)
+    }
+  where
+    withLaws = \case
+      GClass c -> GClass c {classLaws = classLaws c <> laws}
+      g -> g
 
 {- |
 The function defining a method in an instance: a member of the instance's

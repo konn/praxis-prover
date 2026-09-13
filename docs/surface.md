@@ -139,17 +139,40 @@ instance Monoid (List a) where
   mempty = Nil
 ```
 
-A class has one parameter, and methods: first-order signatures, each
-mentioning the parameter. Its superclasses constrain the same parameter. A
-method is a top-level name, as in Haskell, and a member of its class's
-namespace.
+A class has one parameter, methods and laws. Its methods are first-order
+signatures, each mentioning the parameter. Its laws are statements over
+values of the parameter and of types over it:
+
+```
+class Pointed a where
+  zero : a
+  plus : a -> a -> a
+  plus-zero : (x : a) -> plus x zero ≡ x
+```
+
+Its superclasses constrain the same parameter. A method or a law is a
+top-level name, as in Haskell, and a member of its class's namespace.
 
 An instance is for a data type applied to distinct type variables, or for
 `Nat`. It is the only instance of its class for that type; it comes after an
-instance of each superclass for it; and it defines every method by clauses,
-as a function is defined. Each method of an instance is a function of the
-instance, `Semigroup-List.(<>)` — `lists.(<>)` for `instance lists : Monoid
-(List a) where …` — with its unfolding lemmas, `Semigroup-List.(<>).unfold-Nil`.
+instance of each superclass for it; it defines every method by clauses, as a
+function is defined; and it proves every law by clauses, as a theorem is
+proved. Each method of an instance is a function of the instance,
+`Semigroup-List.(<>)` — `lists.(<>)` for `instance lists : Monoid (List a)
+where …` — with its unfolding lemmas, `Semigroup-List.(<>).unfold-Nil`. Each
+law is a theorem at the instance's type, its methods the instance's
+functions, `Pointed-List.plus-zero`:
+
+```
+instance Pointed (List a) where
+  zero = Nil
+  plus xs ys = app xs ys
+  plus-zero Nil = rfl
+  plus-zero (x : xs) = calc
+    plus (x : xs) zero
+    = x : plus xs zero
+    = x : xs := by cong (plus-zero xs)
+```
 
 A use of a method is resolved once the types of its declaration are known:
 it is the function of the instance of its class for the type it is used at.
@@ -183,7 +206,27 @@ single-five = mconcat-single 5
 ```
 
 Its proof may use what holds at every instance: the clauses of the
-functions — and, once classes have them, their laws, which come next.
+functions, and the laws of the classes.
+
+```
+plus-zero-twice : Pointed a => (x : a) -> plus (plus x zero) zero ≡ x
+plus-zero-twice x = calc
+  plus (plus x zero) zero
+  = plus x zero := plus-zero (plus x zero)
+  = x := plus-zero x
+
+twice-list : (xs : List Nat) -> plus (plus xs zero) zero ≡ xs
+twice-list xs = plus-zero-twice xs
+```
+
+A law applied to values of a constrained type variable holds at every
+instance; applied to values of a known type, it is the instance's proof of
+it. Under a class with laws, a theorem's values of the constrained variable
+are members of the type it stands for, and so is every result of a method
+applied to members: what a law applied at them needs. An appeal at an
+instance holds by the instance's proofs of the laws. A law applies to
+arguments, whose type gives the instance; and a proof may use the laws
+about the methods its statement uses, which fix the functions they are at.
 
 ## Types
 
@@ -279,10 +322,11 @@ argument, each constructor once, structurally recursive with unchanged other
 arguments; classes with superclasses, and their instances for data types and
 `Nat`, each use of a method resolved at the type it is used at; functions
 and theorems under constraints, schemas and rules over the methods they use;
-theorems by clauses on one value, by `calc`, and by the tactics listed, a
-lemma applying at any arguments through the closure lemmas of functions;
-`.px` diagnostics. Planned, in order: laws of classes and instances with
-contexts; goal display in hover, the
+laws of classes, proved by each instance and premises of the theorems under
+the class; theorems by clauses on one value, by `calc`, and by the tactics
+listed, a lemma applying at any arguments through the closure lemmas of
+functions; `.px` diagnostics. Planned, in order: instances with contexts;
+goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
 `if` in terms, nested patterns and matching on several arguments, matching
 and recursion on `Nat`, overlapping first-match clauses, mutual recursion and

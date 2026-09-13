@@ -45,6 +45,15 @@ checkTests =
         c <- checkFile "test/data/generic.px"
         errors c @?= []
         checkedTheorems c @?= ["Generic.mconcat-single", "Generic.mconcat-copy", "Generic.single-five"]
+    , testCase "a class's laws are proved by each instance, and are premises of a theorem under the class, discharged where it is appealed to" $ do
+        c <- checkFile "test/data/laws.px"
+        errors c @?= []
+        checkedTheorems c @?= ["Laws.Pointed-Nat.plus-zero", "Laws.Pointed-List.plus-zero", "Laws.plus-zero-twice", "Laws.plus-zero-thrice", "Laws.twice-nat", "Laws.twice-list", "Laws.list-law"]
+    , testCase "an instance proves every law of its class, and its proofs are checked" $ do
+        c <- checkFile "test/data/laws-bad.px"
+        checkedTheorems c @?= ["LawsBad.fine"]
+        let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
+        mapM_ (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls)) [("the missing proof", [13 :: Int]), ("the wrong proof", [22 .. 25])]
     , testCase "a function's closure lemma gives the membership of its results, and a lemma applies at them" $ do
         c <- checkFile "test/data/closure.px"
         errors c @?= []
