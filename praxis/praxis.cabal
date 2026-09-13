@@ -93,6 +93,7 @@ executable praxis
     -with-rtsopts=-N
 
   build-depends:
+    optparse-applicative,
     praxis,
     text,
 
