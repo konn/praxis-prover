@@ -373,6 +373,16 @@ function its clauses define with the instances' methods in place of the
 classes'. Premise (U) holds for its core term, an instance of its schema, as
 its rules instantiated at those methods state.
 
+A theorem under constraints is a rule of the core over the parameters of its
+dictionary, the methods its statement uses taking arguments. Its values and
+the values of its dictionary are term metavariables, and the auxiliary
+theorems of its inductions are rules the same way. An appeal instantiates it
+at the methods of an instance, which the core infers by matching. For
+adequacy, the rule states its sequent at every instantiation of its abstract
+functions by primitive recursive functions, among them the methods of each
+instance. There the argument of § Statements and their adequacy applies: a
+theorem under constraints holds at every instance of its classes.
+
 The translation of statements therefore never meets a method. A certified
 statement mentions the functions of the instances chosen, which
 `praxis check --dump-core` shows, and § Statements and their adequacy

@@ -57,6 +57,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
 import Data.Void (absurd)
+import Language.Praxis.Surface.Compile (ruleBinders)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (ctorLemma, dataLemma)
@@ -89,6 +90,10 @@ data Goal = Goal
   -- ^ a surface name of a hypothesis, and its core name
   , goalIH :: ![(Text, Text)]
   -- ^ the induction hypothesis at a core variable, by its core name
+  , goalDict :: ![Slot]
+  {- ^ the dictionary of the theorem's constraints: its methods taking
+  arguments are the parameters of the rule the goal is proved as
+  -}
   }
 
 -- | The goal as a core sequent.
@@ -157,7 +162,7 @@ statementGoal membership td = do
     Left "a theorem's value binders must have distinct names"
   forM_ (tdBinders td) \(n, t) ->
     unless (firstOrder t) $ Left ("the value " <> T.unpack n <> " is not of a first-order type")
-  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> map HProp antecedents)] conclusion vars [] [])
+  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> map HProp antecedents)] conclusion vars [] [] (tdSlots td))
   where
     vars = [(n, (mangleVariable n, t)) | (n, t) <- tdBinders td]
     prop = instantiate (\i -> Var (fst (snd (vars !! i)))) (fmap absurd (tdProp td))
@@ -185,14 +190,35 @@ proveTheorem k td = do
           out <- proveRhs k info (counter 0) renamed (pcRhs pc)
           pure (outTactic out, outAux out)
     pcs -> byClauses k info goal0 td pcs
-  stmt <- either (Left . EngineError (tdSpan td) . ("the statement: " <>)) Right (goalSequent goal0)
-  pure (aux <> [(thmCore info, runBuilder ("theorem " <> fromText (thmCore info) <> " : " <> stmt <> "\nby " <> tactic))])
+  decl <- either (Left . EngineError (tdSpan td) . ("the statement: " <>)) Right (declaration (thmCore info) goal0 tactic)
+  pure (aux <> [(thmCore info, runBuilder decl)])
   where
     isVariable = \case
       PVar _ -> True
       PWild -> True
       _ -> False
     counter = id
+
+{- |
+The declaration of a goal proved by a core tactic: a theorem, or, when the
+goal is over the parameters of a schema — the methods of its dictionary
+taking arguments — a rule over them, its variables term metavariables.
+-}
+declaration :: Text -> Goal -> Builder -> Either String Builder
+declaration name g tac = do
+  stmt <- goalSequent g
+  pure case staticSlots (goalDict g) of
+    [] -> "theorem " <> fromText name <> " : " <> stmt <> "\nby " <> tac
+    statics -> "rule " <> fromText name <> ruleBinders statics (sequentVars g) <> " : " <> stmt <> "\nby " <> tac
+
+-- | The variables of a goal's sequent: its free variables, and the values of its dictionary it mentions.
+sequentVars :: Goal -> [Text]
+sequentVars g = nub (concatMap (hypVars . snd) (goalHyps g) <> exprVars (goalConcl g))
+  where
+    hypVars = \case
+      HProp p -> exprVars p
+      HMember _ v -> [v]
+    exprVars e = foldr (:) [] e <> [valueVar k | Ref RefValueParam k <- globalsOf e]
 
 hname :: Int -> Text
 hname i = "H" <> T.pack (show i)
@@ -350,7 +376,7 @@ calcProof k info n g sp (R.Calc first steps) = do
 term :: Knowledge -> Goal -> Located R.Expr -> Either EngineError (Expr Text)
 term k g e0 = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) ctx e >>= resolveMethods (knowEnv k) [] . fst))
+  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) ctx e >>= resolveMethods (knowEnv k) (goalDict g) . fst))
   where
     ctx = [(n, (v, t)) | (n, (v, t)) <- goalVars g]
 
@@ -449,15 +475,15 @@ induction k info _ g sp v _ = do
             keptNames = [(s, hname (length members + length ihs + i)) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
             vars = [("#" <> T.pack (show j), f) | (j, f) <- zip [0 :: Int ..] fields] <> [(nm, x) | (nm, x) <- goalVars g, fst x /= core]
             concl = at (apps (Global (Ref RefConstructor (ctorCore c))) [Var fv | (fv, _) <- fields])
-         in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames) (zip recursive (map ihCore [1 ..]))
+         in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames) (zip recursive (map ihCore [1 ..])) (goalDict g)
       goals = map caseGoal (dataCtors dat)
       tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
       auxName i = mangleGlobal (map raw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show i)])
       eigen = head [name | i <- [0 :: Int ..], let name = "e_" <> T.pack (show i), name `notElem` map (fst . snd) (goalVars g)]
       finish outs = do
         auxDecls <- forM (zip3 [0 :: Int ..] goals outs) \(i, cg, o) -> do
-          stmt <- either (Left . EngineError sp) Right (goalSequent cg)
-          pure (outAux o <> [(auxName i, runBuilder ("theorem " <> fromText (auxName i) <> " : " <> stmt <> "\nby " <> outTactic o))])
+          decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
+          pure (outAux o <> [(auxName i, runBuilder decl)])
         script <- either (Left . EngineError sp) Right (mkScript k auxName dat isCore core memberHyp eigen motive reverted)
         pure (Out script (concat auxDecls))
   pure (goals, finish)

@@ -41,6 +41,10 @@ checkTests =
         c <- checkFile "test/data/constrained.px"
         errors c @?= []
         checkedTheorems c @?= ["Constrained.sum-three", "Constrained.flatten", "Constrained.triple-two", "Constrained.twice-sum"]
+    , testCase "a theorem under a constraint is a rule over the methods its statement uses, proved once, and appealed to at an instance" $ do
+        c <- checkFile "test/data/generic.px"
+        errors c @?= []
+        checkedTheorems c @?= ["Generic.mconcat-single", "Generic.mconcat-copy", "Generic.single-five"]
     , testCase "a false theorem, a non-structural recursion, a sorry and an appeal to a failed theorem are refused" $ do
         c <- checkFile "test/data/bad.px"
         checkedTheorems c @?= []

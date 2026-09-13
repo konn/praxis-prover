@@ -1,0 +1,44 @@
+module Generic where
+
+data List a = Nil | a : List a
+
+infixr 5 :
+
+class Semigroup a where
+  (<>) : a -> a -> a
+
+infixr 4 <>
+
+class Semigroup a => Monoid a where
+  mempty : a
+
+instance Semigroup Nat where
+  (<>) x y = x + y
+
+instance Monoid Nat where
+  mempty = 0
+
+mconcat : Monoid a => List a -> a
+mconcat Nil = mempty
+mconcat (x : xs) = x <> mconcat xs
+
+copy : List a -> List a
+copy Nil = Nil
+copy (x : xs) = x : copy xs
+
+-- A theorem under a constraint: a rule over the methods its statement uses.
+mconcat-single : Monoid a => (x : a) -> mconcat (x : Nil) ≡ x <> mempty
+mconcat-single x = rfl
+
+-- By induction, its recursive call the induction hypothesis, under the constraint.
+mconcat-copy : Monoid a => (xs : List a) -> mconcat (copy xs) ≡ mconcat xs
+mconcat-copy Nil = rfl
+mconcat-copy (x : xs) = calc
+  mconcat (copy (x : xs))
+  = x <> mconcat (copy xs)
+  = x <> mconcat xs := by cong (mconcat-copy xs)
+  = mconcat (x : xs)
+
+-- At a known type, an instance of the rule.
+single-five : mconcat (5 : Nil) ≡ 5 <> mempty
+single-five = mconcat-single 5

@@ -102,6 +102,8 @@ data TheoremDef = TheoremDef
   -- ^ the proposition, over the binders
   , tdClauses :: ![ProofClause]
   , tdSpan :: !Span
+  , tdSlots :: ![Slot]
+  -- ^ the dictionary of its constraints: the places its statement uses
   }
 
 -- | A clause of a proof: a pattern per binder, the variables they bind, and the proof, elaborated where it is used.
@@ -410,7 +412,6 @@ elabDecl fx env sp name ty0 clauses = do
       paramNames = map fst params
   if isProp body
     then do
-      unless (null constraints) $ Left (ElabError sp "a theorem under constraints: not supported yet")
       -- Statement lowering names each value by its binder. Distinct values
       -- must never acquire the same core variable and share memberships.
       _ <- foldM checkBinder [] (map fst binders)
@@ -418,12 +419,15 @@ elabDecl fx env sp name ty0 clauses = do
         bty <- elabType env paramNames t
         unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a theorem quantifies over values, which are first-order"))
         pure (n, bty)
+      full <- dictionaryOf env paramNames constraints
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
-      prop <- runTC (elabProp env ctx0 body >>= resolveMethods env [])
-      let q = qualify env [name]
+      prop0 <- runTC (elabProp env ctx0 body >>= resolveMethods env full)
+      -- The theorem is over the places of its dictionary its statement uses.
+      let (used, prop) = prunePlaces full prop0
+          q = qualify env [name]
           (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys)
       pcs <- forM clauses \c -> runTC (elabProofClause fx env (map snd binderTys) c)
-      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp))
+      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp used))
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       fty <- elabType env paramNames body
@@ -507,6 +511,16 @@ pruneDictionary info fcs = (kept, map prune fcs)
       Global r -> Global (renamed r)
       other -> other
     renamed r = Map.findWithDefault r r renumber
+
+-- | The places of a dictionary a statement refers to, and the statement over those alone, renumbered.
+prunePlaces :: [Slot] -> Expr a -> ([Slot], Expr a)
+prunePlaces full e = (kept, mapGlobals (\r -> Map.findWithDefault r r renumber) e)
+  where
+    refs = placeRefs full
+    used = [r | r <- globalsOf e, r `elem` refs]
+    keep = [r `elem` used | r <- refs]
+    kept = [s | (s, True) <- zip full keep]
+    renumber = Map.fromList (zip [r | (r, True) <- zip refs keep] (placeRefs kept))
 
 {- |
 The names of the unfolding lemmas of a function, one per clause: @unfold-@

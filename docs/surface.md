@@ -169,8 +169,21 @@ mconcat (x : xs) = x <> mconcat xs
 
 A call at a known type passes the instances' methods; a call at a
 constrained variable passes on the caller's own. A method at a type not
-known, or at a variable no constraint is on, is refused. Theorems under
-constraints come next, and laws after them.
+known, or at a variable no constraint is on, is refused.
+
+A theorem may constrain its type variables too. It is proved once, for
+every instance:
+
+```
+mconcat-single : Monoid a => (x : a) -> mconcat (x : Nil) ≡ x <> mempty
+mconcat-single x = rfl
+
+single-five : mconcat (5 : Nil) ≡ 5 <> mempty
+single-five = mconcat-single 5
+```
+
+Its proof may use what holds at every instance: the clauses of the
+functions — and, once classes have them, their laws, which come next.
 
 ## Types
 

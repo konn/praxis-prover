@@ -32,6 +32,7 @@ module Language.Praxis.Surface.Syntax (
   spine,
   apps,
   mapGlobals,
+  globalsOf,
 
   -- * Patterns
   patternVariables,
@@ -42,7 +43,7 @@ module Language.Praxis.Surface.Syntax (
   instantiateNames,
 ) where
 
-import Bound (Scope, abstract, instantiate, (>>>=))
+import Bound (Scope, abstract, fromScope, instantiate, (>>>=))
 import Bound.Scope (hoistScope)
 import Control.Monad (ap)
 import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1, showsPrec1)
@@ -286,6 +287,26 @@ mapGlobals f = go
       Bottom -> Bottom
       Universe -> Universe
       Hole -> Hole
+
+-- | The global references of an expression, under binders too.
+globalsOf :: Expr a -> [Ref]
+globalsOf = go
+  where
+    go :: Expr x -> [Ref]
+    go = \case
+      Global r -> [r]
+      App f x -> go f <> go x
+      At _ e -> go e
+      Lam _ b -> go (fromScope b)
+      Case s alts -> go s <> concatMap (go . fromScope . snd) alts
+      If c t e -> go c <> go t <> go e
+      Pi _ _ d b -> go d <> go (fromScope b)
+      Arrow a b -> go a <> go b
+      Quant _ _ bound ty b -> maybe [] (go . snd) bound <> maybe [] go ty <> go (fromScope b)
+      Rel _ a b -> go a <> go b
+      Conn _ a b -> go a <> go b
+      Not a -> go a
+      _ -> []
 
 -- * Patterns
 
