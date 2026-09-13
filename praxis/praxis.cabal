@@ -105,6 +105,7 @@ test-suite praxis-test
   hs-source-dirs: test
   -- cabal-gild: discover test --exclude=test/Test.hs
   other-modules:
+    Language.Praxis.Surface.AdequacyTest
     Language.Praxis.Surface.CheckTest
     Language.Praxis.Surface.ParserTest
 
@@ -115,8 +116,13 @@ test-suite praxis-test
     -with-rtsopts=-N
 
   build-depends:
+    QuickCheck,
+    bound,
     containers,
+    megaparsec,
     praxis,
+    praxis-core,
     tasty,
     tasty-hunit,
+    tasty-quickcheck,
     text,

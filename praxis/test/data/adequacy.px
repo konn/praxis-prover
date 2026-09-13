@@ -1,0 +1,93 @@
+module Adequacy where
+
+{- Statements, not theorems: the adequacy test evaluates them, in the
+surface language and in the core text they translate to, on random values.
+Many are false for some values on purpose, so that both truth values are
+compared; every one is left to sorry. -}
+
+data List a = Nil | a : List a
+data Color = Red | Green | Blue
+-- a field of a data type declared before: its membership is checked
+data Pixel = Px Color Nat
+data Tree = Leaf | Node Tree Nat Tree
+
+(<>) : List a -> List a -> List a
+(<>) Nil      ys = ys
+(<>) (x : xs) ys = x : (xs <> ys)
+
+infixr 5 <>
+
+length : List a -> Nat
+length Nil      = 0
+length (x : xs) = S (length xs)
+
+sum : List Nat -> Nat
+sum Nil      = 0
+sum (x : xs) = x + sum xs
+
+size : Tree -> Nat
+size Leaf         = 0
+size (Node l n r) = S (size l + size r)
+
+mirror : Tree -> Tree
+mirror Leaf         = Leaf
+mirror (Node l n r) = Node (mirror r) n (mirror l)
+
+next : Color -> Color
+next Red   = Green
+next Green = Blue
+next Blue  = Red
+
+brightness : Pixel -> Nat
+brightness (Px c n) = n
+
+eq-or-ne : (xs ys : List Nat) -> xs ≡ ys ∨ xs ≠ ys
+eq-or-ne xs ys = by sorry
+
+lt-iff-gt : (m : Nat) -> (n : Nat) -> m < n ↔ n > m
+lt-iff-gt m n = by sorry
+
+le-ge : (m : Nat) -> (n : Nat) -> m ≤ n -> n ≥ m -> ¬ (m > n)
+le-ge m n = by sorry
+
+lt-sometimes : (m : Nat) -> (n : Nat) -> m < n
+lt-sometimes m n = by sorry
+
+length-append : (xs : List Nat) -> (ys : List Nat) -> length (xs <> ys) ≡ length xs + length ys
+length-append xs ys = by sorry
+
+append-self : (xs : List Nat) -> xs <> xs ≡ xs
+append-self xs = by sorry
+
+below-sum : (xs : List Nat) -> ∀ i < length xs, i < sum xs
+below-sum xs = by sorry
+
+at-most : (n : Nat) -> ∃ i ≤ n, i ≡ n
+at-most n = by sorry
+
+below : (n : Nat) -> ∃ i < n, i ≡ n
+below n = by sorry
+
+sub-add : (m : Nat) -> (n : Nat) -> (m - n) + n ≡ m
+sub-add m n = by sorry
+
+mirror-size : (t : Tree) -> size (mirror t) ≡ size t
+mirror-size t = by sorry
+
+mirror-self : (t : Tree) -> mirror t ≡ t
+mirror-self t = by sorry
+
+next-cycle : (c : Color) -> next (next (next c)) ≡ c
+next-cycle c = by sorry
+
+next-fixed : (c : Color) -> next c ≡ c -> ⊥
+next-fixed c = by sorry
+
+brightness-order : (p : Pixel) -> (q : Pixel) -> brightness p ≤ brightness q ∨ brightness q < brightness p
+brightness-order p q = by sorry
+
+length-nil : {a : Type} -> (xs : List a) -> length xs ≡ 0 ↔ xs ≡ Nil
+length-nil {a} xs = by sorry
+
+trivial : (n : Nat) -> ⊤ ∧ ¬ ⊥
+trivial n = by sorry
