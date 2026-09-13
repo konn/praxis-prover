@@ -57,6 +57,13 @@ character). Nothing in praxis-core or the prelude starts with `u_` or `v_`, so
 a surface variable called `at` or `add` is never taken for a symbol.
 `demangle` turns core messages back into surface names.
 
+The value binders of a theorem must have distinct names. Elaboration rejects
+duplicates, and statement translation checks this invariant again: merging
+two values into one core variable would conjoin their membership predicates
+on the same code and could turn an inhabited surface context into an
+impossible numeric context. Induction uses a fresh eigenvariable apart from
+the values already in scope.
+
 `CoreText` builds that text from a small term type, parenthesising every
 application, so the text means exactly the term whatever the core's fixities.
 `praxis check --dump-core` prints it.

@@ -49,7 +49,7 @@ module Language.Praxis.Surface.Elab (
 ) where
 
 import Bound (Scope, Var (..), toScope)
-import Control.Monad (forM, forM_, unless, when, zipWithM)
+import Control.Monad (foldM, forM, forM_, unless, when, zipWithM)
 import Control.Monad.Except (throwError)
 import Control.Monad.State.Strict (StateT, evalStateT)
 import Data.List (elemIndex, find, nub)
@@ -251,6 +251,9 @@ elabDecl fx env sp name ty0 clauses = do
       paramNames = map fst params
   if isProp body
     then do
+      -- Statement lowering names each value by its binder. Distinct values
+      -- must never acquire the same core variable and share memberships.
+      _ <- foldM checkBinder [] (map fst binders)
       binderTys <- forM binders \(Located nsp n, t) -> do
         bty <- elabType env paramNames t
         unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a theorem quantifies over values, which are first-order"))
@@ -272,6 +275,9 @@ elabDecl fx env sp name ty0 clauses = do
           env2 = foldl (registerUnfolding info) env1 (zip3 [1 :: Int ..] names fcs)
       pure (env2, IFun (FunDef info args result fcs sp))
   where
+    checkBinder seen (Located nsp n)
+      | n `elem` seen = Left (ElabError nsp ("the variable " <> T.unpack n <> " is bound twice"))
+      | otherwise = Right (n : seen)
     arrows = \case
       TArrow a b -> let (as, r) = arrows b in (a : as, r)
       t -> ([], t)

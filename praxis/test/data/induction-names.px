@@ -1,0 +1,18 @@
+module InductionNames where
+
+data A = A0
+data B = B0 A
+
+-- The induction variable used to collide with the generated eigenvariable.
+only : (m : A) -> m ≡ A0
+only A0 = by rfl
+
+-- A different value named m must also remain free during induction.
+other : (m : Nat) -> (a : A) -> a ≡ A0
+other m A0 = by rfl
+
+-- Nested inductions and names resembling generated variables stay distinct.
+nested : (e_0 : Nat) -> (m : B) -> m ≡ B0 A0
+nested e_0 (B0 a) = by
+  induction a
+  { rfl }

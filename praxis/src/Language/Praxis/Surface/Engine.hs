@@ -152,6 +152,9 @@ of a first-order type, the types the encoding gives a meaning to.
 -}
 statementGoal :: Map Text Text -> TheoremDef -> Either String Goal
 statementGoal membership td = do
+  let names = map fst (tdBinders td)
+  unless (length names == length (nub names)) $
+    Left "a theorem's value binders must have distinct names"
   forM_ (tdBinders td) \(n, t) ->
     unless (firstOrder t) $ Left ("the value " <> T.unpack n <> " is not of a first-order type")
   pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> map HProp antecedents)] conclusion vars [] [])
@@ -441,11 +444,12 @@ induction k info _ g sp v _ = do
       goals = map caseGoal (dataCtors dat)
       tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
       auxName i = mangleGlobal (map raw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show i)])
+      eigen = head [name | i <- [0 :: Int ..], let name = "e_" <> T.pack (show i), name `notElem` map (fst . snd) (goalVars g)]
       finish outs = do
         auxDecls <- forM (zip3 [0 :: Int ..] goals outs) \(i, cg, o) -> do
           stmt <- either (Left . EngineError sp) Right (goalSequent cg)
           pure (outAux o <> [(auxName i, runBuilder ("theorem " <> fromText (auxName i) <> " : " <> stmt <> "\nby " <> outTactic o))])
-        script <- either (Left . EngineError sp) Right (mkScript k auxName dat isCore core memberHyp motive reverted)
+        script <- either (Left . EngineError sp) Right (mkScript k auxName dat isCore core memberHyp eigen motive reverted)
         pure (Out script (concat auxDecls))
   pure (goals, finish)
   where
@@ -466,10 +470,9 @@ substTy args = \case
   t -> t
 
 -- | The core script of an induction, the auxiliary theorems of its cases named as given.
-mkScript :: Knowledge -> (Int -> Text) -> DataInfo -> Text -> Text -> Text -> Expr Text -> [(Text, Expr Text)] -> Either String Builder
-mkScript k auxName dat isCore t memberHyp motive reverted = do
-  let m = "v_m"
-      at x = motive >>= \w -> if w == t then x else Var w
+mkScript :: Knowledge -> (Int -> Text) -> DataInfo -> Text -> Text -> Text -> Text -> Expr Text -> [(Text, Expr Text)] -> Either String Builder
+mkScript k auxName dat isCore t memberHyp m motive reverted = do
+  let at x = motive >>= \w -> if w == t then x else Var w
       code x = do
         f <- formula (at x)
         pure ("[[" <> f <> "]]")
@@ -499,11 +502,11 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
         <> finishText
     )
   where
-    m' = CVar "v_m"
+    m' = CVar m
     ctorApplied c = CSym (ctorCore c) [fieldT j m' | j <- [0 .. length (ctorFields c) - 1]]
     membersOf c = Map.findWithDefault [] (ctorCore c) (knowMembers k)
     disjunct c = do
-      let eqT = "(v_m = " <> render (ctorApplied c) <> ")"
+      let eqT = "(" <> fromText m <> " = " <> render (ctorApplied c) <> ")"
           mems = [membershipText p (fieldT j m') | (j, p) <- membersOf c]
       pure (conjunction (eqT : mems))
     conjunction = \case
@@ -545,9 +548,13 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
               <> fromDec j
               <> ": ((lt "
               <> f
-              <> " v_m) = 1) { calc (lt "
+              <> " "
+              <> fromText m
+              <> ") = 1) { calc (lt "
               <> f
-              <> " v_m) = (lt "
+              <> " "
+              <> fromText m
+              <> ") = (lt "
               <> f
               <> " "
               <> render applied
@@ -559,7 +566,9 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
               <> render (CSym isCore [fieldT j m'])
               <> " "
               <> codeF
-              <> ")) = 1) { exact belowElim _ v_m "
+              <> ")) = 1) { exact belowElim _ "
+              <> fromText m
+              <> " "
               <> f
               <> " }; have IHd"
               <> fromDec j
@@ -577,7 +586,7 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
           )
       caseFormula <- formula (motiveAt (fromCT applied))
       let splitConj h = case mems of
-            [] -> "have Km: (v_m = " <> render applied <> ") { exact " <> h <> " }; "
+            [] -> "have Km: (" <> fromText m <> " = " <> render applied <> ") { exact " <> h <> " }; "
             _ -> "ConjL on " <> h <> " as Km " <> conjNames (length mems) <> "; "
           conjNames nm = case nm of
             1 -> "K1"

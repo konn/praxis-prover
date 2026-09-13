@@ -3,10 +3,15 @@
 -- | The checker, end to end: what certifies, and what must not.
 module Language.Praxis.Surface.CheckTest (checkTests) where
 
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Language.Praxis.Surface.Check
+import Language.Praxis.Surface.Elab (Item (..), TheoremDef (..), elabModule)
+import Language.Praxis.Surface.Engine (theoremStatement)
+import Language.Praxis.Surface.Fixity (moduleFixities)
+import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude, prelude)
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
 import Test.Tasty
@@ -36,6 +41,40 @@ checkTests =
         let errs = [(l, m) | Report (Span (l, _) _) SevError m <- checkedReports c]
         mapM_ (\(n, l) -> assertBool ("an error for " <> n) (any ((== l) . fst) errs)) [("Box", 9 :: Int), ("apply", 12), ("fun-refl", 16), ("partly", 20)]
         assertBool "the partial application is named" (any (("applied to 1 of its 2 arguments" `T.isInfixOf`) . snd) errs)
+    , testCase "duplicate theorem binders cannot merge independent membership hypotheses" $ do
+        c <- checkFile "test/data/duplicate-binders.px"
+        checkedTheorems c @?= ["DuplicateBinders.only-a", "DuplicateBinders.only-b", "DuplicateBinders.fine"]
+        let messages = [m | Report _ SevError m <- checkedReports c]
+        length messages @?= 3
+        assertBool "the duplicate binder is diagnosed" (any ("the variable x is bound twice" `T.isInfixOf`) messages)
+        assertBool "distinct binders do not prove the false equation" (any ("DuplicateBinders.distinct" `T.isInfixOf`) messages)
+        assertBool "a rejected theorem is unavailable" (any ("not a hypothesis or a lemma: bad" `T.isInfixOf`) messages)
+    , testCase "grouped and forall theorem binders must also be distinct" $ do
+        p <- either assertFailure pure prelude
+        mapM_
+          ( \signature -> do
+              let src = T.unlines ["module Duplicate where", signature, "bad a b = by rfl"]
+                  c = checkSource p "duplicate.px" src
+              checkedTheorems c @?= []
+              assertBool "the duplicate value binder is diagnosed" (any ("the variable x is bound twice" `T.isInfixOf`) (map reportMessage (checkedReports c)))
+          )
+          [ "bad : (x x : Nat) -> x ≡ x"
+          , "bad : (x : Nat) -> ∀ (x : Nat), x ≡ x"
+          ]
+    , testCase "statement translation refuses colliding binders even in an already elaborated declaration" $ do
+        src <- TIO.readFile "test/data/duplicate-binders.px"
+        m <- either (assertFailure . show) pure (parseModule "duplicate-binders.px" src)
+        fx <- either (assertFailure . show) pure (moduleFixities m)
+        let (_, items) = elabModule fx m
+        case reverse [td | ITheorem td <- items] of
+          td : _ -> do
+            let colliding = td {tdBinders = [("x", ty) | (_, ty) <- tdBinders td]}
+            theoremStatement Map.empty colliding @?= Left "a theorem's value binders must have distinct names"
+          [] -> assertFailure "expected the ordinary theorem at the end of the fixture"
+    , testCase "induction eigenvariables stay apart from surface binders" $ do
+        c <- checkFile "test/data/induction-names.px"
+        errors c @?= []
+        checkedTheorems c @?= ["InductionNames.only", "InductionNames.other", "InductionNames.nested"]
     ]
 
 checkFile :: FilePath -> IO Checked

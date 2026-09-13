@@ -1,0 +1,40 @@
+module DuplicateBinders where
+
+data A = A0
+data B = B0 A
+
+only-a : (a : A) -> A0 ≡ a
+only-a A0 = by rfl
+
+only-b : (b : B) -> b ≡ B0 A0
+only-b (B0 a) = by
+  induction a
+  { rfl }
+
+-- Both types are inhabited, so this theorem is false. Previously both
+-- binders became v_x, making their membership hypotheses contradictory:
+-- A's only code is 1, while B's only code is 6.
+bad : (x : A) -> (x : B) -> 1 ≡ 6
+bad a b = calc
+  1
+  = A0
+  = a := by exact only-a
+  = B0 A0 := by exact only-b
+  = 6
+
+-- The same calculation with distinct binders cannot equate their codes.
+distinct : (x : A) -> (y : B) -> 1 ≡ 6
+distinct a b = calc
+  1
+  = A0
+  = a := by exact only-a
+  = B0 A0 := by exact only-b
+  = 6
+
+-- A failed declaration must not become available to later proofs.
+reuse : (x : A) -> (y : B) -> 1 ≡ 6
+reuse a b = by exact bad
+
+-- Ordinary independent binders still work.
+fine : (x : A) -> (y : B) -> x ≡ x
+fine a b = by rfl
