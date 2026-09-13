@@ -1,4 +1,20 @@
 module Main (main) where
 
+import Data.Map.Strict qualified as Map
+import Language.Praxis.Surface.CheckTest (checkTests)
+import Language.Praxis.Surface.ParserTest (parserTests)
+import Language.Praxis.Surface.Prelude
+import Test.Tasty
+import Test.Tasty.HUnit
+
 main :: IO ()
-main = putStrLn "Test suite not yet implemented"
+main =
+  defaultMain $
+    testGroup
+      "praxis"
+      [ testCase "the prelude certifies, and states the lemmas generated proofs appeal to" $ do
+          p <- either assertFailure pure prelude
+          mapM_ (\n -> assertBool n (Map.member n (preludeLemmas p))) ["hdCons", "tlCons", "dropConsSucc", "cvrecUnfold", "histAt", "cvInduction", "belowElim"]
+      , parserTests
+      , checkTests
+      ]

@@ -1,0 +1,57 @@
+-- Generic lemmas about the prelude, certified at run time over the library of
+-- praxis-core by Language.Praxis.Surface.Prelude.
+
+theorem hdCons : |- hd (cons a b) = a
+by calc hd (cons a b) = godelPi1 (pair a b) = a by exact pi1Pair
+
+theorem tlCons : |- tl (cons a b) = b
+by calc tl (cons a b) = godelPi2 (pair a b) = b by exact pi2Pair
+
+theorem dropTl : |- drop k (tl l) = tl (drop k l)
+by induction k as n
+   { refl }
+   { calc drop (S n) (tl l) = tl (drop n (tl l)) = tl (tl (drop n l)) by cong H1 = tl (drop (S n) l) }
+
+theorem dropConsSucc : |- drop (S k) (cons a l) = drop k l
+by calc drop (S k) (cons a l) = tl (drop k (cons a l)) = drop k (tl (cons a l)) by cong dropTl = drop k l by cong tlCons
+
+theorem subSuccPos : j < m |- m - j = S (m - S j)
+by have A: (S j + (m - S j) = m) { exact ltAddSub };
+   have B: (S j + (m - S j) = S (j + (m - S j))) { exact succAdd };
+   have C: ((j + S (m - S j)) - j = S (m - S j)) { exact addSubCancel };
+   calc m - j = (S j + (m - S j)) - j by cong A
+            = (S (j + (m - S j))) - j by cong B
+            = (j + S (m - S j)) - j
+            = S (m - S j) by exact C
+
+rule cvrecUnfold (k h : var) (t : term) (Γ : ctx) (f(k, h) : term) : Γ |- cvrec {f} t = f t (hist {f} t)
+by refl
+
+rule histAt (k h : var) (t j : term) (Γ : ctx) (f(k, h) : term) : j < t, Γ |- at (hist {f} t) t j = cvrec {f} j
+by induction t as m
+   { exact notLtZero }
+   { have C: (j < m \/ j = m) { exact ltSuccCases };
+     DisjL on C as Lt E
+     { have IH: (at (hist {f} m) m j = cvrec {f} j) { ImplL on H2 { exact Lt } { assumption } };
+       have D: (m - j = S (m - S j)) { exact subSuccPos };
+       calc at (hist {f} (S m)) (S m) j
+          = hd (drop (S m - S j) (hist {f} (S m)))
+          = hd (drop (m - j) (hist {f} (S m))) by cong succSubSucc
+          = hd (drop (S (m - S j)) (hist {f} (S m))) by cong D
+          = hd (drop (S (m - S j)) (cons (f m (hist {f} m)) (hist {f} m)))
+          = hd (drop (m - S j) (hist {f} m)) by cong dropConsSucc
+          = at (hist {f} m) m j
+          = cvrec {f} j by cong IH }
+     { calc at (hist {f} (S m)) (S m) j
+          = at (hist {f} (S m)) (S m) m by cong E
+          = hd (drop (S m - S m) (hist {f} (S m)))
+          = hd (drop 0 (hist {f} (S m))) by cong subSelf
+          = hd (cons (f m (hist {f} m)) (hist {f} m))
+          = f m (hist {f} m) by exact hdCons
+          = cvrec {f} m
+          = cvrec {f} j by cong E } }
+
+-- An if on a numeral, at variables: what a generated proof instantiates to
+-- collapse a dispatch without normalising its branches.
+theorem collapseT : |- (if 1 then a else b) = a by refl
+theorem collapseF : |- (if 0 then a else b) = b by refl

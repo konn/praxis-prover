@@ -1,0 +1,22 @@
+-- The prelude of the surface language: sequences and course-of-values recursion.
+
+-- The components of a pair, as lft and rgt, but stuck at once on a code
+-- which is not a successor, so that a term over variables stays small.
+hd 0 = 0
+hd (S p) = godelPi1 p
+tl 0 = 0
+tl (S p) = godelPi2 p
+
+-- The list l without its first k elements.
+drop 0 l = l
+drop (S k) l = tl (drop k l)
+
+-- The value at j < k in the history h of k: hist lists the values newest first.
+at h k j = hd (drop (k - S j) h)
+
+-- The history of F below n: the values at n - 1, …, 0, newest first.
+hist {F} 0 $[xs] = 0
+hist {F} (S n) $[xs] = cons (F n (hist {F} n $[xs]) $[xs]) (hist {F} n $[xs])
+
+-- Course-of-values recursion: F at n, given the history below n.
+cvrec {F} n $[xs] = F n (hist {F} n $[xs]) $[xs]

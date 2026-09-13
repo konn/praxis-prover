@@ -17,6 +17,11 @@ extra-doc-files:
   CHANGELOG.md
   README.md
 
+extra-source-files:
+  src-pra/*.pra
+  src-pra/*.prf
+  test/data/*.px
+
 source-repository head
   type: git
   location: https://github.com/konn/praxis
@@ -39,14 +44,42 @@ common defaults
 
   build-depends: base >=4.7 && <5
   default-language: GHC2024
+  default-extensions:
+    BlockArguments
+    DerivingStrategies
+    MultiWayIf
 
 library
   import: defaults
   hs-source-dirs: src
   -- cabal-gild: discover src --exclude=src/**/Internal.hs --exclude=src/**/Internal/**/*.hs
-  exposed-modules: Lib
+  exposed-modules:
+    Language.Praxis.Surface.Check
+    Language.Praxis.Surface.Compile
+    Language.Praxis.Surface.CoreText
+    Language.Praxis.Surface.Elab
+    Language.Praxis.Surface.Encode
+    Language.Praxis.Surface.Engine
+    Language.Praxis.Surface.Env
+    Language.Praxis.Surface.Fixity
+    Language.Praxis.Surface.Lexer
+    Language.Praxis.Surface.Mangle
+    Language.Praxis.Surface.Parser
+    Language.Praxis.Surface.Prelude
+    Language.Praxis.Surface.Syntax
+    Language.Praxis.Surface.Syntax.Raw
+    Language.Praxis.Surface.Types
+
   -- cabal-gild: discover src --include=src/**/Internal.hs --include=src/**/Internal/**/*.hs
   other-modules:
+  build-depends:
+    bound,
+    containers,
+    megaparsec,
+    mtl,
+    praxis-core,
+    template-haskell,
+    text,
 
 executable praxis
   import: defaults
@@ -59,7 +92,9 @@ executable praxis
     -rtsopts
     -with-rtsopts=-N
 
-  build-depends: praxis
+  build-depends:
+    praxis,
+    text,
 
 test-suite praxis-test
   import: defaults
@@ -68,10 +103,18 @@ test-suite praxis-test
   hs-source-dirs: test
   -- cabal-gild: discover test --exclude=test/Test.hs
   other-modules:
+    Language.Praxis.Surface.CheckTest
+    Language.Praxis.Surface.ParserTest
+
   ghc-options:
     -threaded
     -O2
     -rtsopts
     -with-rtsopts=-N
 
-  build-depends: praxis
+  build-depends:
+    containers,
+    praxis,
+    tasty,
+    tasty-hunit,
+    text,

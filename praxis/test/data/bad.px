@@ -1,0 +1,32 @@
+module Bad where
+
+-- Declarations the checker must refuse, each for its own reason; the rest
+-- of the module is checked without them.
+
+data List a = Nil | a : List a
+
+(<>) : List a -> List a -> List a
+(<>) Nil      ys = ys
+(<>) (x : xs) ys = x : (xs <> ys)
+
+-- false, whatever the proof: the core rejects the last step
+wrong : {a : Type} -> (xs : List a) -> xs <> Nil ≡ Nil
+wrong {a} xs = by
+  induction xs
+  { refl }
+  { intros x xs
+    calc (x : xs) <> Nil = x : (xs <> Nil)
+                         = Nil := by IH }
+
+-- not structural: the recursive call is on the value matched, not a field
+loop : List a -> List a
+loop Nil = Nil
+loop (x : xs) = loop (x : xs)
+
+-- abandoned: sorry reports its goal, and fails
+unfinished : {a : Type} -> (xs : List a) -> xs ≡ xs
+unfinished {a} xs = by sorry
+
+-- appeals to a theorem which did not certify, which is no lemma
+uses : {a : Type} -> (xs : List a) -> xs <> Nil ≡ Nil
+uses {a} xs = wrong xs

@@ -1,0 +1,9 @@
+module Logic.FOL where
+
+data Void f t -- empty type
+data RingE f t = Neg t | t :+ t | t :* t
+data RingR f t = t := t
+data ZFR f t = Member t t
+
+data Term r f v = FVar v | BVar nat | App (f (Formula r f v) (Term r f v))
+data Formula r f v = Var v | Rel (r (Formula r f v) (Term r f v)) | Not (Formula r f v) | Formula r f v :/\ Formula r f v | Formula r f v :\/ Formula r f v | Formula r f v :=> Formula r f v | Forall (Formula r f v) | Exists (Formula r f v)

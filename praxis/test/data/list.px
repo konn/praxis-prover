@@ -1,0 +1,41 @@
+module Data.List where
+
+data List a = Nil | a : List a
+
+(<>) : List a -> List a -> List a
+(<>) Nil      ys = ys
+(<>) (x : xs) ys = x : (xs <> ys)
+
+-- (<>).unfold-Nil and (<>).unfold-: will be defined.
+
+infixr 4 <> -- precedence is arbitrary chosen, rational number
+
+{-
+Block comment
+{- this is nestable -}
+like the above
+-}
+
+-- combinatorial proof:
+-- {a}: implicit parameter,
+-- allow `-` for function name
+append-nil : {a: Type} -> (xs : List a) -> xs <> Nil ≡ xs
+append-nil {a} Nil = (<>).unfold-Nil
+append-nil {a} (x : xs) = calc -- calculational proof!
+  (x : xs) <> Nil
+  = x : (xs <> Nil)
+  = x : xs  := by cong (append-nil xs)
+
+-- or, tactically
+append-nil-tactically : {a: Type} -> (xs : List a) -> xs <> Nil ≡ xs
+append-nil-tactically {a} xs = by
+  induction xs
+  { -- base case
+    refl; -- allow optional trailing semicolon, without changing semantics
+  }
+  {
+     intros x xs
+     calc
+       (x : xs) <> Nil = x : (xs <> Nil)
+                       = x : xs := by IH
+  }
