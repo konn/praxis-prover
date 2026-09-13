@@ -27,6 +27,9 @@ module Language.Praxis.Surface.Syntax.Raw (
   -- * Modules and declarations
   Module (..),
   Decl (..),
+  ClassDecl (..),
+  InstanceDecl (..),
+  TyConstraint,
   OpenSpec (..),
   Assoc (..),
   DataDecl (..),
@@ -125,6 +128,39 @@ data Decl
     DSignature !(Located Segment) !(Located Expr)
   | -- | a clause of a function or of a proof
     DClause !Clause
+  | -- | @class C a => D a where@ and the signatures of its methods
+    DClass !ClassDecl
+  | -- | @instance D T where@ and the clauses of its methods
+    DInstance !InstanceDecl
+  deriving stock (Show, Eq)
+
+-- | A constraint on a type variable, @C a@: the class, and the variable.
+type TyConstraint = (Located QName, Located Text)
+
+{- |
+A class: its superclasses, each a constraint on its parameter; its name; its
+parameter; and the signatures of its methods, in order.
+-}
+data ClassDecl = ClassDecl
+  { classSupers :: ![TyConstraint]
+  , className :: !(Located Text)
+  , classParam :: !(Located Text)
+  , classMembers :: ![(Located Segment, Located Expr)]
+  }
+  deriving stock (Show, Eq)
+
+{- |
+An instance: its name, when one is given, @instance name : C T@; the
+constraints on the type variables of its type; its class; the type it is
+for; and the clauses of its methods.
+-}
+data InstanceDecl = InstanceDecl
+  { instanceName :: !(Maybe (Located Text))
+  , instanceContext :: ![TyConstraint]
+  , instanceClass :: !(Located QName)
+  , instanceType :: !(Located Expr)
+  , instanceClauses :: ![Located Clause]
+  }
   deriving stock (Show, Eq)
 
 data OpenSpec

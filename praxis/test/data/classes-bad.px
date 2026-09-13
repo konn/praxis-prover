@@ -1,0 +1,42 @@
+module ClassesBad where
+
+data List a = Nil | a : List a
+
+class Semigroup a where
+  (<>) : a -> a -> a
+
+class Semigroup a => Monoid a where
+  mempty : a
+
+-- No instance of the superclass for List before this one.
+instance Monoid (List a) where
+  mempty = Nil
+
+instance Semigroup Nat where
+  (<>) x y = x + y
+
+-- A second instance of Semigroup for Nat.
+instance Semigroup Nat where
+  (<>) x y = x
+
+-- A clause for no method of the class.
+instance Monoid Nat where
+  mempty = 0
+  other = 1
+
+-- A method at a type variable.
+generic : {a : Type} -> (x : a) -> x <> x ≡ x
+generic {a} x = rfl
+
+-- A type the method is used at is not known.
+ambiguous : mempty ≡ mempty
+ambiguous = rfl
+
+-- An instance for a type which is not a data type applied to distinct variables.
+data Pair a b = MkPair a b
+
+instance Semigroup (Pair a a) where
+  (<>) p q = p
+
+fine : (x : Nat) -> x <> 0 ≡ x
+fine x = rfl

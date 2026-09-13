@@ -32,6 +32,11 @@ module Language.Praxis.Surface.Types (
   zonk,
   instantiateScheme,
   UnifyError (..),
+
+  -- * Constraints
+  Wanted (..),
+  wantInstance,
+  takeWanted,
 ) where
 
 import Control.Monad (unless, zipWithM_)
@@ -41,6 +46,7 @@ import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IM
 import Data.Text (Text)
 import Data.Text qualified as T
+import Language.Praxis.Surface.Syntax.Raw (Segment, Span)
 
 -- * Kinds and types
 
@@ -128,15 +134,47 @@ data UnifyError
   | Occurs !Int !Ty
   deriving stock (Show, Eq)
 
--- | Unification variables and their solutions, and the next fresh one.
+{- |
+Unification variables and their solutions, and the next fresh one; and the
+constraints the uses of methods raised, not solved yet.
+-}
 data St = St
   { stNext :: !Int
   , stSolved :: !(IntMap Ty)
+  , stWanted :: ![Wanted]
+  -- ^ the most recent first
   }
 
--- | No variables yet.
+{- |
+A constraint raised by a use of a method: the placeholder the use stands for
+until the constraint is solved, the method by its qualified name, the type
+its class is at there, and where the use is.
+-}
+data Wanted = Wanted
+  { wantedPlaceholder :: !Text
+  , wantedMethod :: ![Segment]
+  , wantedType :: !Ty
+  , wantedSpan :: !Span
+  }
+
+-- | No variables yet, and no constraints.
 initialSt :: St
-initialSt = St 0 IM.empty
+initialSt = St 0 IM.empty []
+
+-- | Record the constraint a use of a method raises: the method, the type its class is at, where; and the placeholder the use stands for.
+wantInstance :: (MonadState St m) => [Segment] -> Ty -> Span -> m Text
+wantInstance method t sp = do
+  n <- gets stNext
+  let placeholder = "#method-" <> T.pack (show n)
+  modify' \s -> s {stNext = n + 1, stWanted = Wanted placeholder method t sp : stWanted s}
+  pure placeholder
+
+-- | The constraints recorded, in the order they were, and none left.
+takeWanted :: (MonadState St m) => m [Wanted]
+takeWanted = do
+  ws <- gets stWanted
+  modify' \s -> s {stWanted = []}
+  pure (reverse ws)
 
 type Unify = StateT St (Either UnifyError)
 

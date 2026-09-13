@@ -350,7 +350,7 @@ calcProof k info n g sp (R.Calc first steps) = do
 term :: Knowledge -> Goal -> Located R.Expr -> Either EngineError (Expr Text)
 term k g e0 = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  either (\(ElabError sp msg) -> Left (EngineError sp msg)) (Right . fst) (runTC (inferTerm (knowEnv k) ctx e))
+  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) ctx e >>= resolveMethods (knowEnv k) . fst))
   where
     ctx = [(n, (v, t)) | (n, (v, t)) <- goalVars g]
 

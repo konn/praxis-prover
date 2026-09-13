@@ -1,0 +1,44 @@
+module Classes where
+
+data List a = Nil | a : List a
+
+-- An operation, the class of the types which have one.
+class Semigroup a where
+  (<>) : a -> a -> a
+
+infixr 4 <>
+
+-- A hierarchy: a monoid is a semigroup with a unit.
+class Semigroup a => Monoid a where
+  mempty : a
+
+instance Semigroup Nat where
+  (<>) x y = x + y
+
+instance Monoid Nat where
+  mempty = 0
+
+instance Semigroup (List a) where
+  (<>) Nil ys = ys
+  (<>) (x : xs) ys = x : (xs <> ys)
+
+instance Monoid (List a) where
+  mempty = Nil
+
+-- One operator, and the instance of its class for the type it is used at.
+nat-unit : (x : Nat) -> x <> mempty ≡ x
+nat-unit x = rfl
+
+list-unit : {a : Type} -> (xs : List a) -> mempty <> xs ≡ xs
+list-unit {a} xs = rfl
+
+-- A method of an instance is a function of the instance, with its lemmas.
+list-cons : {a : Type} -> (x : a) -> (xs : List a) -> (x : Nil) <> xs ≡ x : xs
+list-cons {a} x xs = calc
+  (x : Nil) <> xs
+  = x : (Nil <> xs) := Semigroup-List.(<>).unfold-:
+  = x : xs := by cong Semigroup-List.(<>).unfold-Nil
+
+-- Both instances in one statement.
+both : (xs : List Nat) -> (2 <> 3) : (mempty <> xs) ≡ 5 : xs
+both xs = rfl

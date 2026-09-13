@@ -20,6 +20,9 @@ module Language.Praxis.Surface.Env (
   CtorInfo (..),
   FunInfo (..),
   TheoremInfo (..),
+  ClassInfo (..),
+  MethodInfo (..),
+  InstanceInfo (..),
   Global (..),
   globalQualName,
   globalCore,
@@ -32,6 +35,9 @@ module Language.Praxis.Surface.Env (
   addData,
   addFunction,
   addTheorem,
+  addClass,
+  addInstanceFunction,
+  addInstance,
   addNamespaceMember,
   openNamespace,
 
@@ -99,11 +105,47 @@ data TheoremInfo = TheoremInfo
   }
   deriving stock (Show)
 
+-- | A class: its superclasses, by their qualified names, and its methods, in order.
+data ClassInfo = ClassInfo
+  { classQual :: !QualName
+  , classSuperclasses :: ![QualName]
+  , classMethods :: ![MethodInfo]
+  }
+  deriving stock (Show)
+
+{- |
+A method of a class: its class, its scheme — the class's parameter its first
+type parameter — and the number of arguments it is applied to.
+-}
+data MethodInfo = MethodInfo
+  { methodQual :: !QualName
+  , methodClass :: !QualName
+  , methodScheme :: !Scheme
+  , methodArity :: !Int
+  }
+  deriving stock (Show)
+
+{- |
+An instance: its class, the head of the type it is for — the qualified name
+of a data type, or @Nat@ — and the function defining each method, by the
+method's qualified name.
+-}
+data InstanceInfo = InstanceInfo
+  { instQual :: !QualName
+  , instClass :: !QualName
+  , instHead :: !Text
+  , instFunctions :: !(Map QualName FunInfo)
+  }
+  deriving stock (Show)
+
 data Global
   = GData !DataInfo
   | GCtor !CtorInfo
   | GFun !FunInfo
   | GTheorem !TheoremInfo
+  | GClass !ClassInfo
+  | GMethod !MethodInfo
+  | GInstance !InstanceInfo
   deriving stock (Show)
 
 globalQualName :: Global -> QualName
@@ -112,14 +154,18 @@ globalQualName = \case
   GCtor c -> ctorQual c
   GFun f -> funQual f
   GTheorem t -> thmQual t
+  GClass c -> classQual c
+  GMethod m -> methodQual m
+  GInstance i -> instQual i
 
--- | The core name of a global: its symbol, or its lemma.
+-- | The core name of a global: its symbol, or its lemma; a class, a method and an instance have none of their own.
 globalCore :: Global -> Text
 globalCore = \case
   GData d -> dataIs d
   GCtor c -> ctorCore c
   GFun f -> funCore f
   GTheorem t -> thmCore t
+  g -> coreOf (globalQualName g)
 
 -- * Environments
 
@@ -133,10 +179,12 @@ data Env = Env
   , envOpened :: ![QualName]
   , envDisplay :: !(Map Text Text)
   -- ^ every core name, with the surface name it stands for
+  , envInstances :: !(Map (QualName, Text) InstanceInfo)
+  -- ^ each instance, by its class and the head of its type: one for each
   }
 
 emptyEnv :: QualName -> Env
-emptyEnv m = Env m Map.empty Map.empty Map.empty [] Map.empty
+emptyEnv m = Env m Map.empty Map.empty Map.empty [] Map.empty Map.empty
 
 -- | A name of the module, qualified.
 qualify :: Env -> [Segment] -> QualName
@@ -196,6 +244,48 @@ addTheorem env q binders = (env', info)
         , envTop = top (envTop env)
         , envDisplay = Map.insert (thmCore info) (renderQualName (drop (length (envModule env)) q)) (envDisplay env)
         }
+
+{- |
+Add a class and its methods.  The class opens a namespace holding its
+methods, and each method, as in Haskell, is also a top-level name.
+-}
+addClass :: Env -> Segment -> [QualName] -> [(Segment, Scheme, Int)] -> (Env, ClassInfo)
+addClass env name supers methods = (env', info)
+  where
+    q = qualify env [name]
+    info = ClassInfo q supers [MethodInfo (q <> [m]) q sch arity | (m, sch, arity) <- methods]
+    env' =
+      env
+        { envGlobals = foldr (\m -> Map.insert (methodQual m) (GMethod m)) (Map.insert q (GClass info) (envGlobals env)) (classMethods info)
+        , envTop = foldr (\(m, _, _) -> Map.insert m (q <> [m])) (Map.insert name q (envTop env)) methods
+        , envNamespaces = Map.insertWith Map.union q (Map.fromList [(m, q <> [m]) | (m, _, _) <- methods]) (envNamespaces env)
+        }
+
+{- |
+The function defining a method in an instance: a member of the instance's
+namespace by the method's name, which opens a namespace of its own for its
+lemmas, as a function does.
+-}
+addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> (Env, FunInfo)
+addInstanceFunction env instance' method sch arity = (env', info)
+  where
+    q = instance' <> [method]
+    info = FunInfo q sch arity (coreOf q)
+    env' =
+      env
+        { envGlobals = Map.insert q (GFun info) (envGlobals env)
+        , envNamespaces = Map.insertWith Map.union instance' (Map.singleton method q) (Map.insertWith Map.union q Map.empty (envNamespaces env))
+        , envDisplay = Map.insert (funCore info) (renderQualName (drop (length (envModule env)) q)) (envDisplay env)
+        }
+
+-- | Add an instance: a top-level name, whose namespace holds the functions of its methods.
+addInstance :: Env -> InstanceInfo -> Env
+addInstance env inst =
+  env
+    { envGlobals = Map.insert (instQual inst) (GInstance inst) (envGlobals env)
+    , envTop = Map.insert (last (instQual inst)) (instQual inst) (envTop env)
+    , envInstances = Map.insert (instClass inst, instHead inst) inst (envInstances env)
+    }
 
 -- | Make a global a member of a namespace, by the name given.
 addNamespaceMember :: QualName -> Segment -> QualName -> Env -> Env

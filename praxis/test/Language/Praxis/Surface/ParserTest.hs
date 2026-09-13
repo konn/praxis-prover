@@ -82,6 +82,13 @@ parserTests =
         case expr "(x : xs) <> ys" of
           EOps (Operand (Located _ (EParen _)) : _) -> pure ()
           other -> assertFailure (show other)
+    , testCase "classes, one with a superclass, and instances with their clauses laid out" $ do
+        m <- parseFile "test/data/classes.px"
+        let decls = map unLocated (moduleDecls m)
+        [unLocated (className c) | DClass c <- decls] @?= ["Semigroup", "Monoid"]
+        [map (qnameText . unLocated . fst) (classSupers c) | DClass c <- decls] @?= [[], ["Semigroup"]]
+        [(qnameText (unLocated (instanceClass i)), length (instanceClauses i)) | DInstance i <- decls]
+          @?= [("Semigroup", 1), ("Monoid", 1), ("Semigroup", 2), ("Monoid", 1)]
     , testCase "an offside token ends the item" $
         case parseModule "<test>" "f x = x\ng y = y\n" of
           Right m -> length (moduleDecls m) @?= 2
@@ -107,3 +114,5 @@ declKind = \case
   DFixity {} -> "fixity"
   DSignature {} -> "signature"
   DClause {} -> "clause"
+  DClass {} -> "class"
+  DInstance {} -> "instance"

@@ -28,6 +28,15 @@ checkTests =
     , testCase "the FOL example's data types are encoded, and their lemmas certify" $ do
         c <- checkFile "test/data/fol.px"
         errors c @?= []
+    , testCase "a method is the function of the instance of its class for the type it is used at" $ do
+        c <- checkFile "test/data/classes.px"
+        errors c @?= []
+        checkedTheorems c @?= ["Classes.nat-unit", "Classes.list-unit", "Classes.list-cons", "Classes.both"]
+    , testCase "an instance follows its superclasses', is its type's only one, defines methods only; a method is at a known type, no variable" $ do
+        c <- checkFile "test/data/classes-bad.px"
+        checkedTheorems c @?= ["ClassesBad.fine"]
+        let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
+        mapM_ (\(n, l) -> assertBool ("an error for " <> n) (l `elem` lines')) [("superclass", 12 :: Int), ("second", 19), ("other", 25), ("generic", 28), ("ambiguous", 32), ("pair", 38)]
     , testCase "a false theorem, a non-structural recursion, a sorry and an appeal to a failed theorem are refused" $ do
         c <- checkFile "test/data/bad.px"
         checkedTheorems c @?= []

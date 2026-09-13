@@ -338,6 +338,27 @@ definitional equality only on what remains (functions applied to variables).
 step's goal. A recursive call in a proof term names the induction hypothesis
 at its argument; a lemma name is `exact`, `cong e` is `cong`.
 
+## Classes
+
+Classes are resolved before anything reaches the core. A use of a method
+stands for a placeholder, and records a constraint: the type its class is at
+there. Once the declaration's types are unified, each constraint is solved by
+the instance of its class for the head of that type, and the placeholder
+replaced by the instance's function (`Elab.resolveMethods`). A method at a
+type not known, or at a type variable, is refused.
+
+An instance's methods are ordinary functions, compiled as any function is,
+with their unfolding lemmas. The instance comes into scope before its
+clauses, so a method may recur through itself, or use another method of the
+instance.
+
+The translation of statements therefore never meets a method. A certified
+statement mentions the functions of the instances chosen, which
+`praxis check --dump-core` shows, and § Statements and their adequacy
+applies unchanged. That an instance is the only one of its class for its type
+is what makes the choice the one the reader of the source predicts; soundness
+does not depend on it.
+
 ## Invariants, collected
 
 1. Every name the surface hands to the core is mangled into `u_…`/`v_…`.
@@ -356,3 +377,6 @@ at its argument; a lemma name is `exact`, `cong e` is `cong`.
 8. The engine builds text, never proof terms: the core certifies it.
 9. Auxiliary theorems have names unique by the source position of their
    induction.
+10. Methods never reach the core: each use is the function of the instance
+    of its class for the type it is used at, the only instance of its class
+    for that type.

@@ -7,6 +7,8 @@ The grammar of the surface language, over the tokens and the layout of
 > module   ::= ['module' qname 'where'] {decl}
 > decl     ::= 'open' qname ['using' (names) | 'hiding' (names)]
 >            | 'data' Name {param} ['=' ctor {'|' ctor}]
+>            | 'class' [constraints '=>'] Name name 'where' {name ':' expr}
+>            | 'instance' [name ':'] [constraints '=>'] qname atom 'where' {clause}
 >            | ('infixl' | 'infixr' | 'infix') rational op {op}
 >            | name ':' expr                          -- a signature
 >            | expr '=' rhs                           -- a clause
@@ -72,7 +74,7 @@ spanned start x = locatedFrom start (pure x)
 -- * Declarations
 
 declP :: Parser (Located Decl)
-declP = located (choice [openP, dataP, fixityP, try signatureP, clauseP]) <?> "declaration"
+declP = located (choice [openP, dataP, classP, instanceP, fixityP, try signatureP, clauseP]) <?> "declaration"
 
 openP :: Parser Decl
 openP = do
@@ -159,11 +161,49 @@ signatureP = do
   DSignature n <$> exprP
 
 clauseP :: Parser Decl
-clauseP = do
+clauseP = DClause <$> clauseBodyP
+
+-- | A clause, @lhs = rhs@.
+clauseBodyP :: Parser Clause
+clauseBodyP = do
   lhs <- withStops ["="] [] opsP
   symbol "="
-  rhs <- located rhsP
-  pure (DClause (Clause lhs rhs))
+  Clause lhs <$> located rhsP
+
+-- | Constraints on type variables: @C a@, or @(C a, D b)@.
+constraintsP :: Parser [TyConstraint]
+constraintsP = bracketed "(" ")" (constraintP `sepBy1` symbol ",") <|> fmap pure constraintP
+  where
+    constraintP = (,) <$> qualifiedName <*> identifier
+
+{- |
+A class: @class [constraints =>] Name param where@, and the signatures of its
+methods, laid out or in braces.
+-}
+classP :: Parser Decl
+classP = do
+  keyword "class"
+  supers <- option [] (try (constraintsP <* symbol "=>"))
+  n <- identifier
+  param <- identifier
+  keyword "where"
+  members <- block ((,) <$> nameSegment <* symbol ":" <*> exprP)
+  pure (DClass (ClassDecl supers n param members))
+
+{- |
+An instance: @instance [name :] [constraints =>] Class type where@, and the
+clauses of its methods, laid out or in braces.
+-}
+instanceP :: Parser Decl
+instanceP = do
+  keyword "instance"
+  name <- optional (try (identifier <* symbol ":"))
+  context <- option [] (try (constraintsP <* symbol "=>"))
+  cls <- qualifiedName
+  ty <- atomP
+  keyword "where"
+  clauses <- block (located clauseBodyP)
+  pure (DInstance (InstanceDecl name context cls ty clauses))
 
 -- | A right side: a tactic proof, a calculation, or an expression.
 rhsP :: Parser Rhs

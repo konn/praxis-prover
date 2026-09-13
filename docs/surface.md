@@ -66,8 +66,9 @@ Each stage is a module of `Language.Praxis.Surface`: `Lexer`, `Parser` and
   grammar reserves `->`, `→`, `|`, `\`, `=>`, `<-`, `←`, `.`, `<;>`, `¬`, `⊤`,
   `⊥`; `=`, `:` and `:=` are ordinary operators the grammar reads specially
   where it needs them, so `:` and `:=` can still name constructors.
-- **Keywords** are `module where open using hiding data infixl infixr infix
-  case of if then else let in by calc Type forall exists fun with`. Tactic
+- **Keywords** are `module where open using hiding data class instance
+  infixl infixr infix case of if then else let in by calc Type forall exists
+  fun with`. Tactic
   names are words only in tactic position.
 
 ## Layout
@@ -97,6 +98,8 @@ line is a block whose first item is the first term. A step is
 | fixity | `infixr 4 <>`, `infixl 6.5 +++`, `infix 9/2 ~~` |
 | signature | `name : type` |
 | clause | `lhs = rhs` |
+| class | `class Semigroup a => Monoid a where`, and the signatures of its methods |
+| instance | `instance Monoid Nat where`, and the clauses of its methods |
 
 A constructor is a name applied to the types of its fields, `Neg t`, or two
 types around a constructor operator, `t :+ t`; as in Haskell, a constructor
@@ -118,6 +121,42 @@ of the module, a member of an opened namespace, and then a constructor — of
 the type expected there, which is how `Nil` means `List.Nil` in the example
 without any `open`, or the only constructor of that name. Anything else is an
 ambiguity error listing the candidates.
+
+## Classes and instances
+
+```
+class Semigroup a where
+  (<>) : a -> a -> a
+
+class Semigroup a => Monoid a where
+  mempty : a
+
+instance Semigroup (List a) where
+  (<>) Nil      ys = ys
+  (<>) (x : xs) ys = x : (xs <> ys)
+
+instance Monoid (List a) where
+  mempty = Nil
+```
+
+A class has one parameter, and methods: first-order signatures, each
+mentioning the parameter. Its superclasses constrain the same parameter. A
+method is a top-level name, as in Haskell, and a member of its class's
+namespace.
+
+An instance is for a data type applied to distinct type variables, or for
+`Nat`. It is the only instance of its class for that type; it comes after an
+instance of each superclass for it; and it defines every method by clauses,
+as a function is defined. Each method of an instance is a function of the
+instance, `Semigroup-List.(<>)` — `lists.(<>)` for `instance lists : Monoid
+(List a) where …` — with its unfolding lemmas, `Semigroup-List.(<>).unfold-Nil`.
+
+A use of a method is resolved once the types of its declaration are known:
+it is the function of the instance of its class for the type it is used at.
+`2 <> 3` is `Semigroup-Nat.(<>) 2 3`, and `mempty <> xs`, at `List Nat`,
+is `Semigroup-List.(<>) Monoid-List.mempty xs`. A method at a type not known,
+or at a type variable, is refused for now: constraints on type variables,
+`Monoid a => List a -> a`, come next, and laws after them.
 
 ## Types
 
@@ -204,8 +243,12 @@ the core's definitional equality taking only what is left.
 Implemented: the whole grammar above; data types, including higher-kinded
 parameters and nested and mutually referring types; functions matching on one
 argument, each constructor once, structurally recursive with unchanged other
-arguments; theorems by clauses on one value, by `calc`, and by the tactics
-listed; `.px` diagnostics. Planned, in order: goal display in hover, the
+arguments; classes with superclasses, and their instances for data types and
+`Nat`, each use of a method resolved at the type it is used at; theorems by
+clauses on one value, by `calc`, and by the tactics listed; `.px`
+diagnostics. Planned, in order: constraints on type variables, `Monoid a =>
+…`, compiled to schemas over the methods, generic theorems over them, laws of
+classes and instances with contexts; goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
 `if` in terms, nested patterns and matching on several arguments, matching
 and recursion on `Nat`, overlapping first-match clauses, mutual recursion and

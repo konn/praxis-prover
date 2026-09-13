@@ -31,6 +31,7 @@ module Language.Praxis.Surface.Syntax (
   stripLocations,
   spine,
   apps,
+  mapGlobals,
 
   -- * Patterns
   patternVariables,
@@ -42,6 +43,7 @@ module Language.Praxis.Surface.Syntax (
 ) where
 
 import Bound (Scope, abstract, instantiate, (>>>=))
+import Bound.Scope (hoistScope)
 import Control.Monad (ap)
 import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1, showsPrec1)
 import Data.List (elemIndex)
@@ -250,6 +252,31 @@ spine = go []
 -- | A head applied to arguments.
 apps :: Expr a -> [Expr a] -> Expr a
 apps = foldl App
+
+-- | Every global reference replaced as the function says, under binders too.
+mapGlobals :: (Ref -> Ref) -> Expr a -> Expr a
+mapGlobals f = go
+  where
+    go :: Expr x -> Expr x
+    go = \case
+      Var a -> Var a
+      Global r -> Global (f r)
+      Nat n -> Nat n
+      App g x -> App (go g) (go x)
+      At sp e -> At sp (go e)
+      Lam hs b -> Lam hs (hoistScope go b)
+      Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]
+      If c t e -> If (go c) (go t) (go e)
+      Pi h i d b -> Pi h i (go d) (hoistScope go b)
+      Arrow a b -> Arrow (go a) (go b)
+      Quant q h bound ty b -> Quant q h (fmap (fmap go) bound) (fmap go ty) (hoistScope go b)
+      Rel r a b -> Rel r (go a) (go b)
+      Conn c a b -> Conn c (go a) (go b)
+      Not a -> Not (go a)
+      Top -> Top
+      Bottom -> Bottom
+      Universe -> Universe
+      Hole -> Hole
 
 -- * Patterns
 

@@ -43,6 +43,7 @@ module Language.Praxis.Surface.Elab (
   elabProp,
   elabType,
   extendCtx,
+  resolveMethods,
 
   -- * Errors
   ElabError (..),
@@ -62,7 +63,7 @@ import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, isConnective, isRelation, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleVariable)
 import Language.Praxis.Surface.Syntax
-import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, qnameText)
+import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, qnameText, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types
 
@@ -170,10 +171,18 @@ elabModule fx m = walk envData (R.moduleDecls m) []
       R.DClause c -> case headOf c of
         Just name | name `elem` signed -> walk env rest acc
         _ -> walk env rest (IFailed (ElabError sp "a clause with no signature for its name") : acc)
+      R.DClass cd -> case elabClass fx env cd of
+        Left err -> walk env rest (IFailed err : acc)
+        Right env' -> walk env' rest acc
+      R.DInstance idl -> case elabInstance fx env sp idl of
+        Left err -> walk env rest (IFailed err : acc)
+        Right (env', items) -> walk env' rest (reverse items <> acc)
 
     isNamespace = \case
       GData _ -> True
       GFun _ -> True
+      GClass _ -> True
+      GInstance _ -> True
       _ -> False
 
 -- * Data types
@@ -205,6 +214,140 @@ elabData fx env d = do
     kindFrom = \case
       R.KType -> KType
       R.KArrow a b -> KArrow (kindFrom a) (kindFrom b)
+
+-- * Classes and instances
+
+{- |
+A class: its superclasses, constraints on its own parameter by classes
+declared before it; and its methods, each a signature over the parameter —
+its first type parameter — and type variables of its own.  A method is
+first-order, as a function is, and mentions the parameter.
+-}
+elabClass :: Fixities -> Env -> R.ClassDecl -> Either ElabError Env
+elabClass fx env cd = do
+  let a = unLocated (R.classParam cd)
+  supers <- forM (R.classSupers cd) \(Located qsp q, Located vsp v) -> do
+    unless (v == a) $ Left (ElabError vsp ("a superclass constrains the class's own parameter, " <> T.unpack a))
+    case [c | GClass c <- resolve env q] of
+      c : _ -> pure (classQual c)
+      [] -> Left (ElabError qsp ("not a class: " <> T.unpack (qnameText q)))
+  methods <- forM (R.classMembers cd) \(Located msp m, ty0) -> do
+    ty <- resolved fx ty0
+    when (isProp ty) $ Left (ElabError msp "a law of a class: laws are not supported yet")
+    let params = a : filter (/= a) (nub (typeVariables env ty))
+    t <- elabType env params ty
+    let (args, result) = arrows t
+    unless (all firstOrder (result : args)) $ Left (ElabError msp "a method of functions: its arguments and its result are values, which are first-order")
+    unless (0 `elem` tyParams t) $ Left (ElabError msp ("the method does not mention the class's parameter " <> T.unpack a))
+    pure (m, Scheme [(p, KType) | p <- params] t, length args)
+  pure (fst (addClass env (Ident (unLocated (R.className cd))) supers methods))
+
+{- |
+An instance: of a class declared before it, for a data type applied to
+distinct type variables or for @Nat@, the only one of its class for that
+type, and after an instance of each superclass for it.  Each method is a
+function of the instance, @C-T.m@ unless the instance is named, whose type
+is the method's at the instance's type.  The functions and the instance come
+into scope before the clauses are elaborated, as a function does, so that a
+method may call itself, or another method of the instance.
+-}
+elabInstance :: Fixities -> Env -> Span -> R.InstanceDecl -> Either ElabError (Env, [Item])
+elabInstance fx env sp idl = do
+  let Located csp cq = R.instanceClass idl
+  unless (null (R.instanceContext idl)) $ Left (ElabError sp "an instance with a context: not supported yet")
+  cls <- case [c | GClass c <- resolve env cq] of
+    c : _ -> pure c
+    [] -> Left (ElabError csp ("not a class: " <> T.unpack (qnameText cq)))
+  ty0 <- resolved fx (R.instanceType idl)
+  let vars = nub (typeVariables env ty0)
+      className' = segmentText (last (classQual cls))
+  headTy <- elabType env vars ty0
+  headName <- case headTy of
+    TNat -> pure "Nat"
+    TData dn args | args == [TParam i [] | i <- [0 .. length vars - 1]] -> pure dn
+    _ -> Left (ElabError (location ty0) "an instance is for a data type applied to distinct type variables, or for Nat")
+  let shortHead = last (T.splitOn "." headName)
+      iq = qualify env [Ident (maybe (className' <> "-" <> shortHead) unLocated (R.instanceName idl))]
+  when (Map.member (classQual cls, headName) (envInstances env)) $
+    Left (ElabError sp ("a second instance of " <> T.unpack className' <> " for " <> T.unpack shortHead <> ": an instance is the only one of its class for its type"))
+  forM_ (classSuperclasses cls) \s ->
+    unless (Map.member (s, headName) (envInstances env)) $
+      Left (ElabError sp ("no instance of " <> T.unpack (segmentText (last s)) <> " for " <> T.unpack shortHead <> ", a superclass of " <> T.unpack className' <> ", before this one"))
+  let clauses = [c | Located _ c <- R.instanceClauses idl]
+      methodName m = last (methodQual m)
+  forM_ clauses \c -> case clauseHead c of
+    Just n | n `elem` map methodName (classMethods cls) -> pure ()
+    _ -> Left (ElabError (location (R.clauseLhs c)) ("a clause for no method of " <> T.unpack className'))
+  let atType m = case methodScheme m of
+        Scheme mparams mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) (atInstance headTy (length vars) mty)
+      declare (e, fs) m = let (e', f) = addInstanceFunction e iq (methodName m) (atType m) (methodArity m) in (e', fs <> [(m, f)])
+      (env1, funs) = foldl declare (env, []) (classMethods cls)
+      env2 = addInstance env1 (InstanceInfo iq (classQual cls) headName (Map.fromList [(methodQual m, f) | (m, f) <- funs]))
+  foldM (define clauses) (env2, []) funs
+  where
+    clauseHead c = either (const Nothing) Just (resolveExpr fx (R.clauseLhs c)) >>= fmap fst . lhsParts
+    define clauses (e, items) (m, f) = do
+      let mine = [c | c <- clauses, clauseHead c == Just (last (methodQual m))]
+          (args, result) = arrows (schemeType (funScheme f))
+      when (null mine) $ Left (ElabError sp ("no clauses for the method " <> T.unpack (segmentText (last (methodQual m)))))
+      fcs <- forM mine \c -> runTC (elabFunClause fx e f args result c)
+      pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f args result fcs sp)])
+
+-- | A method's type at an instance: the class's parameter the instance's type, over its @n@ variables, and the method's own variables after them.
+atInstance :: Ty -> Int -> Ty -> Ty
+atInstance headTy n = go
+  where
+    go = \case
+      TParam 0 _ -> headTy
+      TParam i ts -> TParam (n + i - 1) (map go ts)
+      TData d ts -> TData d (map go ts)
+      TArrow a b -> TArrow (go a) (go b)
+      t -> t
+
+-- | A type's arguments and its result.
+arrows :: Ty -> ([Ty], Ty)
+arrows = \case
+  TArrow a b -> let (as, r) = arrows b in (a : as, r)
+  t -> ([], t)
+
+-- | Register a function's unfolding lemmas, one per clause, as members of its namespace: @f.unfold-C@, and @f.eq_i@.
+registerUnfoldings :: FunInfo -> [FunClause] -> Env -> Env
+registerUnfoldings info fcs env = foldl register env (zip3 [1 :: Int ..] (unfoldingNames env (map fcPatterns fcs)) fcs)
+  where
+    register e (i, n, fc) =
+      let binders' = map (mangleVariable . fst) (fcVars fc)
+          alias = Ident ("eq_" <> T.pack (show i))
+          (e1, thm) = addTheorem e (funQual info <> [Ident n]) binders'
+          (e2, eqI) = addTheorem e1 (funQual info <> [alias]) binders'
+       in addNamespaceMember (funQual info) alias (thmQual eqI) (addNamespaceMember (funQual info) (Ident n) (thmQual thm) e2)
+
+{- |
+Solve the constraints the uses of methods raised, now that the types are
+known: each use becomes the function of its method in the instance of its
+class for the type it is used at.  A method at a type not known, or at a type
+variable, is an error: constraints on type variables are not supported yet.
+-}
+resolveMethods :: Env -> Expr a -> TC (Expr a)
+resolveMethods env e = do
+  ws <- takeWanted
+  chosen <- forM ws \w -> do
+    m <- case Map.lookup (wantedMethod w) (envGlobals env) of
+      Just (GMethod m) -> pure m
+      _ -> failAt (wantedSpan w) "internal: a method not in scope"
+    t <- zonk (wantedType w)
+    let name = T.unpack (segmentText (last (methodQual m)))
+        cls = T.unpack (segmentText (last (methodClass m)))
+        at h = case Map.lookup (methodClass m, h) (envInstances env) >>= Map.lookup (methodQual m) . instFunctions of
+          Just f -> pure (wantedPlaceholder w, funCore f)
+          Nothing -> failAt (wantedSpan w) ("no instance of " <> cls <> " for " <> T.unpack (last (T.splitOn "." h)) <> ", where " <> name <> " is used")
+    case t of
+      TNat -> at "Nat"
+      TData dn _ -> at dn
+      TParam _ _ -> failAt (wantedSpan w) (name <> " at a type variable: a constraint " <> cls <> " on it is not supported yet")
+      TMeta _ -> failAt (wantedSpan w) ("the type " <> name <> " is used at is ambiguous")
+      TArrow _ _ -> failAt (wantedSpan w) (name <> " at a function type")
+  let table = Map.fromList chosen
+  pure (mapGlobals (\r -> maybe r (Ref RefFunction) (Map.lookup (refName r) table)) e)
 
 resolved :: Fixities -> Located R.Expr -> Either ElabError (Located R.Expr)
 resolved fx e = either (\err -> let (sp, msg) = renderFixityError err in Left (ElabError sp msg)) Right (resolveExpr fx e)
@@ -259,7 +402,7 @@ elabDecl fx env sp name ty0 clauses = do
         unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a theorem quantifies over values, which are first-order"))
         pure (n, bty)
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
-      prop <- runTC (elabProp env ctx0 body)
+      prop <- runTC (elabProp env ctx0 body >>= resolveMethods env)
       let q = qualify env [name]
           (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys)
       pcs <- forM clauses \c -> runTC (elabProofClause fx env (map snd binderTys) c)
@@ -271,22 +414,11 @@ elabDecl fx env sp name ty0 clauses = do
           (env1, info) = addFunction env name (Scheme params fty) (length args)
       unless (all firstOrder (result : args)) $ Left (ElabError (location body) "a function of functions: its arguments and its result are values, which are first-order")
       fcs <- forM clauses \c -> runTC (elabFunClause fx env1 info args result c)
-      let names = unfoldingNames env1 (map fcPatterns fcs)
-          env2 = foldl (registerUnfolding info) env1 (zip3 [1 :: Int ..] names fcs)
-      pure (env2, IFun (FunDef info args result fcs sp))
+      pure (registerUnfoldings info fcs env1, IFun (FunDef info args result fcs sp))
   where
     checkBinder seen (Located nsp n)
       | n `elem` seen = Left (ElabError nsp ("the variable " <> T.unpack n <> " is bound twice"))
       | otherwise = Right (n : seen)
-    arrows = \case
-      TArrow a b -> let (as, r) = arrows b in (a : as, r)
-      t -> ([], t)
-    registerUnfolding info e (i, n, fc) =
-      let binders' = map (mangleVariable . fst) (fcVars fc)
-          alias = Ident ("eq_" <> T.pack (show i))
-          (e1, thm) = addTheorem e (funQual info <> [Ident n]) binders'
-          (e2, eqI) = addTheorem e1 (funQual info <> [alias]) binders'
-       in addNamespaceMember (funQual info) alias (thmQual eqI) (addNamespaceMember (funQual info) (Ident n) (thmQual thm) e2)
 
 {- |
 The names of the unfolding lemmas of a function, one per clause: @unfold-@
@@ -384,7 +516,7 @@ elabFunClause fx env info args result (R.Clause lhs0 (Located rsp rhs)) = do
   body <- case rhs of
     R.RExpr e -> do
       e' <- liftE (resolved fx e)
-      checkTerm env [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' result
+      checkTerm env [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' result >>= resolveMethods env
     _ -> failAt rsp "a function's clause is a term, not a proof"
   pure (FunClause pats vars (toScope (fmap B body)) (R.spanning (location lhs) rsp))
 
@@ -573,11 +705,21 @@ checkTerm env ctx le@(Located sp e) expected = case e of
           (t, _) <- instantiateScheme (Scheme (dataParams d) (foldr TArrow result (ctorFields c)))
           pure (Global (Ref RefConstructor (ctorCore c)), t, length (ctorFields c))
         Nothing -> failAt sp "internal: a constructor of no data type"
+      -- A method stands for a placeholder until the type its class is at is known.
+      GMethod m -> do
+        (t, metas) <- instantiateScheme (methodScheme m)
+        placeholder <- case metas of
+          c : _ -> wantInstance (methodQual m) c sp
+          [] -> failAt sp "internal: a method of no class"
+        pure (Global (Ref RefFunction placeholder), t, methodArity m)
       GTheorem t -> failAt sp (T.unpack (renderQualName (thmQual t)) <> " is a theorem, not a term")
       GData d -> failAt sp (T.unpack (renderQualName (dataQual d)) <> " is a type, not a term")
+      GClass c -> failAt sp (T.unpack (renderQualName (classQual c)) <> " is a class, not a term")
+      GInstance i -> failAt sp (T.unpack (renderQualName (instQual i)) <> " is an instance, not a term")
     isTerm = \case
       GFun _ -> True
       GCtor _ -> True
+      GMethod _ -> True
       _ -> False
     isCtor = \case
       GCtor _ -> True

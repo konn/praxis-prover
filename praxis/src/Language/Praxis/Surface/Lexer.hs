@@ -181,6 +181,8 @@ keywords =
   , "using"
   , "hiding"
   , "data"
+  , "class"
+  , "instance"
   , "infixl"
   , "infixr"
   , "infix"
