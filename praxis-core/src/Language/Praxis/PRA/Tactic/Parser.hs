@@ -113,8 +113,9 @@ Both tactics appeal to the reflection lemmas of the library,
 taken.  Blocks after it are for the goal it leaves, as for any step.
 
 Where @symmetry@, @rewrite@ and @cong@ take a hypothesis, they also take the
-name of a lemma stating an equation, @|- t = s@ under no hypotheses but a
-context metavariable: @cong zeroMinus@ finds the instance of @0 - t = 0@
+name of a lemma stating an equation, @|- t = s@, under no premises; its
+hypotheses, if it has any, are discharged by the goal's where its instance
+is appealed to: @cong zeroMinus@ finds the instance of @0 - t = 0@
 where the sides of the goal differ, @rewrite zeroMinus in H@ at the first
 subterm of @H@ that @0 - t@ matches, and @symmetry@ takes a closed equation;
 the instance is cut in and proved by the lemma.

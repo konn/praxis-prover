@@ -1892,13 +1892,15 @@ useLemma sig hints name lemma userArgs goal = do
 -- | What a hypothesis selector stands for: a hypothesis, or a lemma stating an equation.
 data Equation a = OfHypothesis !(Atomic a) | OfLemma !String !(Lemma a) !(Atomic a)
 
--- | The equation a lemma states: no premises, and no hypotheses but a context metavariable.
+{- |
+The equation a lemma states, under no premises.  Its hypotheses, if it has
+any, are discharged by the goal's where its instance is appealed to.
+-}
 lemmaEquation :: (Schematic a) => Lemma a -> Maybe (Atomic a)
 lemmaEquation lemma = case lemmaGoal lemma of
-  ctx :|- Atm p
+  _ :|- Atm p
     | null (lemmaPremises lemma)
-    , isNothing (metaAtom p)
-    , all (isJust . contextMeta) (toList ctx) ->
+    , isNothing (metaAtom p) ->
         Just p
   _ -> Nothing
 

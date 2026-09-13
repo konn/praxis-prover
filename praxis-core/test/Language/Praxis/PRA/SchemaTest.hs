@@ -113,6 +113,15 @@ schemaTests =
           ["rule commuteWith (t : term) (comm ∀ p : |- p + t = t + p) : |- 0 + t = t + 0 by exact comm"]
           "theorem captured : |- 0 + p = p + 0 by exact commuteWith p { refl }"
         refusedIn sig [] "rule fixedMeta (t : term) (h ∀ p : |- p + t = t) : |- 0 + 1 = 1 by exact h"
+    , testCase "a lemma under hypotheses stands for its equation in cong, its hypotheses discharged where its instance is appealed to" $ do
+        sig <- environmentSignature <$> mixEnvironment
+        certifiesIn
+          sig
+          [ "theorem addZeroUnder : 0 < n |- n + 0 = n by refl"
+          , "theorem congUnder : 0 < a |- S (a + 0) = S a by cong addZeroUnder"
+          , "rule congLocal (t : term) (h ∀ p : 0 < p |- p + t = t + p) : 0 < 1 |- S (1 + t) = S (t + 1) by cong h"
+          ]
+        refusedIn sig ["theorem addZeroUnder : 0 < n |- n + 0 = n by refl"] "theorem congBare : |- S (a + 0) = S a by cong addZeroUnder"
     , testCase "a premise over variables of its own mentions no other object variable, and no metavariable but var and term ones" $ do
         sig <- environmentSignature <$> mixEnvironment
         unparsedIn sig "rule stray (h ∀ p : |- p = y) : |- 0 = 0 by refl" "mentions no other object variable"
