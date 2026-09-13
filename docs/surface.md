@@ -1,0 +1,200 @@
+# The surface language, `.px`
+
+The surface language is what a user of praxis writes: modules of data types,
+functions defined by pattern matching, and theorems proved by clauses, by
+calculations or by tactics, in a syntax close to Agda and Haskell. It lives in
+the `praxis` package. Nothing in it is trusted: every definition becomes a
+primitive recursive definition of the core, and every proof a declaration of
+the core's `pra` language, certified by the kernel — see
+[elaboration.md](elaboration.md) for how, and [kernel.md](kernel.md) for what
+the kernel checks.
+
+```
+module Data.List where
+
+data List a = Nil | a : List a
+
+(<>) : List a -> List a -> List a
+(<>) Nil      ys = ys
+(<>) (x : xs) ys = x : (xs <> ys)
+
+infixr 4 <>
+
+append-nil : {a : Type} -> (xs : List a) -> xs <> Nil ≡ xs
+append-nil {a} Nil = (<>).unfold-Nil
+append-nil {a} (x : xs) = calc
+  (x : xs) <> Nil
+  = x : (xs <> Nil)
+  = x : xs  := by cong (append-nil xs)
+
+append-nil-tactically : {a : Type} -> (xs : List a) -> xs <> Nil ≡ xs
+append-nil-tactically {a} xs = by
+  induction xs
+  { refl }
+  { intros x xs
+    calc (x : xs) <> Nil = x : (xs <> Nil)
+                         = x : xs := by IH }
+```
+
+## The pipeline
+
+```
+source ──Lexer/Parser──▶ raw syntax (named, operators unassociated)
+       ──Fixity─────────▶ operators associated by the module's fixities
+       ──Elab───────────▶ resolved syntax (bound scopes), types checked, items
+       ──Encode/Compile─▶ prf equations + generated lemmas (core text)
+       ──Engine─────────▶ theorem proofs as pra declarations (core text)
+       ──Check──────────▶ the core compiles and certifies, in order
+```
+
+Each stage is a module of `Language.Praxis.Surface`: `Lexer`, `Parser` and
+`Syntax.Raw`; `Fixity`; `Syntax`, `Types`, `Env` and `Elab`; `Encode`,
+`Compile`, `CoreText` and `Mangle`; `Engine`; `Check`, the driver, with
+`Prelude`, the definitions and lemmas every module is compiled against.
+
+## Lexical structure
+
+- **Comments** are `-- …` to the end of the line, and `{- … -}`, nestable.
+- **Identifiers** are alphanumeric segments joined by single dashes, as in
+  Agda: `append-nil`, `unfold-Nil`. Binary minus therefore needs spaces:
+  `x-y` is one identifier, `x - y` a subtraction.
+- **Qualified names** join segments with a dot and no whitespace:
+  `List.Nil`, `Term.App`, `(<>).unfold-Nil`, `List.(:)`. A segment may be an
+  operator in parentheses, and the last segment of a qualified member may end
+  in operator segments, `(<>).unfold-:`.
+- **Operators** are runs of symbol characters (ASCII and Unicode). The
+  grammar reserves `->`, `→`, `|`, `\`, `=>`, `<-`, `←`, `.`, `<;>`, `¬`, `⊤`,
+  `⊥`; `=`, `:` and `:=` are ordinary operators the grammar reads specially
+  where it needs them, so `:` and `:=` can still name constructors.
+- **Keywords** are `module where open using hiding data infixl infixr infix
+  case of if then else let in by calc Type forall exists fun with`. Tactic
+  names are words only in tactic position.
+
+## Layout
+
+Layout is the offside rule, checked token by token (`Lexer.block`). A block
+opened without a brace — after `where`, `by`, `of`, and for a `calc`'s steps —
+takes the column of its first token; a line starting at that column starts
+the next item, and within an item every later token must stand to the right
+of the column. Brackets `( ) [ ] { } ⟨ ⟩` suspend the layout of the enclosing
+block, and a closing bracket is never offside. Inside explicit braces, items
+are separated by `;` or by newlines at the column of the first item; a
+trailing `;` is ignored. There is no other scoping rule: mixing tactics,
+calculations and terms is resolved by this one.
+
+A `calc` whose first term follows it on the same line has its further steps
+on lines deeper than the item it belongs to; one with nothing after it on its
+line is a block whose first item is the first term. A step is
+`= term [:= proof]`, and Lean's `_ = term := proof` is accepted.
+
+## Declarations
+
+| declaration | example |
+|---|---|
+| module header | `module Logic.FOL where` |
+| namespace opening | `open List` (the `using (…)` and `hiding (…)` forms parse, and are not enforced yet) |
+| data type | `data Term r f v = FVar v \| BVar nat \| App (f (Formula r f v) (Term r f v))` |
+| fixity | `infixr 4 <>`, `infixl 6.5 +++`, `infix 9/2 ~~` |
+| signature | `name : type` |
+| clause | `lhs = rhs` |
+
+A constructor is a name applied to the types of its fields, `Neg t`, or two
+types around a constructor operator, `t :+ t`; as in Haskell, a constructor
+operator starts with `:`.
+
+A signature whose type ends in a proposition declares a **theorem**; any other
+declares a **function**. The clauses following it define it; a clause's left
+side may be prefix, `(<>) Nil ys`, or infix, `Nil <> ys`.
+
+## Namespaces and names
+
+Namespaces follow Rust: `data T` opens the namespace `T`, holding its
+constructors; a function `f` opens the namespace `f`, holding the lemmas
+generated for it, `f.unfold-C` and Lean's `f.eq_i`. `open T` brings a
+namespace's members into unqualified scope, as in Agda.
+
+An unqualified name resolves, in order, as a local variable, a top-level name
+of the module, a member of an opened namespace, and then a constructor — of
+the type expected there, which is how `Nil` means `List.Nil` in the example
+without any `open`, or the only constructor of that name. Anything else is an
+ambiguity error listing the candidates.
+
+## Types
+
+Types are `Nat` (also `nat`), data types applied to types, type parameters
+(possibly higher-kinded, `f` in `Term r f v` has kind `Type -> Type -> Type`,
+inferred from use) and function types. Polymorphism is rank 1, as in
+Hindley–Milner: a signature's free type variables are its implicit
+parameters, in order, and implicit binders `{a : Type}` may also be written in
+front. Function types are first order — a function takes no function
+arguments. Types guide elaboration only: the core never sees them, except
+through the membership predicates of data types.
+
+## Propositions
+
+`s ≡ t` (also `=`), `s ≠ t`, `s < t`, `s ≤ t`, `s > t`, `s ≥ t` (on `Nat`),
+`⊤`, `⊥`, `¬ A`, `A ∧ B`, `A ∨ B`, `A → B`, `A ↔ B`, and the bounded
+quantifiers `∀ i < t, A` and `∃ i < t, A` (also `≤ t`; `.` followed by a
+space may replace the comma).
+
+Relations bind looser than every term operator, whatever its declared
+precedence, so `xs <> Nil ≡ xs` needs no parentheses; connectives take
+Lean's precedences, `¬` 40, `∧` 35 and `∨` 30 to the right, `↔` 20; the
+arrow binds loosest.
+
+A theorem may quantify over values only in front, `(xs : List a) -> …` or
+`∀ (xs : List a), …`: its statement is Π₁, as PRA's theorems are. A
+quantifier elsewhere must be bounded. Σ₁ statements, `∃ y, A` at the top,
+proved by a witness term, are planned (see below).
+
+## Proofs
+
+A theorem's right side is a proof in one of three styles, which nest freely.
+
+**By clauses** (Agda style). Clauses matching on a value of a data type
+prove the statement by structural induction on it, one clause per
+constructor; a recursive call of the theorem at a field of the matched
+constructor is the induction hypothesis there. A right side is a proof term
+— a lemma or a hypothesis, `cong e`, `rfl` — a `calc`, or `by` tactics.
+
+**By calculation.** `calc t₀ = t₁ := p₁ … = tₙ := pₙ` proves `t₀ = tₙ`; an
+omitted justification is `rfl`.
+
+**By tactics** (Lean 4 style, with Rocq's spellings accepted). A tactic acts
+on the first goal; newlines and `;` sequence; `{ … }` and `· …` focus the first
+goal and must close it, so `induction xs { … } { … }` solves the cases in
+turn. The engine translates, so far: `rfl` (`refl`, `reflexivity`), `exact`,
+`cong` (`congr`), `calc`, `induction x`, `intro`/`intros` (naming what a case
+introduces: the constructor's fields, then the induction hypotheses, `IH` by
+default, `IH1 …` when there are several), `assumption`, `sorry` (`admit`),
+focused blocks, and a bare proof term, `by IH`, which closes the goal by the
+term or else by congruence. The grammar also accepts `apply`, `rw [e, ← e'] at
+h`, `unfold`, `simp only`, `constructor`, `left`, `right`, `exfalso`,
+`contradiction`, `cases`, `obtain`, `exists`/`use`, `have`, `show`, `revert`,
+`clear`, `by_cases`, `try`, `repeat`, `first`, `all_goals`, `any_goals`, `<;>`
+and `case`; their translations are the next step of the engine.
+
+`rfl` is *surface* definitional equality: the sides are rewritten by the
+unfolding lemmas wherever a function meets a constructor, then compared,
+the core's definitional equality taking only what is left.
+
+## Tooling
+
+- `praxis check [--dump-core] FILE.px…` checks modules and prints every
+  report; `--dump-core` prints the core text generated, which the tools of
+  praxis-core can check again.
+- `praxis-lsp` serves `.px` documents with the driver's diagnostics.
+- `editors/vscode` highlights `.px` and starts the server.
+
+## Scope of the current implementation
+
+Implemented: the whole grammar above; data types, including higher-kinded
+parameters and nested and mutually referring types; functions matching on one
+argument, each constructor once, structurally recursive with unchanged other
+arguments; theorems by clauses on one value, by `calc`, and by the tactics
+listed; `.px` diagnostics. Planned, in order: goal display in hover, the
+remaining tactic translations, Σ₁ statements with witness terms, `case` and
+`if` in terms, nested patterns and matching on several arguments, matching
+and recursion on `Nat`, overlapping first-match clauses, mutual recursion and
+accumulating parameters, full (not only shape) membership predicates for
+nested and higher-kinded types, and list-literal sugar.

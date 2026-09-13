@@ -6,8 +6,10 @@ The usage includes, well, development of finitistic mathematics, but the main mo
 ## Packages
 
 - `praxis-core`: the calculus, the primitive-recursive function language `prf`, the tactic language `pra` and their quasiquoters.
-- `praxis-lsp`: a language server for `.pra` and `.prf` files, checking them as they are edited and showing the goal under the cursor; `editors/vscode` is the VS Code extension which runs it.
-- `praxis`: the user-facing layer, to come.
+- `praxis`: the surface language, `.px` — Agda/Haskell-like modules of data types, functions by pattern matching and theorems proved by clauses, calculations or tactics, all translated into PRA and certified by the core — and its checker, `praxis check FILE.px`.
+- `praxis-lsp`: a language server for `.px`, `.pra` and `.prf` files, checking them as they are edited and showing the goal under the cursor in `.pra` files; `editors/vscode` is the VS Code extension which runs it.
+
+The design is documented in [`docs/`](docs/README.md): the kernel calculus, the core languages, the surface language, and the elaboration between them.
 
 ## Design Goal
 
