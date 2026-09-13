@@ -35,6 +35,10 @@ module Language.Praxis.Surface.Engine (
   Hyp (..),
   renderGoal,
 
+  -- * Statements
+  statementGoal,
+  theoremStatement,
+
   -- * Proving
   Unfolding (..),
   Knowledge (..),
@@ -43,7 +47,7 @@ module Language.Praxis.Surface.Engine (
 ) where
 
 import Bound (instantiate)
-import Control.Monad (forM, unless)
+import Control.Monad (forM, forM_, unless)
 import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -62,7 +66,7 @@ import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ty (..))
+import Language.Praxis.Surface.Types (Ty (..), firstOrder)
 
 -- * Goals
 
@@ -135,6 +139,32 @@ data Knowledge = Knowledge
 data EngineError = EngineError !Span !String
   deriving stock (Show)
 
+-- * Statements
+
+{- |
+The core statement of a theorem, as a goal: the one translation the kernel
+cannot check, whose adequacy @docs/elaboration.md@ argues.  The theorem's
+values are free variables, each of a data type with the hypothesis of its
+membership, by the predicates given for the qualified names of the data
+types, and none for @Nat@ or a type parameter; its proposition is split at
+its top-level implications into hypotheses and a conclusion.  A value must be
+of a first-order type, the types the encoding gives a meaning to.
+-}
+statementGoal :: Map Text Text -> TheoremDef -> Either String Goal
+statementGoal membership td = do
+  forM_ (tdBinders td) \(n, t) ->
+    unless (firstOrder t) $ Left ("the value " <> T.unpack n <> " is not of a first-order type")
+  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> map HProp antecedents)] conclusion vars [] [])
+  where
+    vars = [(n, (mangleVariable n, t)) | (n, t) <- tdBinders td]
+    prop = instantiate (\i -> Var (fst (snd (vars !! i)))) (fmap absurd (tdProp td))
+    (antecedents, conclusion) = implications prop
+    members = [HMember isCore v | (_, (v, TData dn _)) <- vars, Just isCore <- [Map.lookup dn membership]]
+
+-- | The text of a theorem's core statement: 'statementGoal' as a sequent.
+theoremStatement :: Map Text Text -> TheoremDef -> Either String Text
+theoremStatement membership td = runBuilder <$> (goalSequent =<< statementGoal membership td)
+
 -- * Theorems
 
 {- |
@@ -144,11 +174,7 @@ theorem, each a name and its text.
 proveTheorem :: Knowledge -> TheoremDef -> Either EngineError [(Text, Text)]
 proveTheorem k td = do
   let info = tdInfo td
-      vars = [(n, (mangleVariable n, t)) | (n, t) <- tdBinders td]
-      prop = instantiate (\i -> Var (fst (snd (vars !! i)))) (fmap absurd (tdProp td))
-      (antecedents, conclusion) = implications prop
-      members = [HMember isCore v | (_, (v, TData dn _)) <- vars, Just isCore <- [Map.lookup dn (knowMembership k)]]
-      goal0 = Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> map HProp antecedents)] conclusion vars [] []
+  goal0 <- either (Left . EngineError (tdSpan td) . ("the statement: " <>)) Right (statementGoal (knowMembership k) td)
   (tactic, aux) <- case tdClauses td of
     [pc]
       | all isVariable (pcPatterns pc) -> do
