@@ -73,6 +73,7 @@ library
     sized,
     template-haskell,
     text,
+    text-builder-linear,
     th-abstraction,
     th-desugar,
     transformers,

@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.Presburger #-}
 
@@ -5,6 +6,13 @@
 Rendering of terms, formulae and sequents in the concrete syntax
 "Language.Praxis.PRA.Syntax.Parser" reads, so that a goal or a hypothesis can
 be shown as the user would have written it.
+
+A rendering is composed with the builders of "Data.Text.Builder.Linear", so
+that a subterm is written once however deeply it is nested, and run once
+where it is finished: the rendering returned, a 'String' as the messages and
+the parsers take it; each formula of a context, which are sorted by their
+text; and the terms whose renderings are compared to decide on a bounded
+quantifier.
 
 >>> :seti -XDataKinds -XQuasiQuotes -XPatternSynonyms
 >>> import Data.Sized (pattern Nil, pattern (:<))
@@ -40,11 +48,15 @@ module Language.Praxis.PRA.Syntax.Pretty (
 import Control.Applicative ((<|>))
 import Control.Monad (guard, (>=>))
 import Data.Foldable (toList)
-import Data.List (intercalate, sort)
+import Data.List (intersperse, sort)
 import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Multiset (Multiset)
 import Data.Proxy (Proxy (..))
 import Data.Sized qualified as SV
+import Data.String (fromString)
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec, runBuilder)
 import GHC.TypeNats (KnownNat, natVal)
 import Language.Praxis.PRA.Pattern (Hole (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode (..), V)
@@ -69,76 +81,78 @@ canonicalised first, so a successor of a numeral is shown as the next
 numeral.
 -}
 renderTerm :: Signature -> (a -> String) -> Term a -> String
-renderTerm sig name = renderTermAt sig name 0
+renderTerm sig name = runString . buildTermAt sig name 0
 
 -- Precedence levels are those of the parser: a conditional or a bounded
 -- search (0) extends to the right; a comparison (1) does not associate; sums
 -- (2) and products (3) associate to the left, powers (4) to the right; an
 -- application (5) takes atoms (6).
-renderTermAt :: forall a. Signature -> (a -> String) -> Int -> Term a -> String
-renderTermAt sig = \name level -> go [] name level . canonicalise
+buildTermAt :: forall a. Signature -> (a -> String) -> Int -> Term a -> Builder
+buildTermAt sig = \name level -> go [] name level . canonicalise
   where
-    go :: forall b. [String] -> (b -> String) -> Int -> Term b -> String
+    go :: forall b. [String] -> (b -> String) -> Int -> Term b -> Builder
     go bound name level term = case term of
-      Var x -> name x
-      Lit n -> show n
+      Var x -> fromString (name x)
+      Lit n -> fromUnboundedDec n
       Succ :$ args -> application "S" args
       App f args
         | Just (binder, b, body) <- quantifiedAt sig False name bound "holdsBelow" term ->
-            paren (level > 0) ("∀ " <> binder <> " < " <> at 2 b <> ". " <> go (binder : bound) (either id name) 0 body)
+            paren (level > 0) ("∀ " <> fromString binder <> " < " <> at 2 b <> ". " <> go (binder : bound) (either id name) 0 body)
         | Just shown <- existential f args -> shown
         | Just (binder, b, body) <- quantifiedAt sig False name bound "mu" term ->
-            paren (level > 0) ("μ " <> binder <> " < " <> at 2 b <> ". " <> go (binder : bound) (either id name) 0 body)
-        | Just (n, _) <- abstractName f -> applied n args
+            paren (level > 0) ("μ " <> fromString binder <> " < " <> at 2 b <> ". " <> go (binder : bound) (either id name) 0 body)
+        | Just (n, _) <- abstractName f -> applied (fromString n) args
         | Just (op, opLevel, leftLevel, rightLevel) <- operatorOf f
         , [l, r] <- toList args ->
             paren (level > opLevel) (at leftLevel l <> " " <> op <> " " <> at rightLevel r)
         | conditional f
         , [c, t, e] <- toList args ->
             paren (level > 0) ("if " <> at 0 c <> " then " <> at 0 t <> " else " <> at 0 e)
-        | Just sym <- symbolOfFunction f sig -> application (symbolName sym) args
+        | Just sym <- symbolOfFunction f sig -> application (fromString (symbolName sym)) args
         | Just inst <- schemaInstanceOf sig f, Just rendered <- schemaApplication inst args -> rendered
-        | otherwise -> application ("<" <> show f <> ">") args
+        | otherwise -> application ("<" <> fromString (show f) <> ">") args
       where
         at = go bound name
 
-        application :: forall n. String -> V n (Term b) -> String
+        application :: forall n. Builder -> V n (Term b) -> Builder
         application hd args
           | null args = hd
-          | otherwise = paren (level > 5) (unwords (hd : map (at 6) (toList args)))
+          | otherwise = paren (level > 5) (unwordsB (hd : map (at 6) (toList args)))
 
         -- An abstract function applied, as a metavariable with parameters is written: @p(t, u)@.
-        applied :: forall n. String -> V n (Term b) -> String
+        applied :: forall n. Builder -> V n (Term b) -> Builder
         applied hd args
           | null args = hd
-          | otherwise = hd <> "(" <> intercalate ", " (map (at 0) (toList args)) <> ")"
+          | otherwise = hd <> "(" <> intercalateB ", " (map (at 0) (toList args)) <> ")"
 
         -- @mu {λ i ys. c} b ys < b@, a bounded existential at a canonical lambda: @∃ i < b. c@.
-        existential :: forall n. (KnownNat n) => F.Function n -> V n (Term b) -> Maybe String
+        -- The bound is rendered once, to be compared with the right side and shown.
+        existential :: forall n. (KnownNat n) => F.Function n -> V n (Term b) -> Maybe Builder
         existential f args = do
           [l, r] <- Just (toList args)
           sym <- comparisonSymbol sig "<"
           guard (symbolFunction sym == F.SomeFunction f)
           (binder, b, body) <- quantifiedAt sig False name bound "mu" l
-          guard (at 2 b == at 2 r)
-          pure (paren (level > 0) ("∃ " <> binder <> " < " <> at 2 b <> ". " <> go (binder : bound) (either id name) 0 body))
+          let shownBound = runBuilder (at 2 b)
+          guard (shownBound == runBuilder (at 2 r))
+          pure (paren (level > 0) ("∃ " <> fromString binder <> " < " <> fromText shownBound <> ". " <> go (binder : bound) (either id name) 0 body))
 
         -- An instance of a schema at its parameter: a symbol or an abstract
         -- function in braces, or a lambda.
-        schemaApplication :: forall n. SchemaInstance -> V n (Term b) -> Maybe String
+        schemaApplication :: forall n. SchemaInstance -> V n (Term b) -> Maybe Builder
         schemaApplication inst args = case instanceParameter inst of
           F.SomeFunction (param :: F.Function k)
-            | Just (p, _) <- abstractName param -> Just (application (schema <> " {" <> p <> "}") args)
-            | Just sym <- symbolOfFunction param sig -> Just (application (schema <> " {" <> symbolName sym <> "}") args)
+            | Just (p, _) <- abstractName param -> Just (application (schema <> " {" <> fromString p <> "}") args)
+            | Just sym <- symbolOfFunction param sig -> Just (application (schema <> " {" <> fromString (symbolName sym) <> "}") args)
             | F.Primitive Succ <- param -> Just (application (schema <> " {S}") args)
             | otherwise -> do
                 let binders = take (fromIntegral (natVal (Proxy @k))) (freshNames (bound <> avoid args))
                 slots <- SV.fromList' (map (Var . Left) binders)
                 let body = decompileProgram slots (F.functionProgram param)
-                    lambda = "{λ " <> unwords binders <> ". " <> go (binders <> bound) (either id name) 0 body <> "}"
+                    lambda = "{λ " <> unwordsB (map fromString binders) <> ". " <> go (binders <> bound) (either id name) 0 body <> "}"
                 pure (application (schema <> " " <> lambda) args)
           where
-            schema = instanceName inst
+            schema = fromString (instanceName inst)
 
         -- The names a binder must avoid: the variables of the arguments, and symbols.
         avoid :: forall n. V n (Term b) -> [String]
@@ -155,7 +169,7 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
 
     -- The operator the parser reads a symbol as: the first candidate in
     -- scope of arity two, with the levels of the operator and its operands.
-    operatorOf :: forall n. (KnownNat n) => F.Function n -> Maybe (String, Int, Int, Int)
+    operatorOf :: forall n. (KnownNat n) => F.Function n -> Maybe (Builder, Int, Int, Int)
     operatorOf f =
       listToMaybe
         [ (op, opLevel, leftLevel, rightLevel)
@@ -168,6 +182,7 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
           sym <- lookupSymbol c sig
           guard (symbolArity sym == 2)
           pure sym
+    operators :: [(Builder, [String], Int, Int, Int)]
     operators =
       [ ("<", ["lt"], 1, 2, 2)
       , ("<=", ["le", "lte"], 1, 2, 2)
@@ -178,9 +193,6 @@ renderTermAt sig = \name level -> go [] name level . canonicalise
       , ("^", ["pow"], 4, 5, 4)
       ]
 
-    paren True s = "(" <> s <> ")"
-    paren False s = s
-
 {- | Render an equation, its left side parenthesized unless it is a sum, a
 product, a power or an application; the equation of a comparison with 1 is
 shown as the comparison alone, as the parser reads it.
@@ -190,12 +202,15 @@ renderAtomic = renderAtomicWith (const Nothing)
 
 -- | Render an equation, unless the hook names the atom, as for a metavariable.
 renderAtomicWith :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Atomic a -> String
-renderAtomicWith hook sig name p@(s :=== t) = case hook p of
-  Just shown -> shown
+renderAtomicWith hook sig name = runString . buildAtomic hook sig name
+
+buildAtomic :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Atomic a -> Builder
+buildAtomic hook sig name p@(s :=== t) = case hook p of
+  Just shown -> fromString shown
   Nothing
-    | Lit 1 <- canonicalise t, Just shown <- renderQuantifier hook sig name s -> shown
-    | Lit 1 <- canonicalise t, isComparison sig s, not (showsExistential sig name s) -> renderTermAt sig name 1 s
-    | otherwise -> renderTermAt sig name 2 s <> " = " <> renderTerm sig name t
+    | Lit 1 <- canonicalise t, Just shown <- buildQuantifier hook sig name s -> shown
+    | Lit 1 <- canonicalise t, isComparison sig s, not (showsExistential sig name s) -> buildTermAt sig name 1 s
+    | otherwise -> buildTermAt sig name 2 s <> " = " <> buildTermAt sig name 0 t
 
 {- |
 Render a formula, parenthesising according to the fixities in
@@ -206,38 +221,46 @@ renderFormula :: Signature -> (a -> String) -> Formula a -> String
 renderFormula = renderFormulaWith (const Nothing)
 
 -- | Render a formula, its atoms through the hook.
-renderFormulaWith :: forall a. (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Formula a -> String
-renderFormulaWith hook sig name = go (0 :: Int)
+renderFormulaWith :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Formula a -> String
+renderFormulaWith hook sig name = runString . buildFormula hook sig name
+
+buildFormula :: forall a. (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Formula a -> Builder
+buildFormula hook sig name = go (0 :: Int)
   where
-    go :: Int -> Formula a -> String
+    go :: Int -> Formula a -> Builder
     go d (Atm p@(s :=== t))
       | Nothing <- hook p
       , Lit 1 <- canonicalise t
-      , Just shown <- renderQuantifier hook sig name s =
+      , Just shown <- buildQuantifier hook sig name s =
           paren (d > 0) shown
-      | otherwise = renderAtomicWith hook sig name p
+      | otherwise = buildAtomic hook sig name p
     go _ Bot = "_|_"
     go _ (p :==> Bot) = "~" <> go 6 p
     go d (p :/\ q) = paren (d > 4) (go 5 p <> " /\\ " <> go 4 q)
     go d (p :\/ q) = paren (d > 3) (go 4 p <> " \\/ " <> go 3 q)
     go d (p :==> q) = paren (d > 2) (go 3 p <> " ==> " <> go 2 q)
-    paren True s = "(" <> s <> ")"
-    paren False s = s
 
 -- | Render a context, each formula once per occurrence, in a fixed order.
 renderContext :: Signature -> (a -> String) -> Multiset (Formula a) -> String
 renderContext = renderContextWith (const Nothing)
 
 renderContextWith :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Multiset (Formula a) -> String
-renderContextWith hook sig name = intercalate ", " . sort . map (renderFormulaWith hook sig name) . toList
+renderContextWith hook sig name = runString . buildContext hook sig name
+
+-- The order is that of the texts of the formulas, so each is run once, to be sorted.
+buildContext :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Multiset (Formula a) -> Builder
+buildContext hook sig name = intercalateB ", " . map fromText . sort . map (runBuilder . buildFormula hook sig name) . toList
 
 renderSequent :: Signature -> (a -> String) -> Sequent a -> String
 renderSequent = renderSequentWith (const Nothing)
 
 renderSequentWith :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Sequent a -> String
-renderSequentWith hook sig name (ctx :|- c)
-  | null ctx = "|- " <> renderFormulaWith hook sig name c
-  | otherwise = renderContextWith hook sig name ctx <> " |- " <> renderFormulaWith hook sig name c
+renderSequentWith hook sig name = runString . buildSequent hook sig name
+
+buildSequent :: (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Sequent a -> Builder
+buildSequent hook sig name (ctx :|- c)
+  | null ctx = "|- " <> buildFormula hook sig name c
+  | otherwise = buildContext hook sig name ctx <> " |- " <> buildFormula hook sig name c
 
 -- | A wildcard is an underscore.
 renderHole :: (a -> String) -> Hole a -> String
@@ -298,27 +321,27 @@ An equation of a term with 1 shown as a bounded quantifier, @∀ i < t. A@ or
 @∃ i < t. A@, when the term is one at a canonical lambda whose body is the code
 of the formula @A@, so that the formula printed reads back as the same term.
 -}
-renderQuantifier :: forall a. (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Term a -> Maybe String
-renderQuantifier hook sig name s = universal <|> existential
+buildQuantifier :: forall a. (Atomic a -> Maybe String) -> Signature -> (a -> String) -> Term a -> Maybe Builder
+buildQuantifier hook sig name s = universal <|> existential
   where
     universal = do
       (binder, b, body) <- quantifiedAt sig True name [] "holdsBelow" s
       formula <- faithful body
-      pure ("∀ " <> binder <> " < " <> renderTermAt sig name 2 b <> ". " <> renderFormulaWith hook' sig nameE formula)
+      pure ("∀ " <> fromString binder <> " < " <> buildTermAt sig name 2 b <> ". " <> buildFormula hook' sig nameE formula)
     existential = do
       App f args <- Just (canonicalise s)
       [l, r] <- Just (toList args)
       sym <- comparisonSymbol sig "<"
       guard (symbolFunction sym == F.SomeFunction f)
       (binder, b, body) <- quantifiedAt sig True name [] "mu" l
-      guard (renderTerm sig name b == renderTerm sig name r)
+      guard (termText sig name b == termText sig name r)
       formula <- faithful body
-      pure ("∃ " <> binder <> " < " <> renderTermAt sig name 2 b <> ". " <> renderFormulaWith hook' sig nameE formula)
+      pure ("∃ " <> fromString binder <> " < " <> buildTermAt sig name 2 b <> ". " <> buildFormula hook' sig nameE formula)
     -- The formula the body is the code of, when that formula's code is the body again.
     faithful body = do
       formula <- decodeFormula sig body
       code <- either (const Nothing) Just (encodeFormula sig (const False) formula)
-      guard (renderTerm sig nameE code == renderTerm sig nameE body)
+      guard (termText sig nameE code == termText sig nameE body)
       pure formula
     nameE = either id name
     hook' = traverse (either (const Nothing) Just) >=> hook
@@ -331,5 +354,28 @@ showsExistential sig name s = case canonicalise s of
     , Just sym <- comparisonSymbol sig "<"
     , symbolFunction sym == F.SomeFunction f
     , Just (_, b, _) <- quantifiedAt sig False name [] "mu" l ->
-        renderTerm sig name b == renderTerm sig name r
+        termText sig name b == termText sig name r
   _ -> False
+
+-- * Builders
+
+-- | A finished rendering, as the functions of this module return it.
+runString :: Builder -> String
+runString = T.unpack . runBuilder
+
+-- | The text of a term, as 'renderTerm' shows it, for comparing two renderings.
+termText :: Signature -> (a -> String) -> Term a -> Text
+termText sig name = runBuilder . buildTermAt sig name 0
+
+-- | A rendering in parentheses, when the condition holds.
+paren :: Bool -> Builder -> Builder
+paren True s = "(" <> s <> ")"
+paren False s = s
+
+-- | Builders joined by a separator, as 'Data.List.intercalate' joins strings.
+intercalateB :: Builder -> [Builder] -> Builder
+intercalateB sep = mconcat . intersperse sep
+
+-- | Builders joined by spaces.
+unwordsB :: [Builder] -> Builder
+unwordsB = intercalateB " "

@@ -444,6 +444,9 @@ prettyTests =
         let shadowed = signature [symbol "plus" plus, symbol "add" mult]
         renderTerm shadowed id (plus :$ (Var "x" :< Var "y" :< Nil)) @?= "plus x y"
         renderTerm shadowed id (mult :$ (Var "x" :< Var "y" :< Nil)) @?= "x + y"
+    , testCase "a context is shown in the order of the texts of its formulas, by code point" $
+        (renderSequent builtin id <$> parseSequent (plainScope builtin) "∀ i < t. i < x, x < y + 1, x < y, a = 0 |- _|_")
+          @?= Right "a = 0, x < y, x < y + 1, ∀ i < t. i < x |- _|_"
     ]
 
 sorryTests :: TestTree
