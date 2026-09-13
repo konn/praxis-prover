@@ -1,3 +1,5 @@
+{-# LANGUAGE ApplicativeDo #-}
+
 module Main (main) where
 
 import Control.Monad (when)
@@ -29,20 +31,22 @@ main = do
 
 commandP :: Parser Command
 commandP =
-  hsubparser
-    ( command
-        "check"
-        ( info
-            (Check <$> checkP)
-            (progDesc "Check modules of the surface language, printing every report; fail when one has an error")
-        )
-    )
+  hsubparser $
+    command "check" $
+      info (Check <$> checkP) (progDesc "Check modules of the surface language, printing every report; fail when one has an error")
 
 checkP :: Parser CheckOptions
-checkP =
-  CheckOptions
-    <$> switch (long "dump-core" <> help "Print the core text generated, prf definitions and pra declarations, before the reports")
-    <*> some (strArgument (metavar "FILE.px..." <> action "file" <> help "The modules to check"))
+checkP = do
+  dump <-
+    switch $
+      long "dump-core"
+        <> help "Print the core text generated, prf definitions and pra declarations, before the reports"
+  paths <-
+    some . strArgument $
+      metavar "FILE.px..."
+        <> action "file"
+        <> help "The modules to check"
+  pure CheckOptions {dumpCore = dump, files = paths}
 
 versionP :: Parser (a -> a)
 versionP = infoOption (showVersion version) (long "version" <> help "Show the version")
