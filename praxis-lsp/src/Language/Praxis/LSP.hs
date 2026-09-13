@@ -49,6 +49,9 @@ import Language.Praxis.PRA.Syntax.Parser (syntaxErrorPosition)
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
+import Language.Praxis.Surface.Check qualified as Surface
+import Language.Praxis.Surface.Prelude (Prelude, prelude)
+import Language.Praxis.Surface.Syntax.Raw (Span (..))
 import System.Exit (ExitCode (..))
 import System.FilePath (takeExtension)
 
@@ -138,13 +141,14 @@ diagnostic text (Report line column severity message) =
 -- * Analysis
 
 -- | The languages served, told apart by the extension of the file.
-data Language = Pra | Prf
+data Language = Pra | Prf | Px
   deriving (Show, Eq)
 
 languageOf :: FilePath -> Maybe Language
 languageOf path = case takeExtension path of
   ".pra" -> Just Pra
   ".prf" -> Just Prf
+  ".px" -> Just Px
   _ -> Nothing
 
 -- | A finding about a document: where, from line and column 1, how severe, and what.
@@ -161,6 +165,7 @@ analyse :: Language -> Text -> [Report]
 analyse = \case
   Pra -> analysePra
   Prf -> analysePrf
+  Px -> analysePx
 
 analysePrf :: Text -> [Report]
 analysePrf text = case checkQuote mempty Map.empty Set.empty id "" text of
@@ -301,3 +306,22 @@ replaceAt target new = go
       Calc t0 steps -> Calc t0 [(t, go u) | (t, u) <- steps]
       Have n f t -> Have n f (go t)
       t -> t
+
+{- |
+A module of the surface language, checked by the driver of the praxis
+package: each report where the driver places it, a failed proof at its
+declaration or at the tactic which failed.
+-}
+analysePx :: Text -> [Report]
+analysePx text = case surfacePrelude of
+  Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err))]
+  Right p -> map report (Surface.checkedReports (Surface.checkSource p "<document>" text))
+  where
+    report (Surface.Report (Span (l, c) _) sev msg) = Report (max 1 l) (max 1 c) (severity sev) msg
+    severity = \case
+      Surface.SevError -> DiagnosticSeverity_Error
+      Surface.SevInfo -> DiagnosticSeverity_Information
+
+-- | The prelude of the surface language, certified once for the server's lifetime.
+surfacePrelude :: Either String Prelude
+surfacePrelude = prelude

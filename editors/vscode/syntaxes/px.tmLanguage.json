@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Praxis",
+  "scopeName": "source.px",
+  "patterns": [
+    { "include": "#comments" },
+    {
+      "name": "keyword.other.declaration.px",
+      "match": "\\b(module|where|open|using|hiding|data|infixl|infixr|infix|Type)\\b"
+    },
+    {
+      "name": "keyword.control.px",
+      "match": "\\b(case|of|if|then|else|let|in|by|calc|with|fun)\\b"
+    },
+    {
+      "name": "keyword.control.tactic.px",
+      "match": "(?<![\\w'-])(intro|intros|exact|apply|rfl|refl|reflexivity|symm|symmetry|trans|transitivity|rw|rewrite|unfold|simp|only|constructor|split|left|right|exfalso|contradiction|absurd|assumption|trivial|decide|cong|congr|cases|destruct|induction|generalizing|obtain|use|have|assert|show|change|revert|clear|by_cases|sorry|admit|try|repeat|first|all_goals|any_goals|at)(?![\\w'-])"
+    },
+    {
+      "name": "keyword.operator.quantifier.px",
+      "match": "∀|∃|λ|\\b(forall|exists)\\b"
+    },
+    {
+      "name": "keyword.operator.logic.px",
+      "match": "≡|≠|≤|≥|∧|∨|¬|↔|→|←|⊤|⊥|:=|<;>|=>|->|<-|·"
+    },
+    {
+      "name": "entity.name.type.constructor.px",
+      "match": "(?<![\\w'-])[A-Z][\\w']*(?:-[A-Za-z0-9][\\w']*)*"
+    },
+    {
+      "name": "constant.numeric.px",
+      "match": "\\b[0-9]+\\b"
+    },
+    {
+      "name": "keyword.operator.px",
+      "match": "[!#$%&*+./<=>?@\\\\^|~:-]+"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.px",
+          "begin": "\\{-",
+          "end": "-\\}",
+          "patterns": [{ "include": "#comments" }]
+        },
+        {
+          "name": "comment.line.double-dash.px",
+          "match": "--(?![!#$%&*+./<=>?@\\\\^|~:]).*$"
+        }
+      ]
+    }
+  }
+}

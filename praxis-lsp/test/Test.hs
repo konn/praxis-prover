@@ -17,6 +17,7 @@ tests =
     [ testCase "the language is told by the extension" $ do
         languageOf "Lemmas.pra" @?= Just Pra
         languageOf "Definitions.prf" @?= Just Prf
+        languageOf "List.px" @?= Just Px
         languageOf "Main.hs" @?= Nothing
     , testCase "a file which certifies reports nothing" $
         analyse Pra proofs @?= []
@@ -39,6 +40,9 @@ tests =
     , testCase "a declaration whose proof fails is still a lemma for those after it" $
         map reportSeverity (analyse Pra "theorem later : |- 3 = 3\nby sorry\n\ntheorem uses : b = 0 |- 3 = 3\nby exact later\n")
           @?= [DiagnosticSeverity_Information]
+    , testCase "a module of the surface language is checked, a failed proof reported" $ do
+        analyse Px surface @?= []
+        map reportSeverity (analyse Px (surface <> "\nwrong : {a : Type} -> (xs : List a) -> xs <> Nil ≡ Nil\nwrong {a} xs = by sorry\n")) @?= [DiagnosticSeverity_Error]
     , testCase "a file of definitions is checked" $ do
         analyse Prf "double 0 = 0\ndouble (S n) = S (S (double n))\n" @?= []
         map reportSeverity (analyse Prf "double 0 = 0\ndouble (S n) = S (S (doubled n))\n") @?= [DiagnosticSeverity_Error]
@@ -56,3 +60,18 @@ tests =
         , "theorem two : |- 2 = 2"
         , "by refl"
         ]
+
+-- | A module of the surface language: lists, append, and a theorem by clauses.
+surface :: Text
+surface =
+  T.unlines
+    [ "module Data.List where"
+    , "data List a = Nil | a : List a"
+    , "(<>) : List a -> List a -> List a"
+    , "(<>) Nil ys = ys"
+    , "(<>) (x : xs) ys = x : (xs <> ys)"
+    , "infixr 4 <>"
+    , "append-nil : {a : Type} -> (xs : List a) -> xs <> Nil ≡ xs"
+    , "append-nil {a} Nil = (<>).unfold-Nil"
+    , "append-nil {a} (x : xs) = calc (x : xs) <> Nil = x : (xs <> Nil) = x : xs := by cong (append-nil xs)"
+    ]

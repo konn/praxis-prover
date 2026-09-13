@@ -1,7 +1,7 @@
 {
   "name": "praxis",
   "displayName": "Praxis",
-  "description": "The pra and prf languages of the Praxis prover: highlighting, and the praxis-lsp language server for diagnostics and goals on hover.",
+  "description": "The languages of the Praxis prover — the surface language px, and the core languages pra and prf: highlighting, and the praxis-lsp language server for diagnostics and goals on hover.",
   "version": "0.1.0",
   "publisher": "konn",
   "license": "SEE LICENSE IN LICENSE",
@@ -17,12 +17,24 @@
     "Programming Languages"
   ],
   "activationEvents": [
+    "onLanguage:px",
     "onLanguage:pra",
     "onLanguage:prf"
   ],
   "main": "./extension.js",
   "contributes": {
     "languages": [
+      {
+        "id": "px",
+        "aliases": [
+          "Praxis",
+          "px"
+        ],
+        "extensions": [
+          ".px"
+        ],
+        "configuration": "./language-configuration.json"
+      },
       {
         "id": "pra",
         "aliases": [
@@ -47,6 +59,11 @@
       }
     ],
     "grammars": [
+      {
+        "language": "px",
+        "scopeName": "source.px",
+        "path": "./syntaxes/px.tmLanguage.json"
+      },
       {
         "language": "pra",
         "scopeName": "source.pra",

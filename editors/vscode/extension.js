@@ -1,4 +1,4 @@
-// The Praxis extension: starts praxis-lsp for .pra and .prf documents.
+// The Praxis extension: starts praxis-lsp for .px, .pra and .prf documents.
 const { workspace } = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 
@@ -9,6 +9,7 @@ function activate(context) {
   const serverOptions = { command, args: [], transport: TransportKind.stdio };
   const clientOptions = {
     documentSelector: [
+      { scheme: "file", language: "px" },
       { scheme: "file", language: "pra" },
       { scheme: "file", language: "prf" },
     ],
