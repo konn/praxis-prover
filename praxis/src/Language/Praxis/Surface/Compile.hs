@@ -37,6 +37,7 @@ import Data.List (nub)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Builder.Linear (fromDec, fromText, runBuilder)
 import Data.Void (Void, absurd)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
@@ -141,7 +142,7 @@ compileFunction env fd = do
                 tagged = replaceCT (\t -> if t == hdT scr then Just (CNum (fromIntegral (ctorIndex ci))) else Nothing) start
                 branch = branchAt scr ps fc
                 steps =
-                  [(start, "exact " <> defLemma), (tagged, "cong " <> ctorLemma ci "tag"), (branch, "exact " <> collapseLemma dat (ctorIndex ci))]
+                  [(start, "exact " <> fromText defLemma), (tagged, "cong " <> fromText (ctorLemma ci "tag")), (branch, "exact " <> fromText (collapseLemma dat (ctorIndex ci)))]
                     <> fieldSteps ci scr (fieldVars ps fc ci) branch
             pure (lhs, rhs, calc lhs steps)
           pure (Compiled [definition core (map argName [0 .. arity - 1]) dispatch] ((defLemma, theorem defLemma (equation (CSym core vargs) (ifChain (hdT (vargs !! c)) [either (error "internal") id (bodyCT core (placeCT (vargs !! c) (vargs !!) ps) (const (Left "")) fc) | (fc, ps, _) <- ordered])) "refl") : unfoldings info names proofs) (table info names proofs))
@@ -152,9 +153,9 @@ compileFunction env fd = do
               recCall ps fc k h callArgs = recursiveCall c others ps fc k h callArgs
           branches <- forM ordered \(fc, ps, _) ->
             bodyCT core (placeCT (CVar "k") other ps) (recCall ps fc (CVar "k") (CVar "h")) fc
-          let lam = "{λ " <> T.unwords lamParams <> ". " <> render (ifChain (hdT (CVar "k")) branches) <> "}"
-              cvrec scr rest = CRaw ("cvrec " <> lam <> " " <> T.unwords (map render (scr : rest)))
-              hist scr rest = CRaw ("hist " <> lam <> " " <> T.unwords (map render (scr : rest)))
+          let lam = runBuilder ("{λ " <> unwordsB (map fromText lamParams) <> ". " <> render (ifChain (hdT (CVar "k")) branches) <> "}")
+              cvrec scr rest = CRaw (runBuilder ("cvrec " <> fromText lam <> " " <> unwordsB (map render (scr : rest))))
+              hist scr rest = CRaw (runBuilder ("hist " <> fromText lam <> " " <> unwordsB (map render (scr : rest))))
               defLemma = functionLemma info "#def"
               betaLemma = functionLemma info "#beta"
               vothers = map (vargs !!) others
@@ -180,17 +181,17 @@ compileFunction env fd = do
                     afterFields
                 defSteps = scanl1' [(j, replaceCT (\u -> if u == cvrec (fields !! j) rest then Just (CSym core (argsWith c (fields !! j) rest)) else Nothing)) | j <- recFields] (lastOf afterFields histSteps)
                 haves =
-                  T.concat
+                  mconcat
                     [ "have L"
-                        <> T.pack (show j)
+                        <> fromDec j
                         <> ": ((lt "
                         <> render (fields !! j)
                         <> " "
                         <> render scr
                         <> ") = 1) { exact "
-                        <> ctorLemma ci ("lt-" <> T.pack (show j))
+                        <> fromText (ctorLemma ci ("lt-" <> T.pack (show j)))
                         <> " }; have E"
-                        <> T.pack (show j)
+                        <> fromDec j
                         <> ": ("
                         <> render (CSym "at" [h, scr, fields !! j])
                         <> " = "
@@ -199,10 +200,10 @@ compileFunction env fd = do
                     | j <- recFields
                     ]
                 steps =
-                  [(cvrec scr rest, "exact " <> defLemma), (start, "exact " <> betaLemma), (tagged, "cong " <> ctorLemma ci "tag"), (branch, "exact " <> collapseLemma dat (ctorIndex ci))]
+                  [(cvrec scr rest, "exact " <> fromText defLemma), (start, "exact " <> fromText betaLemma), (tagged, "cong " <> fromText (ctorLemma ci "tag")), (branch, "exact " <> fromText (collapseLemma dat (ctorIndex ci)))]
                     <> fieldSteps ci scr fields branch
-                    <> [(t, "cong E" <> T.pack (show j)) | (j, t) <- histSteps]
-                    <> [(t, "cong " <> defLemma) | (_, t) <- defSteps]
+                    <> [(t, "cong E" <> fromDec j) | (j, t) <- histSteps]
+                    <> [(t, "cong " <> fromText defLemma) | (_, t) <- defSteps]
             pure (lhs, rhs, haves <> calc lhs steps)
           pure
             ( Compiled
@@ -228,14 +229,14 @@ compileFunction env fd = do
     -- Each step of a chain of rewrites, starting from a term.
     scanl1' rewrites t0 = drop 1 (scanl (\(_, t) (j, f) -> (j, f t)) (0, t0) rewrites)
     argsWith c x rest = let (before, after) = splitAt c rest in before <> [x] <> after
-    definition core params body = T.unwords (core : params) <> " = " <> render body
+    definition core params body = runBuilder (unwordsB (map fromText (core : params)) <> " = " <> render body)
     equation lhs rhs = "(" <> render lhs <> " = " <> render rhs <> ")"
-    theorem name stmt proof = "theorem " <> name <> " : |- " <> stmt <> "\nby " <> proof
-    calc lhs steps = "calc " <> render lhs <> T.concat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
+    theorem name stmt proof = runBuilder ("theorem " <> fromText name <> " : |- " <> stmt <> "\nby " <> proof)
+    calc lhs steps = "calc " <> render lhs <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
     unfoldings info names triples =
       concat
         [ [ (functionLemma info n, theorem (functionLemma info n) stmt proof)
-          , (functionLemma info alias, theorem (functionLemma info alias) stmt ("exact " <> functionLemma info n))
+          , (functionLemma info alias, theorem (functionLemma info alias) stmt ("exact " <> fromText (functionLemma info n)))
           ]
         | (i, n, (lhs, rhs, proof)) <- zip3 [1 :: Int ..] names triples
         , let alias = "eq_" <> T.pack (show i)
@@ -261,7 +262,7 @@ compileFunction env fd = do
     fieldSteps ci scr fields branch =
       drop 1 $
         scanl
-          (\(t, _) (j, x) -> (replaceCT (\u -> if u == fieldT j scr then Just x else Nothing) t, "cong " <> ctorLemma ci ("field-" <> T.pack (show j))))
+          (\(t, _) (j, x) -> (replaceCT (\u -> if u == fieldT j scr then Just x else Nothing) t, "cong " <> fromText (ctorLemma ci ("field-" <> T.pack (show j)))))
           (branch, "")
           [(j, x) | (j, x) <- zip [0 ..] fields, fieldT j scr `occursIn` branch]
     occursIn needle = \case

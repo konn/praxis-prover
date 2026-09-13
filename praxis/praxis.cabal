@@ -80,6 +80,7 @@ library
     praxis-core,
     template-haskell,
     text,
+    text-builder-linear,
 
 executable praxis
   import: defaults

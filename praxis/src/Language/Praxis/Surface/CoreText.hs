@@ -12,6 +12,10 @@ that text is a symbol of the signature or a mangled surface name
 so the text means exactly the term it was built from whatever the fixities
 of the core.  The same text can be printed for inspection and checked again
 by the tools of praxis-core.
+
+The text is written with the builders of "Data.Text.Builder.Linear", and
+run once where a piece of it is finished — a declaration, or the text of a
+raw term — rather than appended piece by piece.
 -}
 module Language.Praxis.Surface.CoreText (
   -- * Core terms
@@ -29,11 +33,16 @@ module Language.Praxis.Surface.CoreText (
   termCT,
   propText,
   membershipText,
+
+  -- * Builders
+  intercalateB,
+  unwordsB,
 ) where
 
 import Bound (Var (..), fromScope)
+import Data.List (intersperse)
 import Data.Text (Text)
-import Data.Text qualified as T
+import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec)
 import Language.Praxis.Surface.Syntax
 import Numeric.Natural (Natural)
 
@@ -48,13 +57,13 @@ data CT
   deriving stock (Show, Eq)
 
 -- | The text of a term, every application parenthesised.
-render :: CT -> Text
+render :: CT -> Builder
 render = \case
-  CVar v -> v
-  CNum n -> T.pack (show n)
-  CSym f [] -> f
-  CSym f args -> "(" <> T.unwords (f : map render args) <> ")"
-  CRaw t -> "(" <> t <> ")"
+  CVar v -> fromText v
+  CNum n -> fromUnboundedDec n
+  CSym f [] -> fromText f
+  CSym f args -> "(" <> unwordsB (fromText f : map render args) <> ")"
+  CRaw t -> "(" <> fromText t <> ")"
 
 hdT, tlT :: CT -> CT
 hdT x = CSym "hd" [x]
@@ -113,10 +122,10 @@ termCT var = go
 The text of a core formula for a surface proposition, the bound variables of
 its quantifiers named by the function given, a name apart from the others.
 -}
-propText :: (Text -> Text) -> (a -> CT) -> Expr a -> Either String Text
+propText :: (Text -> Text) -> (a -> CT) -> Expr a -> Either String Builder
 propText fresh var = go var
   where
-    go :: (b -> CT) -> Expr b -> Either String Text
+    go :: (b -> CT) -> Expr b -> Either String Builder
     go v = \case
       At _ e -> go v e
       Rel r a b -> do
@@ -150,11 +159,21 @@ propText fresh var = go var
             sym = case q of
               Forall -> "∀"
               Exists -> "∃"
-        pure (paren (sym <> " " <> name <> " < " <> limit <> ". " <> inner))
+        pure (paren (sym <> " " <> fromText name <> " < " <> limit <> ". " <> inner))
       Quant {} -> Left "an unbounded quantifier"
       _ -> Left "not a proposition"
     paren t = "(" <> t <> ")"
 
 -- | The hypothesis that a term is in a data type, by its membership predicate: @0 < T.is x@.
-membershipText :: Text -> CT -> Text
+membershipText :: Text -> CT -> Builder
 membershipText isCore x = "((lt 0 " <> render (CSym isCore [x]) <> ") = 1)"
+
+-- * Builders
+
+-- | Builders joined by a separator, as 'Data.Text.intercalate' joins texts.
+intercalateB :: Builder -> [Builder] -> Builder
+intercalateB sep = mconcat . intersperse sep
+
+-- | Builders joined by spaces.
+unwordsB :: [Builder] -> Builder
+unwordsB = intercalateB " "

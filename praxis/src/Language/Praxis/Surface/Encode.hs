@@ -40,6 +40,7 @@ module Language.Praxis.Surface.Encode (
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Mangle (mangleGlobal)
@@ -104,7 +105,7 @@ fieldMemberships known d c k h = catMaybes (zipWith one [0 ..] (ctorFields c))
 
 -- | The step function of the membership predicate, as a schema parameter.
 membershipLambda :: (Text -> Maybe Text) -> DataInfo -> Text
-membershipLambda known d = "{λ k h. " <> render (membershipBody known d (CVar "k") (CVar "h")) <> "}"
+membershipLambda known d = runBuilder ("{λ k h. " <> render (membershipBody known d (CVar "k") (CVar "h")) <> "}")
 
 {- |
 The definitions and lemmas of a data type, given the membership predicates
@@ -116,15 +117,13 @@ encodeData known d = Encoded equations lemmas members
     ctors = dataCtors d
     isCore = dataIs d
     lam = membershipLambda known d
-    equations =
-      [ render (CSym (ctorCore c) [CVar ("a" <> T.pack (show j)) | j <- [0 .. length (ctorFields c) - 1]]) `withoutParens` c
-          <> " = "
-          <> render (consSeq (toInteger (ctorIndex c)) [CVar ("a" <> T.pack (show j)) | j <- [0 .. length (ctorFields c) - 1]])
-      | c <- ctors
-      ]
-        <> [isCore <> " n = " <> if null ctors then "0" else "cvrec " <> lam <> " n"]
     -- An equation's left side is the name and its arguments, unparenthesised.
-    withoutParens t c = if null (ctorFields c) then t else T.drop 1 (T.dropEnd 1 t)
+    equations =
+      [ runBuilder (unwordsB (map fromText (ctorCore c : params)) <> " = " <> render (consSeq (toInteger (ctorIndex c)) (map CVar params)))
+      | c <- ctors
+      , let params = ["a" <> T.pack (show j) | j <- [0 .. length (ctorFields c) - 1]]
+      ]
+        <> [runBuilder (fromText isCore <> " n = " <> if null ctors then "0" else "cvrec " <> fromText lam <> " n")]
 
     lemmas = concatMap ctorLemmas ctors <> collapses <> membership <> [inversion]
     members = [(ctorCore c, [(j, memberOf code) | (j, code) <- fieldMemberships known d c (CVar "k") (CVar "h")]) | c <- ctors]
@@ -137,7 +136,7 @@ encodeData known d = Encoded equations lemmas members
           -- the sequence with its first m elements dropped
           consSeq' m = foldr (\x acc -> CSym "cons" [x, acc]) (CNum 0) (drop m (CNum (fromIntegral (ctorIndex c)) : vs))
           defName = ctorLemma c "def"
-          haveE = "have E: (" <> render applied <> " = " <> render (seqs !! 0) <> ") { exact " <> defName <> " }; "
+          haveE = "have E: (" <> render applied <> " = " <> render (seqs !! 0) <> ") { exact " <> fromText defName <> " }; "
           fieldLemma j =
             ( ctorLemma c ("field-" <> T.pack (show j))
             , theorem (ctorLemma c ("field-" <> T.pack (show j))) [] (eqn (fieldT j applied) (vs !! j)) $
@@ -147,7 +146,7 @@ encodeData known d = Encoded equations lemmas members
                   <> " = "
                   <> render (fieldT j (seqs !! 0))
                   <> " by cong E"
-                  <> T.concat [" = " <> render (hdT (iterate tlT (seqs !! (m + 1)) !! (j - m))) <> " by cong tlCons" | m <- [0 .. j]]
+                  <> mconcat [" = " <> render (hdT (iterate tlT (seqs !! (m + 1)) !! (j - m))) <> " by cong tlCons" | m <- [0 .. j]]
                   <> " = "
                   <> render (vs !! j)
                   <> " by exact hdCons"
@@ -157,24 +156,24 @@ encodeData known d = Encoded equations lemmas members
             , theorem (ctorLemma c ("lt-" <> T.pack (show j))) [] (ltT (vs !! j) applied) $
                 haveE
                   <> "have L"
-                  <> T.pack (show (j + 1))
+                  <> show' (j + 1)
                   <> ": "
                   <> ltT (vs !! j) (seqs !! (j + 1))
                   <> " { exact ltConsL }; "
-                  <> T.concat
+                  <> mconcat
                     [ "have R"
-                        <> T.pack (show m)
+                        <> show' m
                         <> ": "
                         <> ltT (seqs !! (m + 1)) (seqs !! m)
                         <> " { exact ltConsR }; "
                         <> "have L"
-                        <> T.pack (show m)
+                        <> show' m
                         <> ": "
                         <> ltT (vs !! j) (seqs !! m)
                         <> " { exact ltTrans on L"
-                        <> T.pack (show (m + 1))
+                        <> show' (m + 1)
                         <> " R"
-                        <> T.pack (show m)
+                        <> show' m
                         <> " }; "
                     | m <- reverse [0 .. j]
                     ]
@@ -204,8 +203,8 @@ encodeData known d = Encoded equations lemmas members
 
     n = CVar "v_n"
     t = CVar "v_t"
-    cvrecAt x = CRaw ("cvrec " <> lam <> " " <> render x)
-    histAt' x = CRaw ("hist " <> lam <> " " <> render x)
+    cvrecAt x = CRaw (runBuilder ("cvrec " <> fromText lam <> " " <> render x))
+    histAt' x = CRaw (runBuilder ("hist " <> fromText lam <> " " <> render x))
     membership
       | null ctors = []
       | otherwise =
@@ -255,11 +254,11 @@ encodeData known d = Encoded equations lemmas members
             <> " = "
             <> render (cvrecAt t)
             <> " by exact "
-            <> dataLemma d "is-def"
+            <> fromText (dataLemma d "is-def")
             <> " = "
             <> render body
             <> " by exact "
-            <> dataLemma d "is-beta"
+            <> fromText (dataLemma d "is-beta")
             <> " }; "
             <> caseAt 0
     isT = render (CSym isCore [t])
@@ -362,7 +361,7 @@ encodeData known d = Encoded equations lemmas members
                 <> h
                 <> " }; "
                 <> splitConj ("J" <> show' idx) more (idx + 1)
-          memProofs = T.concat (zipWith memProof [1 :: Int ..] mems)
+          memProofs = mconcat (zipWith memProof [1 :: Int ..] mems)
           memProof idx (j, code) = case code of
             CSym "at" [hh, _, f] ->
               "have Lf"
@@ -370,7 +369,7 @@ encodeData known d = Encoded equations lemmas members
                 <> ": "
                 <> ltT f ctorApplied
                 <> " { exact "
-                <> ctorLemma c ("lt-" <> T.pack (show j))
+                <> fromText (ctorLemma c ("lt-" <> T.pack (show j)))
                 <> " }; have Lt"
                 <> show' idx
                 <> ": "
@@ -400,7 +399,7 @@ encodeData known d = Encoded equations lemmas members
                 <> ") = (lt 0 "
                 <> render (cvrecAt f)
                 <> ") by cong "
-                <> dataLemma d "is-def"
+                <> fromText (dataLemma d "is-def")
                 <> " = (lt 0 "
                 <> render (CSym "at" [hh, t, f])
                 <> ") by cong Ha"
@@ -416,11 +415,11 @@ encodeData known d = Encoded equations lemmas members
             [x] -> "exact " <> x
             x : xs -> "ConjR { exact " <> x <> " } { " <> conjR xs <> " }"
             [] -> "skip"
-          select = T.concat (replicate (ctorIndex c) "DisjR1; ") <> (if ctorIndex c < length ctors - 1 then "DisjR2; " else "")
+          select = mconcat (replicate (ctorIndex c) "DisjR1; ") <> (if ctorIndex c < length ctors - 1 then "DisjR2; " else "")
        in start <> splitEq <> memCodes <> memProofs <> select <> conclude
 
-    theorem name hyps statement proof = "theorem " <> name <> " : " <> T.intercalate ", " hyps <> " |- " <> statement <> "\nby " <> proof
+    theorem name hyps statement proof = runBuilder ("theorem " <> fromText name <> " : " <> intercalateB ", " hyps <> " |- " <> statement <> "\nby " <> proof)
     eqn a b = "(" <> render a <> " = " <> render b <> ")"
     ltT a b = "((lt " <> render a <> " " <> render b <> ") = 1)"
-    show' :: (Show s) => s -> Text
-    show' = T.pack . show
+    show' :: Int -> Builder
+    show' = fromDec

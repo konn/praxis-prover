@@ -48,8 +48,10 @@ import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
 import Data.Void (absurd)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
@@ -86,26 +88,26 @@ data Goal = Goal
   }
 
 -- | The goal as a core sequent.
-goalSequent :: Goal -> Either String Text
+goalSequent :: Goal -> Either String Builder
 goalSequent g = do
   hs <- traverse (hypText . snd) (goalHyps g)
   c <- formula (goalConcl g)
-  pure (T.intercalate ", " hs <> " |- " <> c)
+  pure (intercalateB ", " hs <> " |- " <> c)
 
-hypText :: Hyp -> Either String Text
+hypText :: Hyp -> Either String Builder
 hypText = \case
   HProp p -> formula p
   HMember isCore v -> Right (membershipText isCore (CVar v))
 
-formula :: Expr Text -> Either String Text
+formula :: Expr Text -> Either String Builder
 formula = propText (\h -> "b_" <> mangleVariable h) CVar
 
 -- | The goal as the user reads it: the variables, the hypotheses by their names, the conclusion.
 renderGoal :: Env -> Goal -> Text
-renderGoal _ g = T.unlines (map var (goalVars g) <> map hyp (goalHyps g) <> ["⊢ " <> either T.pack id (formula (goalConcl g))])
+renderGoal _ g = runBuilder (foldMap (<> "\n") (map var (goalVars g) <> map hyp (goalHyps g) <> ["⊢ " <> either fromString id (formula (goalConcl g))]))
   where
-    var (n, (_, _)) = n
-    hyp (core, h) = maybe core fst (find ((== core) . snd) (goalNames g)) <> " : " <> either T.pack id (hypText h)
+    var (n, (_, _)) = fromText n
+    hyp (core, h) = fromText (maybe core fst (find ((== core) . snd) (goalNames g))) <> " : " <> either fromString id (hypText h)
 
 -- * Knowledge
 
@@ -155,7 +157,7 @@ proveTheorem k td = do
           pure (outTactic out, outAux out)
     pcs -> byClauses k info goal0 td pcs
   stmt <- either (Left . EngineError (tdSpan td) . ("the statement: " <>)) Right (goalSequent goal0)
-  pure (aux <> [(thmCore info, "theorem " <> thmCore info <> " : " <> stmt <> "\nby " <> tactic)])
+  pure (aux <> [(thmCore info, runBuilder ("theorem " <> fromText (thmCore info) <> " : " <> stmt <> "\nby " <> tactic))])
   where
     isVariable = \case
       PVar _ -> True
@@ -181,11 +183,11 @@ rename pairs g = g {goalVars = [(fromMaybe n (lookup n pairs), v) | (n, v) <- go
 
 -- | A core tactic, and the auxiliary declarations it appeals to, in order.
 data Out = Out
-  { outTactic :: !Text
+  { outTactic :: !Builder
   , outAux :: ![(Text, Text)]
   }
 
-closed :: Text -> Out
+closed :: Builder -> Out
 closed t = Out t []
 
 type Counter = Int
@@ -205,11 +207,11 @@ termProof k info n g le@(Located sp e) = case e of
   _ -> case spineOf le of
     (Located _ (R.EName (QName [] (Ident w))), [arg]) | w `elem` ["cong", "congr"] -> do
       name <- evidence k info g arg
-      pure (closed ("cong " <> name))
+      pure (closed ("cong " <> fromText name))
     (Located _ (R.EName (QName [] (Ident w))), []) | w `elem` ["rfl", "refl"] -> closed <$> rflTactic k g sp
     _ -> do
       name <- evidence k info g le
-      pure (closed ("exact " <> name))
+      pure (closed ("exact " <> fromText name))
 
 -- | The name, in the core, of what a proof term refers to: a hypothesis, an induction hypothesis, a lemma.
 evidence :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError Text
@@ -263,12 +265,12 @@ runTactics k info n g0 sp tacs0 = do
         R.TRefl -> (\x -> (closed x, more)) <$> rflTactic k g tsp
         R.TAssumption -> Right (closed "assumption", more)
         R.TSorry -> Left (EngineError tsp ("sorry: the goal is\n" <> T.unpack (renderGoal (knowEnv k) g)))
-        R.TExact e -> (\x -> (closed ("exact " <> x), more)) <$> evidence k info g e
-        R.TCong (Just e) -> (\x -> (closed ("cong " <> x), more)) <$> evidence k info g e
+        R.TExact e -> (\x -> (closed ("exact " <> fromText x), more)) <$> evidence k info g e
+        R.TCong (Just e) -> (\x -> (closed ("cong " <> fromText x), more)) <$> evidence k info g e
         R.TCong Nothing -> Right (closed "cong", more)
         R.TTerm e -> case unLocated e of
           R.EProof rhs -> (,more) <$> proveRhs k info n g (Located tsp rhs)
-          _ -> (\x -> (closed ("(exact " <> x <> " | cong " <> x <> ")"), more)) <$> evidence k info g e
+          _ -> (\x -> (closed ("(exact " <> fromText x <> " | cong " <> fromText x <> ")"), more)) <$> evidence k info g e
         R.TCalc c -> (,more) <$> calcProof k info n g tsp c
         R.TFocus inner -> do
           out <- runTactics k info n g tsp inner
@@ -310,7 +312,7 @@ calcProof k info n g sp (R.Calc first steps) = do
       Nothing -> closed <$> rflTactic k stepGoal ssp
       Just rhs -> proveRhs k info n stepGoal rhs
   texts <- traverse (render' sp) ends
-  let tac = "calc " <> head texts <> T.concat [" = " <> t <> " by (" <> outTactic o <> ")" | (t, o) <- zip (drop 1 texts) proofs]
+  let tac = "calc " <> head texts <> mconcat [" = " <> t <> " by (" <> outTactic o <> ")" | (t, o) <- zip (drop 1 texts) proofs]
   pure (Out tac (concatMap outAux proofs))
   where
     render' ssp e = either (Left . EngineError ssp) (Right . render) (termCT CVar e)
@@ -331,7 +333,7 @@ the head of every application of a function to a constructor, until neither
 changes; then the core's definitional equality on what is left, whose
 functions are applied to variables only.
 -}
-rflTactic :: Knowledge -> Goal -> Span -> Either EngineError Text
+rflTactic :: Knowledge -> Goal -> Span -> Either EngineError Builder
 rflTactic k g sp = case goalConcl g of
   Rel RelEq a b -> do
     l <- ct a
@@ -343,7 +345,7 @@ rflTactic k g sp = case goalConcl g of
         steps = [(t, tac) | (tac, t) <- ls] <> [(rEnd, "refl") | lEnd /= rEnd] <> reverse [(t, tac) | ((tac, _), t) <- zip rs (r : map snd rs)]
     pure case steps of
       [] -> "refl"
-      _ -> "calc " <> render l <> T.concat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
+      _ -> "calc " <> render l <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
   At _ e -> rflTactic k g {goalConcl = e} sp
   _ -> Left (EngineError sp "rfl: the goal is not an equation")
   where
@@ -355,7 +357,7 @@ rflTactic k g sp = case goalConcl g of
       Just (u, lemma, u') -> Just (lemma, replaceCT (\x -> if x == u then Just u' else Nothing) t)
       Nothing -> Nothing
     -- The first application, outermost, which an unfolding lemma rewrites.
-    redex t = case [(t, "cong " <> unfoldingLemma uf, rhs) | uf <- knowUnfoldings k, Just rhs <- [instanceOf uf t]] of
+    redex t = case [(t, "cong " <> fromText (unfoldingLemma uf), rhs) | uf <- knowUnfoldings k, Just rhs <- [instanceOf uf t]] of
       x : _ -> Just x
       [] -> case t of
         CSym _ args -> firstJust (map redex args)
@@ -416,7 +418,7 @@ induction k info _ g sp v _ = do
       finish outs = do
         auxDecls <- forM (zip3 [0 :: Int ..] goals outs) \(i, cg, o) -> do
           stmt <- either (Left . EngineError sp) Right (goalSequent cg)
-          pure (outAux o <> [(auxName i, "theorem " <> auxName i <> " : " <> stmt <> "\nby " <> outTactic o)])
+          pure (outAux o <> [(auxName i, runBuilder ("theorem " <> fromText (auxName i) <> " : " <> stmt <> "\nby " <> outTactic o))])
         script <- either (Left . EngineError sp) Right (mkScript k auxName dat isCore core memberHyp motive reverted)
         pure (Out script (concat auxDecls))
   pure (goals, finish)
@@ -438,7 +440,7 @@ substTy args = \case
   t -> t
 
 -- | The core script of an induction, the auxiliary theorems of its cases named as given.
-mkScript :: Knowledge -> (Int -> Text) -> DataInfo -> Text -> Text -> Text -> Expr Text -> [(Text, Expr Text)] -> Either String Text
+mkScript :: Knowledge -> (Int -> Text) -> DataInfo -> Text -> Text -> Text -> Expr Text -> [(Text, Expr Text)] -> Either String Builder
 mkScript k auxName dat isCore t memberHyp motive reverted = do
   let m = "v_m"
       at x = motive >>= \w -> if w == t then x else Var w
@@ -450,7 +452,7 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
   inversion <- inversionText
   branches <- forM (zip [0 ..] (dataCtors dat)) \(i, c) -> branch i c
   let split = splitDisj "I" branches
-      step = "have Q: (((lt 0 " <> render (CSym isCore [CVar m]) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> dataLemma dat "inversion" <> " }; " <> split <> " }; exact impIntro"
+      step = "have Q: (((lt 0 " <> render (CSym isCore [CVar m]) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> fromText (dataLemma dat "inversion") <> " }; " <> split <> " }; exact impIntro"
   finishText <- finishing
   pure
     ( "have C: ((lt 0 (imp "
@@ -458,15 +460,15 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
         <> " "
         <> codeT
         <> ")) = 1) { exact cvInduction "
-        <> m
+        <> fromText m
         <> " "
-        <> t
+        <> fromText t
         <> " { "
         <> step
         <> " } }; have R: ((lt 0 "
         <> codeT
         <> ") = 1) { exact impElim on C "
-        <> memberHyp
+        <> fromText memberHyp
         <> " }; reflect R as R1; "
         <> finishText
     )
@@ -503,18 +505,18 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
       ihs <- forM selfFields \j -> do
         codeF <- motiveCode (fieldT j m')
         let f = render (fieldT j m')
-            kname = "K" <> T.pack (show (1 + length (takeWhile ((/= j) . fst) mems)))
+            kname = "K" <> fromDec (1 + length (takeWhile ((/= j) . fst) mems))
         pure
           ( "have Lf"
-              <> T.pack (show j)
+              <> fromDec j
               <> ": ((lt "
               <> f
               <> " "
               <> render applied
               <> ") = 1) { exact "
-              <> ctorLemma c ("lt-" <> T.pack (show j))
+              <> fromText (ctorLemma c ("lt-" <> T.pack (show j)))
               <> " }; have Lm"
-              <> T.pack (show j)
+              <> fromDec j
               <> ": ((lt "
               <> f
               <> " v_m) = 1) { calc (lt "
@@ -524,9 +526,9 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
               <> " "
               <> render applied
               <> ") by cong Km = 1 by exact Lf"
-              <> T.pack (show j)
+              <> fromDec j
               <> " }; have IHc"
-              <> T.pack (show j)
+              <> fromDec j
               <> ": ((lt 0 (imp "
               <> render (CSym isCore [fieldT j m'])
               <> " "
@@ -534,17 +536,17 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
               <> ")) = 1) { exact belowElim _ v_m "
               <> f
               <> " }; have IHd"
-              <> T.pack (show j)
+              <> fromDec j
               <> ": ((lt 0 "
               <> codeF
               <> ") = 1) { exact impElim on IHc"
-              <> T.pack (show j)
+              <> fromDec j
               <> " "
               <> kname
               <> " }; reflect IHd"
-              <> T.pack (show j)
+              <> fromDec j
               <> " as IHr"
-              <> T.pack (show j)
+              <> fromDec j
               <> "; "
           )
       caseFormula <- formula (motiveAt (fromCT applied))
@@ -553,14 +555,14 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
             _ -> "ConjL on " <> h <> " as Km " <> conjNames (length mems) <> "; "
           conjNames nm = case nm of
             1 -> "K1"
-            _ -> "Kr1; " <> T.concat ["ConjL on Kr" <> T.pack (show q) <> " as K" <> T.pack (show q) <> (if q + 1 == nm then " K" <> T.pack (show (q + 1)) else " Kr" <> T.pack (show (q + 1))) <> "; " | q <- [1 .. nm - 1]] <> "skip"
+            _ -> "Kr1; " <> mconcat ["ConjL on Kr" <> fromDec q <> " as K" <> fromDec q <> (if q + 1 == nm then " K" <> fromDec (q + 1) else " Kr" <> fromDec (q + 1)) <> "; " | q <- [1 .. nm - 1]] <> "skip"
       pure \h ->
         splitConj h
-          <> T.concat ihs
+          <> mconcat ihs
           <> "have A: "
           <> caseFormula
           <> " { exact "
-          <> auxName i
+          <> fromText (auxName i)
           <> " }; reify A as A1; calc (lt 0 "
           <> codeM
           <> ") = (lt 0 "
@@ -575,7 +577,7 @@ mkScript k auxName dat isCore t memberHyp motive reverted = do
       _ -> Right (implEliminations "R1" (map fst reverted))
     implEliminations h = \case
       [] -> "exact " <> h
-      x : xs -> "ImplL on " <> h <> " as " <> h <> "i { exact " <> x <> " } { " <> implEliminations (h <> "i") xs <> " }"
+      x : xs -> "ImplL on " <> h <> " as " <> h <> "i { exact " <> fromText x <> " } { " <> implEliminations (h <> "i") xs <> " }"
 
 -- | A core term as a surface expression over core variables, to be substituted into a motive.
 fromCT :: CT -> Expr Text
@@ -588,7 +590,7 @@ fromCT = \case
 -- * By clauses
 
 -- | A proof by clauses matching on one value: induction on it, each clause a case, its recursive calls the induction hypotheses.
-byClauses :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Text, [(Text, Text)])
+byClauses :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Builder, [(Text, Text)])
 byClauses k info g td pcs = do
   let columns = nub [i | pc <- pcs, (i, PCon {}) <- zip [0 ..] (pcPatterns pc)]
   c <- case columns of
