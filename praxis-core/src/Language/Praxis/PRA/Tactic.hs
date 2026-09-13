@@ -858,8 +858,13 @@ runTacticDeclared env lemmas prems fresh = go noHints
                   )
                   goal
             -- The instance of a lemma's equation: the pair its sides match where the sides of the goal differ.
-            matching l r (b, seen) u' v' = case matchTermL (envSignature env) noConstraints b l u' of
-              Matched b' | Matched b'' <- matchTermL (envSignature env) noConstraints b' r v' -> Just (b'', seen <|> Just (u', v'))
+            -- Either side may be matched first, so that the one binding the arguments of the
+            -- other's abstract functions, a schema instance say, is.
+            matching l r (b, seen) u' v' = case both b l u' r v' <|> both b r v' l u' of
+              Just b'' -> Just (b'', seen <|> Just (u', v'))
+              Nothing -> Nothing
+            both b0 x x' y y' = case matchTermL (envSignature env) noConstraints b0 x x' of
+              Matched b' | Matched b'' <- matchTermL (envSignature env) noConstraints b' y y' -> Just b''
               _ -> Nothing
         case sel of
           Nothing -> byHypotheses [p | Hypothesis _ (Atm p) <- goalHypotheses goal, isAtom p]

@@ -85,6 +85,8 @@ schemaTests =
           , "rule mixStep (a b : var) (n x : term) (Γ : ctx) (f(a, b) : term) (g(a) : term) : Γ |- mix {f} {g} (S n) x = f n (mix {f} {g} n x) by refl"
           , "theorem mixAddZero : |- mix {add} {S} 0 y = S y by exact mixZero"
           , "theorem mixAddStep : |- mix {add} {S} (S m) y = add m (mix {add} {S} m y) by exact mixStep"
+          , -- Backwards: the side applying an abstract function is matched after the schema instance binds it.
+            "theorem mixAddBack : |- add m (mix {add} {S} m y) = mix {add} {S} (S m) y by cong mixStep"
           ]
     ]
 
