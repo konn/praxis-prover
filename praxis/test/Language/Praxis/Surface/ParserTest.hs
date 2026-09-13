@@ -61,7 +61,7 @@ parserTests =
               , ("RingR", [Op ":="])
               , ("ZFR", [Ident "Member"])
               , ("Term", [Ident "FVar", Ident "BVar", Ident "App"])
-              , ("Formula", [Ident "Var", Ident "Rel", Ident "Not", Op ":/\\", Op ":\\/", Op ":=>", Ident "Forall", Ident "Exists"])
+              , ("Formula", [Ident "Rel", Ident "Not", Op ":/\\", Op ":\\/", Op ":=>", Ident "Forall", Ident "Exists"])
               ]
     , testCase "binary minus needs spaces; a dash joins an identifier" $ do
         expr "x-y" @?= EName (QName [] (Ident "x-y"))
