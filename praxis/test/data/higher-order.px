@@ -1,0 +1,25 @@
+module HigherOrder where
+
+-- Values are first-order: each declaration but the last is refused, for its
+-- own reason, and the rest of the module is checked without it.
+
+data List a = Nil | a : List a
+
+-- a field of function type
+data Box = Box (Nat -> Nat)
+
+-- a function of a function
+apply : (Nat -> Nat) -> Nat -> Nat
+apply f n = n
+
+-- a variable of function type
+fun-refl : (f : Nat -> Nat) -> f ≡ f
+fun-refl f = rfl
+
+-- a constructor applied to one of its two fields
+partly : (xs : List Nat) -> (:) 0 ≡ (:) 0
+partly xs = rfl
+
+-- first-order, and certified
+fine : (xs : List Nat) -> xs ≡ xs
+fine xs = rfl

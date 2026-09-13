@@ -183,7 +183,10 @@ elabData :: Fixities -> Env -> R.DataDecl -> Either ElabError ([(Text, Kind)], [
 elabData fx env d = do
   let params = map (unLocated . fst) (R.dataParams d)
   ctors <- forM (R.dataConstructors d) \(Located _ c) -> do
-    fields <- forM (R.constructorFields c) \f -> resolved fx f >>= elabType env params
+    fields <- forM (R.constructorFields c) \f -> do
+      t <- resolved fx f >>= elabType env params
+      unless (firstOrder t) $ Left (ElabError (location f) "a field of function type: values are first-order, and a function is not one")
+      pure t
     pure (unLocated (R.constructorName c), fields)
   let arities = [(i, length ts) | (_, fs) <- ctors, f <- fs, (i, ts) <- applications f]
       kindOf i = case [n | (j, n) <- arities, j == i] of
@@ -248,7 +251,10 @@ elabDecl fx env sp name ty0 clauses = do
       paramNames = map fst params
   if isProp body
     then do
-      binderTys <- forM binders \(Located _ n, t) -> (,) n <$> elabType env paramNames t
+      binderTys <- forM binders \(Located nsp n, t) -> do
+        bty <- elabType env paramNames t
+        unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a theorem quantifies over values, which are first-order"))
+        pure (n, bty)
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
       prop <- runTC (elabProp env ctx0 body)
       let q = qualify env [name]
@@ -260,6 +266,7 @@ elabDecl fx env sp name ty0 clauses = do
       fty <- elabType env paramNames body
       let (args, result) = arrows fty
           (env1, info) = addFunction env name (Scheme params fty) (length args)
+      unless (all firstOrder (result : args)) $ Left (ElabError (location body) "a function of functions: its arguments and its result are values, which are first-order")
       fcs <- forM clauses \c -> runTC (elabFunClause fx env1 info args result c)
       let names = unfoldingNames env1 (map fcPatterns fcs)
           env2 = foldl (registerUnfolding info) env1 (zip3 [1 :: Int ..] names fcs)
@@ -502,7 +509,12 @@ checkTerm env ctx le@(Located sp e) expected = case e of
   _ -> uncurry application (rawSpine le)
   where
     application hd args = do
-      (h, hty) <- headOf hd
+      (h, hty, arity) <- headOf hd
+      -- Values are first-order: a function or a constructor is applied in full, never passed or returned.
+      when (length args < arity) $ failAt sp ("applied to " <> show (length args) <> " of its " <> show arity <> " arguments: a function is not a value, so it is applied in full")
+      case drop arity args of
+        extra : _ -> failAt (location extra) "applied to too many arguments"
+        [] -> pure ()
       (res, resTy) <- applyArgs h hty args
       unifyAt sp expected resTy
       pure (At (Irrelevant sp) res)
@@ -520,11 +532,12 @@ checkTerm env ctx le@(Located sp e) expected = case e of
           _ -> failAt (location a) "applied to too many arguments"
         a' <- checkTerm env ctx a dom
         applyArgs (App h a') cod rest
+    -- The head of an application, its type, and the number of arguments it takes.
     headOf (Located hsp h) = case h of
-      R.EName (QName [] (Ident n)) | Just (v, t) <- lookup n ctx -> pure (Var v, t)
+      R.EName (QName [] (Ident n)) | Just (v, t) <- lookup n ctx -> pure (Var v, t, 0)
       R.EName q -> resolveHead hsp q
-      R.ENat n -> pure (Nat n, TNat)
-      R.EParen x -> inferTerm env ctx x
+      R.ENat n -> pure (Nat n, TNat, 0)
+      R.EParen x -> (\(e', t) -> (e', t, 0)) <$> inferTerm env ctx x
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
     resolveHead hsp q = case builtin q of
       Just b -> pure b
@@ -547,12 +560,12 @@ checkTerm env ctx le@(Located sp e) expected = case e of
     typed = \case
       GFun f -> do
         (t, _) <- instantiateScheme (funScheme f)
-        pure (Global (Ref RefFunction (funCore f)), t)
+        pure (Global (Ref RefFunction (funCore f)), t, funArity f)
       GCtor c -> case dataOfCtor env c of
         Just d -> do
           let result = TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. length (dataParams d) - 1]]
           (t, _) <- instantiateScheme (Scheme (dataParams d) (foldr TArrow result (ctorFields c)))
-          pure (Global (Ref RefConstructor (ctorCore c)), t)
+          pure (Global (Ref RefConstructor (ctorCore c)), t, length (ctorFields c))
         Nothing -> failAt sp "internal: a constructor of no data type"
       GTheorem t -> failAt sp (T.unpack (renderQualName (thmQual t)) <> " is a theorem, not a term")
       GData d -> failAt sp (T.unpack (renderQualName (dataQual d)) <> " is a type, not a term")
@@ -564,8 +577,8 @@ checkTerm env ctx le@(Located sp e) expected = case e of
       GCtor _ -> True
       _ -> False
     builtin = \case
-      QName [] (Ident n) | n `elem` ["S", "suc"] -> Just (Global (Ref RefBuiltin "S"), TArrow TNat TNat)
-      QName [] (Op o) | Just core <- lookup o arithmetic -> Just (Global (Ref RefBuiltin core), TArrow TNat (TArrow TNat TNat))
+      QName [] (Ident n) | n `elem` ["S", "suc"] -> Just (Global (Ref RefBuiltin "S"), TArrow TNat TNat, 1)
+      QName [] (Op o) | Just core <- lookup o arithmetic -> Just (Global (Ref RefBuiltin core), TArrow TNat (TArrow TNat TNat), 2)
       _ -> Nothing
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
 

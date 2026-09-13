@@ -30,6 +30,12 @@ checkTests =
         mapM_ (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls)) [("wrong", [13 .. 19]), ("loop", [22 .. 24]), ("unfinished", [27, 28]), ("uses", [31, 32])]
         assertBool "the non-structural call is named" (any ("recursive call" `T.isInfixOf`) (map reportMessage (checkedReports c)))
         assertBool "sorry shows its goal" (any ("sorry" `T.isInfixOf`) (map reportMessage (checkedReports c)))
+    , testCase "values are first-order: a field, an argument or a variable of function type, and a partial application, are refused" $ do
+        c <- checkFile "test/data/higher-order.px"
+        checkedTheorems c @?= ["HigherOrder.fine"]
+        let errs = [(l, m) | Report (Span (l, _) _) SevError m <- checkedReports c]
+        mapM_ (\(n, l) -> assertBool ("an error for " <> n) (any ((== l) . fst) errs)) [("Box", 9 :: Int), ("apply", 12), ("fun-refl", 16), ("partly", 20)]
+        assertBool "the partial application is named" (any (("applied to 1 of its 2 arguments" `T.isInfixOf`) . snd) errs)
     ]
 
 checkFile :: FilePath -> IO Checked

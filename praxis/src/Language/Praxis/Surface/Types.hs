@@ -19,6 +19,7 @@ module Language.Praxis.Surface.Types (
   renderTy,
   renderKind,
   tyParams,
+  firstOrder,
 
   -- * Unification
   Unify,
@@ -79,6 +80,20 @@ tyParams = \case
   TData _ ts -> concatMap tyParams ts
   TNat -> []
   TArrow a b -> tyParams a <> tyParams b
+
+{- |
+Whether a type is first-order: no function type anywhere in it.  Values are
+first-order — numerals and the codes of data types — so every field, binder
+and argument has such a type; a function type stands only at the top of a
+function's signature, and a function is always applied in full.
+-}
+firstOrder :: Ty -> Bool
+firstOrder = \case
+  TParam _ ts -> all firstOrder ts
+  TMeta _ -> True
+  TData _ ts -> all firstOrder ts
+  TNat -> True
+  TArrow _ _ -> False
 
 -- | A type, its parameters by the names given, qualified data names by their last segment.
 renderTy :: [Text] -> Ty -> String
