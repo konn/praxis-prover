@@ -398,6 +398,7 @@ bodyCT info userArity var dvar rec fc = go (fromScope (fcBody fc))
       (Var (F v), _) -> absurd v
       (Global (Ref RefStatic w), []) -> Right (CStatic w)
       (Global (Ref RefStatic w), as) -> CSym w <$> traverse go as
+      (Global (Ref (RefPartial n) f), dict) -> (\d -> CPartial f d n) <$> traverse go dict
       (Global (Ref RefValueParam k), []) -> dvar <$> maybe (Left "internal: a value of the dictionary at no position") Right (readMaybe (T.unpack k))
       (Global (Ref _ r), as)
         | r == core -> do

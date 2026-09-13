@@ -174,6 +174,22 @@ instance Pointed (List a) where
     = x : xs := by cong (plus-zero xs)
 ```
 
+An instance may constrain the variables of its type:
+
+```
+instance Semigroup a => Semigroup (Pair a) where
+  (<>) (MkPair x y) q = MkPair (x <> first q) (y <> second q)
+```
+
+Its functions are then functions under the constraints, each taking the
+methods of the context it uses, itself or through the instance's other
+methods. A use at `Pair Nat` is `Semigroup-Pair.(<>)` with
+`Semigroup-Nat.(<>)` passed. At `Pair (Pair Nat)` it is passed the
+instance's own function for `Pair Nat`, with that function's methods in
+turn. Its laws are theorems under the context. The membership of a value of
+`Pair a` does not yet constrain its fields of type `a`, so a law whose proof
+needs the context's laws at those fields cannot be proved yet.
+
 A use of a method is resolved once the types of its declaration are known:
 it is the function of the instance of its class for the type it is used at.
 `2 <> 3` is `Semigroup-Nat.(<>) 2 3`, and `mempty <> xs`, at `List Nat`,
@@ -325,8 +341,9 @@ and theorems under constraints, schemas and rules over the methods they use;
 laws of classes, proved by each instance and premises of the theorems under
 the class; theorems by clauses on one value, by `calc`, and by the tactics
 listed, a lemma applying at any arguments through the closure lemmas of
-functions; `.px` diagnostics. Planned, in order: instances with contexts;
-goal display in hover, the
+functions; instances under contexts; `.px` diagnostics. Planned, in order:
+the membership of the fields of a type parameter, for the laws of instances
+under contexts; goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
 `if` in terms, nested patterns and matching on several arguments, matching
 and recursion on `Nat`, overlapping first-match clauses, mutual recursion and

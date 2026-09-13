@@ -414,6 +414,20 @@ applies unchanged. That an instance is the only one of its class for its type
 is what makes the choice the one the reader of the source predicts; soundness
 does not depend on it.
 
+**Instances under a context.** The functions of `instance Semigroup a =>
+Semigroup (Pair a)` are functions under the context's constraints. Each
+takes the places of the context's dictionary it uses, itself or through the
+other methods of the instance it calls, found as a fixpoint, since a schema
+must use each of its parameters. A use at a known type passes the
+dictionary the context takes at the type's arguments, each place resolved in
+turn (`Elab.methodAt`, `dictionaryAt`). Passed on as the parameter of a
+schema, such a function is the closed λ applying it to its dictionary:
+`mconcat {λ y_1 y_2. (Semigroup-Pair.(<>) {Semigroup-Nat.(<>)} y_1 y_2)} …`.
+The instance's laws are elaborated at its type under the context, as a
+theorem under constraints is. For adequacy, a function of an instance under
+a context at a known type denotes the function its clauses define with the
+context's instances' methods in place, as a function under constraints does.
+
 **Laws.** A law of a class is a statement over the class's dictionary at its
 parameter. An instance proves it as a theorem at its type, the dictionary's
 places its functions: `Pointed-List.plus-zero : 0 < List.is x |-

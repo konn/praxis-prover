@@ -21,6 +21,7 @@ module Language.Praxis.Surface.CoreText (
   -- * Core terms
   CT (..),
   render,
+  isParameter,
   hdT,
   tlT,
   fieldT,
@@ -43,6 +44,7 @@ module Language.Praxis.Surface.CoreText (
 import Bound (Var (..), fromScope)
 import Data.List (intersperse, partition)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec)
 import Language.Praxis.Surface.Syntax
 import Numeric.Natural (Natural)
@@ -60,11 +62,19 @@ data CT
   | CNum !Natural
   | CRaw !Text
   | CStatic !Text
+  | {- | a function applied to the dictionary its schema takes, standing as
+    the parameter of a schema: its name, that dictionary — parameters and
+    values, in order — and the number of values it takes before the
+    dictionary's
+    -}
+    CPartial !Text ![CT] !Int
   deriving stock (Show, Eq)
 
 {- |
 The text of a term, every application parenthesised; the parameters of a
-schema, in braces, right after its name, as the core writes an instance.
+schema, in braces, right after its name, as the core writes an instance.  A
+function with its dictionary, as a parameter, is the λ over the values it
+takes applied to them and to the dictionary.
 -}
 render :: CT -> Builder
 render = \case
@@ -72,14 +82,21 @@ render = \case
   CNum n -> fromUnboundedDec n
   CSym f [] -> fromText f
   CSym f args ->
-    let (statics, others) = partition isStatic args
+    let (statics, others) = partition isParameter args
      in "(" <> unwordsB (fromText f : map render (statics <> others)) <> ")"
   CRaw t -> "(" <> fromText t <> ")"
   CStatic f -> "{" <> fromText f <> "}"
-  where
-    isStatic = \case
-      CStatic _ -> True
-      _ -> False
+  CPartial f dict n ->
+    let ys = [CVar ("y_" <> T.pack (show i)) | i <- [1 .. n]]
+        (statics, values) = partition isParameter dict
+     in "{λ " <> unwordsB (map render ys) <> ". " <> render (CSym f (statics <> ys <> values)) <> "}"
+
+-- | Whether a term stands as the parameter of a schema.
+isParameter :: CT -> Bool
+isParameter = \case
+  CStatic _ -> True
+  CPartial {} -> True
+  _ -> False
 
 hdT, tlT :: CT -> CT
 hdT x = CSym "hd" [x]
@@ -103,6 +120,7 @@ replaceCT f t = case f t of
   Just u -> u
   Nothing -> case t of
     CSym g args -> CSym g (map (replaceCT f) args)
+    CPartial g dict n -> CPartial g (map (replaceCT f) dict) n
     _ -> t
 
 -- | The variables of a term.
@@ -110,6 +128,7 @@ varsCT :: CT -> [Text]
 varsCT = \case
   CVar v -> [v]
   CSym _ args -> concatMap varsCT args
+  CPartial _ dict _ -> concatMap varsCT dict
   _ -> []
 
 -- * From the surface
@@ -133,6 +152,7 @@ termCT var = go
       -- A function passed as the parameter of a schema, in braces; a value of a dictionary, its variable.
       (Global (Ref RefStatic core), []) -> Right (CStatic core)
       (Global (Ref RefValueParam k), []) -> Right (CVar (valueVar k))
+      (Global (Ref (RefPartial n) core), dict) -> (\d -> CPartial core d n) <$> traverse go dict
       (Global (Ref _ core), args) -> CSym core <$> traverse go args
       (h, _) -> Left ("no core term for " <> shape h)
     shape = \case

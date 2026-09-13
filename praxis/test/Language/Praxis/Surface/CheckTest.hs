@@ -49,6 +49,10 @@ checkTests =
         c <- checkFile "test/data/laws.px"
         errors c @?= []
         checkedTheorems c @?= ["Laws.Pointed-Nat.plus-zero", "Laws.Pointed-List.plus-zero", "Laws.plus-zero-twice", "Laws.plus-zero-thrice", "Laws.twice-nat", "Laws.twice-list", "Laws.list-law"]
+    , testCase "an instance under a context takes the context's dictionary, passed at the instances of known types" $ do
+        c <- checkFile "test/data/contexts.px"
+        errors c @?= []
+        checkedTheorems c @?= ["Contexts.pair-sum", "Contexts.pair-mconcat", "Contexts.nested-sum", "Contexts.Pointed-Nat.plus-zero", "Contexts.Pointed-Option.plus-zero"]
     , testCase "an instance proves every law of its class, and its proofs are checked" $ do
         c <- checkFile "test/data/laws-bad.px"
         checkedTheorems c @?= ["LawsBad.fine"]

@@ -66,7 +66,8 @@ import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Syntax (Expr)
-import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), segmentText)
+import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentText)
+import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Kind, Scheme, Ty)
 
 -- * Globals
@@ -199,6 +200,8 @@ data LawInfo = LawInfo
   -- ^ its proposition, over the binders, its methods the places of 'lawSlots'
   , lawSlots :: ![Slot]
   -- ^ the dictionary of the class at its parameter: each method of it and of its superclasses
+  , lawBody :: !(Located R.Expr)
+  -- ^ its proposition as written, which an instance elaborates at its type
   }
   deriving stock (Show)
 
@@ -373,11 +376,11 @@ The function defining a method in an instance: a member of the instance's
 namespace by the method's name, which opens a namespace of its own for its
 lemmas, as a function does.
 -}
-addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> (Env, FunInfo)
-addInstanceFunction env instance' method sch arity = (env', info)
+addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)
+addInstanceFunction env instance' method sch arity slots = (env', info)
   where
     q = instance' <> [method]
-    info = FunInfo q sch arity (coreOf q) []
+    info = FunInfo q sch arity (coreOf q) slots
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)

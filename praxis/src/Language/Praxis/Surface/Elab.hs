@@ -58,10 +58,11 @@ import Control.Monad.Except (throwError)
 import Control.Monad.State.Strict (StateT, evalStateT)
 import Data.List (elemIndex, find, nub, nubBy)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, maybeToList)
+import Data.Maybe (isJust, maybeToList)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Void (Void)
+import Data.Void (Void, vacuous)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, isConnective, isRelation, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleVariable)
@@ -273,7 +274,7 @@ elabClass fx env cd = do
       unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a law quantifies over values, which are first-order"))
       pure (n, bty)
     prop <- runTC (elabProp env1 [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body >>= resolveMethods env1 slots)
-    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots)
+    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots body)
   pure (addLaws (classQual info) laws env1)
 
 -- | A class after its superclasses, each once.
@@ -288,11 +289,14 @@ function of the instance, @C-T.m@ unless the instance is named, whose type
 is the method's at the instance's type.  The functions and the instance come
 into scope before the clauses are elaborated, as a function does, so that a
 method may call itself, or another method of the instance.
+
+Under a context, @Monoid a => Monoid (Pair a)@, the functions take the
+dictionary the context gives, each the places it uses, itself or through the
+other methods it calls; and each law is a theorem under the context.
 -}
 elabInstance :: Fixities -> Env -> Span -> R.InstanceDecl -> Either ElabError (Env, [Item])
 elabInstance fx env sp idl = do
   let Located csp cq = R.instanceClass idl
-  unless (null (R.instanceContext idl)) $ Left (ElabError sp "an instance with a context: not supported yet")
   cls <- case [c | GClass c <- resolve env cq] of
     c : _ -> pure c
     [] -> Left (ElabError csp ("not a class: " <> T.unpack (qnameText cq)))
@@ -304,6 +308,8 @@ elabInstance fx env sp idl = do
     TNat -> pure "Nat"
     TData dn args | args == [TParam i [] | i <- [0 .. length vars - 1]] -> pure dn
     _ -> Left (ElabError (location ty0) "an instance is for a data type applied to distinct type variables, or for Nat")
+  given <- constraintClasses env vars (R.instanceContext idl)
+  full <- dictionaryOf env vars (R.instanceContext idl)
   let shortHead = last (T.splitOn "." headName)
       iq = qualify env [Ident (maybe (className' <> "-" <> shortHead) unLocated (R.instanceName idl))]
   when (Map.member (classQual cls, headName) (envInstances env)) $
@@ -318,39 +324,76 @@ elabInstance fx env sp idl = do
     _ -> Left (ElabError (location (R.clauseLhs c)) ("a clause for no method or law of " <> T.unpack className'))
   let atType m = case methodScheme m of
         Scheme mparams mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) (atInstance headTy (length vars) mty)
-      declare (e, fs) m = let (e', f) = addInstanceFunction e iq (methodName m) (atType m) (methodArity m) in (e', fs <> [(m, f)])
-      (env1, funs) = foldl declare (env, []) (classMethods cls)
-      functions = Map.fromList [(methodQual m, f) | (m, f) <- funs]
-      env2 = addInstance env1 (InstanceInfo iq (classQual cls) headName functions Map.empty)
-  (env3, items) <- foldM (define clauses) (env2, []) funs
-  -- Each law, a theorem at the instance's type, its methods the instance's functions for them.
-  (env4, lawItems, proved) <- foldM (prove headTy vars headName iq clauses) (env3, [], Map.empty) (classLaws cls)
-  pure (addInstance env4 (InstanceInfo iq (classQual cls) headName functions proved), items <> lawItems)
+      declare slotsOf (e, fs) m = let (e', f) = addInstanceFunction e iq (methodName m) (atType m) (methodArity m) (slotsOf m) in (e', fs <> [(m, f)])
+      register e fs laws = addInstance e (InstanceInfo iq (classQual cls) headName (Map.fromList [(methodQual m, f) | (m, f) <- fs]) laws)
+  -- Under a context, every method is elaborated over the whole dictionary
+  -- first, to see which places each uses, itself or through the others.
+  slotsOf <-
+    if null full
+      then pure (const [])
+      else do
+        let (env1, funs1) = foldl (declare (const full)) (env, []) (classMethods cls)
+            env2 = register env1 funs1 Map.empty
+            siblings = Map.fromList [(funCore f, (methodQual m, funArity f)) | (m, f) <- funs1]
+        uses <- forM funs1 \(m, f) -> (methodQual m,) . placesUsed siblings (placeRefs full) <$> methodClauses clauses env2 m f
+        let reach = usedThrough (Map.fromList uses)
+        pure \m -> [s | (s, r) <- zip full (placeRefs full), r `Set.member` Map.findWithDefault Set.empty (methodQual m) reach]
+  let (env3, funs) = foldl (declare slotsOf) (env, []) (classMethods cls)
+  (env4, items) <- foldM (define clauses) (register env3 funs Map.empty, []) funs
+  -- Each law, a theorem at the instance's type, under its context.
+  (env5, lawItems, proved) <- foldM (prove headTy vars given full iq clauses) (env4, [], Map.empty) (classLaws cls)
+  pure (register env5 funs proved, items <> lawItems)
   where
     clauseHead c = either (const Nothing) Just (resolveExpr fx (R.clauseLhs c)) >>= fmap fst . lhsParts
-    define clauses (e, items) (m, f) = do
+    methodClauses clauses e m f = do
       let mine = [c | c <- clauses, clauseHead c == Just (last (methodQual m))]
           (args, result) = arrows (schemeType (funScheme f))
       when (null mine) $ Left (ElabError sp ("no clauses for the method " <> T.unpack (segmentText (last (methodQual m)))))
-      fcs <- forM mine \c -> runTC (elabFunClause fx e f args result c)
+      forM mine \c -> runTC (elabFunClause fx e f args result c)
+    define clauses (e, items) (m, f) = do
+      fcs <- methodClauses clauses e m f
+      let (args, result) = arrows (schemeType (funScheme f))
       pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f args result fcs sp)])
-    prove headTy vars headName iq clauses (e, items, proved) l = do
+    prove headTy vars given full iq clauses (e, items, proved) l = do
       let lawSeg = last (lawQual l)
           mine = [c | c <- clauses, clauseHead c == Just lawSeg]
           binderTys = [(n, atInstance headTy (length vars) t) | (n, t) <- lawBinders l]
-          function s = case Map.lookup (slotMethod s) (envGlobals e) of
-            Just (GMethod m) -> Map.lookup (methodClass m, headName) (envInstances e) >>= Map.lookup (slotMethod s) . instFunctions
-            _ -> Nothing
+          ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
       when (null mine) $ Left (ElabError sp ("no proof of the law " <> T.unpack (segmentText lawSeg)))
-      table <- forM (zip (lawSlots l) (placeRefs (lawSlots l))) \(s, r) -> case function s of
-        Just f -> pure (r, Ref RefFunction (funCore f))
-        Nothing -> Left (ElabError sp ("internal: no function for the method " <> T.unpack (renderQualName (slotMethod s)) <> " at this instance"))
-      let prop = mapGlobals (\r -> fromMaybe r (lookup r table)) (fromScope (lawProp l))
+      prop0 <- runTC (elabProp e ctx0 (lawBody l) >>= resolveMethods e full)
+      -- Under the context: the places its statement uses, the membership
+      -- predicates of the type variables its values are of, and the premises they give.
+      let used = globalsOf prop0
+          kept = [s | (s, r) <- zip full (placeRefs full), r `elem` used || (isMembershipSlot s && TParam (slotParam s) [] `elem` map snd binderTys)]
+          prop = keepPlaces full kept prop0
+          premises = premisesFor e given kept
           q = iq <> [lawSeg]
-          (e1, info) = addTheorem e q (map (mangleVariable . fst) binderTys) (map snd binderTys) [] [] (Just (toScope prop))
+          (e1, info) = addTheorem e q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (Just (toScope (fmap B prop)))
           e2 = addNamespaceMember iq lawSeg q e1
       pcs <- forM mine \c -> runTC (elabProofClause fx e2 (map snd binderTys) c)
-      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys (toScope prop) pcs sp [] [])], Map.insert (lawQual l) info proved)
+      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys (toScope (fmap B prop)) pcs sp kept premises)], Map.insert (lawQual l) info proved)
+
+{- |
+The places of a dictionary the clauses of a method refer to themselves, and
+the other methods of its instance they call, whose dictionaries the calls
+pass on.
+-}
+placesUsed :: Map.Map Text (QualName, Int) -> [Ref] -> [FunClause] -> ([Ref], [QualName])
+placesUsed siblings refs = foldMap (go . fromScope . fcBody)
+  where
+    go :: Expr x -> ([Ref], [QualName])
+    go e = case spine e of
+      (Global (Ref (RefPartial _) n), _) | Just (q, _) <- Map.lookup n siblings -> ([], [q])
+      (Global (Ref _ n), as) | Just (q, arity) <- Map.lookup n siblings -> ([], [q]) <> foldMap go (take arity as)
+      (h, as) -> ([r | Global r <- [h], r `elem` refs], []) <> foldMap go as
+
+-- | Each method's places: its own, and those of the methods it calls, to a fixpoint.
+usedThrough :: Map.Map QualName ([Ref], [QualName]) -> Map.Map QualName (Set.Set Ref)
+usedThrough uses = go (Map.map (Set.fromList . fst) uses)
+  where
+    go current =
+      let next = Map.map (\(own, calls) -> Set.unions (Set.fromList own : [Map.findWithDefault Set.empty c current | c <- calls])) uses
+       in if next == current then current else go next
 
 -- | A method's type at an instance: the class's parameter the instance's type, over its @n@ variables, and the method's own variables after them.
 atInstance :: Ty -> Int -> Ty -> Ty
@@ -383,10 +426,13 @@ registerUnfoldings info fcs env = foldl register env (zip3 [1 :: Int ..] (unfold
 {- |
 Solve the constraints the uses of methods raised, now that the types are
 known.  At a known type, a use is the function of its method in the instance
-of its class for that type.  At a type parameter a dictionary is given for,
-it is a place of that dictionary: a parameter of the enclosing function's
-schema, or a value it takes.  A method at a type not known, or at a type
-parameter no constraint gives it for, is an error.
+of its class for the head of that type, applied after its arguments to the
+dictionary the instance's context takes at the type's arguments; passed on
+as the parameter of a schema, the function with that dictionary.  At a type
+parameter a dictionary is given for, it is a place of that dictionary: a
+parameter of the enclosing function's schema, or a value it takes.  A method
+at a type not known, or at a type parameter no constraint gives it for, is
+an error.
 -}
 resolveMethods :: Env -> [Slot] -> Expr a -> TC (Expr a)
 resolveMethods env givens e = do
@@ -396,22 +442,62 @@ resolveMethods env givens e = do
       Just (GMethod m) -> pure m
       _ -> failAt (wantedSpan w) "internal: a method not in scope"
     t <- zonk (wantedType w)
-    let name = T.unpack (segmentText (last (methodQual m)))
-        cls = T.unpack (segmentText (last (methodClass m)))
-        at h = case Map.lookup (methodClass m, h) (envInstances env) >>= Map.lookup (methodQual m) . instFunctions of
-          -- The placeholder keeps its kind: a function passed on, or one applied.
-          Just f -> pure (wantedPlaceholder w, \(Ref k _) -> Ref k (funCore f))
-          Nothing -> failAt (wantedSpan w) ("no instance of " <> cls <> " for " <> T.unpack (last (T.splitOn "." h)) <> ", where " <> name <> " is used")
-    case t of
-      TNat -> at "Nat"
-      TData dn _ -> at dn
-      TParam j _ -> case givenPlace givens (methodQual m) j of
-        Just r -> pure (wantedPlaceholder w, const r)
-        Nothing -> failAt (wantedSpan w) (name <> " at a type variable: it needs a constraint " <> cls <> " on the variable")
-      TMeta _ -> failAt (wantedSpan w) ("the type " <> name <> " is used at is ambiguous")
-      TArrow _ _ -> failAt (wantedSpan w) (name <> " at a function type")
+    either (failAt (wantedSpan w)) (pure . (wantedPlaceholder w,)) (methodAt env givens m t)
   let table = Map.fromList chosen
-  pure (mapGlobals (\r -> maybe r ($ r) (Map.lookup (refName r) table)) e)
+  pure (rewriteApps (resolvedAt table) e)
+  where
+    -- A placeholder: a place as it stands; an instance's function applied, its
+    -- dictionary after the arguments; passed on, with its dictionary, as a parameter.
+    resolvedAt :: Map.Map Text Resolution -> Ref -> [Expr x] -> Maybe (Expr x)
+    resolvedAt table (Ref k n) as = case Map.lookup n table of
+      Nothing -> Nothing
+      Just (AtPlace r) -> Just (apps (Global r) as)
+      Just (AtInstance f dict) -> Just case (k, as) of
+        (RefStatic, []) -> parameterOf f (map vacuous dict)
+        _ -> apps (Global (Ref RefFunction (funCore f))) (as <> map vacuous dict)
+
+-- | What a method is where it is used: the function of an instance, with the dictionary its context takes there, or a place of the dictionary given.
+data Resolution = AtInstance !FunInfo ![Expr Void] | AtPlace !Ref
+
+-- | An instance's function passed on as the parameter of a schema: itself, or, taking a dictionary, applied to it.
+parameterOf :: FunInfo -> [Expr a] -> Expr a
+parameterOf f dict
+  | null dict = Global (Ref RefStatic (funCore f))
+  | otherwise = apps (Global (Ref (RefPartial (funArity f)) (funCore f))) dict
+
+{- |
+A method at a type: at a known type, the function of the instance of its
+class for the head of the type, with the dictionary the instance's context
+takes at the type's arguments; at a type parameter a dictionary is given
+for, a place of it.
+-}
+methodAt :: Env -> [Slot] -> MethodInfo -> Ty -> Either String Resolution
+methodAt env givens m = \case
+  TNat -> at "Nat" []
+  TData dn targs -> at dn targs
+  TParam j _ -> maybe (Left (name <> " at a type variable: it needs a constraint " <> cls <> " on the variable")) (Right . AtPlace) (givenPlace givens (methodQual m) j)
+  TMeta _ -> Left ("the type " <> name <> " is used at is ambiguous")
+  TArrow _ _ -> Left (name <> " at a function type")
+  where
+    name = T.unpack (segmentText (last (methodQual m)))
+    cls = T.unpack (segmentText (last (methodClass m)))
+    at h targs = case Map.lookup (methodClass m, h) (envInstances env) >>= Map.lookup (methodQual m) . instFunctions of
+      Just f -> AtInstance f <$> dictionaryAt env givens f targs
+      Nothing -> Left ("no instance of " <> cls <> " for " <> T.unpack (last (T.splitOn "." h)) <> ", where " <> name <> " is used")
+
+-- | The dictionary an instance's function takes at the arguments of the instance's type: each place, its method at the argument the place's parameter stands for.
+dictionaryAt :: Env -> [Slot] -> FunInfo -> [Ty] -> Either String [Expr Void]
+dictionaryAt env givens f targs = forM (funSlots f) \s -> do
+  m <- case Map.lookup (slotMethod s) (envGlobals env) of
+    Just (GMethod m) -> Right m
+    _ -> Left "internal: a place of a dictionary for no method"
+  ty <- maybe (Left "internal: a place at no argument of the instance's type") Right (lookup (slotParam s) (zip [0 ..] targs))
+  r <- methodAt env givens m ty
+  pure case r of
+    AtPlace ref -> Global ref
+    AtInstance g gdict
+      | slotArity s > 0 -> parameterOf g gdict
+      | otherwise -> apps (Global (Ref RefFunction (funCore g))) gdict
 
 -- | The place of a dictionary for a method at a type parameter: a parameter of the schema, by its name, or a value, by its position.
 givenPlace :: [Slot] -> QualName -> Int -> Maybe Ref

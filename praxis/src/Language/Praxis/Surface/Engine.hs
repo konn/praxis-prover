@@ -473,7 +473,8 @@ evidence k info g le = case spineOf le of
                   GMethod m <- Map.lookup (slotMethod s) (envGlobals (knowEnv k))
                   inst <- Map.lookup (methodClass m, h) (envInstances (knowEnv k))
                   f <- Map.lookup (slotMethod s) (instFunctions inst)
-                  Just (Ref RefFunction (funCore f))
+                  -- A function taking a dictionary is no place of its own: no equation is stated then.
+                  if null (funSlots f) then Just (Ref RefFunction (funCore f)) else Nothing
                 _ -> Nothing
     -- The equation a statement over places states at the arguments given, one for each of its values, its places those of the table.
     equationOf sp sc table typed n = case table of
@@ -552,14 +553,17 @@ premiseBlocks k g sp t assign = mconcat <$> traverse block (thmPremises t)
   where
     env = knowEnv k
     block p =
-      (\n -> " { exact " <> fromText n <> " }") <$> case p of
+      (\body -> " { " <> body <> " }") <$> case p of
         PLaw lq i -> case Map.lookup i assign of
-          Just (TParam j []) -> own (PLaw lq j)
+          Just (TParam j []) -> exactly <$> own (PLaw lq j)
           Just ty | Just h <- headOf ty -> do
             inst <- instanceOf lq h
-            maybe (Left (EngineError sp ("internal: the instance does not prove " <> T.unpack (renderQualName lq)))) (Right . thmCore) (Map.lookup lq (instLaws inst))
+            t' <- maybe (Left (EngineError sp ("internal: the instance does not prove " <> T.unpack (renderQualName lq)))) Right (Map.lookup lq (instLaws inst))
+            -- Under a context, the instance's law has premises of its own, at the type's arguments.
+            nested <- premiseBlocks k g sp t' (Map.fromList (zip [0 ..] (typeArgs ty)))
+            Right (exactly (thmCore t') <> nested)
           _ -> unknown
-        PClosure mq i -> case Map.lookup i assign of
+        PClosure mq i -> fmap exactly $ case Map.lookup i assign of
           Just (TParam j []) -> own (PClosure mq j)
           Just TNat -> Right "anyIsMember"
           Just ty@(TData dn _) -> do
@@ -575,6 +579,11 @@ premiseBlocks k g sp t assign = mconcat <$> traverse block (thmPremises t)
         _ -> Left (EngineError sp ("internal: " <> T.unpack (renderQualName q) <> " is no law or method"))
       maybe (Left (EngineError sp ("no instance of " <> T.unpack (renderQualName cls) <> " for " <> T.unpack h))) Right (Map.lookup (cls, h) (envInstances env))
     own p = maybe (Left (EngineError sp (T.unpack (renderQualName (thmQual t)) <> " needs a premise the goal does not have: its statement's methods must be the goal's"))) (Right . gpName) (find ((== p) . gpPremise) (goalPremises g))
+    exactly n = "exact " <> fromText n
+    typeArgs = \case
+      TData _ ts -> ts
+      _ -> []
+    unknown :: Either EngineError b
     unknown = Left (EngineError sp (T.unpack (renderQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances"))
 
 -- | Whether a hypothesis of the goal states the membership of the term by the predicate, as the core writes it.
@@ -762,7 +771,7 @@ unfoldStep k t0 = case redex t0 of
     -- A lemma's variables, and the parameters of its schema, bound where it matches.
     match p t s = case (p, t) of
       (CVar v, _) -> bind v t s
-      (CStatic v, CStatic _) -> bind v t s
+      (CStatic v, _) | isParameter t -> bind v t s
       (CSym f ps, CSym f' ts) | f == f', length ps == length ts -> foldl' (\acc (x, y) -> acc >>= match x y) (Just s) (zip ps ts)
       (CNum a, CNum b) | a == b -> Just s
       _ -> Nothing
@@ -773,7 +782,11 @@ unfoldStep k t0 = case redex t0 of
     instantiated s = \case
       CVar v -> fromMaybe (CVar v) (lookup v s)
       CStatic v -> fromMaybe (CStatic v) (lookup v s)
-      CSym f args -> CSym (case lookup f s of Just (CStatic fn) -> fn; _ -> f) (map (instantiated s) args)
+      CSym f args -> case lookup f s of
+        Just (CStatic fn) -> CSym fn (map (instantiated s) args)
+        -- A function with its dictionary, applied: to the arguments, then to the dictionary, as a call passes it.
+        Just (CPartial fn dict _) -> CSym fn (map (instantiated s) args <> dict)
+        _ -> CSym f (map (instantiated s) args)
       other -> other
 
 -- * Induction
@@ -1000,6 +1013,7 @@ fromCT = \case
   CNum n -> Nat n
   CRaw t -> Global (Ref RefBuiltin t)
   CStatic t -> Global (Ref RefStatic t)
+  CPartial f dict n -> apps (Global (Ref (RefPartial n) f)) (map fromCT dict)
 
 -- * By clauses
 

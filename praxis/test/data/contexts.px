@@ -1,0 +1,72 @@
+module Contexts where
+
+data List a = Nil | a : List a
+
+infixr 5 :
+
+data Pair a = MkPair a a
+
+data Option a = None | Some a
+
+class Semigroup a where
+  (<>) : a -> a -> a
+
+infixr 4 <>
+
+class Semigroup a => Monoid a where
+  mempty : a
+
+instance Semigroup Nat where
+  (<>) x y = x + y
+
+instance Monoid Nat where
+  mempty = 0
+
+first : Pair a -> a
+first (MkPair x y) = x
+
+second : Pair a -> a
+second (MkPair x y) = y
+
+-- Under a context: the function of the instance takes the context's dictionary.
+instance Semigroup a => Semigroup (Pair a) where
+  (<>) (MkPair x y) q = MkPair (x <> first q) (y <> second q)
+
+-- Each function takes the places it uses: mempty the context's mempty alone.
+instance Monoid a => Monoid (Pair a) where
+  mempty = MkPair mempty mempty
+
+mconcat : Monoid a => List a -> a
+mconcat Nil = mempty
+mconcat (x : xs) = x <> mconcat xs
+
+-- At a known type, the instance's function, with the context's instances.
+-- (rfl unfolds functions; the sums inside a constructor are left as they are.)
+pair-sum : MkPair 1 2 <> MkPair 3 4 ≡ MkPair (1 + 3) (2 + 4)
+pair-sum = rfl
+
+-- A function under a constraint at an instance under a context: the method, with its dictionary, as the parameter.
+pair-mconcat : mconcat (MkPair 1 2 : MkPair 3 4 : Nil) ≡ MkPair (1 + (3 + 0)) (2 + (4 + 0))
+pair-mconcat = rfl
+
+-- The context's instance is under a context in turn.
+nested-sum : MkPair (MkPair 1 2) (MkPair 3 4) <> MkPair (MkPair 5 6) (MkPair 7 8) ≡ MkPair (MkPair (1 + 5) (2 + 6)) (MkPair (3 + 7) (4 + 8))
+nested-sum = rfl
+
+class Pointed a where
+  zero : a
+  plus : a -> a -> a
+  plus-zero : (x : a) -> plus x zero ≡ x
+
+instance Pointed Nat where
+  zero = 0
+  plus x y = x + y
+  plus-zero x = rfl
+
+-- A context no function uses: they take no dictionary, and the law is a theorem.
+instance Pointed a => Pointed (Option a) where
+  zero = None
+  plus None y = y
+  plus (Some x) y = Some x
+  plus-zero None = rfl
+  plus-zero (Some x) = rfl
