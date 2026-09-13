@@ -155,3 +155,9 @@ premise's proof with the instance substituted. For that the premise's
 variables must not capture what the rule's metavariables stand for:
 `instantiateLemma` renames them apart from the appeal's names
 (`premisesApart`) before instantiating, and the certifier does it again.
+
+A rule whose premises mention no context metavariable may be appealed to
+under more hypotheses than its conclusion states. Its premises are then
+goals as they are stated, and the instantiated proof is the rule's, with
+the premises' proofs in place, weakened as a whole by `weakenProof`: what
+the quasiquoter splices, too.

@@ -110,7 +110,9 @@ matching; abstract functions are inferred by abstracting the goal. A lemma
 with free object variables but no metavariables or premises is instantiated
 by substitution; one with both is refused (`NotClosed`), and a rule's `var`
 metavariables bound as eigenvariables must be instantiated apart from the
-goal (`NotEigen`). An abstract function bound to a function applied to its
+goal (`NotEigen`). A rule whose premises mention no context metavariable is
+weakened at a goal under more hypotheses than its conclusion states: the
+premises are left as they are stated. An abstract function bound to a function applied to its
 parameters, `u + v` for `f(a, b)`, matches that function's applications
 argument by argument. A premise over variables of its own is left as a goal
 with them free, renamed apart from the names the appeal instantiates the

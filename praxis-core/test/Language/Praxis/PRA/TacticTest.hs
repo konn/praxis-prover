@@ -551,9 +551,11 @@ lemmaTests =
           _ -> False
     , testCase "the premises of a lemma are left as goals" $
         provesWith both "2 = 2 |- 2 = 2 /\\ 2 = 2 by exact both { Id }"
-    , testCase "a lemma with premises but no context metavariable is not weakened" $
-        failsWithIn both "2 = 2, c = 0 |- 2 = 2 /\\ 2 = 2 by exact both { Id }" \case
-          CannotWeaken "both" _ -> True
+    , testCase "a lemma whose premises mention no context metavariable is weakened in its conclusion alone" $ do
+        provesWith both "2 = 2, c = 0 |- 2 = 2 /\\ 2 = 2 by exact both { Id }"
+        -- The premise is 2 = 2 |- 2 = 2, without the hypothesis H1 weakened in.
+        failsWithIn both "c = 0, 2 = 2 |- 2 = 2 /\\ 2 = 2 by exact both { exact H1 }" \case
+          UnknownPremise "H1" -> True
           _ -> False
     , testCase "a lemma with premises must be closed but for its metavariables" $
         failsWithIn bothOpen "a = 0 |- a = 0 /\\ a = 0 by exact bothOpen { Id }" \case

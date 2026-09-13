@@ -405,8 +405,11 @@ place.  The premises of a rule become goals.
 Two shapes are refused, because instantiating them is not a matter of
 applying the rule: a rule which has metavariables or premises besides free
 variables in its statement — declare the variables as @term@ metavariables —
-and a rule with premises but no context metavariable, under hypotheses it does
-not mention.
+and a rule with a premise under a context metavariable but no context
+metavariable to take the hypotheses its conclusion does not mention.  A rule
+whose premises mention no context metavariable is weakened: its conclusion
+takes the goal's other hypotheses, and its premises are goals as they are
+stated.
 -}
 data Lemma a = Lemma
   { lemmaMetas :: ![(String, R.Sort)]
@@ -1671,6 +1674,15 @@ freeVariables :: (Schematic a) => Lemma a -> HashSet a
 freeVariables lemma =
   HS.filter (isNothing . metaName) (HS.unions (goalNames (lemmaGoal lemma) : [goalNames s `HS.difference` HS.fromList (localsOf lemma n) | (n, s) <- lemmaPremises lemma]))
 
+{- |
+Whether no premise of a lemma mentions a context metavariable: an appeal to
+it may then be weakened, its conclusion under more hypotheses than it states
+and its premises as they are stated, since its proof is the rule's weakened
+as a whole.
+-}
+closedPremises :: (Schematic a) => Lemma a -> Bool
+closedPremises lemma = and [isNothing (contextMeta f) | (_, hyps :|- _) <- lemmaPremises lemma, f <- toList hyps]
+
 -- | The variables of a premise its own, none for a premise which has none.
 localsOf :: Lemma a -> String -> [a]
 localsOf lemma n = fromMaybe [] (lookup n (lemmaLocals lemma))
@@ -1793,7 +1805,7 @@ useLemma sig hints name lemma userArgs goal = do
   let (b3, weakening) = case ctxMetas of
         [] -> (b2, restCtx)
         n : ns -> (b2 {bCtxs = Map.insert n restCtx (foldr (\m -> Map.insert m MS.empty) (bCtxs b2) ns)}, MS.empty)
-  unless (MS.population weakening == 0 || null premises) $ Left (CannotWeaken name weakening)
+  unless (MS.population weakening == 0 || closedPremises lemma) $ Left (CannotWeaken name weakening)
   let unbound = [ref | (n, s) <- metas, let ref = R.MetaRef s n, not (isBound ref b3)]
   unless (null unbound) $ Left (CannotInstantiate name unbound)
   args <- traverse (argOfSort b3) metas
@@ -1864,13 +1876,15 @@ useLemma sig hints name lemma userArgs goal = do
 
     -- The instantiated premises, as goals: the hypotheses of the goal stay,
     -- and those the statement's premise lists besides the context
-    -- metavariable are new, in order.
+    -- metavariable are new, in order.  A premise under no context
+    -- metavariable is under its own hypotheses alone.
     premiseGoals appeal dischargedNames given sequents = do
       b <- appealBindings lemma appeal
       let sigma = HM.fromList (appealSubst appeal)
           one (acc, names) (stated :|- _, hyps' :|- s) = do
             explicit <- traverse (instantiateFormula sig name sigma b) [f | f <- toList stated, isNothing (contextMeta f)]
-            (hs, names', counter) <- nameHypotheses goal dischargedNames explicit names
+            let site = if all (isNothing . contextMeta) (toList stated) then goal {goalHypotheses = []} else goal
+            (hs, names', counter) <- nameHypotheses site dischargedNames explicit names
             let g = Goal hs s counter
             when (goalSequent g /= (hyps' :|- s)) $ Left (Malformed ("the premise of " <> name <> " is not what it was instantiated to"))
             pure (g : acc, names')
@@ -2228,10 +2242,12 @@ trusted; the certifier instantiates the statement again from the appeal.
 -}
 instantiateLemma :: forall a. (Schematic a) => Signature -> Lemma a -> Appeal a -> Either (Failure a) ([Sequent a], Sequent a)
 instantiateLemma sig lemma appeal = do
-  -- The proofs of the premises cannot be weakened after the fact.
-  unless (null (lemmaPremises lemma) || MS.population extra == 0) $ Left (CannotWeaken name extra)
+  -- A premise under a context metavariable takes the goal's other hypotheses
+  -- there, so its proof cannot be weakened after the fact.  Premises under
+  -- none are as they are stated, and the conclusion alone is weakened.
+  unless (closedPremises lemma || MS.population extra == 0) $ Left (CannotWeaken name extra)
   b <- appealBindings lemma appeal
-  premises <- traverse (instantiateSequent sig name sigma extra b) (premisesApart lemma appeal)
+  premises <- traverse (instantiateSequent sig name sigma MS.empty b) (premisesApart lemma appeal)
   conclusion <- instantiateSequent sig name sigma extra b (lemmaGoal lemma)
   pure (premises, conclusion)
   where

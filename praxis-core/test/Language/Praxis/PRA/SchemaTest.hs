@@ -100,6 +100,8 @@ schemaTests =
             "rule mixFixed (a b : var) (f(a, b) : term) (g(a) : term) (x : term) (h ∀ p : |- mix {f} {g} p x = x) : |- mix {f} {g} 0 x = x by exact h"
           , "theorem addFour : |- ((m + n) + k) + l = m + (n + (k + l)) by exact assocFour u v (u + v) { exact addAssoc }"
           , "theorem addCong : |- S ((m + n) + k) = S (m + (n + k)) by exact assocCong u v (u + v) { exact addAssoc }"
+          , -- Under a hypothesis the rule does not mention, weakened in; the premise is as it is stated.
+            "theorem addFourUnder : k = 0 |- ((m + n) + k) + l = m + (n + (k + l)) by exact assocFour u v (u + v) { exact addAssoc }"
           , -- The variables of the premise, which the instance mentions, are renamed apart.
             "theorem addFourAgain : |- ((p + q) + r) + p = p + (q + (r + p)) by exact assocFour u v (u + v) { exact addAssoc }"
           , "rule commuteWith (t : term) (comm ∀ p : |- p + t = t + p) : |- 0 + t = t + 0 by exact comm"
