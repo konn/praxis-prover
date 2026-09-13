@@ -1758,14 +1758,18 @@ identityAbstraction n ps = case abstractFunction n ps of
     vs = placeholderNames (length ps)
     placeholderNames k = reverse (snd (foldl (\(used, acc) _ -> let v = freshen used anyName in (HS.insert v used, v : acc)) (HS.empty, []) [1 .. k]))
 
--- | The function an abstraction is, when it applies that function to its parameters, in order, capturing nothing.
+{- |
+The function an abstraction is, when its body applies that function to its
+parameters, in order, capturing nothing: an instance of the abstraction is
+then that function applied, whatever code it was compiled to, as an instance
+of a schema is.
+-}
 identityOf :: (Eq a) => Abstraction a -> Maybe F.SomeFunction
 identityOf a = case abstractionBody a of
   App f xs
     | null (abstractionCaptured a)
-    , toList xs == map Var (abstractionParameters a)
-    , F.SomeFunction f == abstractionFunction a ->
-        Just (abstractionFunction a)
+    , toList xs == map Var (abstractionParameters a) ->
+        Just (F.SomeFunction f)
   _ -> Nothing
 
 {- |
@@ -1883,7 +1887,14 @@ useLemmaWith heads sig hints name lemma userArgs goal = do
       Nothing -> case instances cons b hyps f of
         [(h, b')] -> Right (b', filter ((/= hypothesisName h) . hypothesisName) hyps, pending, True)
         [] -> Left (NotAnInstance name (lemmaGoal lemma))
-        _ -> Right (b, hyps, (f, pin) : pending, progressed)
+        cands -> case [c | c@(_, b') <- cands, relevant b b'] of
+          -- Of several, the one whose abstract functions take their arguments where they occur.
+          [(h, b')] -> Right (b', filter ((/= hypothesisName h) . hypothesisName) hyps, pending, True)
+          _ -> Right (b, hyps, (f, pin) : pending, progressed)
+
+    -- Bindings which bind no abstract function to one ignoring a parameter: a
+    -- constant abstraction makes any hypothesis an instance.
+    relevant b0 b' = and [all (`elem` toList (abstractionBody a)) (abstractionParameters a) | (n, a) <- Map.toList (bFuns b'), not (Map.member n (bFuns b0))]
 
     instances cons b hyps f =
       [ (h, b')
