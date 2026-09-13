@@ -125,8 +125,149 @@ encodeData known d = Encoded equations lemmas members
       ]
         <> [runBuilder (fromText isCore <> " n = " <> if null ctors then "0" else "cvrec " <> fromText lam <> " n")]
 
-    lemmas = concatMap ctorLemmas ctors <> collapses <> membership <> [inversion]
+    lemmas = concatMap ctorLemmas ctors <> collapses <> membership <> map intro ctors <> [inversion]
     members = [(ctorCore c, [(j, memberOf code) | (j, code) <- fieldMemberships known d c (CVar "k") (CVar "h")]) | c <- ctors]
+
+    {- The memberships of its fields |- 0 < T.is (C x̄): the code of every
+    value is a member, the premise of the adequacy of statements.  The
+    predicate unfolds at the code to the branch of C, whose shape conjunct is
+    eqRefl once the fields are rewritten to the variables, and whose
+    membership conjuncts are the hypotheses, through the history for the
+    fields of T itself. -}
+    intro c =
+      let k = length (ctorFields c)
+          vs = map var [0 .. k - 1]
+          applied = CSym (ctorCore c) vs
+          h = histAt' applied
+          mems = fieldMemberships known d c applied h
+          dispatch = membershipBody known d applied h
+          tagged = replaceCT (\u -> if u == hdT applied then Just (CNum (fromIntegral (ctorIndex c))) else Nothing) dispatch
+          br = nth (ctorIndex c) dispatch
+          shapeCode = CSym "eq" [applied, CSym (ctorCore c) [fieldT j applied | j <- [0 .. k - 1]]]
+          -- the shape, its fields rewritten to the variables one by one
+          shapes = scanl (\s j -> replaceCT (\u -> if u == fieldT j applied then Just (vs !! j) else Nothing) s) shapeCode [0 .. k - 1]
+          isApplied = CSym isCore [applied]
+          name = ctorLemma c "intro"
+          fieldLemma' j = fromText (ctorLemma c ("field-" <> T.pack (show j)))
+          lt0 x = "(lt 0 " <> render x <> ")"
+          unfold =
+            "have W: ("
+              <> render isApplied
+              <> " = "
+              <> render br
+              <> ") { calc "
+              <> render isApplied
+              <> " = "
+              <> render (cvrecAt applied)
+              <> " by exact "
+              <> fromText (dataLemma d "is-def")
+              <> " = "
+              <> render dispatch
+              <> " by exact "
+              <> fromText (dataLemma d "is-beta")
+              <> " = "
+              <> render tagged
+              <> " by cong "
+              <> fromText (ctorLemma c "tag")
+              <> " = "
+              <> render br
+              <> " by exact "
+              <> fromText (collapseLemma d (ctorIndex c))
+              <> " }; "
+          shape =
+            "have Rf: ((eq "
+              <> render applied
+              <> " "
+              <> render applied
+              <> ") = 1) { exact eqRefl }; have Sh: ("
+              <> lt0 shapeCode
+              <> " = 1) { calc "
+              <> lt0 shapeCode
+              <> mconcat [" = " <> lt0 s <> " by cong " <> fieldLemma' j | (j, s) <- zip [0 ..] (drop 1 shapes)]
+              <> " = (lt 0 1) by cong Rf = 1 }; "
+          member idx (j, code) = case code of
+            CSym "at" [hh, _, _] ->
+              let atVar = CSym "at" [hh, applied, vs !! j]
+               in "have L"
+                    <> show' idx
+                    <> ": "
+                    <> ltT (vs !! j) applied
+                    <> " { exact "
+                    <> fromText (ctorLemma c ("lt-" <> T.pack (show j)))
+                    <> " }; have A"
+                    <> show' idx
+                    <> ": ("
+                    <> render atVar
+                    <> " = "
+                    <> render (cvrecAt (vs !! j))
+                    <> ") { exact histAt }; have M"
+                    <> show' idx
+                    <> ": ("
+                    <> lt0 code
+                    <> " = 1) { calc "
+                    <> lt0 code
+                    <> " = "
+                    <> lt0 atVar
+                    <> " by cong "
+                    <> fieldLemma' j
+                    <> " = "
+                    <> lt0 (cvrecAt (vs !! j))
+                    <> " by cong A"
+                    <> show' idx
+                    <> " = "
+                    <> lt0 (CSym isCore [vs !! j])
+                    <> " by cong "
+                    <> fromText (dataLemma d "is-def")
+                    <> " = 1 by exact H"
+                    <> show' idx
+                    <> " }; "
+            CSym p [_] ->
+              "have M"
+                <> show' idx
+                <> ": ("
+                <> lt0 code
+                <> " = 1) { calc "
+                <> lt0 code
+                <> " = "
+                <> lt0 (CSym p [vs !! j])
+                <> " by cong "
+                <> fieldLemma' j
+                <> " = 1 by exact H"
+                <> show' idx
+                <> " }; "
+            _ -> error "internal: a membership conjunct of another form"
+          codes = map snd mems
+          conjs = \case
+            [m] -> m
+            m : ms -> CSym "conj" [m, conjs ms]
+            [] -> CNum 1
+          -- Q_i: 0 < the conjunction of the memberships from the i-th, innermost first.
+          partial i =
+            "have Q"
+              <> show' i
+              <> ": ("
+              <> lt0 (conjs (drop (i - 1) codes))
+              <> " = 1) { exact "
+              <> (if i == length codes then "M" <> show' i else "conjIntro on M" <> show' i <> " Q" <> show' (i + 1))
+              <> " }; "
+          conclude =
+            mconcat (map partial (reverse [1 .. length codes]))
+              <> "have B: ("
+              <> lt0 br
+              <> " = 1) { exact "
+              <> (if null codes then "Sh" else "conjIntro on Sh Q1")
+              <> " }; calc "
+              <> lt0 isApplied
+              <> " = "
+              <> lt0 br
+              <> " by cong W = 1 by exact B"
+       in ( name
+          , theorem
+              name
+              [membershipText (memberOf code) (vs !! j) | (j, code) <- mems]
+              (membershipText isCore applied)
+              (unfold <> shape <> mconcat (zipWith member [1 ..] mems) <> conclude)
+          )
 
     ctorLemmas c =
       let k = length (ctorFields c)
