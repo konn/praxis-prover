@@ -2,7 +2,7 @@
   "name": "praxis",
   "displayName": "Praxis",
   "description": "The languages of the Praxis prover — the surface language px, and the core languages pra and prf: highlighting, and the praxis-lsp language server for diagnostics and goals on hover.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "konn",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
