@@ -102,6 +102,10 @@ schemaTests =
           , "theorem addCong : |- S ((m + n) + k) = S (m + (n + k)) by exact assocCong u v (u + v) { exact addAssoc }"
           , -- Under a hypothesis the rule does not mention, weakened in; the premise is as it is stated.
             "theorem addFourUnder : k = 0 |- ((m + n) + k) + l = m + (n + (k + l)) by exact assocFour u v (u + v) { exact addAssoc }"
+          , -- Nothing determining the arguments of f, it is the function the goal applies.
+            "theorem addFourByHead : |- ((m + n) + k) + l = m + (n + (k + l)) by exact assocFour { exact addAssoc }"
+          , -- A rule with a premise stands for its equation in cong, the premise left as a goal.
+            "theorem addFourCong : |- S (((m + n) + k) + l) = S (m + (n + (k + l))) by cong assocFour { exact addAssoc }"
           , -- The variables of the premise, which the instance mentions, are renamed apart.
             "theorem addFourAgain : |- ((p + q) + r) + p = p + (q + (r + p)) by exact assocFour u v (u + v) { exact addAssoc }"
           , "rule commuteWith (t : term) (comm ∀ p : |- p + t = t + p) : |- 0 + t = t + 0 by exact comm"

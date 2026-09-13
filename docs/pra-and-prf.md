@@ -106,7 +106,9 @@ engine, or as `as` says; `on` selects principal formulas.
 
 **Lemma appeals.** `exact name` instantiates a certified `Lemma`
 (statement, metavariables, premises, bound variables) to the goal by
-matching; abstract functions are inferred by abstracting the goal. A lemma
+matching; abstract functions are inferred by abstracting the goal, and,
+when nothing determines their arguments, matched again as the function the
+goal applies where they stand. A lemma
 with free object variables but no metavariables or premises is instantiated
 by substitution; one with both is refused (`NotClosed`), and a rule's `var`
 metavariables bound as eigenvariables must be instantiated apart from the

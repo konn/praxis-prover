@@ -867,11 +867,11 @@ runTacticDeclared env lemmas prems fresh = go noHints
             -- The instance of a lemma's equation: the pair its sides match where the sides of the goal differ.
             -- Either side may be matched first, so that the one binding the arguments of the
             -- other's abstract functions, a schema instance say, is.
-            matching l r (b, seen) u' v' = case both b l u' r v' <|> both b r v' l u' of
+            matching cs l r (b, seen) u' v' = case both cs b l u' r v' <|> both cs b r v' l u' of
               Just b'' -> Just (b'', seen <|> Just (u', v'))
               Nothing -> Nothing
-            both b0 one one' other other' = case matchTermL (envSignature env) noConstraints b0 one one' of
-              Matched b' | Matched b'' <- matchTermL (envSignature env) noConstraints b' other other' -> Just b''
+            both cs b0 one one' other other' = case matchTermL (envSignature env) cs b0 one one' of
+              Matched b' | Matched b'' <- matchTermL (envSignature env) cs b' other other' -> Just b''
               _ -> Nothing
         case sel of
           Nothing -> byHypotheses [p | Hypothesis _ (Atm p) <- goalHypotheses goal, isAtom p]
@@ -880,7 +880,13 @@ runTacticDeclared env lemmas prems fresh = go noHints
               OfHypothesis p -> byHypotheses [p]
               OfLemma n lemma p@(t :=== s) ->
                 let b0 = fixedBindings lemma emptyBindings
-                 in case (congruenceWith (matching t s) (b0, Nothing) x u v, congruenceWith (matching s t) (b0, Nothing) x u v) of
+                    found cs = (congruenceWith (matching cs t s) (b0, Nothing) x u v, congruenceWith (matching cs s t) (b0, Nothing) x u v)
+                    -- Found nowhere, the lemma is matched again, each abstract function
+                    -- nothing determines the function the goal applies there.
+                    results = case found noConstraints of
+                      (Nothing, Nothing) -> found noConstraints {cHeads = True}
+                      r -> r
+                 in case results of
                       (Just ((_, Just (a, b)), _), _) -> viaLemma n lemma (a :=== b) (Cong . Just)
                       (_, Just ((_, Just (a, b)), _)) -> viaLemma n lemma (b :=== a) (Cong . Just)
                       (Just ((_, Nothing), _), _) -> go noHints Refl goal
@@ -1345,10 +1351,14 @@ data Constraints a = Constraints
   { cTerms :: !(Map String (Term (Hole a)))
   , cAtoms :: !(Map String (Atomic (Hole a)))
   , cForms :: !(Map String (Formula (Hole a)))
+  , cHeads :: !Bool
+  {- ^ whether an abstract function applied to arguments nothing determines
+  yet is the function the goal applies there, rather than put off
+  -}
   }
 
 noConstraints :: Constraints a
-noConstraints = Constraints Map.empty Map.empty Map.empty
+noConstraints = Constraints Map.empty Map.empty Map.empty False
 
 data Match a = Matched !(Bindings a) | Deferred | Mismatch
 
@@ -1763,7 +1773,14 @@ Appeal to a lemma at a goal: match its statement against the goal, binding
 its metavariables and free variables, and leave its premises open.
 -}
 useLemma :: forall a. (Schematic a) => Signature -> Hints -> String -> Lemma a -> [Maybe (Arg (Hole a))] -> Goal a -> Either (Failure a) (Partial a)
-useLemma sig hints name lemma userArgs goal = do
+useLemma sig hints name lemma userArgs goal = case useLemmaWith False sig hints name lemma userArgs goal of
+  -- Failing, it is matched again, each abstract function nothing determines the function the goal applies there.
+  Left e -> either (const (Left e)) Right (useLemmaWith True sig hints name lemma userArgs goal)
+  r -> r
+
+-- | 'useLemma', matching with 'cHeads' as given.
+useLemmaWith :: forall a. (Schematic a) => Bool -> Signature -> Hints -> String -> Lemma a -> [Maybe (Arg (Hole a))] -> Goal a -> Either (Failure a) (Partial a)
+useLemmaWith heads sig hints name lemma userArgs goal = do
   when (length userArgs /= length metas) $
     Left (Malformed (name <> " takes " <> show (length metas) <> " arguments"))
   unless (null metas && null premises || HS.null free) $
@@ -1772,7 +1789,7 @@ useLemma sig hints name lemma userArgs goal = do
   when (length (hintOn hints) > length hyps) $
     Left (Malformed ("on: " <> name <> " has " <> show (length hyps) <> " hypotheses"))
   pins <- pinned goal (hintOn hints)
-  (b0, cons) <- foldM (\acc (m, arg) -> seedMeta m arg acc) (fixedBindings lemma emptyBindings {bAvoid = goalNames (goalSequent goal)}, noConstraints) (zip metas userArgs)
+  (b0, cons) <- foldM (\acc (m, arg) -> seedMeta m arg acc) (fixedBindings lemma emptyBindings {bAvoid = goalNames (goalSequent goal)}, noConstraints {cHeads = heads}) (zip metas userArgs)
   let succedent b = matchFormL sig cons b lemmaSucc (goalSuccedent goal)
       -- The hypotheses pinned discharge hypotheses of the lemma, each one it
       -- is an instance of: the hypotheses of a statement are a multiset, so
@@ -1907,15 +1924,13 @@ useLemma sig hints name lemma userArgs goal = do
 data Equation a = OfHypothesis !(Atomic a) | OfLemma !String !(Lemma a) !(Atomic a)
 
 {- |
-The equation a lemma states, under no premises.  Its hypotheses, if it has
-any, are discharged by the goal's where its instance is appealed to.
+The equation a lemma states.  Its hypotheses, if it has any, are discharged
+by the goal's where its instance is appealed to, and its premises, if it has
+any, are left as goals after the step.
 -}
 lemmaEquation :: (Schematic a) => Lemma a -> Maybe (Atomic a)
 lemmaEquation lemma = case lemmaGoal lemma of
-  _ :|- Atm p
-    | null (lemmaPremises lemma)
-    , isNothing (metaAtom p) ->
-        Just p
+  _ :|- Atm p | isNothing (metaAtom p) -> Just p
   _ -> Nothing
 
 -- | The variables and metavariables of an equation the bindings leave open.
@@ -1977,7 +1992,9 @@ matchTermL sig cons b pat t = case canonicalise pat of
         Just a | Just h <- identityOf a -> sameApplication h (SV.toList ps)
         Just _ -> compareBound
         Nothing -> case placeholders sig b (zip params (SV.toList ps)) of
-          Nothing -> Deferred
+          Nothing
+            | cHeads cons -> headMatch n params (SV.toList ps)
+            | otherwise -> Deferred
           Just (b', slots) ->
             Matched b' {bFuns = Map.insert n (abstraction (map fst slots) (foldl (\u (v, arg) -> abstractTerm arg v u) t slots)) (bFuns b')}
     | Just inst <- schemaInstanceOf sig f
@@ -2010,6 +2027,17 @@ matchTermL sig cons b pat t = case canonicalise pat of
       Just u
         | u == t -> Matched b
         | otherwise -> Mismatch
+
+    -- An abstract function as the function the goal's term applies, taking as many
+    -- arguments, each an instance of the pattern's: one solution, when nothing else
+    -- determines the arguments.
+    headMatch n params args = case canonicalise t of
+      App g us
+        | length (SV.toList us) == length args
+        , (b', vs) <- parameterPlaceholders b params
+        , Just xs <- SV.fromList' (map Var vs) ->
+            matchAll (matchTermL sig cons) b' {bFuns = Map.insert n (abstraction vs (App g xs)) (bFuns b')} (zip args (SV.toList us))
+      _ -> Deferred
 
     -- The goal's term is the function applied, each argument an instance of the pattern's.
     sameApplication h args = case canonicalise t of
