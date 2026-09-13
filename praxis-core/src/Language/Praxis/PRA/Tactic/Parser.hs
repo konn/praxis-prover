@@ -22,7 +22,7 @@ The textual syntax of tactics, and of the declarations which use them.
 > side    ::= ident not free in ident {, ident}   -- an eigenvariable condition; ∉ for not free in
 > binder  ::= ( param {param} : sort )      -- metavariables
 > param   ::= ident [( ident {, ident} )]   -- with the var metavariables it takes as parameters
->           | ( ident : sequent )           -- a premise, for exact
+>           | ( ident [∀ ident {ident}] : sequent )  -- a premise, for exact; over variables of its own when it quantifies them
 > sort    ::= var | term | atom | formula | ctx
 
 The primitive tactics are the rule labels of "Language.Praxis.PRA.Rule.G3i",
@@ -64,6 +64,16 @@ found mentions other variables of the goal, the instances of the schema in
 the rule take them as further variadic arguments, @holdsBelow {λ i x. …} n
 x@, so only a variadic schema takes such a @p@.  The argument for @p@ may
 also be given, a term over the @var@ arguments, @exact cv m t (m < S m)@.
+
+A premise may quantify variables of its own, @(assoc ∀ x y z : |- f (f x y)
+z = f x (f y z))@ for an abstract function @f@: it then holds for every
+instance of them, and mentions no other object variable and no metavariable
+but @var@ and @term@ ones.  In the proof of the rule it is a lemma, appealed
+to at instances of its variables, by @exact@, @cong@, @rewrite@ or
+@symmetry@, as a theorem is, the metavariables of the rule standing for
+themselves; an appeal to the rule leaves it as a goal with its variables
+free, renamed apart from what the metavariables stand for.  Only a
+declaration checked at run time may have one; the quasiquoter refuses it.
 
 A rule declares its eigenvariable conditions after its conclusion: @where n
 not free in Γ, t@, or @where n ∉ Γ, t@, for a @var@ metavariable @n@ and
@@ -152,7 +162,9 @@ module Language.Praxis.PRA.Tactic.Parser (
   plainMetaScope,
 ) where
 
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
+import Data.HashSet qualified as HS
+import Data.List (nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust)
@@ -212,8 +224,8 @@ plainMetaScope sig metas _ =
 data Binder a
   = -- | metavariables of a sort, each with the @var@ metavariables it takes as parameters
     MetaBinder ![(String, [String])] !R.Sort
-  | -- | a premise, with the sequent it is declared to establish
-    PremiseBinder !String !(Sequent a)
+  | -- | a premise, with the variables of its own it holds for every instance of, and the sequent it is declared to establish
+    PremiseBinder !String ![a] !(Sequent a)
   deriving (Show, Eq)
 
 -- | The metavariables a list of binders declares, in order.
@@ -240,9 +252,10 @@ declLemma :: (Schematic a) => Decl a -> Lemma a
 declLemma d =
   Lemma
     { lemmaMetas = binderMetas (declBinders d)
-    , lemmaPremises = [(n, s) | PremiseBinder n s <- declBinders d]
+    , lemmaPremises = [(n, s) | PremiseBinder n _ s <- declBinders d]
     , lemmaGoal = goalSequent (declGoal d)
     , lemmaBound = map fst (declSides d)
+    , lemmaLocals = [(n, xs) | PremiseBinder n xs@(_ : _) _ <- declBinders d]
     }
 
 -- | The lemmas a script may appeal to, each with the sorts of its metavariables in the order of its binders.
@@ -342,7 +355,32 @@ declP lemmas mkScope = theoremP <|> ruleP
           unless (lookup p metas == Just R.VarS) $
             fail ("the parameter " <> p <> " of " <> n <> " is not a var metavariable declared before it")
       pure (MetaBinder names s)
-    premiseBinderP sc = PremiseBinder <$> identifierP sc <* symbolP ":" <*> sequentP sc
+    -- A premise, over variables of its own when it quantifies some: it then
+    -- mentions no other object variable, and no metavariable but var and term
+    -- ones, abstract functions included.
+    premiseBinderP sc = do
+      n <- identifierP sc
+      xs <- option [] ((symbolP "∀" <|> keywordP "forall") *> some (localP sc))
+      symbolP ":"
+      o <- getOffset
+      s <- sequentP sc
+      unless (null xs) $ region (setErrorOffset o) (ownVariables n xs s)
+      pure (PremiseBinder n xs s)
+    localP sc = do
+      o <- getOffset
+      x <- identifierP sc
+      v <- either (region (setErrorOffset o) . fail) pure (scopeVariable sc x)
+      when (isJust (metaName v)) $
+        region (setErrorOffset o) (fail (x <> " is a metavariable of the rule, not a variable of the premise"))
+      pure v
+    ownVariables n xs s = do
+      let names = HS.toList (goalNames s)
+      unless (nub xs == xs) $
+        fail ("the variables of the premise " <> n <> " are not distinct")
+      unless (all (\v -> isJust (metaName v) || v `elem` xs) names) $
+        fail ("the premise " <> n <> " is over variables of its own, and mentions no other object variable")
+      forM_ [m | v <- names, Just (sort, m) <- [metaName v], sort `notElem` [R.VarS, R.TermS]] \m ->
+        fail ("the premise " <> n <> " is over variables of its own, and mentions no metavariable but var and term ones, not " <> m)
     sortP =
       choice
         [ R.VarS <$ keywordP "var"

@@ -352,8 +352,8 @@ declarationTests =
           @?= [ []
               ,
                 [ MetaBinder [("a", []), ("b", [])] TermS
-                , PremiseBinder "D1" (sequent "a = 0, b = 0 |- b = 0")
-                , PremiseBinder "D2" (sequent "a = 0, b = 0 |- a = 0")
+                , PremiseBinder "D1" [] (sequent "a = 0, b = 0 |- b = 0")
+                , PremiseBinder "D2" [] (sequent "a = 0, b = 0 |- a = 0")
                 ]
               ]
     , testCase "a theorem is proved" $ do
@@ -365,7 +365,7 @@ declarationTests =
         decls <- parsed (parseDecls (plainMetaScope sig) source)
         case decls of
           [_, d] -> do
-            let prems = Map.fromList [(n, s) | PremiseBinder n s <- declBinders d]
+            let prems = Map.fromList [(n, s) | PremiseBinder n _ s <- declBinders d]
             case proveOpen prems (declGoal d) (declTactic d) of
               Left err -> assertFailure (renderTacticError sig id err)
               Right p -> toList p @?= ["D1", "D2"]
@@ -566,7 +566,7 @@ lemmaTests =
     , testCase "a bound variable metavariable must be instantiated apart from the goal" $ do
         let scope = schemaScope builtin [("x", VarS), ("t", TermS), ("Γ", CtxS)] []
         statement <- parsed (parseSequent scope "Γ |- t + 0 = t")
-        let indAt = Lemma [("x", VarS), ("t", TermS), ("Γ", CtxS)] [] statement ["x"]
+        let indAt = Lemma [("x", VarS), ("t", TermS), ("Γ", CtxS)] [] statement ["x"] []
             lemmas = Map.fromList [("indAt", indAt)]
             run src = do
               (goal, tac) <- parsed (parseGoalIn (Map.map (map snd . lemmaMetas) lemmas) (schemaScope builtin [] []) src)
@@ -593,7 +593,7 @@ lemmaTests =
         [
           ( name
           , Certified
-              (Lemma [] [("D", sequent (p <> " |- " <> p))] (sequent (p <> " |- " <> p <> " /\\ " <> p)) [])
+              (Lemma [] [("D", sequent (p <> " |- " <> p))] (sequent (p <> " |- " <> p <> " /\\ " <> p)) [] [])
               (\_ ds -> case ds of [d] -> ConjR d d; _ -> error (name <> " takes one premise"))
           )
         ]

@@ -105,7 +105,7 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust, isNothing, listToMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe, mapMaybe)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Set qualified as Set
@@ -418,6 +418,10 @@ data Lemma a = Lemma
   {- ^ the metavariables of sort @var@ the proof binds, as eigenvariables;
   their instantiation must not occur in the goal or the other arguments
   -}
+  , lemmaLocals :: ![(String, [a])]
+  {- ^ the premises over variables of their own, with those: such a premise
+  holds for every instance of them, and is proved with them free
+  -}
   }
   deriving (Show, Eq, Generic)
 
@@ -432,7 +436,7 @@ data Certified a = Certified
 
 -- | A closed proof, as the lemma it certifies.
 theorem :: Sequent a -> Proof a -> Certified a
-theorem s p = Certified (Lemma [] [] s []) (\_ _ -> p)
+theorem s p = Certified (Lemma [] [] s [] []) (\_ _ -> p)
 
 -- * Partial proofs
 
@@ -816,7 +820,7 @@ runTacticDeclared env lemmas prems fresh = go noHints
             go noHints (applyWith DefeqRule [term t, term t]) (reserve (hintAs hints) goal)
               >>= continue (go hints (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (Var x :=== t)]))
           OfLemma n lemma p -> do
-            let open = undetermined emptyBindings p
+            let open = undetermined (fixedBindings lemma emptyBindings) p
             unless (null open) $ failWith (Undetermined n open)
             viaLemma n lemma p Symmetry
       Rewrite eqSel hSel -> do
@@ -829,7 +833,7 @@ runTacticDeclared env lemmas prems fresh = go noHints
             let x = freshen (goalNames (goalSequent goal)) anyName
             go hints (applyWith SubstRule [ArgVar (Named x), term t, term s, atom (abstract t x h)]) goal
           OfLemma n lemma p@(t :=== _) -> do
-            b <- maybe (failWith (NothingToRewrite t h)) Right (firstInstance (envSignature env) t h)
+            b <- maybe (failWith (NothingToRewrite t h)) Right (firstInstance (envSignature env) (fixedBindings lemma emptyBindings) t h)
             let open = undetermined b p
             unless (null open) $ failWith (Undetermined n open)
             inst <- first (TacticError Nothing goal) (instantiateAtom n b p)
@@ -863,8 +867,8 @@ runTacticDeclared env lemmas prems fresh = go noHints
             matching l r (b, seen) u' v' = case both b l u' r v' <|> both b r v' l u' of
               Just b'' -> Just (b'', seen <|> Just (u', v'))
               Nothing -> Nothing
-            both b0 x x' y y' = case matchTermL (envSignature env) noConstraints b0 x x' of
-              Matched b' | Matched b'' <- matchTermL (envSignature env) noConstraints b' y y' -> Just b''
+            both b0 one one' other other' = case matchTermL (envSignature env) noConstraints b0 one one' of
+              Matched b' | Matched b'' <- matchTermL (envSignature env) noConstraints b' other other' -> Just b''
               _ -> Nothing
         case sel of
           Nothing -> byHypotheses [p | Hypothesis _ (Atm p) <- goalHypotheses goal, isAtom p]
@@ -872,11 +876,12 @@ runTacticDeclared env lemmas prems fresh = go noHints
             equation chosen >>= \case
               OfHypothesis p -> byHypotheses [p]
               OfLemma n lemma p@(t :=== s) ->
-                case (congruenceWith (matching t s) (emptyBindings, Nothing) x u v, congruenceWith (matching s t) (emptyBindings, Nothing) x u v) of
-                  (Just ((_, Just (a, b)), _), _) -> viaLemma n lemma (a :=== b) (Cong . Just)
-                  (_, Just ((_, Just (a, b)), _)) -> viaLemma n lemma (b :=== a) (Cong . Just)
-                  (Just ((_, Nothing), _), _) -> go noHints Refl goal
-                  _ -> failWith (NoCongruence (u :=== v) [p])
+                let b0 = fixedBindings lemma emptyBindings
+                 in case (congruenceWith (matching t s) (b0, Nothing) x u v, congruenceWith (matching s t) (b0, Nothing) x u v) of
+                      (Just ((_, Just (a, b)), _), _) -> viaLemma n lemma (a :=== b) (Cong . Just)
+                      (_, Just ((_, Just (a, b)), _)) -> viaLemma n lemma (b :=== a) (Cong . Just)
+                      (Just ((_, Nothing), _), _) -> go noHints Refl goal
+                      _ -> failWith (NoCongruence (u :=== v) [p])
       Induction t given -> do
         unless (null (hintOn hints)) $ failWith NothingToName
         let names = goalNames (goalSequent goal)
@@ -1661,10 +1666,85 @@ instForm b = \case
 
 -- * Appeals to lemmas
 
--- | The free variables of a lemma: the names of its statement which are not metavariables.
+-- | The free variables of a lemma: the names of its statement which are not metavariables, nor the variables of a premise its own.
 freeVariables :: (Schematic a) => Lemma a -> HashSet a
 freeVariables lemma =
-  HS.filter (isNothing . metaName) (HS.unions (map goalNames (lemmaGoal lemma : map snd (lemmaPremises lemma))))
+  HS.filter (isNothing . metaName) (HS.unions (goalNames (lemmaGoal lemma) : [goalNames s `HS.difference` HS.fromList (localsOf lemma n) | (n, s) <- lemmaPremises lemma]))
+
+-- | The variables of a premise its own, none for a premise which has none.
+localsOf :: Lemma a -> String -> [a]
+localsOf lemma n = fromMaybe [] (lookup n (lemmaLocals lemma))
+
+{- |
+The premises of a lemma at an appeal to it, each over variables of its own
+with them renamed apart from the names the appeal instantiates the statement
+with, so that none captures or is captured: such a premise is to hold for
+every instance of them, whatever the metavariables stand for.  The renaming
+depends on the appeal only, so the certifier makes it again.
+-}
+premisesApart :: (Schematic a) => Lemma a -> Appeal a -> [Sequent a]
+premisesApart lemma appeal = [apart (localsOf lemma n) s | (n, s) <- lemmaPremises lemma]
+  where
+    avoid =
+      HS.unions
+        ( map argNames (appealArgs appeal)
+            <> [HS.fromList (v : toList t) | (v, t) <- appealSubst appeal]
+            <> [argNames (ArgCtx (appealWeakening appeal))]
+        )
+    apart [] s = s
+    apart xs (hyps :|- c) =
+      let renaming = HM.fromList [(x, Var x') | (x, x') <- zip xs (chosen xs), x /= x']
+       in foldr (MS.insertOne . substFormula renaming) MS.empty (toList hyps) :|- substFormula renaming c
+    -- A variable is kept unless the appeal's names have it; renamed, it is apart from them and from the others.
+    chosen xs = reverse (snd (foldl pick (HS.empty, []) xs))
+      where
+        pick (taken, acc) x
+          | x `HS.member` avoid || x `HS.member` taken =
+              let x' = freshen (avoid <> taken <> HS.fromList xs) x in (HS.insert x' taken, x' : acc)
+          | otherwise = (HS.insert x taken, x : acc)
+
+{- |
+The bindings the statement of a lemma is matched from, and instantiated at.
+A metavariable it mentions without declaring it, one of the rule being
+proved when the lemma is a premise of that rule over variables of its own,
+stands for itself: a @var@ or @term@ metavariable is bound to itself, and an
+abstract function to the abstraction applying it to its parameters.
+-}
+fixedBindings :: (Schematic a) => Lemma a -> Bindings a -> Bindings a
+fixedBindings lemma b =
+  b
+    { bVars = Map.fromList [(n, v) | (n, R.VarS, v) <- fixed] <> bVars b
+    , bTerms = Map.fromList [(n, Var v) | (n, R.TermS, v) <- fixed] <> bTerms b
+    , bFuns = Map.fromList [(n, identityAbstraction n ps) | (n, ps) <- statementFunctions lemma, n `notElem` declared] <> bFuns b
+    }
+  where
+    declared = map fst (lemmaMetas lemma)
+    fixed =
+      [ (n, sort, v)
+      | v <- HS.toList (HS.unions (map goalNames (lemmaGoal lemma : map snd (lemmaPremises lemma))))
+      , Just (sort, n) <- [metaName v]
+      , n `notElem` declared
+      ]
+
+-- | The abstraction applying an abstract function to its parameters, as placeholders.
+identityAbstraction :: (Fresh a) => String -> [String] -> Abstraction a
+identityAbstraction n ps = case abstractFunction n ps of
+  F.SomeFunction f -> case SV.fromList' (map Var vs) of
+    Just xs -> abstraction vs (App f xs)
+    Nothing -> error "identityAbstraction: the arity of an abstract function is the number of its parameters"
+  where
+    vs = placeholderNames (length ps)
+    placeholderNames k = reverse (snd (foldl (\(used, acc) _ -> let v = freshen used anyName in (HS.insert v used, v : acc)) (HS.empty, []) [1 .. k]))
+
+-- | The function an abstraction is, when it applies that function to its parameters, in order, capturing nothing.
+identityOf :: (Eq a) => Abstraction a -> Maybe F.SomeFunction
+identityOf a = case abstractionBody a of
+  App f xs
+    | null (abstractionCaptured a)
+    , toList xs == map Var (abstractionParameters a)
+    , F.SomeFunction f == abstractionFunction a ->
+        Just (abstractionFunction a)
+  _ -> Nothing
 
 {- |
 Appeal to a lemma at a goal: match its statement against the goal, binding
@@ -1680,7 +1760,7 @@ useLemma sig hints name lemma userArgs goal = do
   when (length (hintOn hints) > length hyps) $
     Left (Malformed ("on: " <> name <> " has " <> show (length hyps) <> " hypotheses"))
   pins <- pinned goal (hintOn hints)
-  (b0, cons) <- foldM (\acc (m, arg) -> seedMeta m arg acc) (emptyBindings {bAvoid = goalNames (goalSequent goal)}, noConstraints) (zip metas userArgs)
+  (b0, cons) <- foldM (\acc (m, arg) -> seedMeta m arg acc) (fixedBindings lemma emptyBindings {bAvoid = goalNames (goalSequent goal)}, noConstraints) (zip metas userArgs)
   let succedent b = matchFormL sig cons b lemmaSucc (goalSuccedent goal)
       -- The hypotheses pinned discharge hypotheses of the lemma, each one it
       -- is an instance of: the hypotheses of a statement are a multiset, so
@@ -1794,7 +1874,7 @@ useLemma sig hints name lemma userArgs goal = do
             let g = Goal hs s counter
             when (goalSequent g /= (hyps' :|- s)) $ Left (Malformed ("the premise of " <> name <> " is not what it was instantiated to"))
             pure (g : acc, names')
-      (gs, left) <- foldM one ([], given) (zip (map snd premises) sequents)
+      (gs, left) <- foldM one ([], given) (zip (premisesApart lemma appeal) sequents)
       pure (reverse gs, left)
 
     argOfSort b (n, s) = case s of
@@ -1830,11 +1910,11 @@ undetermined b (t :=== s) = nub [v | v <- toList t <> toList s, open v]
       Just (sort, n) -> not (isBound (R.MetaRef sort n) b)
       Nothing -> not (HM.member v (bFree b))
 
--- | The bindings under which the pattern matches the first subterm of the atom it matches at all, in order.
-firstInstance :: (Schematic a) => Signature -> Term a -> Atomic a -> Maybe (Bindings a)
-firstInstance sig pat (s :=== u) = listToMaybe (mapMaybe attempt (subterms s <> subterms u))
+-- | The bindings, from those given, under which the pattern matches the first subterm of the atom it matches at all, in order.
+firstInstance :: (Schematic a) => Signature -> Bindings a -> Term a -> Atomic a -> Maybe (Bindings a)
+firstInstance sig b0 pat (s :=== u) = listToMaybe (mapMaybe attempt (subterms s <> subterms u))
   where
-    attempt t = case matchTermL sig noConstraints emptyBindings pat t of
+    attempt t = case matchTermL sig noConstraints b0 pat t of
       Matched b -> Just b
       _ -> Nothing
     subterms t =
@@ -1877,11 +1957,17 @@ matchTermL sig cons b pat t = case canonicalise pat of
     Nothing -> Mismatch
   App (f :: Function n) ps
     | Just (n, params) <- abstractName f -> case Map.lookup n (bFuns b) of
+        -- Bound to a function applied to its parameters, a fixed abstract function say, it is that function applied.
+        Just a | Just h <- identityOf a -> sameApplication h (SV.toList ps)
         Just _ -> compareBound
         Nothing -> case placeholders sig b (zip params (SV.toList ps)) of
           Nothing -> Deferred
           Just (b', slots) ->
             Matched b' {bFuns = Map.insert n (abstraction (map fst slots) (foldl (\u (v, arg) -> abstractTerm arg v u) t slots)) (bFuns b')}
+    | Just inst <- schemaInstanceOf sig f
+    , any isJust (abstractParameters inst)
+    , all fixedParameter (zip (abstractParameters inst) (instanceParameters inst)) ->
+        sameApplication (F.SomeFunction f) (SV.toList ps)
     | Just inst <- schemaInstanceOf sig f
     , any isJust (abstractParameters inst) ->
         if all (maybe True ((`Map.member` bFuns b) . fst)) (abstractParameters inst)
@@ -1908,6 +1994,19 @@ matchTermL sig cons b pat t = case canonicalise pat of
       Just u
         | u == t -> Matched b
         | otherwise -> Mismatch
+
+    -- The goal's term is the function applied, each argument an instance of the pattern's.
+    sameApplication h args = case canonicalise t of
+      App g us
+        | F.SomeFunction g == h
+        , length (SV.toList us) == length args ->
+            matchAll (matchTermL sig cons) b (zip args (SV.toList us))
+      _ -> Mismatch
+
+    -- A parameter of the pattern's instance of a schema which is bound to itself applied, as a fixed one is.
+    fixedParameter = \case
+      (Just (m, _), mine) -> maybe False ((== Just mine) . identityOf) (Map.lookup m (bFuns b))
+      (Nothing, _) -> True
 
     -- Each abstract function of the pattern's instance not yet bound is the
     -- goal's parameter in its place, capturing the goal's further arguments;
@@ -2043,26 +2142,34 @@ metaParameters :: (Schematic a) => Lemma a -> Map String [String]
 metaParameters lemma =
   Map.fromList
     ( [ (n, map fst pairs)
-      | p <- atoms
+      | p <- statementAtoms lemma
       , Just (_, n) <- [metaAtom p]
       , let pairs = metaApplied p
       , not (null pairs)
       ]
-        <> [ (n, ps)
-           | p@(s :=== u) <- atoms
-           , isNothing (metaAtom p)
-           , t <- [s, u]
-           , (n, ps) <- functionMetas t
-           ]
+        <> statementFunctions lemma
     )
-  where
-    atoms =
-      [ p
-      | s <- lemmaGoal lemma : map snd (lemmaPremises lemma)
-      , let hyps :|- c = s
-      , f <- c : toList hyps
-      , p <- atomsOf f
-      ]
+
+-- | The abstract functions a lemma's statement mentions, with their parameters.
+statementFunctions :: (Schematic a) => Lemma a -> [(String, [String])]
+statementFunctions lemma =
+  nub
+    [ (n, ps)
+    | p@(s :=== u) <- statementAtoms lemma
+    , isNothing (metaAtom p)
+    , t <- [s, u]
+    , (n, ps) <- functionMetas t
+    ]
+
+-- | The atoms of a lemma's statement, its premises' included.
+statementAtoms :: Lemma a -> [Atomic a]
+statementAtoms lemma =
+  [ p
+  | s <- lemmaGoal lemma : map snd (lemmaPremises lemma)
+  , let hyps :|- c = s
+  , f <- c : toList hyps
+  , p <- atomsOf f
+  ]
 
 -- | The metavariables a formula mentions, but a var metavariable given, and a metavariable it parameterizes.
 metasIn :: (Schematic a) => String -> Formula a -> [String]
@@ -2122,7 +2229,7 @@ instantiateLemma sig lemma appeal = do
   -- The proofs of the premises cannot be weakened after the fact.
   unless (null (lemmaPremises lemma) || MS.population extra == 0) $ Left (CannotWeaken name extra)
   b <- appealBindings lemma appeal
-  premises <- traverse (instantiateSequent sig name sigma extra b . snd) (lemmaPremises lemma)
+  premises <- traverse (instantiateSequent sig name sigma extra b) (premisesApart lemma appeal)
   conclusion <- instantiateSequent sig name sigma extra b (lemmaGoal lemma)
   pure (premises, conclusion)
   where
@@ -2131,11 +2238,11 @@ instantiateLemma sig lemma appeal = do
     extra = appealWeakening appeal
 
 -- | The bindings the arguments of an appeal make for the metavariables of the lemma.
-appealBindings :: Lemma a -> Appeal a -> Either (Failure a) (Bindings a)
+appealBindings :: (Schematic a) => Lemma a -> Appeal a -> Either (Failure a) (Bindings a)
 appealBindings lemma appeal = do
   when (length args /= length metas) $
     Left (Malformed (name <> " takes " <> show (length metas) <> " arguments"))
-  foldM bind emptyBindings (zip metas args)
+  foldM bind (fixedBindings lemma emptyBindings) (zip metas args)
   where
     name = appealName appeal
     args = appealArgs appeal

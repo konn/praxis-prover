@@ -86,6 +86,12 @@ with parameters is an *abstract function* `p(n)` and may stand as a schema
 parameter, `holdsBelow {p} n`, in any of a schema's places, `mix {f} {g} n
 x`), premises (named sequents, usable only at
 exactly their stated shape), and eigenvariable conditions `where n ∉ Γ, t`.
+A premise may quantify variables of its own, `(assoc ∀ x y z : |- f (f x y)
+z = f x (f y z))`; it then mentions no other object variable and no
+metavariable but `var` and `term` ones, and holds for every instance of its
+variables. In the rule's proof it is a lemma, appealed to at instances of
+them by `exact`, `cong`, `rewrite` or `symmetry`, the rule's metavariables
+standing for themselves.
 
 **Tactics** (`Tactic.hs`, grammar in `Tactic/Parser.hs`) are deliberately
 few. The primitive ones are the rule labels, applied backwards, with
@@ -104,7 +110,12 @@ matching; abstract functions are inferred by abstracting the goal. A lemma
 with free object variables but no metavariables or premises is instantiated
 by substitution; one with both is refused (`NotClosed`), and a rule's `var`
 metavariables bound as eigenvariables must be instantiated apart from the
-goal (`NotEigen`).
+goal (`NotEigen`). An abstract function bound to a function applied to its
+parameters, `u + v` for `f(a, b)`, matches that function's applications
+argument by argument. A premise over variables of its own is left as a goal
+with them free, renamed apart from the names the appeal instantiates the
+statement with (`premisesApart`). Only a declaration checked at run time may
+have such a premise; the quasiquoter refuses it.
 
 **Certification.** `Tactic.Quote.checkDecl env lemmas decl` runs a
 declaration's tactic, and certifies the resulting partial proof against the

@@ -420,9 +420,11 @@ after it.
 -}
 checkDecl :: Env -> Map String (Lemma SchemaName) -> Decl SchemaName -> Either (TacticError SchemaName) (Free (Step SchemaName) String, Lemma SchemaName)
 checkDecl env lemmas decl = do
-  let prems = Map.fromList [(n, s) | PremiseBinder n s <- declBinders decl]
+  let prems = Map.fromList [(n, s) | PremiseBinder n [] s <- declBinders decl]
+      -- A premise over variables of its own is appealed to as a theorem is, at instances of them.
+      own = Map.fromList [(n, Lemma [] [] s [] []) | PremiseBinder n (_ : _) s <- declBinders decl]
       fresh = Map.fromListWith (<>) (declSides decl)
-  checked <- proveOpenDeclared env lemmas prems fresh (declGoal decl) (declTactic decl)
+  checked <- proveOpenDeclared env (own <> lemmas) prems fresh (declGoal decl) (declTactic decl)
   pure (checked, declLemma decl)
 
 -- | Compile a declaration to its binding, given the lemmas it may appeal to and how to name its binding globally; also the lemma it is for those after it.
@@ -432,9 +434,11 @@ compileDecl sig global lemmas decl = do
   let dname = declName decl
       binders = declBinders decl
       metas = binderMetas binders
-      prems = Map.fromList [(n, s) | PremiseBinder n s <- binders]
+      prems = Map.fromList [(n, s) | PremiseBinder n _ s <- binders]
   unless (startsLower dname) $
     fail ("pra: " <> dname <> " is not a Haskell variable name")
+  unless (null [() | PremiseBinder _ (_ : _) _ <- binders]) $
+    fail ("pra: " <> dname <> " has a premise over variables of its own, which only a declaration checked at run time may have")
   (checked, lemma) <- either (fail . renderSchemaTacticError sig) pure (checkDecl env0 (fmap entryLemma lemmas) decl)
 
   -- One parameter per binder, in order.
@@ -499,7 +503,7 @@ compileDecl sig global lemmas decl = do
 binderParams :: [Binder a] -> [(String, Either R.Sort ())]
 binderParams = concatMap \case
   MetaBinder ns s -> [(n, Left s) | (n, _) <- ns]
-  PremiseBinder n _ -> [(n, Right ())]
+  PremiseBinder n _ _ -> [(n, Right ())]
 
 -- | The type of the parameter for each name a binder declares: a term metavariable with parameters is an 'Abstraction'.
 binderTypes :: Name -> Binder a -> [Q Type]
@@ -522,7 +526,7 @@ binderType a = \case
     R.AtomS -> [t|Atomic $(QTH.varT a)|]
     R.FormS -> [t|Formula $(QTH.varT a)|]
     R.CtxS -> [t|Multiset (Formula $(QTH.varT a))|]
-  PremiseBinder _ _ -> [t|Proof $(QTH.varT a)|]
+  PremiseBinder {} -> [t|Proof $(QTH.varT a)|]
 
 -- | Every name in the actual arguments, and those the statement fixes, as an expression.
 usedNames :: LiftEnv -> [Binder SchemaName] -> [String] -> Q Exp
@@ -589,7 +593,7 @@ figure sig decl =
   where
     kind = if null (declBinders decl) then "theorem" else "derived rule"
     render = renderSequentWith (schemaHook sig) sig renderSchemaName
-    above = intercalate "    " [n <> " : " <> render s | PremiseBinder n s <- declBinders decl]
+    above = intercalate "    " [n <> " : " <> render s | PremiseBinder n _ s <- declBinders decl]
     below = render (goalSequent (declGoal decl))
     width = max (length above) (length below)
     haddockEscape = concatMap \c -> if c == '\\' then "\\\\" else [c]
@@ -894,8 +898,8 @@ liftLibrary (Library sig lemmas) =
       Inline _ -> Nothing
 
 liftLemma :: Signature -> Lemma SchemaName -> Code Q (Lemma SchemaName)
-liftLemma sig (Lemma metas premises goal bound) =
-  [||Lemma $$(liftTyped metas) $$(listCode [[||($$(liftTyped n), $$(liftSchemaSequent sig s))||] | (n, s) <- premises]) $$(liftSchemaSequent sig goal) $$(liftTyped bound)||]
+liftLemma sig (Lemma metas premises goal bound locals) =
+  [||Lemma $$(liftTyped metas) $$(listCode [[||($$(liftTyped n), $$(liftSchemaSequent sig s))||] | (n, s) <- premises]) $$(liftSchemaSequent sig goal) $$(liftTyped bound) $$(liftTyped locals)||]
 
 liftSchemaSequent :: Signature -> Sequent SchemaName -> Code Q (Sequent SchemaName)
 liftSchemaSequent sig (hyps :|- c) =

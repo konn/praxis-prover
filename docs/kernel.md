@@ -146,3 +146,12 @@ re-check of an instantiated `Defeq` could fail on fuel, but never succeed
 wrongly. The eigenvariable conditions of such appeals are checked by the
 tactic engine (`useLemma`); a producer that bypasses the engine and builds
 appeal steps by hand must not be trusted with them.
+
+The same argument covers a premise over variables of its own, `(assoc ∀ x y
+z : …)`. In the proof of its rule it is appealed to as a theorem is, at
+instances of its variables; at an appeal to the rule its proof has them
+free, so the instantiated proof of the rule takes, at each such appeal, the
+premise's proof with the instance substituted. For that the premise's
+variables must not capture what the rule's metavariables stand for:
+`instantiateLemma` renames them apart from the appeal's names
+(`premisesApart`) before instantiating, and the certifier does it again.
