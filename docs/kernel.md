@@ -132,7 +132,10 @@ Trusted: `Rule/G3i.hs` and the generated checker; the evaluator of
 `PRFCode`/`Program` and `Equality`; `extendKernelEnv`'s closure, arity and
 acyclicity checks; `Proof.Transform`. Everything that *produces* proofs —
 tactics, quasiquoters, the language server, the surface language — is
-untrusted: its output is checked.
+untrusted: its output is checked. The surface language produces statements
+too, and the kernel certifies the core statement it is given; that this
+statement means what the surface one says is argued in
+[elaboration.md](elaboration.md), § Statements and their adequacy.
 
 One point of the trust model deserves stating plainly. When a declaration is
 certified by `checkDecl` (see [pra-and-prf.md](pra-and-prf.md)), an appeal to

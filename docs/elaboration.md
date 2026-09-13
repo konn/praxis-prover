@@ -2,8 +2,9 @@
 
 This document explains how a module of the surface language
 ([surface.md](surface.md)) becomes definitions and certified theorems of the
-core ([kernel.md](kernel.md), [pra-and-prf.md](pra-and-prf.md)), and the
-invariants that make the translation sound and fast. The code is in
+core ([kernel.md](kernel.md), [pra-and-prf.md](pra-and-prf.md)), why a
+certified theorem means what the user wrote, and the invariants that keep
+the translation sound and fast. The code is in
 `praxis/src/Language/Praxis/Surface/`.
 
 ## The trust architecture
@@ -22,18 +23,28 @@ and checker:
 What must be trusted is therefore small:
 
 1. the kernel and its certification of declarations;
-2. **the translation of statements**: a surface theorem must mean what its
-   core statement says (§ Statements), since the core certifies the latter;
-3. the definitions of the prelude (`src-pra/prelude.prf`), which are ordinary
-   primitive recursive definitions, and the membership predicates generated
-   for data types, which appear in statements.
+2. **the translation of statements** (`Engine.statementGoal`, with
+   `CoreText.termCT` and `CoreText.propText`): the kernel certifies a core
+   statement, so the core statement must mean what the surface statement
+   says. Its adequacy is argued once, in § Statements and their adequacy,
+   from facts about the generated definitions which the kernel certifies;
+   that argument is the one piece of trusted reasoning, and differential
+   tests check the implementation against it.
 
-Everything else — the parser, the type checker, the encoder, the compiler,
-the proof engine — can only cause a rejection when it is wrong. A declaration
-which fails is reported and **never becomes a lemma**: later declarations are
-checked without it (unlike the language server of `.pra` files, which keeps
-failed declarations as lemmas for convenience). A theorem is not in scope in
-its own proof.
+The definitions themselves — the prelude's, the codes of constructors, the
+membership predicates, the compiled functions — are not trusted: adding a
+primitive recursive definition is always sound, and what the argument needs
+of them is certified. Everything else — the parser, the type checker, the
+encoder, the compiler, the proof engine — can only cause a rejection when it
+is wrong. A declaration which fails is reported and **never becomes a
+lemma**: later declarations are checked without it (unlike the language
+server of `.pra` files, which keeps failed declarations as lemmas for
+convenience). A theorem is not in scope in its own proof.
+
+What no machine checks is the reading of the source: that the parser, the
+fixities and the resolution of names give a statement the meaning its author
+intended. Every proof assistant shares this last step; `praxis check
+--dump-core` prints each core statement that was certified, for inspection.
 
 ## Names in the core
 
@@ -94,10 +105,18 @@ library of praxis-core.
   unconstrained.
 - **`T.#is-def`, `T.#is-beta`** unfold the predicate at a variable, and
   `T.#collapse-i` collapses a dispatch at tag `i` over variables.
+- **Introduction** `C.#intro : 0 < U₁.is x_{j₁}, … |- 0 < T.is (C x̄)`, a
+  hypothesis for each field whose membership the branch of `C` checks: the
+  predicate unfolds at the code (`#is-def`, `#is-beta`), the tag selects the
+  branch (`C.#tag`, `T.#collapse-i`), the shape conjunct is `eqRefl` once the
+  fields are rewritten to the variables (`C.#field-j`), the conjunct of a
+  field of `T` itself is its hypothesis through the history (`histAt` with
+  `C.#lt-j`), and `conjIntro` joins them. By induction on a value, the code of
+  every value of `T` is a member — premise (M) of § Adequacy.
 - **Inversion** `T.#inversion : 0 < T.is t |- ⋁ᵢ (t = Cᵢ (fields t) ∧
   memberships)`, proved by case analysis on the tag with `eqBool`,
   `collapseT/F`, `conjElim1/2`, `eqElim`, and `histAt` with `C.#lt-j` for the
-  recursive fields.
+  recursive fields. Induction rests on it.
 
 Which fields contribute a membership conjunct is recorded
 (`encodedMembers`) and is the single source both the inversion and the proof
@@ -122,7 +141,9 @@ f a₀ … = cvrec {λ k h ȳ. dispatch on k, recursive calls at h k field} a_c 
 
 **Unfolding lemmas.** Each clause is `f.unfold-C : |- f … (C x̄) … = body`
 (and `f.eq_i`), an equation for *all* codes, since the dispatch reads only the
-tag and the fields. Its generated proof is the chain
+tag and the fields. Its sides are the clause's patterns and body translated
+by `termCT`, as a statement is — premise (U) of § Adequacy. Its generated
+proof is the chain
 
 ```
 f … (C x̄) …  = cvrec {B} (C x̄) ȳ            by exact f.#def
@@ -152,10 +173,12 @@ compares the exponentially shared residuals as trees. Hence two invariants:
 
 With both, every generated lemma of the examples certifies in milliseconds.
 
-## Statements
+## Statements and their adequacy
 
-A theorem `{ā} → (x₁ : T₁) → … → A` (`Engine.proveTheorem`) becomes the core
-sequent
+### The translation
+
+A theorem `{ā} → (x₁ : T₁) → … → A` becomes, by `Engine.statementGoal`, the
+core sequent
 
 ```
 0 < T₁.is x₁, …, H₁, …, Hₘ |- C
@@ -163,13 +186,113 @@ sequent
 
 where `A = H₁ → … → Hₘ → C`: the values are free variables (the Π₁ reading
 of a PRA theorem), each of a data type with its membership hypothesis (none
-for `Nat`), and top-level implications become hypotheses. Type parameters are
-erased. This is the trusted translation, and its soundness argument is simple:
-shape membership is implied by the intended typing, so the core statement has
-*weaker* hypotheses than the intended one — it is at least as strong, and
-proving it proves what the user wrote. Propositions translate connective by
-connective (`CoreText.propText`); bounded quantifiers become the core's
-bounded quantifier atoms.
+for `Nat` or a type parameter), and top-level implications become
+hypotheses. Type parameters are erased. Propositions translate connective by
+connective (`CoreText.propText`):
+
+| surface | core |
+|---|---|
+| `s ≡ t`, `s ≠ t` | `s = t`, `~ (s = t)` |
+| `s < t`, `s ≤ t` | `lt s t = 1`, `le s t = 1` |
+| `s > t`, `s ≥ t` | `lt t s = 1`, `le t s = 1` |
+| `A ∧ B`, `A ∨ B`, `A → B`, `¬ A` | `A /\ B`, `A \/ B`, `A ==> B`, `~ A` |
+| `A ↔ B` | `(A ==> B) /\ (B ==> A)` |
+| `⊤`, `⊥` | `0 = 0`, `_|_` |
+| `∀ i < t, A`, `∀ i ≤ t, A` (and `∃`) | `∀ i < t. A`, `∀ i < S t. A` |
+
+and terms by `CoreText.termCT`: a variable, a numeral, a constructor or a
+function applied to its arguments, and `S`, `+`, `-`, `*`, `^` as the
+builtins `S`, `add`, `sub`, `mul`, `pow`.
+
+### First-order values
+
+The encoding gives a meaning to values of first-order types only: `Nat`,
+data types applied to first-order types, and type parameters. The elaborator
+keeps every value first-order — a field of a data type, a value a theorem
+quantifies over, and a function's arguments and result have types without
+arrows, and every function and constructor is applied to all its arguments
+(`Types.firstOrder`, `Elab.checkTerm`). So no term of a statement denotes a
+function, and a type parameter only ever stands for a first-order type.
+`statementGoal` checks the values once more: the translation refuses what it
+could not give a meaning to.
+
+### What a statement means
+
+- A data type denotes the finite trees its constructors build, at
+  first-order types for its parameters; `Nat` denotes ℕ.
+- A function denotes the unique function on those trees satisfying its
+  clauses — structural recursion has exactly one solution. The arithmetic of
+  `Nat` is the usual one, subtraction truncated.
+- A theorem `(x̄ : T̄) → H₁ → … → Hₘ → C` means: for every assignment ρ of
+  values to x̄, if every `Hᵢ` holds then `C` does.
+
+The **encoding** of a value is `e(n) = n` on `Nat` and
+`e(Cᵢ v₁ … vₖ) = cons i (cons e(v₁) … (cons e(vₖ) 0))`. It is the same at every
+instance of the type parameters: nothing in the translation depends on a
+type.
+
+### Adequacy
+
+**Theorem.** If the kernel certifies the core sequent of a theorem, the
+theorem holds.
+
+It rests on three premises about the generated definitions, each certified
+per declaration:
+
+- **(U)** each function `f̂` satisfies each of its clauses at all codes: the
+  unfolding lemmas `f.unfold-C`;
+- **(I)** codes are injective with distinct tags: `C.#tag` gives a code's
+  tag, `C.#field-j` each field;
+- **(M)** the code of every value is a member: `C.#intro`, by induction on the
+  value.
+
+The proof is three inductions over finite objects.
+
+1. *Terms.* For a term `t` and an assignment ρ, `⟦tr t⟧(e∘ρ) = e(⟦t⟧ρ)`. By
+   induction on `t`, and at an application of a function by induction on the
+   order of definitions and on the value of its scrutinee: `f̂∘e` and `e∘f`
+   satisfy the same clauses — the first by (U) — and structural recursion has
+   one solution.
+2. *Propositions.* `⟦tr A⟧(e∘ρ) ⇔ ⟦A⟧ρ`. By induction on `A`: `≡` and `≠` by
+   (I), since `e` is injective at each type; comparisons and bounded
+   quantifiers range over ℕ on both sides; the connectives are the same. It
+   is an equivalence, so it holds under `¬` and `→` at any depth.
+3. *The sequent.* The kernel's soundness gives the numeric instance at `e∘ρ`.
+   Its membership hypotheses hold there by (M), its other hypotheses by 2
+   exactly when the surface ones do, so its conclusion holds, and by 2 the
+   surface conclusion.
+
+Each step is an induction on syntax or on finite trees, and a free-variable
+theorem is read as its numeric instances: the argument is finitary, the kind
+of reasoning Hilbert's metamathematics allows. It could be formalised in PRA
+module by module, but not uniformly — surface functions reach every
+primitive recursive function, and no primitive recursive function evaluates
+them all, so a uniform statement would need evaluators indexed by fuel — and
+nothing would be gained: a formal proof would rest on a semantics written
+down by hand, as this one does.
+
+Membership is *shape* membership, which may be wider than the codes of a
+type (a field of a type parameter is unconstrained). It appears only as a
+hypothesis on a theorem's values, where a wider predicate gives the core
+statement more instances, not fewer: sound, and incomplete where a statement
+needs the finer typing. Full membership predicates are planned.
+
+### Testing the translation
+
+The argument is proved once; its implementation is tested.
+`praxis/test/Language/Praxis/Surface/AdequacyTest.hs` runs two interpreters
+on random values. One is a reference semantics of the elaborated surface
+syntax: trees, functions run by their clauses, no codes. The other evaluates
+the core text generated — the statement `Engine.theoremStatement` produces,
+and the sides of the unfolding lemmas — as the certified lemmas describe its
+symbols: constructors as free symbols (I), functions by their unfolding
+lemmas (U), membership by a code's constructor and fields (M and the
+inversion), and the builtins by the kernel's own evaluator. It checks lemma 1
+for every function, and lemma 2 and the membership hypotheses for every
+statement of `test/data/adequacy.px` — statements true and false, over every
+relation, connective and bounded quantifier — and of `list.px`. The core side
+evaluates symbolically because numerals are out of reach: the membership of
+a code unrolls a history one level for every number below the code.
 
 ## Proofs
 
@@ -213,12 +336,16 @@ at its argument; a lemma name is `exact`, `cong e` is `cong`.
 1. Every name the surface hands to the core is mangled into `u_…`/`v_…`.
 2. Projections of codes are `hd`/`tl`; `Defeq` is used on statements over
    variables only.
-3. Membership predicates only ever weaken the hypotheses of a statement.
-4. Unfolding lemmas hold for all codes.
-5. The inversion lemma and the engine read the same record of which fields
+3. Values are first-order: no field, theorem value, argument or result of
+   function type, and every application complete.
+4. The code of every value of a data type is a member (`C.#intro`), and
+   membership hypotheses stand only on a theorem's values, where a wider
+   predicate only strengthens the statement.
+5. Unfolding lemmas hold for all codes.
+6. The inversion lemma and the engine read the same record of which fields
    carry memberships.
-6. Declarations are certified in order; a failure is never a lemma; a theorem
+7. Declarations are certified in order; a failure is never a lemma; a theorem
    is not in scope in its own proof.
-7. The engine builds text, never proof terms: the core certifies it.
-8. Auxiliary theorems have names unique by the source position of their
+8. The engine builds text, never proof terms: the core certifies it.
+9. Auxiliary theorems have names unique by the source position of their
    induction.

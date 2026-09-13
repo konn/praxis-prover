@@ -126,9 +126,15 @@ Types are `Nat` (also `nat`), data types applied to types, type parameters
 inferred from use) and function types. Polymorphism is rank 1, as in
 Hindley–Milner: a signature's free type variables are its implicit
 parameters, in order, and implicit binders `{a : Type}` may also be written in
-front. Function types are first order — a function takes no function
-arguments. Types guide elaboration only: the core never sees them, except
-through the membership predicates of data types.
+front.
+
+Values are first-order. A field of a data type, a value a theorem quantifies
+over, and a function's arguments and result have types without arrows, and a
+function or a constructor is always applied to all its arguments; an arrow
+stands only at the top of a function's signature. The encoding gives a
+meaning to first-order values only (see [elaboration.md](elaboration.md),
+§ Statements and their adequacy). Types guide elaboration only: the core
+never sees them, except through the membership predicates of data types.
 
 ## Propositions
 
@@ -146,6 +152,13 @@ A theorem may quantify over values only in front, `(xs : List a) -> …` or
 `∀ (xs : List a), …`: its statement is Π₁, as PRA's theorems are. A
 quantifier elsewhere must be bounded. Σ₁ statements, `∃ y, A` at the top,
 proved by a witness term, are planned (see below).
+
+A theorem means what it says of the values it quantifies over: a data type
+denotes the finite trees its constructors build, a function the unique
+solution of its clauses, and the arithmetic of `Nat` the usual one, `m - n`
+being `0` when `n` exceeds `m`. The core statement a theorem becomes means
+the same; [elaboration.md](elaboration.md), § Statements and their adequacy,
+argues why.
 
 ## Proofs
 
@@ -181,8 +194,8 @@ the core's definitional equality taking only what is left.
 ## Tooling
 
 - `praxis check [--dump-core] FILE.px…` checks modules and prints every
-  report; `--dump-core` prints the core text generated, which the tools of
-  praxis-core can check again.
+  report; `--dump-core` prints the core text generated — the definitions,
+  and every declaration handed to the kernel — for inspection.
 - `praxis-lsp` serves `.px` documents with the driver's diagnostics.
 - `editors/vscode` highlights `.px` and starts the server.
 
