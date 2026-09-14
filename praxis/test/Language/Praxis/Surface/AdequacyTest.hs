@@ -29,16 +29,25 @@ statement over a type parameter is a rule over the parameter's predicate.
 The values are generated with their type parameters at @Nat@, whose
 predicate every code satisfies, and each field well typed: there, the shape
 of a code decides its membership, and a type parameter's predicate holds.
+
+A value of an indexed type is generated well typed at its indices, entry by
+entry of a telescope — a statement's value parameters then its values, a
+function's value parameters then its arguments, a constructor's implicit
+arguments then its fields — so that a function which omits a constructor
+impossible at its indices is only applied where it is defined, and each
+equation of indices a statement has holds of the codes of its values, as
+its memberships do.
 -}
 module Language.Praxis.Surface.AdequacyTest (adequacyTests) where
 
 import Bound (instantiate, instantiate1)
 import Control.Applicative ((<|>))
 import Control.Exception (displayException)
+import Control.Monad (foldM)
 import Data.List (find, partition)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -54,14 +63,14 @@ import Language.Praxis.Surface.CoreText (CT (..), isParameter)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
-import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), renderQualName)
+import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), renderQualName)
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
 import Language.Praxis.Surface.Mangle (demangle, mangleVariable)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Syntax
-import Language.Praxis.Surface.Types (Ty (..))
+import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), normIx)
 import Numeric.Natural (Natural)
 import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, elements, forAll, ioProperty, scale, sized, (===))
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -86,7 +95,7 @@ adequacyTests =
                     ld <- get
                     pure (conjoin [propStatement ld td | td <- ldTheorems ld])
                 ]
-          | path <- ["test/data/adequacy.px", "test/data/list.px"]
+          | path <- ["test/data/adequacy.px", "test/data/list.px", "test/data/gadt.px", "test/data/nat.px"]
           ]
     )
 
@@ -163,27 +172,121 @@ kernelBuiltin sig = do
 data Value = VNat !Natural | VCon !Text ![Value]
   deriving stock (Eq, Show)
 
--- | A random value of a type, its type parameters at @Nat@.
-genValue :: Map Text DataInfo -> Ty -> Gen Value
-genValue datas = go
+{- |
+Random values for a telescope, each well typed: an entry's type's indices
+mention the entries before it, @IxParam i@ the one at position @i@.  An entry
+given is kept.  One which is, bare, an index of a later entry's type is that
+entry's index there, the later entry generated with it left open; every
+other one is generated in turn, at the indices its type has at the entries
+known.  Nothing where a type has no value at the indices asked of it.
+-}
+genTele :: Loaded -> Map Int Value -> [Ty] -> Gen (Maybe (Map Int Value))
+genTele ld given tys = go 0 given
+  where
+    n = length tys
+    defined i = or [normIx x == IxParam i | t <- drop (i + 1) tys, x <- indicesOf t]
+    go p env
+      | p >= n = rest env [0 .. n - 1]
+      | Map.member p env || defined p = go (p + 1) env
+      | otherwise = entry p env >>= maybe (pure Nothing) (go (p + 1))
+    -- An entry, and what its indices say of the entries left open.
+    entry p env =
+      fmap (\(v, is) -> foldl learn (Map.insert p v env) (zip (indicesOf (tys !! p)) is))
+        <$> genAt ld (tys !! p) (`Map.lookup` env)
+    learn env (x, v) = case normIx x of
+      IxParam q | not (Map.member q env) -> Map.insert q v env
+      _ -> env
+    -- An entry no later one's index gave after all: generated at its type.
+    rest env = \case
+      [] -> pure (Just env)
+      p : ps
+        | Map.member p env -> rest env ps
+        | otherwise -> entry p env >>= maybe (pure Nothing) (`rest` ps)
+
+-- | A random value of a type, and its indices: each index of the type at the entries the function given knows, one it does not left open; its type parameters at @Nat@.
+genAt :: Loaded -> Ty -> (Int -> Maybe Value) -> Gen (Maybe (Value, [Value]))
+genAt ld ty known = case ty of
+  TNat -> (\k -> Just (VNat (fromIntegral k), [])) <$> chooseInt (0, 3)
+  TParam _ _ -> genAt ld TNat known
+  THole -> genAt ld TNat known
+  TArrow _ _ -> error "a function type: values are first-order"
+  TData n args ixs -> case Map.lookup n (ldDatas ld) of
+    Nothing -> error ("no data type " <> T.unpack n)
+    Just d -> genData ld d args (map (ixValue ld known) ixs)
+
+-- | A random value of a data type at its arguments, each of its indices asked for or left open, and the indices it has.
+genData :: Loaded -> DataInfo -> [Ty] -> [Maybe Value] -> Gen (Maybe (Value, [Value]))
+genData ld d args asked = sized \s ->
+  case if s <= 1 && not (null leaves) then leaves else fits of
+    [] -> pure Nothing
+    choices -> do
+      (c, fixed) <- elements choices
+      scale (`div` 2) (build c fixed)
+  where
+    self = renderQualName (dataQual d)
+    -- The constructors which build a value at the indices asked, each with what that fixes of its telescope.
+    fits = [(c, fixed) | c <- dataCtors d, Just fixed <- [fitting c]]
+    fitting c = case ctorGadt c of
+      Nothing -> Just Map.empty
+      Just g -> foldM (\acc (x, a) -> maybe (Just acc) (\v -> matchValue x v acc) a) Map.empty (zip (gcResult g) asked)
+    leaves = [cf | cf@(c, _) <- fits, not (any (mentions self) (ctorFields c))]
+    build c fixed = case ctorGadt c of
+      Nothing -> fmap (\env -> (VCon (ctorCore c) (Map.elems env), [])) <$> genTele ld Map.empty (map (substParams args) (ctorFields c))
+      Just g -> do
+        let tele = gcTele g
+            -- The entry of the telescope at a position of the code: a field, or an implicit argument stored.
+            at k = listToMaybe [p | (p, en) <- zip [0 ..] tele, teRole en `elem` [Explicit k, Stored k]]
+        r <- genTele ld fixed [substParams args (teType en) | en <- tele]
+        pure do
+          env <- r
+          fields <- traverse (\k -> at k >>= (`Map.lookup` env)) [0 .. length (ctorFields c) - 1]
+          is <- traverse (ixValue ld (`Map.lookup` env)) (gcResult g)
+          pure (VCon (ctorCore c) fields, is)
+
+-- | A constructor's result index against the value asked of it: what that fixes of its telescope, added to what is fixed; Nothing where they clash.
+matchValue :: Ix -> Value -> Map Int Value -> Maybe (Map Int Value)
+matchValue x v fixed = case (normIx x, v) of
+  (IxParam k, _) -> case Map.lookup k fixed of
+    Nothing -> Just (Map.insert k v fixed)
+    Just u -> if u == v then Just fixed else Nothing
+  (IxNat k, VNat m) -> if k == m then Just fixed else Nothing
+  (IxSucc y, VNat m) | m > 0 -> matchValue y (VNat (m - 1)) fixed
+  (IxCon c ys, VCon c' ws) | c == c', length ys == length ws -> foldM (\acc (y, w) -> matchValue y w acc) fixed (zip ys ws)
+  _ -> Nothing
+
+-- | The value of an index, at what the function given knows of the entries it mentions: Nothing where it mentions one it does not.
+ixValue :: Loaded -> (Int -> Maybe Value) -> Ix -> Maybe Value
+ixValue ld known = go . normIx
   where
     go = \case
-      TNat -> VNat . fromIntegral <$> chooseInt (0, 3)
-      TParam _ _ -> go TNat
-      THole -> go TNat
-      TArrow _ _ -> error "a function type: values are first-order"
-      TData n args _ -> case Map.lookup n datas of
-        Nothing -> error ("no data type " <> T.unpack n)
-        Just d -> sized \s -> do
-          let ctors = dataCtors d
-              leaves = [c | c <- ctors, not (any (mentions n) (ctorFields c))]
-          c <- elements (if s <= 1 && not (null leaves) then leaves else ctors)
-          VCon (ctorCore c) <$> scale (`div` 2) (traverse (go . substParams args) (ctorFields c))
-    mentions n = \case
-      TData m ts _ -> m == n || any (mentions n) ts
-      TParam _ ts -> any (mentions n) ts
-      TArrow a b -> mentions n a || mentions n b
-      _ -> False
+      IxParam i -> known i
+      IxNat k -> Just (VNat k)
+      IxSucc x -> VNat . (+ 1) . nat <$> go x
+      IxCon c xs -> VCon c <$> traverse go xs
+      IxFun f xs ->
+        let ref = if f `elem` ["add", "sub", "mul", "pow"] then RefBuiltin else RefFunction
+         in (\vs -> evalRef ld (apps (Global (Ref ref f)) (map Var vs))) <$> traverse go xs
+      _ -> Nothing
+
+-- | The indices of a type.
+indicesOf :: Ty -> [Ix]
+indicesOf = \case
+  TData _ _ xs -> xs
+  _ -> []
+
+mentions :: Text -> Ty -> Bool
+mentions n = \case
+  TData m ts _ -> m == n || any (mentions n) ts
+  TParam _ ts -> any (mentions n) ts
+  TArrow a b -> mentions n a || mentions n b
+  _ -> False
+
+-- | A generator tried again, a few times, while it finds nothing.
+tries :: Int -> Gen (Maybe a) -> Gen (Maybe a)
+tries k g =
+  g >>= \case
+    Nothing | k > 1 -> tries (k - 1) g
+    r -> pure r
 
 -- | A constructor's field type at the arguments of its data type.
 substParams :: [Ty] -> Ty -> Ty
@@ -205,7 +308,9 @@ evalRef ld = go
       (Nat n, []) -> VNat n
       (Global (Ref RefConstructor c), as) -> VCon c (map go as)
       (Global (Ref RefBuiltin b), as) -> arithmetic b (map (nat . go) as)
-      (Global (Ref RefFunction f), as) -> call f (map go as)
+      (Global (Ref RefFunction f), as) -> call f (map go (dropProofs as))
+      -- A proof standing as a value, as absurd's does: 0, as the code has it.
+      (ProofArg {}, []) -> VNat 0
       (h, _) -> error ("not a term of the fragment: " <> show (fmap (const ()) h))
     call f vs = case Map.lookup f (ldFuns ld) of
       Nothing -> error ("no function " <> T.unpack f)
@@ -401,6 +506,9 @@ matchCodes ps vs
     one p v = case (p, v) of
       (CVar x, _) -> Just (Map.singleton x v)
       (CSym c qs, CK c' ws) | c == c' -> matchCodes qs ws
+      -- A clause on a value of Nat: 0, or a successor.
+      (CNum k, CN m) | k == m -> Just Map.empty
+      (CSym "S" [q], CN m) | m > 0 -> one q (CN (m - 1))
       _ -> Nothing
 
 {- |
@@ -447,30 +555,54 @@ isMembership ld = \case
 
 -- * The properties
 
--- | Lemma 1: the function commutes with the encoding.
+{- |
+Lemma 1: the function commutes with the encoding, at well-typed arguments,
+its value parameters first: those it takes at runtime lead its arguments.
+-}
 propFunction :: Loaded -> FunDef -> Property
 propFunction ld fd =
-  forAll (traverse (genValue (ldDatas ld)) (fdArgs fd)) \vs ->
-    let core = funCore (fdInfo fd)
-        xs = ["v_arg" <> T.pack (show i) | i <- [0 .. length vs - 1]]
-        env = Map.fromList (zip xs (map encode vs))
-     in counterexample (T.unpack core <> " " <> show vs) $
-          evalCore ld env (CSym core (map CVar xs)) === encode (evalRef ld (apps (Global (Ref RefFunction core)) (map Var vs)))
+  forAll (tries 20 (genTele ld Map.empty (valueTys <> explicitTys))) \case
+    Nothing -> counterexample (T.unpack core <> ": no well-typed arguments found") False
+    Just entries ->
+      let values = [entries Map.! i | i <- [0 .. length valueTys - 1]]
+          vs = [values !! i | i <- funRuntime info] <> [entries Map.! (length valueTys + j) | j <- [0 .. length explicitTys - 1]]
+          xs = ["v_arg" <> T.pack (show i) | i <- [0 .. length vs - 1]]
+          env = Map.fromList (zip xs (map encode vs))
+       in counterexample (T.unpack core <> " " <> show vs) $
+            evalCore ld env (CSym core (map CVar xs)) === encode (evalRef ld (apps (Global (Ref RefFunction core)) (map Var vs)))
+  where
+    info = fdInfo fd
+    core = funCore info
+    valueTys = map snd (schemeValues (funScheme info))
+    explicitTys = drop (length (funRuntime info)) (fdArgs fd)
 
--- | Lemma 2, and the membership premise: the statement means the same on both sides.
+{- |
+Lemma 2, and the premises of memberships and indices: the statement means
+the same on both sides, at well-typed values, its value parameters first.
+-}
 propStatement :: Loaded -> TheoremDef -> Property
 propStatement ld td = case theoremStatement (ldMembership ld) td of
   Left err -> counterexample ("no statement: " <> err) False
   Right text -> case parse sequentP "" text of
     Left err -> counterexample (errorBundlePretty err) False
     Right (hyps, concl) ->
-      let (memberships, props) = partition (isMembership ld) hyps
-       in forAll (traverse (genValue (ldDatas ld) . snd) (tdBinders td)) \vs ->
-            let (as, c) = implications (instantiate (Var . (vs !!)) (fmap absurd (tdProp td)))
-                env = Map.fromList (zip [mangleVariable n | (n, _) <- tdBinders td] (map encode vs))
-             in counterexample (T.unpack text) $
-                  counterexample (show vs) $
-                    conjoin
-                      [ counterexample "a membership hypothesis fails of the code of a value" (all (holds ld env) memberships)
-                      , map (holds ld env) props <> [holds ld env concl] === map (truth ld) as <> [truth ld c]
-                      ]
+      let indexFns = Set.fromList [fn | (_, fn, _) <- tdIndexHyps td]
+          isIndexEquation = \case
+            FEq (CSym fn [CVar _]) _ -> Set.member fn indexFns
+            _ -> False
+          (memberships, rest) = partition (isMembership ld) hyps
+          (indexEqs, props) = partition isIndexEquation rest
+          entries = tdValues td <> tdBinders td
+       in forAll (tries 20 (genTele ld Map.empty (map snd entries))) \case
+            Nothing -> counterexample (T.unpack text <> ": no well-typed values found") False
+            Just values ->
+              let vs = Map.elems values
+                  (as, c) = implications (instantiate (Var . (vs !!)) (fmap absurd (tdProp td)))
+                  env = Map.fromList (zip [mangleVariable n | (n, _) <- entries] (map encode vs))
+               in counterexample (T.unpack text) $
+                    counterexample (show vs) $
+                      conjoin
+                        [ counterexample "a membership hypothesis fails of the code of a value" (all (holds ld env) memberships)
+                        , counterexample "an equation of indices fails of the codes of the values" (all (holds ld env) indexEqs)
+                        , map (holds ld env) props <> [holds ld env concl] === map (truth ld) as <> [truth ld c]
+                        ]

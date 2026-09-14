@@ -451,7 +451,17 @@ lemmas (U), membership by a code's constructor and fields (M and the
 inversion), and the builtins by the kernel's own evaluator. It checks lemma 1
 for every function, and lemma 2 and the membership hypotheses for every
 statement of `test/data/adequacy.px` — statements true and false, over every
-relation, connective and bounded quantifier — and of `list.px`. The core side
+relation, connective and bounded quantifier — and of `list.px`, `gadt.px`
+and `nat.px`: indexed types and their index functions, value parameters,
+implicit values taken at runtime, proofs as arguments, and functions matching
+on values of `Nat`. A value of an indexed type is generated well typed at its
+indices, entry by entry of a telescope — a statement's value parameters then
+its values, a function's value parameters then its arguments, a
+constructor's implicit arguments then its fields — and an entry which is,
+bare, an index of a later one's type is taken from that one. So a function
+omitting a constructor impossible at its indices is applied only where it is
+defined, and each equation of indices of a statement is checked to hold of
+the codes of its values, as its memberships are: (M) for indices. The core side
 evaluates symbolically because numerals are out of reach: the membership of
 a code unrolls a history one level for every number below the code.
 
