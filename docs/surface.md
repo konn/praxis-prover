@@ -201,10 +201,16 @@ instance Pointed a => Pointed (Pair a) where
     = MkPair x y := by cong (plus-zero y)
 ```
 
-A use of a method is resolved once the types of its declaration are known:
-it is the function of the instance of its class for the type it is used at.
-`2 <> 3` is `Semigroup-Nat.(<>) 2 3`, and `mempty <> xs`, at `List Nat`,
-is `Semigroup-List.(<>) Monoid-List.mempty xs`.
+A use of a method is resolved where it is applied, as soon as the type it is
+used at is known there: it is the function of the instance of its class for
+that type. `2 <> 3` is `Semigroup-Nat.(<>) 2 3`, and `mempty <> xs`, at
+`List Nat`, is `Semigroup-List.(<>) Monoid-List.mempty xs`.
+
+The type of an application comes from the type expected of it first, then
+from its arguments. An argument that cannot determine its own type, like
+`mempty` here, takes it from the others, and a side of an equation takes it
+from the other side, as in `mempty ≡ 0`. A use at a type nothing determines
+is refused as ambiguous.
 
 A function may constrain its type variables, `mconcat : Monoid a => List a
 -> a` (or `(C a, D b) => …`, in front of the signature or after its

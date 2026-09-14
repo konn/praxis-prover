@@ -381,12 +381,22 @@ reflects nor reifies it.
 
 ## Classes
 
-Classes are resolved before anything reaches the core. A use of a method
-stands for a placeholder, and records a constraint: the type its class is at
-there. Once the declaration's types are unified, each constraint is solved by
-the instance of its class for the head of that type, and the placeholder
-replaced by the instance's function (`Elab.resolveMethods`). A method at a
-type not known, or at a type variable, is refused.
+Classes are resolved before anything reaches the core, at each use of a
+method. Type checking has no unification variables. An application takes the
+parameters of its head's type from the type expected of it, then from its
+arguments, by one-sided matching (`Types.matchTy`). What nothing fixes is a
+hole, which the translation erases.
+
+A method is resolved at the application, at the type its class's parameter is
+then at (`Elab.methodAt`). At a known type, it is the instance of its class
+for the head of that type, applied after its arguments to the dictionary the
+instance's context takes at the type's arguments (`Elab.dictionaryAt`). At a
+type variable a constraint gives it for, it is a place of the enclosing
+dictionary. An argument whose method is not resolved for want of its type,
+like `mempty` in `mempty <> xs`, is checked again once the other arguments
+have fixed its domain; a side of an equation is checked again once the other
+side has. A method at a type nothing determines, or at a type variable no
+constraint gives it for, is refused.
 
 An instance's methods are ordinary functions, compiled as any function is,
 with their unfolding lemmas. The instance comes into scope before its

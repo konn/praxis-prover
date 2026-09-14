@@ -32,7 +32,6 @@ module Language.Praxis.Surface.Syntax (
   spine,
   apps,
   mapGlobals,
-  rewriteApps,
   globalsOf,
 
   -- * Patterns
@@ -49,7 +48,6 @@ import Bound.Scope (hoistScope)
 import Control.Monad (ap)
 import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1, showsPrec1)
 import Data.List (elemIndex)
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Language.Praxis.Surface.Syntax.Raw (Quantifier (..), Span)
 import Numeric.Natural (Natural)
@@ -280,38 +278,6 @@ mapGlobals f = go
       Global r -> Global (f r)
       Nat n -> Nat n
       App g x -> App (go g) (go x)
-      At sp e -> At sp (go e)
-      Lam hs b -> Lam hs (hoistScope go b)
-      Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]
-      If c t e -> If (go c) (go t) (go e)
-      Pi h i d b -> Pi h i (go d) (hoistScope go b)
-      Arrow a b -> Arrow (go a) (go b)
-      Quant q h bound ty b -> Quant q h (fmap (fmap go) bound) (fmap go ty) (hoistScope go b)
-      Rel r a b -> Rel r (go a) (go b)
-      Conn c a b -> Conn c (go a) (go b)
-      Not a -> Not (go a)
-      Top -> Top
-      Bottom -> Bottom
-      Universe -> Universe
-      Hole -> Hole
-
-{- |
-Every application of a global rewritten as the function says, given the
-global and its arguments, themselves rewritten, under binders too; a global
-the function leaves stays, its arguments rewritten.  Spans along a spine are
-dropped.
--}
-rewriteApps :: (forall x. Ref -> [Expr x] -> Maybe (Expr x)) -> Expr a -> Expr a
-rewriteApps f = go
-  where
-    go :: Expr x -> Expr x
-    go = \case
-      e@(App _ _) -> case spine e of
-        (Global r, as) -> let as' = map go as in fromMaybe (apps (Global r) as') (f r as')
-        (h, as) -> apps (go h) (map go as)
-      Global r -> fromMaybe (Global r) (f r [])
-      Var a -> Var a
-      Nat n -> Nat n
       At sp e -> At sp (go e)
       Lam hs b -> Lam hs (hoistScope go b)
       Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]

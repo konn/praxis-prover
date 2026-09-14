@@ -1,0 +1,57 @@
+module Bidirectional where
+
+data List a = Nil | a : List a
+
+infixr 5 :
+
+class Semigroup a where
+  (<>) : a -> a -> a
+
+infixr 4 <>
+
+class Semigroup a => Monoid a where
+  mempty : a
+
+instance Semigroup Nat where
+  (<>) x y = x + y
+
+instance Monoid Nat where
+  mempty = 0
+
+instance Semigroup (List a) where
+  (<>) Nil ys = ys
+  (<>) (x : xs) ys = x : (xs <> ys)
+
+instance Monoid (List a) where
+  mempty = Nil
+
+length : List a -> Nat
+length Nil = 0
+length (x : xs) = S (length xs)
+
+mconcat : Monoid a => List a -> a
+mconcat Nil = mempty
+mconcat (x : xs) = x <> mconcat xs
+
+-- A side whose terms do not determine its type is at the other side's.
+unit-left : mempty ≡ 0
+unit-left = rfl
+
+unit-right : 0 ≡ mempty
+unit-right = rfl
+
+-- A function under a constraint whose parameter only its result gives: the other side's type.
+empty-sum : mconcat Nil ≡ 0
+empty-sum = rfl
+
+-- An argument put off until the one after it determines its domain.
+put-off : mempty : 1 : Nil ≡ 0 : 1 : Nil
+put-off = rfl
+
+-- A type parameter nothing determines is erased.
+length-nil : length Nil ≡ 0
+length-nil = rfl
+
+-- The head of a type is enough for an instance: Nil's element type is the other argument's.
+nil-left : {a : Type} -> (xs : List a) -> Nil <> xs ≡ xs
+nil-left {a} xs = rfl

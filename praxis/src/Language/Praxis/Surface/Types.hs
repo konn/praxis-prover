@@ -1,14 +1,20 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
-The types of the surface language, and their unification.
+The types of the surface language, and their comparison.
 
 A type is a data type applied to types, @Nat@, a function type, a type
 parameter of the enclosing signature — applied to types when its kind is
 higher, as @f@ in @data Term r f v = … App (f (Formula r f v) (Term r f v))@
-— or a unification variable.  Types are checked, not trusted: nothing in the
-core depends on them, which sees only the codes and the membership predicates
-the encoding derives from the data declarations.
+— or a hole, a type nothing has determined where it stands.  Types are
+checked, not trusted: nothing in the core depends on them, which sees only
+the codes and the membership predicates the encoding derives from the data
+declarations.
+
+There are no unification variables.  A type is compared with another by
+equality, a hole agreeing with anything; and the parameters of a scheme are
+found by matching its type, one-sided, against the types its arguments and
+the context determine.
 -}
 module Language.Praxis.Surface.Types (
   -- * Kinds and types
@@ -20,33 +26,20 @@ module Language.Praxis.Surface.Types (
   renderKind,
   tyParams,
   firstOrder,
+  determined,
 
-  -- * Unification
-  Unify,
-  runUnify,
-  freshMeta,
-  unify,
-  unifyWith,
-  St,
-  initialSt,
-  zonk,
-  instantiateScheme,
-  UnifyError (..),
-
-  -- * Constraints
-  Wanted (..),
-  wantInstance,
-  takeWanted,
+  -- * Comparison
+  Assignment,
+  mergeTy,
+  matchTy,
+  substScheme,
 ) where
 
-import Control.Monad (unless, zipWithM_)
-import Control.Monad.Except (MonadError, throwError)
-import Control.Monad.State.Strict (MonadState, StateT, evalStateT, gets, modify')
+import Control.Monad (foldM, zipWithM)
 import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IM
 import Data.Text (Text)
 import Data.Text qualified as T
-import Language.Praxis.Surface.Syntax.Raw (Segment, Span)
 
 -- * Kinds and types
 
@@ -56,8 +49,10 @@ data Kind = KType | KArrow !Kind !Kind
 data Ty
   = -- | the type parameter of that index of the enclosing signature, applied to types
     TParam !Int ![Ty]
-  | -- | a unification variable
-    TMeta !Int
+  | {- | a type nothing has determined where it stands: a parameter no argument,
+    result or expected type fixes, which the translation erases
+    -}
+    THole
   | -- | a data type, by its qualified name, applied to types
     TData !Text ![Ty]
   | TNat
@@ -82,7 +77,7 @@ monoScheme = Scheme []
 tyParams :: Ty -> [Int]
 tyParams = \case
   TParam i ts -> i : concatMap tyParams ts
-  TMeta _ -> []
+  THole -> []
   TData _ ts -> concatMap tyParams ts
   TNat -> []
   TArrow a b -> tyParams a <> tyParams b
@@ -96,10 +91,19 @@ function's signature, and a function is always applied in full.
 firstOrder :: Ty -> Bool
 firstOrder = \case
   TParam _ ts -> all firstOrder ts
-  TMeta _ -> True
+  THole -> True
   TData _ ts -> all firstOrder ts
   TNat -> True
   TArrow _ _ -> False
+
+-- | Whether a type is determined throughout: no hole anywhere in it.
+determined :: Ty -> Bool
+determined = \case
+  TParam _ ts -> all determined ts
+  THole -> False
+  TData _ ts -> all determined ts
+  TNat -> True
+  TArrow a b -> determined a && determined b
 
 -- | A type, its parameters by the names given, qualified data names by their last segment.
 renderTy :: [Text] -> Ty -> String
@@ -108,7 +112,7 @@ renderTy names = go (0 :: Int)
     go d = \case
       TParam i [] -> name i
       TParam i ts -> paren (d > 1) (unwords (name i : map (go 2) ts))
-      TMeta m -> "?" <> show m
+      THole -> "_"
       TData n [] -> short n
       TData n ts -> paren (d > 1) (unwords (short n : map (go 2) ts))
       TNat -> "Nat"
@@ -126,123 +130,72 @@ renderKind = \case
     atomic k@KArrow {} = "(" <> renderKind k <> ")"
     atomic k = renderKind k
 
--- * Unification
+-- * Comparison
 
--- | Why two types do not unify.
-data UnifyError
-  = Mismatch !Ty !Ty
-  | Occurs !Int !Ty
-  deriving stock (Show, Eq)
+-- | The types found so far for the parameters of a scheme, by index.
+type Assignment = IntMap Ty
 
 {- |
-Unification variables and their solutions, and the next fresh one; and the
-constraints the uses of methods raised, not solved yet.
+What two types say of one type together: each hole of one filled by what
+the other has there.  Nothing when they disagree.
 -}
-data St = St
-  { stNext :: !Int
-  , stSolved :: !(IntMap Ty)
-  , stWanted :: ![Wanted]
-  -- ^ the most recent first
-  }
+mergeTy :: Ty -> Ty -> Maybe Ty
+mergeTy a b = case (a, b) of
+  (THole, t) -> Just t
+  (t, THole) -> Just t
+  (TParam i ts, TParam j us) | i == j, length ts == length us -> TParam i <$> zipWithM mergeTy ts us
+  (TData m ts, TData n us) | m == n, length ts == length us -> TData m <$> zipWithM mergeTy ts us
+  (TNat, TNat) -> Just TNat
+  (TArrow x y, TArrow z w) -> TArrow <$> mergeTy x z <*> mergeTy y w
+  _ -> Nothing
 
 {- |
-A constraint raised by a use of a method: the placeholder the use stands for
-until the constraint is solved, the method by its qualified name, the type
-its class is at there, and where the use is.
+Match the type of a scheme of @n@ parameters against a type, one-sided: its
+parameters, @TParam i@ for @i < n@, take what the type has where they stand,
+together with what they were given before; any other part must agree.  A hole
+determines nothing.  A parameter of a higher kind applied, against a type
+parameter applied to as many arguments or more, takes that parameter applied
+to those in front; against anything else it is opaque, and determines
+nothing.  Nothing when the types disagree.
 -}
-data Wanted = Wanted
-  { wantedPlaceholder :: !Text
-  , wantedMethod :: ![Segment]
-  , wantedType :: !Ty
-  , wantedSpan :: !Span
-  }
-
--- | No variables yet, and no constraints.
-initialSt :: St
-initialSt = St 0 IM.empty []
-
--- | Record the constraint a use of a method raises: the method, the type its class is at, where; and the placeholder the use stands for.
-wantInstance :: (MonadState St m) => [Segment] -> Ty -> Span -> m Text
-wantInstance method t sp = do
-  n <- gets stNext
-  let placeholder = "#method-" <> T.pack (show n)
-  modify' \s -> s {stNext = n + 1, stWanted = Wanted placeholder method t sp : stWanted s}
-  pure placeholder
-
--- | The constraints recorded, in the order they were, and none left.
-takeWanted :: (MonadState St m) => m [Wanted]
-takeWanted = do
-  ws <- gets stWanted
-  modify' \s -> s {stWanted = []}
-  pure (reverse ws)
-
-type Unify = StateT St (Either UnifyError)
-
-runUnify :: Unify a -> Either UnifyError a
-runUnify m = evalStateT m initialSt
-
-freshMeta :: (MonadState St m) => m Ty
-freshMeta = do
-  n <- gets stNext
-  modify' \s -> s {stNext = n + 1}
-  pure (TMeta n)
-
--- | The type with every solved variable replaced by its solution.
-zonk :: (MonadState St m) => Ty -> m Ty
-zonk = \case
-  TMeta m ->
-    gets (IM.lookup m . stSolved) >>= \case
-      Nothing -> pure (TMeta m)
-      Just t -> do
-        t' <- zonk t
-        modify' \s -> s {stSolved = IM.insert m t' (stSolved s)}
-        pure t'
-  TParam i ts -> TParam i <$> traverse zonk ts
-  TData n ts -> TData n <$> traverse zonk ts
-  TNat -> pure TNat
-  TArrow a b -> TArrow <$> zonk a <*> zonk b
-
-unify :: (MonadState St m, MonadError UnifyError m) => Ty -> Ty -> m ()
-unify = unifyWith id
-
--- | Unify, reporting a failure as the error the injection makes of it.
-unifyWith :: (MonadState St m, MonadError e m) => (UnifyError -> e) -> Ty -> Ty -> m ()
-unifyWith inj t1 t2 = do
-  a <- zonk t1
-  b <- zonk t2
-  case (a, b) of
-    (TMeta m, TMeta n) | m == n -> pure ()
-    (TMeta m, t) -> bind m t
-    (t, TMeta m) -> bind m t
-    (TParam i ts, TParam j us) | i == j, length ts == length us -> zipWithM_ (unifyWith inj) ts us
-    (TData n ts, TData m us) | n == m, length ts == length us -> zipWithM_ (unifyWith inj) ts us
-    (TNat, TNat) -> pure ()
-    (TArrow x y, TArrow z w) -> unifyWith inj x z *> unifyWith inj y w
-    _ -> throwError (inj (Mismatch a b))
+matchTy :: Int -> Ty -> Ty -> Assignment -> Maybe Assignment
+matchTy n p t s = case (p, t) of
+  (_, THole) -> Just s
+  (TParam i [], _) | i < n -> case IM.lookup i s of
+    Nothing -> Just (IM.insert i t s)
+    Just u -> (\m -> IM.insert i m s) <$> mergeTy u t
+  (TParam i ps, TParam j ts)
+    | i < n
+    , length ts >= length ps ->
+        let (front, rest) = splitAt (length ts - length ps) ts
+         in matchTy n (TParam i []) (TParam j front) s >>= \s' -> pairs (zip ps rest) s'
+  (TParam i _, _) | i < n -> Just s
+  (TParam i ps, TParam j ts) | i == j, length ps == length ts -> pairs (zip ps ts) s
+  (TData a ps, TData b ts) | a == b, length ps == length ts -> pairs (zip ps ts) s
+  (TNat, TNat) -> Just s
+  (TArrow a b, TArrow c d) -> pairs [(a, c), (b, d)] s
+  _ -> Nothing
   where
-    bind m t = do
-      unless (m `notElem` metas t) (throwError (inj (Occurs m t)))
-      modify' \s -> s {stSolved = IM.insert m t (stSolved s)}
-    metas = \case
-      TMeta n -> [n]
-      TParam _ ts -> concatMap metas ts
-      TData _ ts -> concatMap metas ts
-      TNat -> []
-      TArrow x y -> metas x <> metas y
+    pairs xs s0 = foldM (\acc (x, y) -> matchTy n x y acc) s0 xs
 
--- | The type of a scheme with fresh variables for its parameters, and those variables.
-instantiateScheme :: (MonadState St m) => Scheme -> m (Ty, [Ty])
-instantiateScheme (Scheme params ty) = do
-  metas <- traverse (const freshMeta) params
-  pure (subst metas ty, metas)
+{- |
+The type of a scheme of @n@ parameters at the types found for them: a
+parameter found for none is a hole.  A parameter of a higher kind applied
+takes its arguments after those of the type found for it.
+-}
+substScheme :: Int -> Assignment -> Ty -> Ty
+substScheme n s = go
   where
-    subst ms = \case
+    go = \case
       TParam i ts
-        | i < length ms -> case (ms !! i, ts) of
-            (m, []) -> m
-            (m, _) -> m -- a higher-kinded parameter applied: its instance is opaque here
-        | otherwise -> TParam i (map (subst ms) ts)
-      TMeta n -> TMeta n
-      TData n ts -> TData n (map (subst ms) ts)
+        | i < n -> case (IM.lookup i s, map go ts) of
+            (Nothing, _) -> THole
+            (Just u, []) -> u
+            (Just (TParam j us), ts') -> TParam j (us <> ts')
+            (Just (TData d us), ts') -> TData d (us <> ts')
+            (Just _, _) -> THole
+        | otherwise -> TParam i (map go ts)
+      THole -> THole
+      TData d ts -> TData d (map go ts)
       TNat -> TNat
-      TArrow a b -> TArrow (subst ms a) (subst ms b)
+      TArrow a b -> TArrow (go a) (go b)

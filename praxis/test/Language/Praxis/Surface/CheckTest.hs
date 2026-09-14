@@ -36,7 +36,11 @@ checkTests =
         c <- checkFile "test/data/classes-bad.px"
         checkedTheorems c @?= ["ClassesBad.fine"]
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
-        mapM_ (\(n, l) -> assertBool ("an error for " <> n) (l `elem` lines')) [("superclass", 12 :: Int), ("second", 19), ("other", 25), ("generic", 28), ("ambiguous", 32), ("pair", 38)]
+        mapM_ (\(n, l) -> assertBool ("an error for " <> n) (l `elem` lines')) [("superclass", 12 :: Int), ("second", 19), ("other", 25), ("generic", 28), ("ambiguous", 32), ("pair", 38), ("ambiguous function", 49)]
+    , testCase "an application's type comes from the type expected and from its arguments, and an argument undetermined is checked again" $ do
+        c <- checkFile "test/data/bidirectional.px"
+        errors c @?= []
+        checkedTheorems c @?= ["Bidirectional.unit-left", "Bidirectional.unit-right", "Bidirectional.empty-sum", "Bidirectional.put-off", "Bidirectional.length-nil", "Bidirectional.nil-left"]
     , testCase "a function under a constraint is a schema over the methods it uses, at the instances of known types" $ do
         c <- checkFile "test/data/constrained.px"
         errors c @?= []

@@ -40,3 +40,11 @@ instance Semigroup (Pair a a) where
 
 fine : (x : Nat) -> x <> 0 ≡ x
 fine x = rfl
+
+-- A function under a constraint whose parameter nothing determines.
+mconcat : Monoid a => List a -> a
+mconcat Nil = mempty
+mconcat (x : xs) = x <> mconcat xs
+
+ambiguous-sum : mconcat Nil ≡ mconcat Nil
+ambiguous-sum = rfl

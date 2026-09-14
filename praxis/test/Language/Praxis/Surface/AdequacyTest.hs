@@ -170,7 +170,7 @@ genValue datas = go
     go = \case
       TNat -> VNat . fromIntegral <$> chooseInt (0, 3)
       TParam _ _ -> go TNat
-      TMeta _ -> go TNat
+      THole -> go TNat
       TArrow _ _ -> error "a function type: values are first-order"
       TData n args -> case Map.lookup n datas of
         Nothing -> error ("no data type " <> T.unpack n)

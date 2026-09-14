@@ -11,8 +11,11 @@ may also be written, and only in front: polymorphism is rank 1.  A theorem
 may quantify over values in front of its proposition, @(xs : List a) -> …@,
 and the proposition is quantifier-free but for bounded quantifiers.
 
-Terms are checked bidirectionally, which is what resolves a constructor by
-the type expected of it: @Nil@ where a @List a@ is expected is @List.Nil@.
+Terms are checked bidirectionally, without unification variables: an
+application takes its head's type parameters from the type expected of it
+and from its arguments, by matching, and resolves a method there, at the
+type its class is at; a constructor is resolved by the type expected of it,
+@Nil@ where a @List a@ is expected being @List.Nil@.
 The clauses of a function are checked here, their case analysis and
 recursion by "Language.Praxis.Surface.Compile"; the right sides of a
 theorem's clauses are proofs, which the engine elaborates in the goals it
@@ -42,13 +45,13 @@ module Language.Praxis.Surface.Elab (
   -- * Checking in a context
   Ctx,
   TC,
+  Failure,
   runTC,
   inferTerm,
   checkTerm,
   elabProp,
   elabType,
   extendCtx,
-  resolveMethods,
 
   -- * Errors
   ElabError (..),
@@ -56,8 +59,8 @@ module Language.Praxis.Surface.Elab (
 
 import Bound (Scope, Var (..), fromScope, toScope)
 import Control.Monad (foldM, forM, forM_, unless, when, zipWithM)
-import Control.Monad.Except (throwError)
-import Control.Monad.State.Strict (StateT, evalStateT)
+import Data.Bifunctor (first)
+import Data.IntMap.Strict qualified as IM
 import Data.List (elemIndex, find, nub, nubBy)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, maybeToList)
@@ -145,17 +148,39 @@ data ElabError = ElabError
   }
   deriving stock (Show, Eq)
 
--- | Type checking, over unification variables.
-type TC = StateT St (Either ElabError)
+{- |
+Why a term does not check: it is refused; or its type is not determined
+where it stands, as a method's whose class's parameter nothing fixes yet,
+which a type expected of it may determine.
+-}
+data Failure
+  = Refused !ElabError
+  | Undetermined !ElabError
+
+-- | Type checking: without unification variables, it has no state.
+type TC = Either Failure
 
 runTC :: TC a -> Either ElabError a
-runTC m = evalStateT m initialSt
+runTC = first \case
+  Refused err -> err
+  Undetermined err -> err
 
 failAt :: Span -> String -> TC a
-failAt sp msg = throwError (ElabError sp msg)
+failAt sp msg = Left (Refused (ElabError sp msg))
+
+-- | A term whose type is not determined where it stands, and what that leaves unresolved.
+undetermined :: Span -> String -> TC a
+undetermined sp msg = Left (Undetermined (ElabError sp msg))
+
+-- | The result, or, when the term is undetermined, why.
+attempt :: TC a -> TC (Either ElabError a)
+attempt = \case
+  Left (Undetermined err) -> Right (Left err)
+  Left refused -> Left refused
+  Right x -> Right (Right x)
 
 liftE :: Either ElabError a -> TC a
-liftE = either throwError pure
+liftE = first Refused
 
 -- * Modules
 
@@ -275,7 +300,7 @@ elabClass fx env cd = do
       bty <- elabType env1 [a] t
       unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a law quantifies over values, which are first-order"))
       pure (n, bty)
-    prop <- runTC (elabProp env1 [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body >>= resolveMethods env1 slots)
+    prop <- runTC (elabProp env1 slots [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body)
     pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots body)
   pure (addLaws (classQual info) laws env1)
 
@@ -362,7 +387,7 @@ elabInstance fx env sp idl = do
           binderTys = [(n, atInstance headTy (length vars) t) | (n, t) <- lawBinders l]
           ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
       when (null mine) $ Left (ElabError sp ("no proof of the law " <> T.unpack (segmentText lawSeg)))
-      prop0 <- runTC (elabProp e ctx0 (lawBody l) >>= resolveMethods e full)
+      prop0 <- runTC (elabProp e full ctx0 (lawBody l))
       -- Under the context: the places its statement uses, the membership
       -- predicates of the type variables its values are of, and the premises they give.
       let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
@@ -425,37 +450,11 @@ registerUnfoldings info fcs env = foldl register env (zip3 [1 :: Int ..] (unfold
        in addNamespaceMember (funQual info) alias (thmQual eqI) (addNamespaceMember (funQual info) (Ident n) (thmQual thm) e2)
 
 {- |
-Solve the constraints the uses of methods raised, now that the types are
-known.  At a known type, a use is the function of its method in the instance
-of its class for the head of that type, applied after its arguments to the
-dictionary the instance's context takes at the type's arguments; passed on
-as the parameter of a schema, the function with that dictionary.  At a type
-parameter a dictionary is given for, it is a place of that dictionary: a
-parameter of the enclosing function's schema, or a value it takes.  A method
-at a type not known, or at a type parameter no constraint gives it for, is
-an error.
+Why a method is not resolved where it is used: the type its class is at is
+not determined there yet, which a type expected of the use may determine; or
+no instance, or no constraint, gives it there.
 -}
-resolveMethods :: Env -> [Slot] -> Expr a -> TC (Expr a)
-resolveMethods env givens e = do
-  ws <- takeWanted
-  chosen <- forM ws \w -> do
-    m <- case Map.lookup (wantedMethod w) (envGlobals env) of
-      Just (GMethod m) -> pure m
-      _ -> failAt (wantedSpan w) "internal: a method not in scope"
-    t <- zonk (wantedType w)
-    either (failAt (wantedSpan w)) (pure . (wantedPlaceholder w,)) (methodAt env givens m t)
-  let table = Map.fromList chosen
-  pure (rewriteApps (resolvedAt table) e)
-  where
-    -- A placeholder: a place as it stands; an instance's function applied, its
-    -- dictionary after the arguments; passed on, with its dictionary, as a parameter.
-    resolvedAt :: Map.Map Text Resolution -> Ref -> [Expr x] -> Maybe (Expr x)
-    resolvedAt table (Ref k n) as = case Map.lookup n table of
-      Nothing -> Nothing
-      Just (AtPlace r) -> Just (apps (Global r) as)
-      Just (AtInstance f dict) -> Just case (k, as) of
-        (RefStatic, []) -> parameterOf f (map vacuous dict)
-        _ -> apps (Global (Ref RefFunction (funCore f))) (as <> map vacuous dict)
+data Unresolved = Pending !String | Refusal !String
 
 -- | What a method is where it is used: the function of an instance, with the dictionary its context takes there, or a place of the dictionary given.
 data Resolution = AtInstance !FunInfo ![Expr Void] | AtPlace !Ref
@@ -470,29 +469,33 @@ parameterOf f dict
 A method at a type: at a known type, the function of the instance of its
 class for the head of the type, with the dictionary the instance's context
 takes at the type's arguments; at a type parameter a dictionary is given
-for, a place of it.
+for, a place of it.  Pending at a hole, where the instance is not known yet.
 -}
-methodAt :: Env -> [Slot] -> MethodInfo -> Ty -> Either String Resolution
+methodAt :: Env -> [Slot] -> MethodInfo -> Ty -> Either Unresolved Resolution
 methodAt env givens m = \case
   TNat -> at "Nat" []
   TData dn targs -> at dn targs
-  TParam j _ -> maybe (Left (name <> " at a type variable: it needs a constraint " <> cls <> " on the variable")) (Right . AtPlace) (givenPlace givens (methodQual m) j)
-  TMeta _ -> Left ("the type " <> name <> " is used at is ambiguous")
-  TArrow _ _ -> Left (name <> " at a function type")
+  TParam j _ -> maybe (Left (Refusal (name <> " at a type variable: it needs a constraint " <> cls <> " on the variable"))) (Right . AtPlace) (givenPlace givens (methodQual m) j)
+  THole -> Left (Pending ("the type " <> name <> " is used at is ambiguous"))
+  TArrow _ _ -> Left (Refusal (name <> " at a function type"))
   where
     name = T.unpack (segmentText (last (methodQual m)))
     cls = T.unpack (segmentText (last (methodClass m)))
     at h targs = case Map.lookup (methodClass m, h) (envInstances env) >>= Map.lookup (methodQual m) . instFunctions of
       Just f -> AtInstance f <$> dictionaryAt env givens f targs
-      Nothing -> Left ("no instance of " <> cls <> " for " <> T.unpack (last (T.splitOn "." h)) <> ", where " <> name <> " is used")
+      Nothing -> Left (Refusal ("no instance of " <> cls <> " for " <> T.unpack (last (T.splitOn "." h)) <> ", where " <> name <> " is used"))
 
--- | The dictionary an instance's function takes at the arguments of the instance's type: each place, its method at the argument the place's parameter stands for.
-dictionaryAt :: Env -> [Slot] -> FunInfo -> [Ty] -> Either String [Expr Void]
+{- |
+The dictionary a function takes at the types of its parameters: each place,
+its method at the type the place's parameter is at — for an instance's
+function, the arguments of the instance's type.
+-}
+dictionaryAt :: Env -> [Slot] -> FunInfo -> [Ty] -> Either Unresolved [Expr Void]
 dictionaryAt env givens f targs = forM (funSlots f) \s -> do
   m <- case Map.lookup (slotMethod s) (envGlobals env) of
     Just (GMethod m) -> Right m
-    _ -> Left "internal: a place of a dictionary for no method"
-  ty <- maybe (Left "internal: a place at no argument of the instance's type") Right (lookup (slotParam s) (zip [0 ..] targs))
+    _ -> Left (Refusal "internal: a place of a dictionary for no method")
+  ty <- maybe (Left (Refusal "internal: a place at no argument of the function's type")) Right (lookup (slotParam s) (zip [0 ..] targs))
   r <- methodAt env givens m ty
   pure case r of
     AtPlace ref -> Global ref
@@ -566,7 +569,7 @@ elabDecl fx env sp name ty0 clauses = do
       full <- dictionaryOf env paramNames constraints
       given <- constraintClasses env paramNames constraints
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
-      prop0 <- runTC (elabProp env ctx0 body >>= resolveMethods env full)
+      prop0 <- runTC (elabProp env full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
       let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
@@ -857,7 +860,7 @@ elabFunClause fx env info args result (R.Clause lhs0 (Located rsp rhs)) = do
   body <- case rhs of
     R.RExpr e -> do
       e' <- liftE (resolved fx e)
-      checkTerm env [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' result >>= resolveMethods env (funSlots info)
+      checkTerm env (funSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' result
     _ -> failAt rsp "a function's clause is a term, not a proof"
   pure (FunClause pats vars (toScope (fmap B body)) (R.spanning (location lhs) rsp))
 
@@ -890,7 +893,7 @@ elabPattern env expected le@(Located sp e) = case e of
   R.EParen x -> elabPattern env expected x
   R.EWildcard -> pure (PWild, [])
   R.ENat n -> do
-    unifyAt sp expected TNat
+    _ <- agree sp expected TNat
     pure (PNat n, [])
   R.EInfix (Located osp op) l r -> constructor osp (R.operatorName op) [l, r]
   _ -> case rawSpine le of
@@ -903,7 +906,7 @@ elabPattern env expected le@(Located sp e) = case e of
     (Located hsp (R.EName q), args)
       | q `elem` [QName [] (Ident "S"), QName [] (Ident "suc")]
       , [a] <- args -> do
-          unifyAt hsp expected TNat
+          _ <- agree hsp expected TNat
           (p, vs) <- elabPattern env TNat a
           pure (PSucc p, vs)
       | otherwise -> constructor hsp q args
@@ -915,8 +918,12 @@ elabPattern env expected le@(Located sp e) = case e of
         Nothing -> failAt csp ("not a constructor: " <> T.unpack (qnameText q))
     constructorWith csp ci args = do
       dat <- maybe (failAt csp "internal: a constructor of no data type") pure (dataOfCtor env ci)
-      typeArgs <- traverse (const freshMeta) (dataParams dat)
-      unifyAt csp expected (TData (renderQualName (dataQual dat)) typeArgs)
+      -- The type expected is known, an argument's or a field's: its arguments are the constructor's type's.
+      let dn = renderQualName (dataQual dat)
+          holes = map (const THole) (dataParams dat)
+      typeArgs <- case mergeTy expected (TData dn holes) of
+        Just (TData _ targs) -> pure targs
+        _ -> failAt csp (mismatch expected (TData dn holes))
       let fields = map (substParams typeArgs) (ctorFields ci)
       unless (length args == length fields) $
         failAt csp (T.unpack (renderQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields")
@@ -924,8 +931,7 @@ elabPattern env expected le@(Located sp e) = case e of
       pure (PCon (Ref RefConstructor (ctorCore ci)) (map fst subs), concatMap snd subs)
     -- A constructor of the expected type by this name, else the one constructor the name resolves to.
     ctorFor csp q = do
-      t <- zonk expected
-      let byType = case (t, q) of
+      let byType = case (expected, q) of
             (TData dn _, QName [] s) -> [c | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn, c <- dataCtors d, last (ctorQual c) == s]
             _ -> []
           byName = nubCtors ([c | GCtor c <- resolve env q] <> unqualifiedCtors q)
@@ -950,12 +956,12 @@ substParams args = \case
   TArrow a b -> TArrow (substParams args a) (substParams args b)
   t -> t
 
-unifyAt :: Span -> Ty -> Ty -> TC ()
-unifyAt sp = unifyWith (ElabError sp . mismatch)
-  where
-    mismatch = \case
-      Mismatch x y -> "type mismatch: " <> renderTy [] x <> " and " <> renderTy [] y
-      Occurs _ t -> "a type which would contain itself: " <> renderTy [] t
+-- | A type expected and a type found, as one: what both say of it.
+agree :: Span -> Ty -> Ty -> TC Ty
+agree sp expected found = maybe (failAt sp (mismatch expected found)) pure (mergeTy expected found)
+
+mismatch :: Ty -> Ty -> String
+mismatch expected found = "type mismatch: " <> renderTy [] expected <> " and " <> renderTy [] found
 
 -- * Terms
 
@@ -966,21 +972,51 @@ type Ctx a = [(Text, (a, Ty))]
 extendCtx :: Text -> Ty -> Ctx a -> Ctx (Var () a)
 extendCtx n t ctx = (n, (B (), t)) : [(m, (F v, ty)) | (m, (v, ty)) <- ctx]
 
--- | A term, and the type it has.
-inferTerm :: Env -> Ctx a -> Located R.Expr -> TC (Expr a, Ty)
-inferTerm env ctx le = do
-  t <- freshMeta
-  e <- checkTerm env ctx le t
-  t' <- zonk t
-  pure (e, t')
+{- |
+A term, and its type: what the term determines of it.  A parameter nothing
+fixes is a hole, which the translation erases, as the element type of
+@length Nil@.
+-}
+inferTerm :: Env -> [Slot] -> Ctx a -> Located R.Expr -> TC (Expr a, Ty)
+inferTerm env givens ctx le = elabTerm env givens ctx le THole
 
--- | A term of the type expected; its constructors are resolved by it.
-checkTerm :: Env -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a)
-checkTerm env ctx le@(Located sp e) expected = case e of
-  R.EParen x -> checkTerm env ctx x expected
-  R.ENat n -> do
-    unifyAt sp expected TNat
-    pure (At (Irrelevant sp) (Nat n))
+-- | A term of the type expected.
+checkTerm :: Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a)
+checkTerm env givens ctx le expected = fst <$> elabTerm env givens ctx le expected
+
+{- |
+The head of an application: the number of the parameters of its type, its
+domains, its result, and how it is applied at the types found for its
+parameters.
+-}
+data AppHead a = AppHead
+  { ahParams :: !Int
+  , ahDomains :: ![Ty]
+  , ahResult :: !Ty
+  , ahApply :: Assignment -> TC ([Expr a] -> Expr a)
+  }
+
+{- |
+A term against what is known of its type, and its type: what is expected of
+it together with what the term determines.  The dictionary given is the
+enclosing signature's, whose places a method at a constrained type parameter
+is.
+
+An application takes the parameters of its head's type from the type
+expected first, then from its arguments, each checked against its domain as
+far as that is known, by matching, one-sided; what none determines is a
+hole.  A method, or a function under constraints, is resolved there, at the
+types its class's parameters are then at: the instance for the head of the
+type, or a place of the dictionary given at a type parameter.  An argument
+whose type must be known to resolve a method or a constructor in it, and is
+not yet, is undetermined: it is checked again once the other arguments have
+determined more of its domain, and the application is undetermined itself
+when none do.
+-}
+elabTerm :: Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
+elabTerm env givens ctx le@(Located sp e) expected = case e of
+  R.EParen x -> elabTerm env givens ctx x expected
+  R.ENat n -> (At (Irrelevant sp) (Nat n),) <$> agree sp expected TNat
   R.EInfix (Located osp op) l r -> application (Located osp (R.EName (R.operatorName op))) [l, r]
   R.EIf {} -> failAt sp "if is not supported yet"
   R.ECase {} -> failAt sp "case is not supported yet"
@@ -988,81 +1024,106 @@ checkTerm env ctx le@(Located sp e) expected = case e of
   _ -> uncurry application (rawSpine le)
   where
     application hd args = do
-      (h, hty, arity, dict) <- headOf hd
+      h <- headOf hd
+      let n = ahParams h
+          arity = length (ahDomains h)
       -- Values are first-order: a function or a constructor is applied in full, never passed or returned.
       when (length args < arity) $ failAt sp ("applied to " <> show (length args) <> " of its " <> show arity <> " arguments: a function is not a value, so it is applied in full")
       case drop arity args of
         extra : _ -> failAt (location extra) "applied to too many arguments"
         [] -> pure ()
-      (res, resTy) <- applyArgs h hty args
-      unifyAt sp expected resTy
-      -- The dictionary of a function under constraints follows its arguments.
-      pure (At (Irrelevant sp) (apps res dict))
-    applyArgs h hty = \case
-      [] -> pure (h, hty)
-      a : rest -> do
-        hty' <- zonk hty
-        (dom, cod) <- case hty' of
-          TArrow d c -> pure (d, c)
-          TMeta _ -> do
-            d <- freshMeta
-            c <- freshMeta
-            unifyAt (location a) hty' (TArrow d c)
-            pure (d, c)
-          _ -> failAt (location a) "applied to too many arguments"
-        a' <- checkTerm env ctx a dom
-        applyArgs (App h a') cod rest
-    -- The head of an application, its type, the number of arguments it takes, and the dictionary it takes after them.
+      -- The parameters the type expected fixes, then those the arguments do.
+      s0 <- maybe (failAt sp (mismatch expected (substScheme n IM.empty (ahResult h)))) pure (matchTy n (ahResult h) expected IM.empty)
+      (s1, done, pending) <- foldM (argument n) (s0, IM.empty, []) (zip3 [0 :: Int ..] (ahDomains h) args)
+      (s2, done') <- settle n s1 done pending
+      apply <- ahApply h s2
+      t <- agree sp expected (substScheme n s2 (ahResult h))
+      pure (At (Irrelevant sp) (apply [done' IM.! i | i <- [0 .. arity - 1]]), t)
+    -- An argument against its domain as far as it is known; put off, with the type tried and why, when undetermined.
+    argument n (s, done, pending) (i, d, a) = do
+      let dom = substScheme n s d
+      attempt (elabTerm env givens ctx a dom) >>= \case
+        Right (a', t) -> (,IM.insert i a' done,pending) <$> found n (location a) d t s
+        Left why -> pure (s, done, pending <> [(i, d, a, dom, why)])
+    -- The arguments put off, each again once its domain is known further, until none is.
+    settle n s done pending = do
+      (s', done', left, progress) <- foldM (again n) (s, done, [], False) pending
+      case left of
+        [] -> pure (s', done')
+        (_, _, _, _, why) : _
+          | progress -> settle n s' done' left
+          | otherwise -> Left (Undetermined why)
+    again n (s, done, left, progress) entry@(i, d, a, tried, _)
+      | dom == tried = pure (s, done, left <> [entry], progress)
+      | otherwise =
+          attempt (elabTerm env givens ctx a dom) >>= \case
+            Right (a', t) -> (,IM.insert i a' done,left,True) <$> found n (location a) d t s
+            Left why -> pure (s, done, left <> [(i, d, a, dom, why)], progress)
+      where
+        dom = substScheme n s d
+    -- What an argument's type says of the parameters of its head's type.
+    found n asp d t s = maybe (failAt asp (mismatch (substScheme n s d) t)) pure (matchTy n d t s)
+    -- The head of an application: a variable, a builtin, a function, a constructor or a method.
     headOf (Located hsp h) = case h of
-      R.EName (QName [] (Ident n)) | Just (v, t) <- lookup n ctx -> pure (Var v, t, 0, [])
+      R.EName (QName [] (Ident x)) | Just (v, t) <- lookup x ctx -> pure (plain 0 [] t (Var v))
       R.EName q -> resolveHead hsp q
-      R.ENat n -> pure (Nat n, TNat, 0, [])
-      R.EParen x -> (\(e', t) -> (e', t, 0, [])) <$> inferTerm env ctx x
+      R.ENat k -> pure (plain 0 [] TNat (Nat k))
+      R.EParen x -> (\(e', t) -> plain 0 [] t e') <$> elabTerm env givens ctx x THole
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
+    plain n doms res hd = AppHead n doms res (const (pure (apps hd)))
     resolveHead hsp q = case builtin q of
       Just b -> pure b
       Nothing -> do
-        want <- zonk expected
         let terms = [g | g <- resolve env q, isTerm g]
             candidates = case (q, terms) of
               (QName [] s, []) -> map GCtor (constructorsNamed env s)
               _ -> terms
-            byType = case want of
+            byType = case expected of
               TData dn _ -> [g | g@(GCtor c) <- candidates, renderQualName (ctorData c) == dn]
               _ -> []
         case (byType, candidates) of
-          (g : _, _) -> typed g
-          ([], [g]) -> typed g
+          (g : _, _) -> typed hsp g
+          ([], [g]) -> typed hsp g
           ([], []) -> failAt hsp ("not in scope: " <> T.unpack (qnameText q))
           ([], g : _)
-            | all isCtor candidates -> failAt hsp ("ambiguous constructor " <> T.unpack (qnameText q))
-            | otherwise -> typed g
-    typed = \case
+            | all isCtor candidates -> undetermined hsp ("ambiguous constructor " <> T.unpack (qnameText q))
+            | otherwise -> typed hsp g
+    typed hsp = \case
       GFun f -> do
-        (t, metas) <- instantiateScheme (funScheme f)
-        -- Each place of its dictionary a placeholder, until the type its class is at is known.
-        dict <- forM (funSlots f) \s -> do
-          placeholder <- wantInstance (slotMethod s) (metas !! slotParam s) sp
-          pure (Global (Ref (if slotArity s > 0 then RefStatic else RefFunction) placeholder))
-        pure (Global (Ref RefFunction (funCore f)), t, funArity f, dict)
+        let n = length (schemeParams (funScheme f))
+            (doms, res) = splitArrows (funArity f) (schemeType (funScheme f))
+            fn = Global (Ref RefFunction (funCore f))
+        pure $ AppHead n doms res \s ->
+          if null (funSlots f)
+            then pure (apps fn)
+            else do
+              -- Its dictionary at the types its parameters are at, after its arguments.
+              dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. n - 1]])
+              pure \as -> apps fn (as <> map vacuous dict)
       GCtor c -> case dataOfCtor env c of
-        Just d -> do
-          let result = TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. length (dataParams d) - 1]]
-          (t, _) <- instantiateScheme (Scheme (dataParams d) (foldr TArrow result (ctorFields c)))
-          pure (Global (Ref RefConstructor (ctorCore c)), t, length (ctorFields c), [])
+        Just d ->
+          let n = length (dataParams d)
+           in pure (plain n (ctorFields c) (TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. n - 1]]) (Global (Ref RefConstructor (ctorCore c))))
         Nothing -> failAt sp "internal: a constructor of no data type"
-      -- A method stands for a placeholder until the type its class is at is known.
+      -- A method: the function of the instance for the type its class is at, or a place of the dictionary given.
       GMethod m -> do
-        (t, metas) <- instantiateScheme (methodScheme m)
-        placeholder <- case metas of
-          c : _ -> wantInstance (methodQual m) c sp
-          [] -> failAt sp "internal: a method of no class"
-        pure (Global (Ref RefFunction placeholder), t, methodArity m, [])
+        let n = length (schemeParams (methodScheme m))
+            (doms, res) = splitArrows (methodArity m) (schemeType (methodScheme m))
+        when (n == 0) $ failAt hsp "internal: a method of no class"
+        pure $ AppHead n doms res \s ->
+          ( \case
+              AtPlace r -> apps (Global r)
+              AtInstance f dict -> \as -> apps (Global (Ref RefFunction (funCore f))) (as <> map vacuous dict)
+          )
+            <$> resolution (methodAt env givens m (substScheme n s (TParam 0 [])))
       GTheorem t -> failAt sp (T.unpack (renderQualName (thmQual t)) <> " is a theorem, not a term")
       GLaw l -> failAt sp (T.unpack (renderQualName (lawQual l)) <> " is a law, not a term")
       GData d -> failAt sp (T.unpack (renderQualName (dataQual d)) <> " is a type, not a term")
       GClass c -> failAt sp (T.unpack (renderQualName (classQual c)) <> " is a class, not a term")
       GInstance i -> failAt sp (T.unpack (renderQualName (instQual i)) <> " is an instance, not a term")
+    -- A method not resolved: undetermined while its type is not known, else refused.
+    resolution :: Either Unresolved r -> TC r
+    resolution = either (\case Pending why -> undetermined sp why; Refusal why -> failAt sp why) pure
     isTerm = \case
       GFun _ -> True
       GCtor _ -> True
@@ -1072,31 +1133,47 @@ checkTerm env ctx le@(Located sp e) expected = case e of
       GCtor _ -> True
       _ -> False
     builtin = \case
-      QName [] (Ident n) | n `elem` ["S", "suc"] -> Just (Global (Ref RefBuiltin "S"), TArrow TNat TNat, 1, [])
-      QName [] (Op o) | Just core <- lookup o arithmetic -> Just (Global (Ref RefBuiltin core), TArrow TNat (TArrow TNat TNat), 2, [])
+      QName [] (Ident x) | x `elem` ["S", "suc"] -> Just (plain 0 [TNat] TNat (Global (Ref RefBuiltin "S")))
+      QName [] (Op o) | Just core <- lookup o arithmetic -> Just (plain 0 [TNat, TNat] TNat (Global (Ref RefBuiltin core)))
       _ -> Nothing
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
 
+-- | A type's first @n@ domains, and what is left of it.
+splitArrows :: Int -> Ty -> ([Ty], Ty)
+splitArrows n t = case t of
+  TArrow a b | n > 0 -> let (as, r) = splitArrows (n - 1) b in (a : as, r)
+  _ -> ([], t)
+
 -- * Propositions
 
--- | A proposition: relations between terms, connectives, bounded quantifiers.
-elabProp :: Env -> Ctx a -> Located R.Expr -> TC (Expr a)
-elabProp env ctx (Located sp e) =
+{- |
+A proposition: relations between terms, connectives, bounded quantifiers.
+The sides of an equation are checked one against the other: whichever
+determines its type without the other, the other against it, so that both
+@Nil ≡ xs@ and @xs ≡ Nil@ are at the type of @xs@.  The sides of a comparison
+are numbers.
+-}
+elabProp :: Env -> [Slot] -> Ctx a -> Located R.Expr -> TC (Expr a)
+elabProp env givens ctx (Located sp e) =
   At (Irrelevant sp) <$> case e of
-    R.EParen x -> stripLocations <$> elabProp env ctx x
+    R.EParen x -> stripLocations <$> elabProp env givens ctx x
     R.EInfix op l r
-      | Just rel <- relation (opText op) -> do
-          (l', t) <- inferTerm env ctx l
-          r' <- checkTerm env ctx r t
-          when (rel `elem` [RelLt, RelLe, RelGt, RelGe]) (unifyAt sp t TNat)
-          pure (Rel rel l' r')
-      | Just c <- connective (opText op) -> Conn c <$> elabProp env ctx l <*> elabProp env ctx r
-    R.ENot x -> Not <$> elabProp env ctx x
-    R.EArrow a b -> Arrow <$> elabProp env ctx a <*> elabProp env ctx b
+      | Just rel <- relation (opText op) ->
+          if rel `elem` [RelLt, RelLe, RelGt, RelGe]
+            then Rel rel <$> checkTerm env givens ctx l TNat <*> checkTerm env givens ctx r TNat
+            else
+              attempt (inferTerm env givens ctx l) >>= \case
+                Right (l', t) -> Rel rel l' <$> checkTerm env givens ctx r t
+                Left _ -> do
+                  (r', t) <- inferTerm env givens ctx r
+                  (\l' -> Rel rel l' r') <$> checkTerm env givens ctx l t
+      | Just c <- connective (opText op) -> Conn c <$> elabProp env givens ctx l <*> elabProp env givens ctx r
+    R.ENot x -> Not <$> elabProp env givens ctx x
+    R.EArrow a b -> Arrow <$> elabProp env givens ctx a <*> elabProp env givens ctx b
     R.EName (QName [] (Op "⊤")) -> pure Top
     R.EName (QName [] (Op "⊥")) -> pure Bottom
     R.EQuant q bs (Just (bop, bound)) body -> do
-      bound' <- checkTerm env ctx bound TNat
+      bound' <- checkTerm env givens ctx bound TNat
       let names = [unLocated n | R.Binder _ ns _ <- bs, n <- ns]
           rel = if opText bop `elem` ["≤", "<="] then AtMost else Below
       stripLocations <$> quantified q rel body ctx bound' names
@@ -1119,7 +1196,7 @@ elabProp env ctx (Located sp e) =
     -- The names bound one inside the other, each below the same bound, the body innermost.
     quantified :: Quantifier -> BoundRel -> Located R.Expr -> Ctx b -> Expr b -> [Text] -> TC (Expr b)
     quantified q rel body c bnd = \case
-      [] -> elabProp env c body
+      [] -> elabProp env givens c body
       n : ns -> do
         inner <- quantified q rel body (extendCtx n TNat c) (fmap F bnd) ns
         pure (Quant q (Hint n) (Just (rel, bnd)) Nothing (toScope inner))

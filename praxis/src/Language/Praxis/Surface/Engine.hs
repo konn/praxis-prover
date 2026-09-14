@@ -32,6 +32,7 @@ proof terms (@by IH@: @exact@, or else congruence), @assumption@ and
 module Language.Praxis.Surface.Engine (
   -- * Goals
   Goal (..),
+  GoalPremise (..),
   Hyp (..),
   renderGoal,
 
@@ -70,7 +71,7 @@ import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ty (..), firstOrder)
+import Language.Praxis.Surface.Types (Ty (..), firstOrder, mergeTy)
 
 -- * Goals
 
@@ -548,14 +549,14 @@ headOf = \case
 typedArg :: Knowledge -> Goal -> Located R.Expr -> Either EngineError (Expr Text, Ty)
 typedArg k g e0 = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) (goalVars g) e >>= \(x, t) -> (,t) <$> resolveMethods (knowEnv k) (goalDict g) x))
+  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) (goalDict g) (goalVars g) e))
 
 -- | The type parameters of a theorem which the types of the arguments given determine, by the types of its binders.
 assignment :: [Ty] -> [Ty] -> Map Int Ty
 assignment binders args = foldl (\m (b, a) -> go m b a) Map.empty (zip binders args)
   where
     go m b a = case (b, a) of
-      (TParam i [], _) -> Map.insertWith (\_ old -> old) i a m
+      (TParam i [], _) -> Map.alter (Just . maybe a (\old -> fromMaybe old (mergeTy old a))) i m
       (TData n bs, TData n' as) | n == n' -> foldl (\m' (x, y) -> go m' x y) m (zip bs as)
       _ -> m
 
@@ -841,7 +842,7 @@ calcProof k info n g sp (R.Calc first steps) = do
 term :: Knowledge -> Goal -> Located R.Expr -> Either EngineError (Expr Text)
 term k g e0 = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) ctx e >>= resolveMethods (knowEnv k) (goalDict g) . fst))
+  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (fst <$> inferTerm (knowEnv k) (goalDict g) ctx e))
   where
     ctx = [(n, (v, t)) | (n, (v, t)) <- goalVars g]
 
