@@ -499,7 +499,7 @@ indexSpecOf k fd
     info = fdInfo fd
     env = knowEnv k
     values = map fst (schemeValues (funScheme info))
-    valueVar i = mangleVariable ("#" <> (values !! i))
+    paramCore i = mangleVariable ("#" <> (values !! i))
     cores = [mangleVariable ("x" <> T.pack (show i)) | i <- [0 .. length (fdArgs fd) - 1]]
     fnsOf dn = [funCore f | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn, q <- dataIndexFns dd, Just (GFun f) <- [Map.lookup q (envGlobals env)]]
     pres0 = [(fn, a, x) | (a, TData dn _ xs@(_ : _)) <- zip [0 ..] (fdArgs fd), (fn, x) <- zip (fnsOf dn) xs]
@@ -512,10 +512,10 @@ indexSpecOf k fd
       IxParam i | i `notElem` map fst acc -> acc <> [(i, (j, CSym fn [CVar (cores !! a)]))]
       _ -> acc
     defining = [j | (_, (j, _)) <- definitions]
-    ct = ixCT (\i -> maybe (CVar (valueVar i)) snd (lookup i definitions)) . normIx
+    ct = ixCT (\i -> maybe (CVar (paramCore i)) snd (lookup i definitions)) . normIx
     pres = [(fn, a, ct x) | (j, (fn, a, x)) <- zip [0 ..] pres0, j `notElem` defining]
     posts = [(fn, ct x) | (fn, x) <- posts0]
-    kept = [valueVar i | i <- [0 .. length values - 1], i `notElem` map fst definitions]
+    kept = [paramCore i | i <- [0 .. length values - 1], i `notElem` map fst definitions]
 
 -- | An index as a core term, the value parameters by the function given.
 ixCT :: (Int -> CT) -> Ix -> CT
@@ -707,18 +707,18 @@ function's index specification, after the indices its arguments must have,
 found in turn, and the memberships of its arguments.
 -}
 indexOf :: Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> Either String (CT, Builder)
-indexOf k g eqs term = case term of
+indexOf k g eqs t0 = case t0 of
   CSym fn [t]
-    | (n, e) : _ <- [(h, b) | (h, a, b) <- eqs, a == term] -> Right (e, "exact " <> fromText n)
-    | steps@(_ : _) <- reductionsOf k term -> Right (lastTerm term steps, "calc " <> render term <> forth steps)
+    | (n, e) : _ <- [(h, b) | (h, a, b) <- eqs, a == t0] -> Right (e, "exact " <> fromText n)
+    | steps@(_ : _) <- reductionsOf k t0 -> Right (lastTerm t0 steps, "calc " <> render t0 <> forth steps)
     | CSym h args <- t
     , Just s <- Map.lookup h (knowIndexSpecs k)
     , Just post <- lookup fn (ixsPost s) -> do
-        let named = zip (ixsArgs s) args
-        (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) named
+        let byArg = zip (ixsArgs s) args
+        (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) byArg
         mems <- argMemberships k g h args
-        Right (substCT (Map.fromList named <> sigma) post, mems <> haves <> "exact " <> fromText (ixsLemma s))
-  _ -> Left ("no index is known of " <> T.unpack (runBuilder (render term)))
+        Right (substCT (Map.fromList byArg <> sigma) post, mems <> haves <> "exact " <> fromText (ixsLemma s))
+  _ -> Left ("no index is known of " <> T.unpack (runBuilder (render t0)))
 
 {- |
 The indices a lemma's arguments must have, at the arguments given by the
@@ -728,11 +728,11 @@ it, for the appeal to the lemma to find.  The value parameters found, and the
 tactic.
 -}
 premisesAt :: Knowledge -> Goal -> [(Text, CT, CT)] -> [(Text, Int, CT)] -> [Text] -> [(Text, CT)] -> Either String (Map Text CT, Builder)
-premisesAt k g eqs pre values named = foldM one (Map.empty, "") pre
+premisesAt k g eqs pre values byArg = foldM one (Map.empty, "") pre
   where
-    argMap = Map.fromList named
+    argMap = Map.fromList byArg
     one (sigma, acc) (fn, a, pat) = do
-      arg <- maybe (Left "internal: an index of no argument") (Right . snd) (listToMaybe (drop a named))
+      arg <- maybe (Left "internal: an index of no argument") (Right . snd) (listToMaybe (drop a byArg))
       let lhs = CSym fn [arg]
       (e, proof) <- indexOf k g eqs lhs
       sigma' <- maybe (Left ("the index " <> T.unpack (runBuilder (render e)) <> " of " <> T.unpack (runBuilder (render arg)) <> " is not " <> T.unpack (runBuilder (render (substCT argMap pat))))) Right (matchCT values (substCT argMap pat) e sigma)
