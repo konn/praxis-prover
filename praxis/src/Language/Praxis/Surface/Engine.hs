@@ -296,7 +296,7 @@ proveClosure k fd = case (fdResult fd, lemmaPredicate k (lemmaDictionary fd) (fd
   _ -> Right Nothing
   where
     closes = \case
-      TData _ _ -> True
+      TData _ _ _ -> True
       TParam _ [] -> True
       _ -> False
 
@@ -590,7 +590,7 @@ evidence k info g le = case spineOf le of
           typed <- traverse (typedArg k g) (take (length (thmMembered t)) args)
           let assign = assignment (thmMembered t) (map snd typed)
               membered = \case
-                TData _ _ -> True
+                TData _ _ _ -> True
                 TParam i [] -> membershipSlot i `elem` thmSlots t
                 _ -> False
           pre <- memberships k g [(arg, e, typePredicate k g ty) | ((arg, (e, ty)), bty) <- zip (zip args typed) (thmMembered t), membered bty]
@@ -639,7 +639,7 @@ evidence k info g le = case spineOf le of
 headOf :: Ty -> Maybe Text
 headOf = \case
   TNat -> Just "Nat"
-  TData dn _ -> Just dn
+  TData dn _ _ -> Just dn
   _ -> Nothing
 
 -- | An argument of an appeal, elaborated in the goal, with its type.
@@ -654,7 +654,7 @@ assignment binders args = foldl (\m (b, a) -> go m b a) Map.empty (zip binders a
   where
     go m b a = case (b, a) of
       (TParam i [], _) -> Map.alter (Just . maybe a (\old -> fromMaybe old (mergeTy old a))) i m
-      (TData n bs, TData n' as) | n == n' -> foldl (\m' (x, y) -> go m' x y) m (zip bs as)
+      (TData n bs _, TData n' as _) | n == n' -> foldl (\m' (x, y) -> go m' x y) m (zip bs as)
       _ -> m
 
 {- |
@@ -675,7 +675,7 @@ predicateOf :: Map Text (Text, [Int]) -> (Int -> Maybe Pred) -> Ty -> Maybe Pred
 predicateOf membership param = go
   where
     go = \case
-      TData dn targs -> do
+      TData dn targs _ -> do
         (p, used) <- Map.lookup dn membership
         pure (Pred p [predicateParam (fromMaybe anyPred (go =<< lookup u (zip [0 ..] targs))) | u <- used])
       TNat -> Just anyPred
@@ -866,7 +866,7 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
     -- not give them all.
     argumentsOf cl p = do
       given <- case (closureResultTy cl, p) of
-        (TData dn targs, Pred q ps)
+        (TData dn targs _, Pred q ps)
           | Just (q', used) <- Map.lookup dn (knowMembership k)
           , q' == q ->
               Just (Map.fromList [(j, parameterPredicate c) | (u, c) <- zip used ps, Just (TParam j []) <- [lookup u (zip [0 ..] targs)]])
@@ -897,7 +897,7 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
       _ -> []
     blocks rs = mconcat [" { " <> r <> " }" | r <- rs]
     typeArgs = \case
-      TData _ ts -> ts
+      TData _ ts _ -> ts
       _ -> []
     none = \case
       OMember p t -> "the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function"
@@ -910,7 +910,7 @@ siteOfType :: Knowledge -> Goal -> Ty -> Site
 siteOfType k g = \case
   TParam j [] -> SiteParam j
   TNat -> SiteAny
-  TData dn targs -> SiteData dn (map (typePredicate k g) targs)
+  TData dn targs _ -> SiteData dn (map (typePredicate k g) targs)
   _ -> SiteUnknown
 
 {- |
@@ -1106,7 +1106,7 @@ induction :: Knowledge -> TheoremInfo -> Counter -> Goal -> Span -> Text -> [Tex
 induction k info _ g sp v _ = do
   (core, ty) <- maybe (Left (EngineError sp ("not a variable in scope: " <> T.unpack v))) Right (lookup v (goalVars g))
   (dat, typeArgs) <- case ty of
-    TData dn targs -> maybe (Left (EngineError sp ("not a data type: " <> T.unpack dn))) (\d -> Right (d, targs)) (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
+    TData dn targs _ -> maybe (Left (EngineError sp ("not a data type: " <> T.unpack dn))) (\d -> Right (d, targs)) (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
     _ -> Left (EngineError sp (T.unpack v <> " is not of a data type"))
   let self = renderQualName (dataQual dat)
   (isCore, used) <- maybe (Left (EngineError sp "the data type has no membership predicate")) Right (Map.lookup self (knowMembership k))
@@ -1124,7 +1124,7 @@ induction k info _ g sp v _ = do
       caseGoal c =
         let fields = [(core <> "_" <> T.pack (show j), substTy typeArgs fty) | (j, fty) <- zip [0 :: Int ..] (ctorFields c)]
             fieldVar j = fst (fields !! j)
-            recursive = [fieldVar j | (j, TData dn _) <- zip [0 ..] (ctorFields c), dn == self]
+            recursive = [fieldVar j | (j, TData dn _ _) <- zip [0 ..] (ctorFields c), dn == self]
             members = [HMember (fieldPred fp) (fieldVar j) | (j, fp) <- Map.findWithDefault [] (ctorCore c) (knowMembers k)]
             ihs = [HProp (at (Var fv)) | fv <- recursive]
             hyps = members <> ihs <> map snd kept
@@ -1160,7 +1160,7 @@ substTy :: [Ty] -> Ty -> Ty
 substTy args = \case
   TParam i [] | i < length args -> args !! i
   TParam i ts -> TParam i (map (substTy args) ts)
-  TData n ts -> TData n (map (substTy args) ts)
+  TData n ts xs -> TData n (map (substTy args) ts) xs
   TArrow a b -> TArrow (substTy args a) (substTy args b)
   t -> t
 
@@ -1223,7 +1223,7 @@ mkScript k appeal dat isAt fieldPred t memberHyp m motive reverted = do
       b : bs -> "DisjL on " <> h <> " as " <> h <> "a " <> h <> "b { " <> b (h <> "a") <> " } { " <> splitDisj (h <> "b") bs <> " }"
     branch i c = do
       let mems = membersOf c
-          selfFields = [j | (j, TData dn _) <- zip [0 ..] (ctorFields c), dn == renderQualName (dataQual dat)]
+          selfFields = [j | (j, TData dn _ _) <- zip [0 ..] (ctorFields c), dn == renderQualName (dataQual dat)]
           applied = ctorApplied c
       codeCase <- motiveCode applied
       codeM <- motiveCode m'
@@ -1355,5 +1355,5 @@ byClauses k info g td pcs = do
       PCon (Ref _ r) _ -> r == ctorCore ctor
       _ -> False
     dataCtorsOf binder = case lookup binder (tdBinders td) of
-      Just (TData dn _) -> maybe [] dataCtors (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
+      Just (TData dn _ _) -> maybe [] dataCtors (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
       _ -> []

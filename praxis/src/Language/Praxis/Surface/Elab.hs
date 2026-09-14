@@ -259,7 +259,7 @@ elabData fx env d = do
   where
     applications = \case
       TParam i ts -> (i, ts) : concatMap applications ts
-      TData _ ts -> concatMap applications ts
+      TData _ ts _ -> concatMap applications ts
       TArrow a b -> applications a <> applications b
       _ -> []
     kindFrom = \case
@@ -289,7 +289,7 @@ elabClass fx env cd = do
     let (args, result) = arrows t
     unless (all firstOrder (result : args)) $ Left (ElabError msp "a method of functions: its arguments and its result are values, which are first-order")
     unless (0 `elem` tyParams t) $ Left (ElabError msp ("the method does not mention the class's parameter " <> T.unpack a))
-    pure (m, Scheme [(p, KType) | p <- params] t, length args)
+    pure (m, Scheme [(p, KType) | p <- params] [] t, length args)
   let (env1, info) = addClass env (Ident (unLocated (R.className cd))) supers methods
       slots = [Slot (methodQual m) 0 (methodArity m) | c <- classClosure env1 info, m <- classMethods c]
   -- A law: a statement over values of the parameter and of types over it, its methods the places of the class's dictionary.
@@ -334,7 +334,7 @@ elabInstance fx env sp idl = do
   headTy <- elabType env vars ty0
   headName <- case headTy of
     TNat -> pure "Nat"
-    TData dn args | args == [TParam i [] | i <- [0 .. length vars - 1]] -> pure dn
+    TData dn args _ | args == [TParam i [] | i <- [0 .. length vars - 1]] -> pure dn
     _ -> Left (ElabError (location ty0) "an instance is for a data type applied to distinct type variables, or for Nat")
   given <- constraintClasses env vars (R.instanceContext idl)
   full <- dictionaryOf env vars (R.instanceContext idl)
@@ -351,7 +351,7 @@ elabInstance fx env sp idl = do
     Just n | n `elem` map methodName (classMethods cls) <> map (last . lawQual) (classLaws cls) -> pure ()
     _ -> Left (ElabError (location (R.clauseLhs c)) ("a clause for no method or law of " <> T.unpack className'))
   let atType m = case methodScheme m of
-        Scheme mparams mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) (atInstance headTy (length vars) mty)
+        Scheme mparams mvals mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) mvals (atInstance headTy (length vars) mty)
       declare slotsOf (e, fs) m = let (e', f) = addInstanceFunction e iq (methodName m) (atType m) (methodArity m) (slotsOf m) in (e', fs <> [(m, f)])
       register e fs laws = addInstance e (InstanceInfo iq (classQual cls) headName (Map.fromList [(methodQual m, f) | (m, f) <- fs]) laws)
   -- Under a context, every method is elaborated over the whole dictionary
@@ -429,7 +429,7 @@ atInstance headTy n = go
     go = \case
       TParam 0 _ -> headTy
       TParam i ts -> TParam (n + i - 1) (map go ts)
-      TData d ts -> TData d (map go ts)
+      TData d ts xs -> TData d (map go ts) xs
       TArrow a b -> TArrow (go a) (go b)
       t -> t
 
@@ -525,7 +525,7 @@ methodDatabase env givens = Database headOfType clauses [] none deep
   where
     headOfType (_, t) = case t of
       TNat -> HeadOf "Nat"
-      TData dn _ -> HeadOf dn
+      TData dn _ _ -> HeadOf dn
       TParam _ _ -> HeadParam
       THole -> HeadHole
       TArrow _ _ -> HeadArrow
@@ -545,10 +545,10 @@ methodDatabase env givens = Database headOfType clauses [] none deep
     none (m, t) = Refusal ("no instance of " <> classOf m <> " for " <> shortTy t <> ", where " <> nameOf m <> " is used")
     deep (m, _) = Refusal ("the instances giving " <> nameOf m <> " nest deeper than " <> show methodDepth)
     typeArguments = \case
-      TData _ ts -> ts
+      TData _ ts _ -> ts
       _ -> []
     shortTy = \case
-      TData dn _ -> T.unpack (last (T.splitOn "." dn))
+      TData dn _ _ -> T.unpack (last (T.splitOn "." dn))
       t -> renderTy [] t
     nameOf m = T.unpack (segmentText (last (methodQual m)))
     classOf m = T.unpack (segmentText (last (methodClass m)))
@@ -578,7 +578,7 @@ elabType env params le@(Located sp e) = case e of
           | n `elem` ["Nat", "nat"] && null args -> pure TNat
         _ -> case [d | GData d <- resolve env q] of
           dd : _
-            | length args == length (dataParams dd) -> pure (TData (renderQualName (dataQual dd)) args')
+            | length args == length (dataParams dd) -> pure (TData (renderQualName (dataQual dd)) args' [])
             | otherwise -> Left (ElabError hsp (T.unpack (qnameText q) <> " takes " <> show (length (dataParams dd)) <> " type arguments"))
           [] -> Left (ElabError hsp ("not a type: " <> T.unpack (qnameText q)))
     _ -> Left (ElabError sp "a type")
@@ -634,7 +634,7 @@ elabDecl fx env sp name ty0 clauses = do
       fty <- elabType env paramNames body
       full <- dictionaryOf env paramNames constraints
       let (args, result) = arrows fty
-          scheme = Scheme params fty
+          scheme = Scheme params [] fty
           (env1, info1) = addFunction env name scheme (length args) full
       unless (all firstOrder (result : args)) $ Left (ElabError (location body) "a function of functions: its arguments and its result are values, which are first-order")
       fcs1 <- forM clauses \c -> runTC (elabFunClause fx env1 info1 args result c)
@@ -737,7 +737,7 @@ atParam :: Int -> Ty -> Ty
 atParam i = \case
   TParam 0 ts -> TParam i (map (atParam i) ts)
   TParam _ _ -> TNat
-  TData n ts -> TData n (map (atParam i) ts)
+  TData n ts xs -> TData n (map (atParam i) ts) xs
   TArrow a b -> TArrow (atParam i a) (atParam i b)
   t -> t
 
@@ -803,7 +803,7 @@ valueVariables :: Ty -> [Int]
 valueVariables = \case
   TParam i [] -> [i]
   TParam _ ts -> concatMap valueVariables ts
-  TData _ ts -> concatMap valueVariables ts
+  TData _ ts _ -> concatMap valueVariables ts
   TArrow a b -> valueVariables a <> valueVariables b
   _ -> []
 
@@ -971,9 +971,9 @@ elabPattern env expected le@(Located sp e) = case e of
       -- The type expected is known, an argument's or a field's: its arguments are the constructor's type's.
       let dn = renderQualName (dataQual dat)
           holes = map (const THole) (dataParams dat)
-      typeArgs <- case mergeTy expected (TData dn holes) of
-        Just (TData _ targs) -> pure targs
-        _ -> failAt csp (mismatch expected (TData dn holes))
+      typeArgs <- case mergeTy expected (TData dn holes []) of
+        Just (TData _ targs _) -> pure targs
+        _ -> failAt csp (mismatch expected (TData dn holes []))
       let fields = map (substParams typeArgs) (ctorFields ci)
       unless (length args == length fields) $
         failAt csp (T.unpack (renderQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields")
@@ -982,7 +982,7 @@ elabPattern env expected le@(Located sp e) = case e of
     -- A constructor of the expected type by this name, else the one constructor the name resolves to.
     ctorFor csp q = do
       let byType = case (expected, q) of
-            (TData dn _, QName [] s) -> [c | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn, c <- dataCtors d, last (ctorQual c) == s]
+            (TData dn _ _, QName [] s) -> [c | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn, c <- dataCtors d, last (ctorQual c) == s]
             _ -> []
           byName = nubCtors ([c | GCtor c <- resolve env q] <> unqualifiedCtors q)
       case (byType, byName) of
@@ -1002,7 +1002,7 @@ substParams :: [Ty] -> Ty -> Ty
 substParams args = \case
   TParam i [] | i < length args -> args !! i
   TParam i ts -> TParam i (map (substParams args) ts)
-  TData n ts -> TData n (map (substParams args) ts)
+  TData n ts xs -> TData n (map (substParams args) ts) xs
   TArrow a b -> TArrow (substParams args a) (substParams args b)
   t -> t
 
@@ -1040,7 +1040,7 @@ domains, its result, and how it is applied at the types found for its
 parameters.
 -}
 data AppHead a = AppHead
-  { ahParams :: !Int
+  { ahParams :: !(Int, Int)
   , ahDomains :: ![Ty]
   , ahResult :: !Ty
   , ahApply :: Assignment -> TC ([Expr a] -> Expr a)
@@ -1083,7 +1083,7 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
         extra : _ -> failAt (location extra) "applied to too many arguments"
         [] -> pure ()
       -- The parameters the type expected fixes, then those the arguments do.
-      s0 <- maybe (failAt sp (mismatch expected (substScheme n IM.empty (ahResult h)))) pure (matchTy n (ahResult h) expected IM.empty)
+      s0 <- maybe (failAt sp (mismatch expected (substScheme n emptyAssignment (ahResult h)))) pure (matchTy n (ahResult h) expected emptyAssignment)
       (s1, done, pending) <- foldM (argument n) (s0, IM.empty, []) (zip3 [0 :: Int ..] (ahDomains h) args)
       (s2, done') <- settle n s1 done pending
       apply <- ahApply h s2
@@ -1115,10 +1115,10 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
     found n asp d t s = maybe (failAt asp (mismatch (substScheme n s d) t)) pure (matchTy n d t s)
     -- The head of an application: a variable, a builtin, a function, a constructor or a method.
     headOf (Located hsp h) = case h of
-      R.EName (QName [] (Ident x)) | Just (v, t) <- lookup x ctx -> pure (plain 0 [] t (Var v))
+      R.EName (QName [] (Ident x)) | Just (v, t) <- lookup x ctx -> pure (plain (0, 0) [] t (Var v))
       R.EName q -> resolveHead hsp q
-      R.ENat k -> pure (plain 0 [] TNat (Nat k))
-      R.EParen x -> (\(e', t) -> plain 0 [] t e') <$> elabTerm env givens ctx x THole
+      R.ENat k -> pure (plain (0, 0) [] TNat (Nat k))
+      R.EParen x -> (\(e', t) -> plain (0, 0) [] t e') <$> elabTerm env givens ctx x THole
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
     plain n doms res hd = AppHead n doms res (const (pure (apps hd)))
     resolveHead hsp q = case builtin q of
@@ -1129,7 +1129,7 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
               (QName [] s, []) -> map GCtor (constructorsNamed env s)
               _ -> terms
             byType = case expected of
-              TData dn _ -> [g | g@(GCtor c) <- candidates, renderQualName (ctorData c) == dn]
+              TData dn _ _ -> [g | g@(GCtor c) <- candidates, renderQualName (ctorData c) == dn]
               _ -> []
         case (byType, candidates) of
           (g : _, _) -> typed hsp g
@@ -1140,7 +1140,7 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
             | otherwise -> typed hsp g
     typed hsp = \case
       GFun f -> do
-        let n = length (schemeParams (funScheme f))
+        let n = (length (schemeParams (funScheme f)), length (schemeValues (funScheme f)))
             (doms, res) = splitArrows (funArity f) (schemeType (funScheme f))
             fn = Global (Ref RefFunction (funCore f))
         pure $ AppHead n doms res \s ->
@@ -1148,18 +1148,18 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
             then pure (apps fn)
             else do
               -- Its dictionary at the types its parameters are at, after its arguments.
-              dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. n - 1]])
+              dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]])
               pure \as -> apps fn (as <> map vacuous dict)
       GCtor c -> case dataOfCtor env c of
         Just d ->
           let n = length (dataParams d)
-           in pure (plain n (ctorFields c) (TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. n - 1]]) (Global (Ref RefConstructor (ctorCore c))))
+           in pure (plain (n, 0) (ctorFields c) (TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. n - 1]] []) (Global (Ref RefConstructor (ctorCore c))))
         Nothing -> failAt sp "internal: a constructor of no data type"
       -- A method: the function of the instance for the type its class is at, or a place of the dictionary given.
       GMethod m -> do
-        let n = length (schemeParams (methodScheme m))
+        let n = (length (schemeParams (methodScheme m)), 0)
             (doms, res) = splitArrows (methodArity m) (schemeType (methodScheme m))
-        when (n == 0) $ failAt hsp "internal: a method of no class"
+        when (fst n == 0) $ failAt hsp "internal: a method of no class"
         pure $ AppHead n doms res \s ->
           ( \case
               AtPlace r -> apps (Global r)
@@ -1183,8 +1183,8 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
       GCtor _ -> True
       _ -> False
     builtin = \case
-      QName [] (Ident x) | x `elem` ["S", "suc"] -> Just (plain 0 [TNat] TNat (Global (Ref RefBuiltin "S")))
-      QName [] (Op o) | Just core <- lookup o arithmetic -> Just (plain 0 [TNat, TNat] TNat (Global (Ref RefBuiltin core)))
+      QName [] (Ident x) | x `elem` ["S", "suc"] -> Just (plain (0, 0) [TNat] TNat (Global (Ref RefBuiltin "S")))
+      QName [] (Op o) | Just core <- lookup o arithmetic -> Just (plain (0, 0) [TNat, TNat] TNat (Global (Ref RefBuiltin core)))
       _ -> Nothing
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
 

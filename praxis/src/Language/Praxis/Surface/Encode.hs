@@ -99,13 +99,13 @@ fieldPreds known d own c = catMaybes (zipWith one [0 ..] (ctorFields c))
     uniform = [TParam i [] | i <- [0 .. length (dataParams d) - 1]]
     one j = \case
       TParam i [] | i `elem` fo -> Just (j, FieldParam i)
-      TData n targs
+      TData n targs _
         | n == self, targs == uniform -> Just (j, FieldData (dataIs d) (map ParamOf own))
         | n /= self, Just (p, used) <- known n -> Just (j, FieldData p [param (targs !! u) | u <- used, u < length targs])
       _ -> Nothing
     param = \case
       TParam i [] | i `elem` fo -> ParamOf i
-      TData n targs | n /= self, Just (p, used) <- known n -> ParamData p [param (targs !! u) | u <- used, u < length targs]
+      TData n targs _ | n /= self, Just (p, used) <- known n -> ParamData p [param (targs !! u) | u <- used, u < length targs]
       _ -> ParamAny
 
 -- | The parameters a data type's predicate takes: those its fields' memberships use, in order.

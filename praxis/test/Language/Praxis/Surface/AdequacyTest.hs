@@ -172,7 +172,7 @@ genValue datas = go
       TParam _ _ -> go TNat
       THole -> go TNat
       TArrow _ _ -> error "a function type: values are first-order"
-      TData n args -> case Map.lookup n datas of
+      TData n args _ -> case Map.lookup n datas of
         Nothing -> error ("no data type " <> T.unpack n)
         Just d -> sized \s -> do
           let ctors = dataCtors d
@@ -180,7 +180,7 @@ genValue datas = go
           c <- elements (if s <= 1 && not (null leaves) then leaves else ctors)
           VCon (ctorCore c) <$> scale (`div` 2) (traverse (go . substParams args) (ctorFields c))
     mentions n = \case
-      TData m ts -> m == n || any (mentions n) ts
+      TData m ts _ -> m == n || any (mentions n) ts
       TParam _ ts -> any (mentions n) ts
       TArrow a b -> mentions n a || mentions n b
       _ -> False
@@ -190,7 +190,7 @@ substParams :: [Ty] -> Ty -> Ty
 substParams args = \case
   TParam i [] | i < length args -> args !! i
   TParam i ts -> TParam i (map (substParams args) ts)
-  TData n ts -> TData n (map (substParams args) ts)
+  TData n ts xs -> TData n (map (substParams args) ts) xs
   TArrow a b -> TArrow (substParams args a) (substParams args b)
   t -> t
 
@@ -416,7 +416,7 @@ member ld d = \case
     self = renderQualName (dataQual d)
     earlier = takeWhile (/= self) (ldOrder ld)
     ok t f = case t of
-      TData n _
+      TData n _ _
         | n == self -> member ld d f
         | n `elem` earlier, Just d' <- Map.lookup n (ldDatas ld) -> member ld d' f
       _ -> True
