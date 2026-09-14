@@ -361,7 +361,12 @@ is a precondition, which its code does not take. A clause names the proof,
 application gives a proof of the precondition there, a proof term as a
 theorem's clause has; it is checked as a theorem of its own, an obligation,
 over the clause's variables and under the clause's own preconditions, by the
-names the clause gives them. `absurd p`, `p` a proof of `⊥`, is a value of any
+names the clause gives them. The function's lemmas, the membership of its
+results and their indices, are under its preconditions; where a lemma is
+appealed to at a call, the call's precondition holds by a hypothesis stating
+it, or by the call's obligation, the indices at hand rewritten. An obligation
+is of the clause's variables as codes: no membership is among its
+hypotheses. `absurd p`, `p` a proof of `⊥`, is a value of any
 type, for a case the preconditions exclude; a hypothesis whose equation
 clashes once unfolded, as `0 < 0` does, is such a proof.
 

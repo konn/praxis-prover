@@ -39,6 +39,7 @@ module Language.Praxis.Surface.Engine (
   -- * Statements
   statementGoal,
   theoremStatement,
+  asEquation,
 
   -- * Proving
   Unfolding (..),
@@ -179,6 +180,8 @@ data Closure = Closure
   -- ^ the indices its arguments must have, under which it holds: an index function, the argument's position, and the index, over its lemma's variables
   , closureValues :: ![Text]
   -- ^ the variables of those indices its arguments do not give: its value parameters
+  , closureProps :: ![(CT, CT)]
+  -- ^ its preconditions, the propositions its proofs are of, as the equations the core states them as, over its lemma's variables
   }
 
 -- | What the engine knows of the module so far.
@@ -201,6 +204,11 @@ data Knowledge = Knowledge
   -}
   , knowIndexSpecs :: !(Map Text IndexSpec)
   -- ^ what each function over indexed types says of indices, by its core name
+  , knowObligations :: ![(Text, [Text], CT, CT)]
+  {- ^ the obligations of the function whose lemmas are being proved,
+  certified: each lemma's core name, its variables, and the equation it
+  concludes, by which the precondition of a call in its clauses holds
+  -}
   }
 
 data EngineError = EngineError !Span !String
@@ -339,9 +347,10 @@ proveClosure k fd = case (fdResult fd, lemmaPredicate k (lemmaDictionary fd) (fd
         let spec = indexSpecOf k fd
             pre = maybe [] ixsPre spec
             values = maybe [] ixsValues spec
-            -- Under the indices of its arguments, a case they clash in refuted.
-            closure = (closureSpec resultIs ps) {specPre = preExprs pre, specCase = \kk gg -> either (const (membershipCase kk gg)) Right (refute kk gg)}
-         in either (const Nothing) (\p -> Just (Closure (spLemma p) (fdArgs fd) (fdResult fd) (spPremises p) pre values, spDecls p)) <$> proveSpec k fd closure
+            props = maybe [] ixsProps spec
+            -- Under the indices of its arguments and its preconditions, a case they clash in refuted.
+            closure = (closureSpec resultIs ps) {specPre = \cs -> preExprs pre cs <> propExprs props, specCase = \kk gg -> either (const (membershipCase kk gg)) Right (refute kk gg)}
+         in either (const Nothing) (\p -> Just (Closure (spLemma p) (fdArgs fd) (fdResult fd) (spPremises p) pre values props, spDecls p)) <$> proveSpec k fd closure
   _ -> Right Nothing
   where
     closes = \case
@@ -495,13 +504,15 @@ data IndexSpec = IndexSpec
   , ixsValues :: ![Text]
   , ixsPre :: ![(Text, Int, CT)]
   , ixsPost :: ![(Text, CT)]
+  , ixsProps :: ![(CT, CT)]
+  -- ^ its preconditions, the propositions its proofs are of, as the equations the core states them as
   }
 
 -- | What a function says of indices, when the types of its signature have any.
 indexSpecOf :: Knowledge -> FunDef -> Maybe IndexSpec
 indexSpecOf k fd
-  | null pres0 && null posts0 = Nothing
-  | otherwise = Just (IndexSpec (functionLemma info "#index") cores kept pres posts)
+  | null pres0 && null posts0 && null props = Nothing
+  | otherwise = Just (IndexSpec (functionLemma info "#index") cores kept pres posts props)
   where
     info = fdInfo fd
     env = knowEnv k
@@ -520,10 +531,19 @@ indexSpecOf k fd
       IxParam i | i `notElem` map fst acc -> acc <> [(i, (j, CSym fn [CVar (cores !! a)]))]
       _ -> acc
     defining = [j | (_, (j, _)) <- definitions]
-    ct = ixCT (\i -> maybe (CVar (paramCore i)) snd (lookup i definitions)) . normIx
+    valueTerm i = maybe (CVar (paramCore i)) snd (lookup i definitions)
+    ct = ixCT valueTerm . normIx
     pres = [(fn, a, ct x) | (j, (fn, a, x)) <- zip [0 ..] pres0, j `notElem` defining]
     posts = [(fn, ct x) | (fn, x) <- posts0]
     kept = [paramCore i | i <- [0 .. length values - 1], i `notElem` map fst definitions]
+    -- Its preconditions over the variables of its lemmas, as the equations the core states them as.
+    props =
+      [ (l, r)
+      | (_, prop) <- funProofs info
+      , Rel RelEq a b <- [stripLocations (asEquation (instantiate (fromCT . valueTerm) (fmap absurd prop)))]
+      , Right l <- [termCT CVar a]
+      , Right r <- [termCT CVar b]
+      ]
 
 -- | An index as a core term, the value parameters by the function given.
 ixCT :: (Int -> CT) -> Ix -> CT
@@ -538,7 +558,49 @@ ixCT param = go
       IxCon c xs -> CSym c (map go xs)
       IxFun f xs -> CSym f (map go xs)
 
--- | The indices a function's arguments must have, as the propositions of its lemmas' hypotheses, over its arguments' core variables.
+{- | The indices a function's arguments must have, as the propositions of its lemmas' hypotheses, over its arguments' core variables.
+| Preconditions as hypotheses: the equations the core states them as.
+-}
+propExprs :: [(CT, CT)] -> [Expr Text]
+propExprs props = [Rel RelEq (fromCT l) (fromCT r) | (l, r) <- props]
+
+{- |
+The preconditions of a lemma at what the substitution gives its variables:
+each stated by a hypothesis, or else concluded by an obligation of the
+function being proved, which a proof its clauses give is; stated as a
+hypothesis, for the appeal to the lemma to find.  Left, with the one no
+hypothesis states and no obligation concludes.
+-}
+preconditionsAt :: Knowledge -> Goal -> Map Text CT -> [(CT, CT)] -> Either String Builder
+preconditionsAt k g sigma props = fmap mconcat . forM props $ \(l0, r0) -> do
+  let l = substCT sigma l0
+      r = substCT sigma r0
+      concludes t (_, vs, ol, or') = isJust (matchCT vs ol t Map.empty >>= matchCT vs or' r)
+      -- The left side rewritten by the equations of indices at hand, as the obligation
+      -- states it at them: each step, with the hypothesis doing it.
+      rewrites = rewriting l (goalEquations g)
+      rewriting t = \case
+        [] -> []
+        (h, a@(CSym _ (_ : _)), b) : rest
+          | occurs a t ->
+              let t' = replaceCT (\u -> if u == a then Just b else Nothing) t
+               in (t', h) : rewriting t' rest
+        _ : rest -> rewriting t rest
+      occurs a t =
+        a == t || case t of
+          CSym _ xs -> any (occurs a) xs
+          _ -> False
+      rewritten = case reverse rewrites of
+        (t, _) : _ -> t
+        [] -> l
+  if hasEquation g l r
+    then Right ""
+    else case (find (concludes l) (knowObligations k), find (concludes rewritten) (knowObligations k)) of
+      (Just (o, _, _, _), _) -> Right ("have " <> equationText l r <> " { exact " <> fromText o <> " }; ")
+      (_, Just (o, _, _, _)) ->
+        Right ("have " <> equationText l r <> " { calc " <> render l <> mconcat [" = " <> render t <> " by cong " <> fromText h | (t, h) <- rewrites] <> " = " <> render r <> " by exact " <> fromText o <> " }; ")
+      _ -> Left ("the precondition " <> T.unpack (runBuilder (equationText l r)) <> " is not established here: no hypothesis states it, and no proof the clauses give concludes it")
+
 preExprs :: [(Text, Int, CT)] -> [Text] -> [Expr Text]
 preExprs pre cores = [Rel RelEq (fromCT (CSym fn [CVar (cores !! a)])) (fromCT x) | (fn, a, x) <- pre, a < length cores]
 
@@ -552,7 +614,7 @@ indexSpec :: IndexSpec -> Spec
 indexSpec s =
   Spec
     { specName = "#index"
-    , specPre = preExprs (ixsPre s)
+    , specPre = \cs -> preExprs (ixsPre s) cs <> propExprs (ixsProps s)
     , specPost = \_ applied -> conjunction [Rel RelEq (App (Global (Ref RefFunction fn)) applied) (fromCT x) | (fn, x) <- ixsPost s]
     , specPremises = closurePremises
     , specCase = indexCase
@@ -725,8 +787,9 @@ indexOf k g eqs t0 = case t0 of
     , Just post <- lookup fn (ixsPost s) -> do
         let byArg = zip (ixsArgs s) args
         (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) byArg
+        props <- preconditionsAt k g (Map.fromList byArg <> sigma) (ixsProps s)
         mems <- argMemberships k g h args
-        Right (substCT (Map.fromList byArg <> sigma) post, mems <> haves <> "exact " <> fromText (ixsLemma s))
+        Right (substCT (Map.fromList byArg <> sigma) post, mems <> haves <> props <> "exact " <> fromText (ixsLemma s))
   _ -> Left ("no index is known of " <> T.unpack (runBuilder (render t0)))
 
 {- |
@@ -1270,7 +1333,9 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
              in Just case (closureAppeal cl given, premisesAt k g (goalEquations g) (closurePre cl) (closureValues cl) (zip names args)) of
                   (Left why, _) -> Refuse why
                   (_, Left why) -> Refuse why
-                  (Right (subs, appeal), Right (_, haves)) -> afterMemberships [(a, q) | (a, Just q) <- zip args argPs] subs (\rs -> haves <> appeal rs)
+                  (Right (subs, appeal), Right (sigma, haves)) -> case preconditionsAt k g (Map.fromList (zip names args) <> sigma) (closureProps cl) of
+                    Left why -> Refuse why
+                    Right props -> afterMemberships [(a, q) | (a, Just q) <- zip args argPs] subs (\rs -> haves <> props <> appeal rs)
       _ -> Nothing
     lawPremise = \case
       OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (renderQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))

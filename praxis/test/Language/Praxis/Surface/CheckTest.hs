@@ -133,6 +133,8 @@ checkTests =
         let obligationsOf f = [n | n <- checkedTheorems c, ("Gadt." <> f <> ".#obligation") `T.isPrefixOf` n]
         assertBool "the obligation of head-of-two's call" (not (null (obligationsOf "head-of-two")))
         assertBool "the obligation of head-safe's absurd" (not (null (obligationsOf "head-safe")))
+        -- Under its precondition, a function taking a proof has its closure; a call's precondition holds by the obligation.
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (any (("rule u_Gadt_s" <> f <> "_s_x23_closed ") `T.isPrefixOf`) (checkedCore c))) ["head_dsafe", "head_dof_dtwo"]
         -- The membership of its results, under the indices of its argument: a rule over its type parameter's predicate.
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (any (("rule u_Gadt_s" <> f <> "_s_x23_closed ") `T.isPrefixOf`) (checkedCore c))) ["tail", "tail_dtwo", "head", "first"]
     , testCase "an index which cannot be, a clause missing or never matching, and a kind which disagrees, are refused" $ do

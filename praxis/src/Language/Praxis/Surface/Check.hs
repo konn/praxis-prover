@@ -50,15 +50,17 @@ import Language.Praxis.PRA.Tactic qualified as PRA
 import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
+import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData)
-import Language.Praxis.Surface.Engine (Closure, EngineError (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem)
+import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
 import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), renderQualName)
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
+import Language.Praxis.Surface.Syntax (Expr (..), RelOp (..), stripLocations)
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
 
 -- * Reports
@@ -157,10 +159,12 @@ data Run = Run
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
   , runIndexSpecs :: !(Map Text IndexSpec)
+  , runObligations :: ![(Text, [Text], CT, CT)]
+  -- ^ the certified obligations of the function whose lemmas are being proved
   }
 
 runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Core -> [Unfolding] -> [Item] -> Checked
-runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 [] [] [] Map.empty unfoldings0 Map.empty Map.empty) items)
+runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 [] [] [] Map.empty unfoldings0 Map.empty Map.empty []) items)
   where
     finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r))
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}
@@ -190,8 +194,20 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 
                   let r2 = certifyAll (fdSpan fd) (r1 {runCore = core'}) lemmas
                       certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
                    in -- Then what the proofs its clauses give must prove.
-                      foldl proveAndCertify (specify fd (indexed fd (closure fd (r2 {runUnfoldings = runUnfoldings r2 <> certified})))) (fdObligations fd)
+                      let r3 = foldl proveAndCertify (r2 {runUnfoldings = runUnfoldings r2 <> certified}) (fdObligations fd)
+                       in (specify fd (indexed fd (closure fd (r3 {runObligations = obligationFacts r3 fd})))) {runObligations = []}
       ITheorem td -> proveAndCertify r td
+
+    -- The obligations of a function certified: each lemma's name, its variables, and the equation it concludes.
+    obligationFacts r fd =
+      [ (thmCore (tdInfo td), thmBinders (tdInfo td), l, rhs)
+      | td <- fdObligations fd
+      , Map.member (T.unpack (thmCore (tdInfo td))) (coreLemmas (runCore r))
+      , Right gl <- [statementGoal (coreMembership (runCore r)) td]
+      , Rel RelEq a b <- [stripLocations (asEquation (goalConcl gl))]
+      , Right l <- [termCT CVar a]
+      , Right rhs <- [termCT CVar b]
+      ]
 
     -- A theorem, or the obligation a proof in a function's clause is: proved, and certified.
     proveAndCertify r td =
@@ -200,7 +216,7 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 
             Left (EngineError sp msg) -> report sp SevError msg r
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
-    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r)
+    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r)
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of
