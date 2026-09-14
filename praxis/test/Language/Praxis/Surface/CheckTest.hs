@@ -145,6 +145,8 @@ checkTests =
         mapM_
           (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls))
           [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64]), ("bad-proof", [71, 72]), ("bad-implicit", [78, 79]), ("extra-implicit", [82, 83]), ("kind-implicit", [86, 87])]
+        -- A clash names the signature's value, not its position.
+        assertBool "the clash of never names n" (any ("S n is a successor, and 0 is not" `T.isInfixOf`) [m | Report _ SevError m <- checkedReports c])
         assertBool "fine is certified" ("GadtBad.fine.#index" `elem` checkedTheorems c)
         assertBool "nothing refused is certified" (not (any (`elem` checkedTheorems c) ["GadtBad.impossible.#index", "GadtBad.tail-zero.#index", "GadtBad.nil-any.#index", "GadtBad.length-any"]))
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do

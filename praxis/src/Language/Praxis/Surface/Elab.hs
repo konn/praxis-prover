@@ -1110,6 +1110,12 @@ rawSpine = go []
       Located _ (R.EParen x) | null acc -> go acc x
       h -> (h, acc)
 
+-- | The names of the enclosing signature's value parameters, by their positions: how its messages render indices.
+valueNamesOf :: Env -> [Text]
+valueNamesOf env =
+  let vs = tsValues (envScope env)
+   in [fromMaybe ("#" <> T.pack (show i)) (listToMaybe [v | (v, IxParam j) <- vs, j == i]) | i <- [0 .. length vs - 1]]
+
 -- | An application as its head and its arguments in order, those in braces, implicit, on the left.
 rawArgs :: Located R.Expr -> (Located R.Expr, [Either (Located R.Expr) (Located R.Expr)])
 rawArgs = go []
@@ -1537,7 +1543,7 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     foldM
       ( \s (i, (p, a)) -> case patternIx p of
           Nothing -> pure s
-          Just x -> case unifyIx flexibleKey (IxParam i) x s of
+          Just x -> case unifyIxNamed (valueNamesOf env) flexibleKey (IxParam i) x s of
             Unified s' -> pure s'
             Clash why -> failAt (location a) ("this pattern can never match here: " <> why)
             Stuck why -> failAt (location a) ("cannot match on this value: " <> why)
@@ -1685,7 +1691,7 @@ elabPattern env s expected le@(Located sp e) = case e of
           s1 <-
             if null expectedIdx
               then pure s
-              else case unifyAll flexibleKey (zip expectedIdx (map inst (gcResult g))) s of
+              else case unifyAllNamed (valueNamesOf env) flexibleKey (zip expectedIdx (map inst (gcResult g))) s of
                 Unified s' -> pure s'
                 Clash why -> failAt csp ("this pattern can never match here: " <> why)
                 Stuck why -> failAt csp ("cannot match on this index: " <> why)

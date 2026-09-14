@@ -30,7 +30,9 @@ module Language.Praxis.Surface.Index (
   -- * Unification
   Unified (..),
   unifyIx,
+  unifyIxNamed,
   unifyAll,
+  unifyAllNamed,
 
   -- * Terms
   ixToExpr,
@@ -113,31 +115,36 @@ predicate says may be solved.  A variable against a term mentioning it under
 constructor forms clashes, as @n@ against @S n@ does.
 -}
 unifyIx :: (Key -> Bool) -> Ix -> Ix -> Subst -> Unified
-unifyIx flexible a0 b0 s = go (applyIx s a0) (applyIx s b0)
+unifyIx = unifyIxNamed []
+
+-- | 'unifyIx', what it says of a clash naming the value parameters by the names given.
+unifyIxNamed :: [Text] -> (Key -> Bool) -> Ix -> Ix -> Subst -> Unified
+unifyIxNamed names flexible a0 b0 s = go (applyIx s a0) (applyIx s b0)
   where
+    render = renderIx names
     go a b
       | a == b = Unified s
       | Just k <- keyOf a, flexible k = bind k b
       | Just k <- keyOf b, flexible k = bind k a
       | otherwise = case (a, b) of
-          (IxSucc x, IxSucc y) -> unifyIx flexible x y s
+          (IxSucc x, IxSucc y) -> unifyIxNamed names flexible x y s
           (IxSucc x, IxNat n)
-            | n > 0 -> unifyIx flexible x (IxNat (n - 1)) s
-            | otherwise -> Clash (renderIx [] a <> " is a successor, and 0 is not")
+            | n > 0 -> unifyIxNamed names flexible x (IxNat (n - 1)) s
+            | otherwise -> Clash (render a <> " is a successor, and 0 is not")
           (IxNat n, IxSucc y)
-            | n > 0 -> unifyIx flexible (IxNat (n - 1)) y s
-            | otherwise -> Clash ("0 is not a successor, and " <> renderIx [] b <> " is")
+            | n > 0 -> unifyIxNamed names flexible (IxNat (n - 1)) y s
+            | otherwise -> Clash ("0 is not a successor, and " <> render b <> " is")
           (IxNat m, IxNat n) -> Clash (show m <> " is not " <> show n)
           (IxCon c xs, IxCon d ys)
-            | c /= d -> Clash (renderIx [] a <> " and " <> renderIx [] b <> " are built by different constructors")
-            | length xs == length ys -> unifyAll flexible (zip xs ys) s
-          (IxCon {}, IxNat _) -> Clash (renderIx [] a <> " is no numeral")
-          (IxCon {}, IxSucc _) -> Clash (renderIx [] a <> " is no successor")
-          (IxNat _, IxCon {}) -> Clash (renderIx [] b <> " is no numeral")
-          (IxSucc _, IxCon {}) -> Clash (renderIx [] b <> " is no successor")
-          _ -> Stuck (renderIx [] a <> " and " <> renderIx [] b <> ": neither is solved by the other")
+            | c /= d -> Clash (render a <> " and " <> render b <> " are built by different constructors")
+            | length xs == length ys -> unifyAllNamed names flexible (zip xs ys) s
+          (IxCon {}, IxNat _) -> Clash (render a <> " is no numeral")
+          (IxCon {}, IxSucc _) -> Clash (render a <> " is no successor")
+          (IxNat _, IxCon {}) -> Clash (render b <> " is no numeral")
+          (IxSucc _, IxCon {}) -> Clash (render b <> " is no successor")
+          _ -> Stuck (render a <> " and " <> render b <> ": neither is solved by the other")
     bind k t
-      | k `elem` keysOf t = if constructorForm t then Clash (renderIx [] t <> " would contain itself") else Stuck (renderIx [] t <> " mentions what it is to solve")
+      | k `elem` keysOf t = if constructorForm t then Clash (render t <> " would contain itself") else Stuck (render t <> " mentions what it is to solve")
       | otherwise =
           let Subst m = s
               one = Subst (Map.singleton k t)
@@ -149,10 +156,14 @@ unifyIx flexible a0 b0 s = go (applyIx s a0) (applyIx s b0)
 
 -- | Unify indices pairwise, left to right; the first clash or stuck pair is the answer.
 unifyAll :: (Key -> Bool) -> [(Ix, Ix)] -> Subst -> Unified
-unifyAll flexible pairs s0 = foldl step (Unified s0) pairs
+unifyAll = unifyAllNamed []
+
+-- | 'unifyAll', what it says of a clash naming the value parameters by the names given.
+unifyAllNamed :: [Text] -> (Key -> Bool) -> [(Ix, Ix)] -> Subst -> Unified
+unifyAllNamed names flexible pairs s0 = foldl step (Unified s0) pairs
   where
     step acc (x, y) = case acc of
-      Unified s -> unifyIx flexible x y s
+      Unified s -> unifyIxNamed names flexible x y s
       other -> other
 
 -- * Terms
