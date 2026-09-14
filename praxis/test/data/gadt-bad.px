@@ -46,3 +46,11 @@ bad-type v = 0
 -- Fine, after all that.
 fine : Vec a (S n) -> Vec a n
 fine v = tail v
+
+-- A theorem whose clause for nil is missing where nil can match.
+length : Vec a n -> Nat
+length nil = 0
+length (_ :- xs) = S (length xs)
+
+length-any : (v : Vec a n) -> length v ≡ n
+length-any (x :- xs) = cong (length-any xs)

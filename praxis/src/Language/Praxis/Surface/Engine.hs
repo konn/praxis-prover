@@ -219,16 +219,25 @@ of a first-order type, the types the encoding gives a meaning to.
 -}
 statementGoal :: Map Text (Text, [Int]) -> TheoremDef -> Either String Goal
 statementGoal membership td = do
-  let names = map fst (tdBinders td)
+  let names = map fst (tdValues td) <> map fst (tdBinders td)
   unless (length names == length (nub names)) $
     Left "a theorem's value binders must have distinct names"
   forM_ (tdBinders td) \(n, t) ->
     unless (firstOrder t) $ Left ("the value " <> T.unpack n <> " is not of a first-order type")
   premises <- renderPremises predicate (tdPremises td)
-  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> map HProp antecedents)] conclusion vars [] [] (tdSlots td) premises)
+  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> indexHyps <> map HProp antecedents)] conclusion vars [] [] (tdSlots td) premises)
   where
-    vars = [(n, (mangleVariable n, t)) | (n, t) <- tdBinders td]
-    prop = instantiate (\i -> Var (fst (snd (vars !! i)))) (fmap absurd (tdProp td))
+    binderCores = [mangleVariable n | (n, _) <- tdBinders td]
+    valueCores = [mangleVariable n | (n, _) <- tdValues td]
+    -- The indices of the binders' types: a value parameter which is, bare,
+    -- one of them eliminated, that index standing for it; the others equations.
+    (defined, indexEqs) = indexHypotheses binderCores valueCores (tdIndexHyps td)
+    nv = length (tdValues td)
+    valueTerm i = maybe (Var (valueCores !! i)) fromCT (lookup i defined)
+    vars =
+      [(n, (core, t)) | (i, ((n, t), core)) <- zip [0 ..] (zip (tdValues td) valueCores), i `notElem` map fst defined]
+        <> [(n, (core, t)) | ((n, t), core) <- zip (tdBinders td) binderCores]
+    prop = instantiate (\i -> if i < nv then valueTerm i else Var (binderCores !! (i - nv))) (fmap absurd (tdProp td))
     (antecedents, conclusion) = implications prop
     -- The predicate the values of a type are members by: a data type's, at
     -- the predicates of its arguments, or a type parameter's own, a place of
@@ -236,7 +245,28 @@ statementGoal membership td = do
     predicate = \case
       TNat -> Nothing
       t -> predicateOf membership (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip (tdSlots td) [n | Ref _ n <- placeRefs (tdSlots td)])) t
-    members = [HMember p v | (_, (v, t)) <- vars, Just p <- [predicate t]]
+    members =
+      [HMember p core | ((_, t), core) <- zip (tdBinders td) binderCores, Just p <- [predicate t]]
+        <> [HMember p core | (i, ((_, t), core)) <- zip [0 :: Int ..] (zip (tdValues td) valueCores), i `notElem` map fst defined, Just p <- [predicate t]]
+    indexHyps = [HProp (Rel RelEq (fromCT (CSym fn [CVar (binderCores !! k)])) (fromCT x)) | (fn, k, x) <- indexEqs]
+
+{- |
+The equations of the indices of a theorem's binders, over the core variables
+of its binders and of its value parameters.  A value parameter which is,
+bare, an index of a binder is eliminated, that index — its definition —
+standing for it: every value has exactly one index, so a statement for all
+values and all indices they have is one for all values at their own.  The
+definitions, by the value parameter's position, and the equations left, each
+an index function, the binder's position and the index.
+-}
+indexHypotheses :: [Text] -> [Text] -> [(Int, Text, Ix)] -> ([(Int, CT)], [(Text, Int, CT)])
+indexHypotheses binders values hyps = ([(i, d) | (i, (_, d)) <- defs], [(fn, k, ct x) | (j, (k, fn, x)) <- zip [0 ..] hyps, j `notElem` [j' | (_, (j', _)) <- defs]])
+  where
+    defs = foldl define [] (zip [0 :: Int ..] hyps)
+    define acc (j, (k, fn, x)) = case normIx x of
+      IxParam i | i `notElem` map fst acc, k < length binders -> acc <> [(i, (j, CSym fn [CVar (binders !! k)]))]
+      _ -> acc
+    ct = ixCT (\i -> maybe (CVar (if i < length values then values !! i else "?")) snd (lookup i defs)) . normIx
 
 {- |
 The premises of a rule, as a goal proved in it has them, by the predicates
@@ -395,7 +425,7 @@ proveSpec k fd spec = do
     dict = lemmaDictionary fd
     predicate = lemmaPredicate k dict
     argIs = map predicate (fdArgs fd)
-    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing
+    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] []
     columns = nub [i | fc <- fdClauses fd, (i, PCon {}) <- zip [0 ..] (fcPatterns fc)]
     pds = specPremises spec (knowEnv k) dict
     caseProof g = let (intro, g') = introduceImplications g in (intro <>) <$> specCase spec k g'
@@ -855,7 +885,7 @@ termProof k info n g le@(Located sp e) = case e of
   _ -> case spineOf le of
     (Located _ (R.EName (QName [] (Ident w))), [arg]) | w `elem` ["cong", "congr"] -> do
       ev <- evidence k info g arg
-      pure (closed (evBefore ev <> congAppeal ev))
+      pure (closed (evBefore ev <> congUnfolded k g ev))
     (Located _ (R.EName (QName [] (Ident w))), []) | w `elem` ["rfl", "refl"] -> closed <$> rflTactic k g sp
     _ -> do
       ev <- evidence k info g le
@@ -891,6 +921,38 @@ congAppeal :: Evidence -> Builder
 congAppeal ev = case evEquation ev of
   Just eq -> "(have " <> eq <> " { " <> exactAppeal ev <> " }; cong " <> eq <> ")"
   Nothing -> "cong " <> fromText (evName ev) <> evAfter ev
+
+{- |
+The appeal by @cong@, after the sides of the goal are unfolded at their
+heads until these agree: a congruence is at a context the sides share, which
+the definitions of their heads may give, as @length (x :- xs)@ and
+@Vec.#idx (x :- xs)@ give @S@.  The appeal alone when the heads agree
+already, or never do, or the goal is no equation: what the appeal rewrites
+may itself unfold.
+-}
+congUnfolded :: Knowledge -> Goal -> Evidence -> Builder
+congUnfolded k g ev = fromMaybe (congAppeal ev) do
+  Rel RelEq a b <- Just (stripLocations (goalConcl g))
+  l <- either (const Nothing) Just (termCT CVar a)
+  r <- either (const Nothing) Just (termCT CVar b)
+  guard (not (sameHead l r))
+  let ls = headReductions l
+      rs = headReductions r
+  (i, j) <- listToMaybe [(i, j) | n <- [1 .. length ls + length rs], i <- [0 .. n], let j = n - i, i <= length ls, j <= length rs, sameHead (reduct l ls i) (reduct r rs j)]
+  let steps =
+        [(t, tac) | (tac, t) <- take i ls]
+          <> [(reduct r rs j, "(" <> congAppeal ev <> ")")]
+          <> reverse [(t, tac) | ((tac, _), t) <- zip (take j rs) (r : map snd rs)]
+  pure ("calc " <> render l <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps])
+  where
+    reduct t0 red i = last (t0 : map snd (take i red))
+    sameHead x y = case (x, y) of
+      (CSym f xs, CSym h ys) -> f == h && length xs == length ys
+      _ -> x == y
+    -- The term unfolded at its head, step by step, by the unfolding lemma applying there.
+    headReductions t = take 32 case unfoldRedex k t of
+      Just (u, tac, t') | u == t -> (tac, t') : headReductions t'
+      _ -> []
 
 {- |
 The name, in the core, of what a proof term refers to — a hypothesis, an
@@ -931,6 +993,14 @@ evidence k info g le = case spineOf le of
       _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (R.qnameText q)))
   (Located sp _, _) -> Left (EngineError sp "a proof term: a hypothesis or a lemma, applied")
   where
+    -- The indices a theorem's binders must have, at the arguments given: found, and stated where no hypothesis does.
+    indexPremises sp t typed
+      | null (thmIndexHyps t) = Right ""
+      | otherwise = either (Left . EngineError sp) (Right . snd) do
+          args <- traverse (termCT CVar . fst) typed
+          let values = map mangleVariable (thmValues t)
+              (defined, pre) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
+          premisesAt k g (goalEquations g) pre [v | (i, v) <- zip [0 ..] values, i `notElem` map fst defined] (zip (thmBinders t) args)
     theorem sp t args
       | thmQual t == thmQual info = named <$> recursive sp args
       | otherwise = do
@@ -941,12 +1011,13 @@ evidence k info g le = case spineOf le of
                 TParam i [] -> membershipSlot i `elem` thmSlots t
                 _ -> False
           pre <- memberships k g [(arg, e, typePredicate k g ty) | ((arg, (e, ty)), bty) <- zip (zip args typed) (thmMembered t), membered bty]
+          idx <- indexPremises sp t typed
           post <- premiseBlocks k g sp t assign
           -- Under a class with laws, the instance is the one the arguments give, stated.
           eq <- case thmStatement t of
             Just sc | any isMembershipSlot (thmSlots t) -> equationOf sp sc (placesAt t assign) typed (length (thmMembered t))
             _ -> Right Nothing
-          Right (Evidence (thmCore t) pre post eq)
+          Right (Evidence (thmCore t) (pre <> idx) post eq)
     -- The place of the goal's dictionary for a method at one of its type parameters.
     goalPlace s = lookup s (zip (goalDict g) (placeRefs (goalDict g)))
     -- The places of a theorem's dictionary at the instances its arguments give: the goal's at its type parameters, the instances' functions at known types.
@@ -1316,7 +1387,7 @@ runTactics k info n g0 sp tacs0 = do
         R.TAssumption -> Right (closed "assumption", more)
         R.TSorry -> Left (EngineError tsp ("sorry: the goal is\n" <> T.unpack (renderGoal (knowEnv k) g)))
         R.TExact e -> (\ev -> (closed (evBefore ev <> exactAppeal ev), more)) <$> evidence k info g e
-        R.TCong (Just e) -> (\ev -> (closed (evBefore ev <> congAppeal ev), more)) <$> evidence k info g e
+        R.TCong (Just e) -> (\ev -> (closed (evBefore ev <> congUnfolded k g ev), more)) <$> evidence k info g e
         R.TCong Nothing -> Right (closed "cong", more)
         R.TTerm e -> case unLocated e of
           R.EProof rhs -> (,more) <$> proveRhs k info n g (Located tsp rhs)
@@ -1410,9 +1481,11 @@ rflWith bridge k g sp = case goalConcl g of
 
 -- | The term rewritten by an unfolding lemma at its first application, outermost, which one rewrites, with the tactic doing it.
 unfoldStep :: Knowledge -> CT -> Maybe (Builder, CT)
-unfoldStep k t0 = case redex t0 of
-  Just (u, lemma, u') -> Just (lemma, replaceCT (\x -> if x == u then Just u' else Nothing) t0)
-  Nothing -> Nothing
+unfoldStep k t0 = (\(u, lemma, u') -> (lemma, replaceCT (\x -> if x == u then Just u' else Nothing) t0)) <$> unfoldRedex k t0
+
+-- | The first application, outermost, an unfolding lemma rewrites: it, the tactic doing it, and what it becomes.
+unfoldRedex :: Knowledge -> CT -> Maybe (CT, Builder, CT)
+unfoldRedex k = redex
   where
     redex t = case [(t, "cong " <> fromText (unfoldingLemma uf), rhs) | uf <- knowUnfoldings k, Just rhs <- [instanceOf uf t]] of
       x : _ -> Just x
@@ -1485,17 +1558,20 @@ induction k info _ g sp v _ = do
             vars = [("#" <> T.pack (show j), f) | (j, f) <- zip [0 :: Int ..] fields] <> [(nm, x) | (nm, x) <- goalVars g, fst x /= core]
             concl = at (apps (Global (Ref RefConstructor (ctorCore c))) [Var fv | (fv, _) <- fields])
          in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames) (zip recursive (map ihCore [1 ..])) (goalDict g) (goalPremises g)
-      goals = map caseGoal (dataCtors dat)
+      cases = map caseGoal (dataCtors dat)
+      -- The hypotheses about indices a case has, the statement's: introduced, since the user cannot name them.
+      opened = map openIndices cases
+      goals = map snd opened
       tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
       auxName i = mangleGlobal (map raw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show i)])
       eigen = head [name | i <- [0 :: Int ..], let name = "e_" <> T.pack (show i), name `notElem` map (fst . snd) (goalVars g)]
       finish outs = do
-        auxDecls <- forM (zip3 [0 :: Int ..] goals outs) \(i, cg, o) -> do
-          decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
+        auxDecls <- forM (zip3 [0 :: Int ..] (zip cases (map fst opened)) outs) \(i, (cg, intro), o) -> do
+          decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (intro <> outTactic o))
           pure (outAux o <> [(auxName i, runBuilder decl)])
         -- The auxiliary theorems are rules with the goal's premises, which the goal's discharge.
         -- Their parameters are the goal's, given, since a case need not determine them.
-        params <- traverse (either (Left . EngineError sp) Right . ruleParams) goals
+        params <- traverse (either (Left . EngineError sp) Right . ruleParams) cases
         let blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
             appeal i = "exact " <> fromText (auxName i) <> staticArgs (params !! i) <> blocks
         script <- either (Left . EngineError sp) Right (mkScript k appeal dat isAt fieldPred core memberHyp eigen motive reverted)
@@ -1505,6 +1581,22 @@ induction k info _ g sp v _ = do
     raw = \case
       Ident t -> t
       Op t -> t
+    -- The leading implications of a case's conclusion whose antecedents are equations of indices, introduced: the tactic, and the goal after.
+    openIndices cg =
+      let (ants, concl) = indexImplications (goalConcl cg)
+          new = [(hname (length (goalHyps cg) + i), HProp a) | (i, a) <- zip [1 ..] ants]
+       in (mconcat ["ImplR as " <> fromText h <> "; " | (h, _) <- new], cg {goalHyps = goalHyps cg <> new, goalConcl = concl})
+
+    indexImplications e = case e of
+      At _ x -> indexImplications x
+      Arrow a b | isIndexEquation a -> let (as, c) = indexImplications b in (a : as, c)
+      _ -> ([], e)
+
+    isIndexEquation a = case stripLocations a of
+      Rel RelEq l _ | (Global (Ref _ f), [_]) <- spine l -> f `elem` indexFns
+      _ -> False
+
+    indexFns = [funCore f | GData dd <- Map.elems (envGlobals (knowEnv k)), q <- dataIndexFns dd, Just (GFun f) <- [Map.lookup q (envGlobals (knowEnv k))]]
 
 -- | The parameters of a data type's field types replaced by the type's arguments.
 substTy :: [Ty] -> Ty -> Ty
@@ -1691,14 +1783,17 @@ byClauses k info g td pcs = do
   (cases, finish) <- induction k info 0 g (tdSpan td) binder []
   outs <- forM (zip [0 :: Int ..] cases) \(i, cg) -> do
     let ctor = dataCtorsOf binder !! i
-    pc <- maybe (Left (EngineError (tdSpan td) ("no clause for the constructor " <> T.unpack (renderQualName (ctorQual ctor))))) Right (find (matches ctor c) pcs)
-    let names = [n | (n, _) <- pcVars pc]
-        fieldNames = [n | PCon _ subs <- [pcPatterns pc !! c], PVar (Hint n) <- subs]
-        others = [n | (j, PVar (Hint n)) <- zip [0 ..] (pcPatterns pc), j /= c]
-        cg' = introduce fieldNames cg
-        cg'' = rename (zip [n | (n, _) <- tdBinders td, n /= binder] others) cg'
-    _ <- pure names
-    proveRhs k info 0 cg'' (pcRhs pc)
+    case find (matches ctor c) pcs of
+      -- A constructor the binder's indices exclude needs no clause: the case is refuted.
+      Nothing -> either (\_ -> Left (EngineError (tdSpan td) ("no clause for the constructor " <> T.unpack (renderQualName (ctorQual ctor))))) (Right . closed) (refute k cg)
+      Just pc -> do
+        let names = [n | (n, _) <- pcVars pc]
+            fieldNames = [n | PCon _ subs <- [pcPatterns pc !! c], PVar (Hint n) <- subs]
+            others = [n | (j, PVar (Hint n)) <- zip [0 ..] (pcPatterns pc), j /= c]
+            cg' = introduce fieldNames cg
+            cg'' = rename (zip [n | (n, _) <- tdBinders td, n /= binder] others) cg'
+        _ <- pure names
+        proveRhs k info 0 cg'' (pcRhs pc)
   out <- finish outs
   pure (outTactic out, outAux out)
   where

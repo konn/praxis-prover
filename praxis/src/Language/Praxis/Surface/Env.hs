@@ -47,6 +47,7 @@ module Language.Praxis.Surface.Env (
   addGadtData,
   addFunction,
   addTheorem,
+  setTheoremIndices,
   addClass,
   addLaws,
   addInstanceFunction,
@@ -215,6 +216,10 @@ data TheoremInfo = TheoremInfo
   -- ^ the premises of the rule it is, in order: laws and closures at its type parameters
   , thmStatement :: !(Maybe (Scope Int Expr Void))
   -- ^ its proposition, over its binders, its methods the places of 'thmSlots'; none for a generated lemma
+  , thmIndexHyps :: ![(Int, Text, Ix)]
+  -- ^ the indices of its binders' types: a binder's position, an index function by its core name, and the index over its value parameters
+  , thmValues :: ![Text]
+  -- ^ its value parameters, by name, which its binders' indices mention
   }
   deriving stock (Show)
 
@@ -370,6 +375,12 @@ addFunction env name sch arity slots = (env', info)
         , envDisplay = Map.insert (funCore info) (segmentText name) (envDisplay env)
         }
 
+-- | A theorem's binders' indices and its value parameters, recorded in its information and in the environment.
+setTheoremIndices :: [(Int, Text, Ix)] -> [Text] -> (Env, TheoremInfo) -> (Env, TheoremInfo)
+setTheoremIndices hyps values (env, info) = (env {envGlobals = Map.insert (thmQual info) (GTheorem info') (envGlobals env)}, info')
+  where
+    info' = info {thmIndexHyps = hyps, thmValues = values}
+
 {- |
 Add a theorem, at the qualified name given, whose core name is derived from
 it, with the types of its values when its statement gives them memberships;
@@ -378,7 +389,7 @@ a top-level one is also a top-level name.
 addTheorem :: Env -> QualName -> [Text] -> [Ty] -> [Slot] -> [Premise] -> Maybe (Scope Int Expr Void) -> (Env, TheoremInfo)
 addTheorem env q binders membered slots premises statement = (env', info)
   where
-    info = TheoremInfo q (coreOf q) binders membered slots premises statement
+    info = TheoremInfo q (coreOf q) binders membered slots premises statement [] []
     top = case drop (length (envModule env)) q of
       [n] | take (length (envModule env)) q == envModule env -> Map.insert n q
       _ -> id

@@ -311,6 +311,20 @@ and terms by `CoreText.termCT`: a variable, a numeral, a constructor or a
 function applied to its arguments, and `S`, `+`, `-`, `*`, `^` as the
 builtins `S`, `add`, `sub`, `mul`, `pow`.
 
+A binder of an indexed type, `x : T τ̄ ī`, has besides its membership the
+equation of each index, `T.#idx x = i` (`T.#idx-j x = iⱼ` for several), the
+index a term. The theorem's value parameters, the variables its binders'
+indices mention, are free variables as its binders are, with the
+memberships of their types; but one which is the whole index of a binder is
+replaced by that binder's index, `T.#idx x`, and has no equation. So
+`(v : Vec a n) → length v ≡ n` becomes `0 < Vec.is {w_1} v |- length v =
+Vec.#idx v`, whose induction is on `v` alone, while `(v : Vec a (S n)) → …`
+keeps `n`, and the hypothesis `Vec.#idx v = S n`. Induction introduces the
+equations of indices it reverts in each case, and a case whose equations
+clash, once unfolded, is refuted; an appeal proves the equations the
+theorem's hypotheses need of its arguments, as an application of a function
+does its index premises.
+
 ### First-order values
 
 The encoding gives a meaning to values of first-order types only: `Nat`,
@@ -366,9 +380,19 @@ The proof is three inductions over finite objects.
    is an equivalence, so it holds under `¬` and `→` at any depth.
 3. *The sequent.* The kernel's soundness gives the numeric instance at `e∘ρ`,
    the rule's predicates at those of the types its type parameters stand
-   for. Its membership hypotheses hold there by (M), its other hypotheses by
-   2 exactly when the surface ones do. So its conclusion holds, and by 2 the
-   surface conclusion.
+   for. Its membership hypotheses hold there by (M), its equations of
+   indices by (M) and (U) as below, its other hypotheses by 2 exactly when
+   the surface ones do. So its conclusion holds, and by 2 the surface
+   conclusion.
+
+For a binder of an indexed type, (M) says more: the code of every value of
+`T τ̄ ī` has the indices `ī` by the index functions, by induction on the
+value, since these satisfy their clauses (U), each the index of a
+constructor's result at the indices its fields have. So the equations of
+indices hold at `e∘ρ`. A value parameter replaced by the index of its binder
+quantifies over nothing less: every value has exactly one index, so a
+statement for all values and all the indices they have is one for each value
+at its own.
 
 Each step is an induction on syntax or on finite trees, and a free-variable
 theorem is read as its numeric instances: the argument is finitary, the kind

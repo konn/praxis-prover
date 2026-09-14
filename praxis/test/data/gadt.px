@@ -35,3 +35,21 @@ data Vec2 a n where
 
 first : Vec2 a (S n) -> a
 first (cons2 x _) = x
+
+-- The length of a list, which its index is: the value n, bare as the
+-- index of v, stands for the index of v.
+length : Vec a n -> Nat
+length nil = 0
+length (_ :- xs) = S (length xs)
+
+length-index : (v : Vec a n) -> length v ≡ n
+length-index nil = rfl
+length-index (x :- xs) = cong (length-index xs)
+
+-- nil is impossible at S n: its case is refuted, as for a function.
+head-tail : (v : Vec a (S n)) -> v ≡ head v :- tail v
+head-tail (x :- xs) = rfl
+
+-- The index head-tail needs of its argument, found.
+head-tail-two : (w : Vec a (S (S m))) -> w ≡ head w :- tail w
+head-tail-two w = head-tail w

@@ -121,6 +121,10 @@ data TheoremDef = TheoremDef
   -}
   , tdPremises :: ![PremiseDef]
   -- ^ the premises of the rule it is: the laws and closures its places give
+  , tdValues :: ![(Text, Ty)]
+  -- ^ its value parameters, the values its binders' indices mention, in the scope of its proposition before its binders
+  , tdIndexHyps :: ![(Int, Text, Ix)]
+  -- ^ the indices of its binders' types: a binder's position, an index function by its core name, and the index over its value parameters
   }
 
 {- |
@@ -734,7 +738,7 @@ elabInstance fx env sp idl = do
           (e1, info) = addTheorem e q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (Just (toScope (fmap B prop)))
           e2 = addNamespaceMember iq lawSeg q e1
       pcs <- forM mine \c -> runTC (elabProofClause fx e2 (map snd binderTys) c)
-      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys (toScope (fmap B prop)) pcs sp kept premises)], Map.insert (lawQual l) info proved)
+      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys (toScope (fmap B prop)) pcs sp kept premises [] [])], Map.insert (lawQual l) info proved)
 
 {- |
 The places of a dictionary the clauses of a method refer to themselves, and
@@ -976,6 +980,10 @@ rawSpine = go []
       Located _ (R.EParen x) | null acc -> go acc x
       h -> (h, acc)
 
+-- | The index functions of a data type, by their core names, one for each index.
+indexFnsOf :: Env -> Text -> [Text]
+indexFnsOf env dn = [funCore f | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn, q <- dataIndexFns dd, Just (GFun f) <- [Map.lookup q (envGlobals env)]]
+
 -- * Declarations
 
 -- | A signature and its clauses: a function, or a theorem with its proof.
@@ -1007,14 +1015,14 @@ elabDecl fx env sp name ty0 clauses = do
     then do
       -- Statement lowering names each value by its binder. Distinct values
       -- must never acquire the same core variable and share memberships.
-      _ <- foldM checkBinder [] (map fst binders)
+      _ <- foldM checkBinder [] (map (Located sp . fst) values <> map fst binders)
       binderTys <- forM binders \(Located nsp n, t) -> do
         bty <- elabTypeIn env scope t
         unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a theorem quantifies over values, which are first-order"))
         pure (n, bty)
       full <- dictionaryOf env paramNames constraints
       given <- constraintClasses env paramNames constraints
-      let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
+      let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] (values <> binderTys)]
       prop0 <- runTC (elabProp env full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
@@ -1022,9 +1030,12 @@ elabDecl fx env sp name ty0 clauses = do
           prop = keepPlaces full' kept prop0
           premises = premisesFor env given kept
           q = qualify env [name]
-          (env', info) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (Just (toScope (fmap B prop)))
+          (env0, info0) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (if null values then Just (toScope (fmap B prop)) else Nothing)
+          -- The indices of its binders' types, which its statement states of them.
+          indexHyps = [(k, fn, x) | (k, (_, TData dn _ xs@(_ : _))) <- zip [0 ..] binderTys, (fn, x) <- zip (indexFnsOf env dn) xs]
+          (env', info) = setTheoremIndices indexHyps (map fst values) (env0, info0)
       pcs <- forM clauses \c -> runTC (elabProofClause fx env (map snd binderTys) c)
-      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises))
+      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises values indexHyps))
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       fty <- elabTypeIn env scope body

@@ -338,6 +338,26 @@ arguments; and a function omitting a constructor has its closure lemma,
 `f.#closed`, under the indices of its arguments, which is how the omission is
 justified.
 
+A theorem over values of an indexed type states the indices of its binders:
+`(v : Vec a (S n)) -> v ≡ head v :- tail v` is of the lists whose length is a
+successor, `n` its implicit value parameter, as in a function's signature,
+and in the scope of its proposition. Its proof by clauses on `v` omits the
+constructors the indices exclude — `nil` here, whose case is refuted — and
+an appeal to it proves the indices it needs of its arguments from what is
+known of theirs, as an application of a function does. A value parameter
+which is the whole index of a binder, `n` of `(v : Vec a n) -> length v ≡ n`,
+stands for that binder's index, so that induction on `v` needs nothing of
+`n`.
+
+```
+length-index : (v : Vec a n) -> length v ≡ n
+length-index nil = rfl
+length-index (x :- xs) = cong (length-index xs)
+
+head-tail : (v : Vec a (S n)) -> v ≡ head v :- tail v
+head-tail (x :- xs) = rfl
+```
+
 ## Propositions
 
 `s ≡ t` (also `=`), `s ≠ t`, `s < t`, `s ≤ t`, `s > t`, `s ≥ t` (on `Nat`),
@@ -371,6 +391,10 @@ prove the statement by structural induction on it, one clause per
 constructor; a recursive call of the theorem at a field of the matched
 constructor is the induction hypothesis there. A right side is a proof term
 — a lemma or a hypothesis, `cong e`, `rfl` — a `calc`, or `by` tactics.
+Where the heads of the sides of an equation differ, `cong e` first unfolds
+them at their heads until they agree, so that the congruence is under what
+their definitions share: `length (x :- xs) ≡ Vec.#idx (x :- xs)` is
+`S (length xs) ≡ S (Vec.#idx xs)`.
 
 **By calculation.** `calc t₀ = t₁ := p₁ … = tₙ := pₙ` proves `t₀ = tₙ`; an
 omitted justification is `rfl`.
@@ -423,16 +447,15 @@ a type's parameters; data types in the GADT style indexed by values of `Nat`
 and of data types, their kinds given or inferred, with their index
 functions; implicit value parameters of signatures; matching which refines
 indices, and clauses omitted where their constructor is impossible, justified
-by certified index and closure lemmas; type ascriptions; `.px` diagnostics.
+by certified index and closure lemmas; theorems over their values, the
+indices of their binders as hypotheses and the cases these exclude refuted;
+type ascriptions; `.px` diagnostics.
 Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
 `if` in terms, nested patterns and matching on several arguments, matching
 and recursion on `Nat`, overlapping first-match clauses, mutual recursion and
 accumulating parameters, membership checking the fields of nested
 and higher-kinded parameters, and list-literal sugar. For indexed data types:
-theorems over their values with the indices of their binders as hypotheses
-(until then a theorem's binder of an indexed type has the membership of its
-erased type alone, which is sound and less than it could say); implicit
-parameters of data types, whose kinds depend on others, `data SameVec {a}
+implicit parameters of data types, whose kinds depend on others, `data SameVec {a}
 {n} {m} (l : Vec a n) (r : Vec a m)`; explicit implicit arguments, `C {n}`;
 and explicit value binders in the signatures of functions.
