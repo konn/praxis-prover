@@ -71,6 +71,7 @@ import Data.Void (Void, vacuous)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, isConnective, isRelation, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleVariable)
+import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, qnameText, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
@@ -470,20 +471,13 @@ A method at a type: at a known type, the function of the instance of its
 class for the head of the type, with the dictionary the instance's context
 takes at the type's arguments; at a type parameter a dictionary is given
 for, a place of it.  Pending at a hole, where the instance is not known yet.
+Resolved by the clauses of 'methodDatabase', coherently: an instance is the
+only one of its class for its type, and two giving a method are refused.
 -}
 methodAt :: Env -> [Slot] -> MethodInfo -> Ty -> Either Unresolved Resolution
-methodAt env givens m = \case
-  TNat -> at "Nat" []
-  TData dn targs -> at dn targs
-  TParam j _ -> maybe (Left (Refusal (name <> " at a type variable: it needs a constraint " <> cls <> " on the variable"))) (Right . AtPlace) (givenPlace givens (methodQual m) j)
-  THole -> Left (Pending ("the type " <> name <> " is used at is ambiguous"))
-  TArrow _ _ -> Left (Refusal (name <> " at a function type"))
+methodAt env givens m t = solve (Coherent overlap) (methodDatabase env givens) methodDepth (m, t)
   where
-    name = T.unpack (segmentText (last (methodQual m)))
-    cls = T.unpack (segmentText (last (methodClass m)))
-    at h targs = case Map.lookup (methodClass m, h) (envInstances env) >>= Map.lookup (methodQual m) . instFunctions of
-      Just f -> AtInstance f <$> dictionaryAt env givens f targs
-      Nothing -> Left (Refusal ("no instance of " <> cls <> " for " <> T.unpack (last (T.splitOn "." h)) <> ", where " <> name <> " is used"))
+    overlap (m', _) = Refusal ("two instances give " <> T.unpack (segmentText (last (methodQual m'))) <> " there")
 
 {- |
 The dictionary a function takes at the types of its parameters: each place,
@@ -491,17 +485,73 @@ its method at the type the place's parameter is at — for an instance's
 function, the arguments of the instance's type.
 -}
 dictionaryAt :: Env -> [Slot] -> FunInfo -> [Ty] -> Either Unresolved [Expr Void]
-dictionaryAt env givens f targs = forM (funSlots f) \s -> do
+dictionaryAt env givens f targs = do
+  goals <- dictionaryGoals env f targs
+  zipWith dictionaryEntry (funSlots f) <$> traverse (uncurry (methodAt env givens)) goals
+
+-- | The method of each place of a function's dictionary, at the type the place's parameter is at.
+dictionaryGoals :: Env -> FunInfo -> [Ty] -> Either Unresolved [(MethodInfo, Ty)]
+dictionaryGoals env f targs = forM (funSlots f) \s -> do
   m <- case Map.lookup (slotMethod s) (envGlobals env) of
     Just (GMethod m) -> Right m
     _ -> Left (Refusal "internal: a place of a dictionary for no method")
   ty <- maybe (Left (Refusal "internal: a place at no argument of the function's type")) Right (lookup (slotParam s) (zip [0 ..] targs))
-  r <- methodAt env givens m ty
-  pure case r of
-    AtPlace ref -> Global ref
-    AtInstance g gdict
-      | slotArity s > 0 -> parameterOf g gdict
-      | otherwise -> apps (Global (Ref RefFunction (funCore g))) gdict
+  pure (m, ty)
+
+-- | A place of a dictionary, its method resolved: a method taking arguments passed as the parameter of a schema, one taking none as a value.
+dictionaryEntry :: Slot -> Resolution -> Expr Void
+dictionaryEntry s = \case
+  AtPlace ref -> Global ref
+  AtInstance g gdict
+    | slotArity s > 0 -> parameterOf g gdict
+    | otherwise -> apps (Global (Ref RefFunction (funCore g))) gdict
+
+-- | How deep instances under contexts may nest where a method is resolved.
+methodDepth :: Int
+methodDepth = 64
+
+-- | The head of the type a method is at, whose clauses are tried for it.
+data TypeHead = HeadOf !Text | HeadParam | HeadHole | HeadArrow
+
+{- |
+The clauses methods are resolved by, the dictionary given the enclosing
+signature's: at the head of a data type or of @Nat@, the instance of the
+method's class there, the methods of its context's dictionary at the type's
+arguments its subgoals; at a type parameter, the place of the dictionary
+given.  At a hole the method is pending, and at a function type refused.
+-}
+methodDatabase :: Env -> [Slot] -> Database TypeHead (MethodInfo, Ty) Resolution Unresolved
+methodDatabase env givens = Database headOfType clauses [] none deep
+  where
+    headOfType (_, t) = case t of
+      TNat -> HeadOf "Nat"
+      TData dn _ -> HeadOf dn
+      TParam _ _ -> HeadParam
+      THole -> HeadHole
+      TArrow _ _ -> HeadArrow
+    clauses = \case
+      HeadOf h -> [instanceAt h]
+      HeadParam -> [given]
+      HeadHole -> [\(m, _) -> Just (Refuse (Pending ("the type " <> nameOf m <> " is used at is ambiguous")))]
+      HeadArrow -> [\(m, _) -> Just (Refuse (Refusal (nameOf m <> " at a function type")))]
+    instanceAt h (m, t) = do
+      f <- Map.lookup (methodClass m, h) (envInstances env) >>= Map.lookup (methodQual m) . instFunctions
+      pure case dictionaryGoals env f (typeArguments t) of
+        Left why -> Refuse why
+        Right goals -> Reduce goals (AtInstance f . zipWith dictionaryEntry (funSlots f))
+    given (m, t) = case t of
+      TParam j _ -> Just (maybe (Refuse (Refusal (nameOf m <> " at a type variable: it needs a constraint " <> classOf m <> " on the variable"))) (\r -> Reduce [] (const (AtPlace r))) (givenPlace givens (methodQual m) j))
+      _ -> Nothing
+    none (m, t) = Refusal ("no instance of " <> classOf m <> " for " <> shortTy t <> ", where " <> nameOf m <> " is used")
+    deep (m, _) = Refusal ("the instances giving " <> nameOf m <> " nest deeper than " <> show methodDepth)
+    typeArguments = \case
+      TData _ ts -> ts
+      _ -> []
+    shortTy = \case
+      TData dn _ -> T.unpack (last (T.splitOn "." dn))
+      t -> renderTy [] t
+    nameOf m = T.unpack (segmentText (last (methodQual m)))
+    classOf m = T.unpack (segmentText (last (methodClass m)))
 
 -- | The place of a dictionary for a method at a type parameter: a parameter of the schema, by its name, or a value, by its position.
 givenPlace :: [Slot] -> QualName -> Int -> Maybe Ref

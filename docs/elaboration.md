@@ -455,6 +455,23 @@ theorem under constraints is. For adequacy, a function of an instance under
 a context at a known type denotes the function its clauses define with the
 context's instances' methods in place, as a function under constraints does.
 
+**Resolution.** Instances and the obligations of proofs are found by one
+search (`Resolve.solve`). It takes a goal and a database of Horn clauses
+keyed by the goal's head symbol, and searches recursively, with a depth
+bound. A clause does not apply to a goal, refuses it with a reason, or
+reduces it to subgoals, the goal's result built from theirs. What a result
+is, and how the clauses that apply are taken, belongs to the back end:
+
+- **Methods** (`Elab.methodDatabase`) are coherent. The only clause at the
+  head of a type is its instance, whose context's methods are the subgoals,
+  and two clauses applying would be refused as an overlap.
+- **Obligations of proofs** (`Engine.obligations`) are the membership of a
+  term, a law at a type, and the closure of a method at a type. They take
+  the first clause whose subgoals succeed, backtracking, since which proof
+  is found does not matter. The clauses are a hypothesis, `anyIsMember`,
+  the goal's premise, a constructor's `intro`, a function's closure lemma,
+  and an instance's theorem of a law.
+
 **Laws.** A law of a class is a statement over the class's dictionary at its
 parameter. An instance proves it as a theorem at its type, the dictionary's
 places its functions: `Pointed-List.plus-zero : 0 < List.is x |-

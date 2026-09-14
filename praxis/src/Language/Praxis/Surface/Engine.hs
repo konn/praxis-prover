@@ -68,10 +68,11 @@ import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), ctorLemma
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
+import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ty (..), firstOrder, mergeTy)
+import Language.Praxis.Surface.Types (Ty (..), firstOrder, mergeTy, renderTy)
 
 -- * Goals
 
@@ -618,49 +619,23 @@ memberships k g args =
 
 {- |
 The blocks proving the premises an appeal to a theorem under constraints
-leaves, in order: at an instance, the theorem proving the law there, or the
-closure lemma of the method's function, @anyIsMember@ at @Nat@; at a type
-parameter of the goal's theorem, the goal's own premise.
+leaves, in order, each an obligation discharged by resolution: at an
+instance, the theorem proving the law there, or the closure lemma of the
+method's function, @anyIsMember@ at @Nat@; at a type parameter of the goal's
+theorem, the goal's own premise.
 -}
 premiseBlocks :: Knowledge -> Goal -> Span -> TheoremInfo -> Map Int Ty -> Either EngineError Builder
-premiseBlocks k g sp t assign = mconcat <$> traverse block (thmPremises t)
+premiseBlocks k g sp t assign = either (Left . EngineError sp) Right do
+  obs <- premiseObligations k g assign t
+  mconcat <$> traverse (fmap (\b -> " { " <> b <> " }") . discharge k g) obs
+
+-- | The obligations the premises of a theorem under constraints leave where it is appealed to, its type parameters at the types given.
+premiseObligations :: Knowledge -> Goal -> Map Int Ty -> TheoremInfo -> Either String [Obligation]
+premiseObligations k g assign t = forM (thmPremises t) \case
+  PLaw lq i -> OLaw lq <$> at i
+  PClosure mq i -> OClosure mq . siteOfType k g <$> at i
   where
-    env = knowEnv k
-    block p =
-      (\body -> " { " <> body <> " }") <$> case p of
-        PLaw lq i -> case Map.lookup i assign of
-          Just (TParam j []) -> exactly <$> own (PLaw lq j)
-          Just ty | Just h <- headOf ty -> do
-            inst <- instanceOf lq h
-            t' <- maybe (Left (EngineError sp ("internal: the instance does not prove " <> T.unpack (renderQualName lq)))) Right (Map.lookup lq (instLaws inst))
-            -- Under a context, the instance's law has premises of its own, at the type's arguments.
-            nested <- premiseBlocks k g sp t' (Map.fromList (zip [0 ..] (typeArgs ty)))
-            Right (exactly (thmCore t') <> nested)
-          _ -> unknown
-        PClosure mq i -> case Map.lookup i assign of
-          Just (TParam j []) -> exactly <$> own (PClosure mq j)
-          Just TNat -> Right "exact anyIsMember"
-          Just ty@(TData dn targs) -> do
-            inst <- instanceOf mq dn
-            f <- maybe (Left (EngineError sp "internal: the instance has no function for the method")) Right (Map.lookup mq (instFunctions inst))
-            cl <- maybe (Left (EngineError sp ("the function of " <> T.unpack (renderQualName mq) <> " at " <> T.unpack (maybe "" id (headOf ty)) <> " has no closure lemma: its results are not known to be members"))) Right (Map.lookup (funCore f) (knowClosures k))
-            -- Under a context, its closure lemma has premises of its own, at the type's arguments.
-            either (Left . EngineError sp) Right (closureTactic k g cl (Map.fromList [(u, pr) | (u, arg) <- zip [0 ..] targs, Just pr <- [typePredicate k g arg]]))
-          _ -> unknown
-    -- The instance of the class of a law or a method for the head of a type.
-    instanceOf q h = do
-      cls <- case Map.lookup q (envGlobals env) of
-        Just (GLaw l) -> Right (lawClass l)
-        Just (GMethod m) -> Right (methodClass m)
-        _ -> Left (EngineError sp ("internal: " <> T.unpack (renderQualName q) <> " is no law or method"))
-      maybe (Left (EngineError sp ("no instance of " <> T.unpack (renderQualName cls) <> " for " <> T.unpack h))) Right (Map.lookup (cls, h) (envInstances env))
-    own p = maybe (Left (EngineError sp (T.unpack (renderQualName (thmQual t)) <> " needs a premise the goal does not have: its statement's methods must be the goal's"))) (Right . gpName) (find ((== p) . gpPremise) (goalPremises g))
-    exactly n = "exact " <> fromText n
-    typeArgs = \case
-      TData _ ts -> ts
-      _ -> []
-    unknown :: Either EngineError b
-    unknown = Left (EngineError sp (T.unpack (renderQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances"))
+    at i = maybe (Left (T.unpack (renderQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances")) Right (Map.lookup i assign)
 
 -- | Whether a hypothesis of the goal states the membership of the term by the predicate, as the core writes it.
 hasMembership :: Goal -> Pred -> CT -> Bool
@@ -668,46 +643,132 @@ hasMembership g p t = any (either (const False) ((== wanted) . runBuilder) . hyp
   where
     wanted = runBuilder (membershipText p t)
 
-{- |
-A proof that a term is in a data type, by its membership predicate: the
-hypothesis stating it; for a constructor applied, its introduction, after
-the memberships of the fields its type checks; for a function applied, its
-closure lemma, after the memberships of its arguments.  None for anything
-else, such as a field whose type's membership does not constrain it.
--}
+-- | A proof that a term is a member by a predicate: the obligation discharged by resolution in the goal.
 membershipProof :: Knowledge -> Goal -> Pred -> CT -> Either String Builder
-membershipProof k g p t
-  | hasMembership g p t = Right "assumption"
-  | p == anyPred = Right "exact anyIsMember"
-  -- A method of the goal's dictionary applied: the goal's premise stating its closure.
-  | (name, argPs) : _ <- [(gpName gp, ps) | gp <- goalPremises g, Just (place, ps, result) <- [gpClosure gp], result == p, headName == Just place] = do
-      pre <- needs [(a, q) | (a, Just q) <- zip operands argPs]
-      Right (pre <> "exact " <> fromText name)
-  | otherwise = case t of
-      CSym f args
-        | Just c <- ctorByCore (knowEnv k) f
-        , Pred _ ps <- p
-        , Just (_, used) <- Map.lookup (renderQualName (ctorData c)) (knowMembership k) -> do
-            pre <- needs [(args !! j, fieldPredicate used ps fp) | (j, fp) <- Map.findWithDefault [] f (knowMembers k), j < length args]
-            Right (pre <> "exact " <> fromText (ctorLemma c "intro"))
-        | Just cl <- Map.lookup f (knowClosures k)
-        , Just (given, argPs) <- argumentsOf cl -> do
-            pre <- needs [(a, q) | (a, Just q) <- zip args argPs]
-            appeal <- closureTactic k g cl given
-            Right (pre <> appeal)
-      _ -> Left ("the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function")
+membershipProof k g p t = discharge k g (OMember p t)
+
+-- * Obligations
+
+{- |
+What the engine discharges by resolution in a goal: the membership of a term
+by a predicate, proved as a goal of its own; a law of a class at a type, or
+the closure of a method at a site, each proved in the block of a premise an
+appeal leaves.
+-}
+data Obligation
+  = OMember !Pred !CT
+  | OLaw !QualName !Ty
+  | OClosure !QualName !Site
+
+{- |
+Where the closure of a method is wanted: at a type parameter of the goal's
+theorem; at every code, @Nat@'s; at a data type, with the predicates of its
+parameters by position, where they are known; or at none of these.
+-}
+data Site = SiteParam !Int | SiteAny | SiteData !Text ![Maybe Pred] | SiteUnknown
+
+-- | The head symbol of an obligation, whose clauses are tried for it: the head of its term, its law, its method.
+data ObligationHead = OnTerm !Text | OnLaw !QualName | OnClosure !QualName | OnNothing
+
+-- | How deep resolution goes: memberships of nested applications, closures and laws under nested contexts.
+obligationDepth :: Int
+obligationDepth = 64
+
+-- | An obligation discharged in a goal, by backtracking, since which proof is found does not matter.
+discharge :: Knowledge -> Goal -> Obligation -> Either String Builder
+discharge k g = solve Backtrack (obligations k g) obligationDepth
+
+{- |
+The clauses obligations are discharged by in a goal, each a lemma or a
+hypothesis whose premises are its subgoals.  For any membership: a
+hypothesis stating it, and @anyIsMember@ for @anyIs@.  For the membership of
+an application, by the head of the term: the goal's premise stating the
+closure of the method of its dictionary applied; a constructor's
+introduction, after the memberships of the fields its type checks; a
+function's closure lemma, after the memberships of its arguments, its
+premises the closures of the methods of its dictionary.  For a law: the
+goal's premise at a type parameter, or the theorem proving it at the
+instance for the head of the type, its premises at the type's arguments.
+For a closure: @anyIsMember@ at every code, the goal's premise at a type
+parameter, and at a data type the closure lemma of the instance's function,
+its premises in turn.
+-}
+obligations :: Knowledge -> Goal -> Database ObligationHead Obligation Builder String
+obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
   where
-    headName = case t of
-      CSym f _ -> Just f
-      CVar v -> Just v
+    env = knowEnv k
+    obligationHead = \case
+      OMember _ (CSym f _) -> OnTerm f
+      OMember _ (CVar v) -> OnTerm v
+      OMember _ _ -> OnNothing
+      OLaw lq _ -> OnLaw lq
+      OClosure mq _ -> OnClosure mq
+    byHead = \case
+      OnTerm f -> [premised f, introduced f, closedBy f]
+      OnLaw _ -> [lawPremise, lawInstance]
+      OnClosure _ -> [closureAny, closurePremise, closureInstance]
+      OnNothing -> []
+    assumed = \case
+      OMember p t | hasMembership g p t -> Just (Reduce [] (const "assumption"))
       _ -> Nothing
-    operands = case t of
-      CSym _ as -> as
-      _ -> []
+    anyMember = \case
+      OMember p _ | p == anyPred -> Just (Reduce [] (const "exact anyIsMember"))
+      _ -> Nothing
+    -- A method of the goal's dictionary applied: the goal's premise stating its closure.
+    premised f = \case
+      OMember p t
+        | (name, argPs) : _ <- [(gpName gp, ps) | gp <- goalPremises g, Just (place, ps, result) <- [gpClosure gp], place == f, result == p] ->
+            Just (afterMemberships [(a, q) | (a, Just q) <- zip (operands t) argPs] [] (const ("exact " <> fromText name)))
+      _ -> Nothing
+    -- A constructor applied: its introduction, after the memberships of the fields its type checks.
+    introduced f = \case
+      OMember (Pred q ps) (CSym _ args)
+        | Just c <- ctorByCore env f
+        , Just (isCore, used) <- Map.lookup (renderQualName (ctorData c)) (knowMembership k)
+        , q == isCore ->
+            Just (afterMemberships [(args !! j, fieldPredicate used ps fp) | (j, fp) <- Map.findWithDefault [] f (knowMembers k), j < length args] [] (const ("exact " <> fromText (ctorLemma c "intro"))))
+      _ -> Nothing
+    -- A function applied: its closure lemma, after the memberships of its arguments.
+    closedBy f = \case
+      OMember p (CSym _ args)
+        | Just cl <- Map.lookup f (knowClosures k)
+        , Just (given, argPs) <- argumentsOf cl p ->
+            Just (either Refuse (uncurry (afterMemberships [(a, q) | (a, Just q) <- zip args argPs])) (closureAppeal cl given))
+      _ -> Nothing
+    lawPremise = \case
+      OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (renderQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
+      _ -> Nothing
+    -- The theorem proving the law at the instance for the head of the type; under a context, its premises at the type's arguments.
+    lawInstance = \case
+      OLaw lq ty
+        | Just h <- headOf ty -> Just case lawTheorem lq h of
+            Left why -> Refuse why
+            Right t' -> either Refuse (\subs -> Reduce subs (\rs -> "exact " <> fromText (thmCore t') <> blocks rs)) (premiseObligations k g (Map.fromList (zip [0 ..] (typeArgs ty))) t')
+      _ -> Nothing
+    closureAny = \case
+      OClosure _ SiteAny -> Just (Reduce [] (const "exact anyIsMember"))
+      _ -> Nothing
+    closurePremise = \case
+      OClosure mq (SiteParam j) -> Just (premiseNamed (PClosure mq j) ("no premise states the closure of " <> T.unpack (renderQualName mq) <> " here"))
+      _ -> Nothing
+    -- The closure lemma of the instance's function; the instance's type parameters are its type's, in order.
+    closureInstance = \case
+      OClosure mq (SiteData dn preds) -> Just case instanceFunction mq dn of
+        Nothing -> Refuse ("no instance's function for " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn)
+        Just f -> case Map.lookup (funCore f) (knowClosures k) of
+          Nothing -> Refuse ("the function of " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn <> " has no closure lemma: its results are not known to be members")
+          Just cl -> either Refuse (uncurry Reduce) (closureAppeal cl (Map.fromList [(u, q) | (u, Just q) <- zip [0 ..] preds]))
+      _ -> Nothing
+    -- The appeal to a closure lemma: its premises, the closures of its dictionary's methods, at the predicates its type parameters are at.
+    closureAppeal cl given = do
+      subs <- forM (closurePremisesOf cl) \case
+        PClosure mq i -> maybe (Left ("the predicate of the type parameter " <> show i <> " of a closure is not known")) (Right . OClosure mq . siteOfPred k g) (Map.lookup i given)
+        PLaw {} -> Left "internal: a law among the premises of a closure"
+      Right (subs, \rs -> "exact " <> fromText (closureLemma cl) <> blocks rs)
     -- The predicates a function's closure lemma needs of its arguments, at the
     -- predicates of the type parameters the result's gives: none when it does
     -- not give them all.
-    argumentsOf cl = do
+    argumentsOf cl p = do
       given <- case (closureResultTy cl, p) of
         (TData dn targs, Pred q ps)
           | Just (q', used) <- Map.lookup dn (knowMembership k)
@@ -717,43 +778,64 @@ membershipProof k g p t
         _ -> Nothing
       guard (all (`Map.member` given) (concatMap valueVariables (closureArgTys cl)))
       Just (given, [if ty == TNat then Nothing else predicateOf (knowMembership k) (`Map.lookup` given) ty | ty <- closureArgTys cl])
-    needs pairs = mconcat <$> traverse one [(a, q) | (a, q) <- pairs, not (hasMembership g q a)]
-    one (a, q) = do
-      inner <- membershipProof k g q a
-      Right ("have (" <> membershipText q a <> ") { " <> inner <> " }; ")
+    -- The memberships of the pairs no hypothesis states, proved first and added
+    -- as hypotheses; then the appeal, from the results of the other subgoals.
+    afterMemberships pairs rest appeal =
+      let needed = [(a, q) | (a, q) <- pairs, not (hasMembership g q a)]
+       in Reduce (map (\(a, q) -> OMember q a) needed <> rest) \rs ->
+            let (proofs, others) = splitAt (length needed) rs
+             in mconcat ["have (" <> membershipText q a <> ") { " <> r <> " }; " | ((a, q), r) <- zip needed proofs] <> appeal others
+    premiseNamed p why = maybe (Refuse why) (\gp -> Reduce [] (const ("exact " <> fromText (gpName gp)))) (find ((== p) . gpPremise) (goalPremises g))
+    lawTheorem lq h = do
+      cls <- case Map.lookup lq (envGlobals env) of
+        Just (GLaw l) -> Right (lawClass l)
+        _ -> Left ("internal: " <> T.unpack (renderQualName lq) <> " is no law")
+      inst <- maybe (Left ("no instance of " <> T.unpack (renderQualName cls) <> " for " <> T.unpack h)) Right (Map.lookup (cls, h) (envInstances env))
+      maybe (Left ("internal: the instance does not prove " <> T.unpack (renderQualName lq))) Right (Map.lookup lq (instLaws inst))
+    instanceFunction mq dn = do
+      GMethod m <- Map.lookup mq (envGlobals env)
+      inst <- Map.lookup (methodClass m, dn) (envInstances env)
+      Map.lookup mq (instFunctions inst)
+    operands = \case
+      CSym _ as -> as
+      _ -> []
+    blocks rs = mconcat [" { " <> r <> " }" | r <- rs]
+    typeArgs = \case
+      TData _ ts -> ts
+      _ -> []
+    none = \case
+      OMember p t -> "the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function"
+      OLaw lq ty -> "the law " <> T.unpack (renderQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
+      OClosure mq _ -> "the closure of " <> T.unpack (renderQualName mq) <> " is not known there"
+    deep _ = "resolution went deeper than " <> show obligationDepth <> " steps"
+
+-- | The site of a closure at a type: a type parameter, every code for @Nat@, a data type at the predicates of its arguments.
+siteOfType :: Knowledge -> Goal -> Ty -> Site
+siteOfType k g = \case
+  TParam j [] -> SiteParam j
+  TNat -> SiteAny
+  TData dn targs -> SiteData dn (map (typePredicate k g) targs)
+  _ -> SiteUnknown
 
 {- |
-The appeal to a function's closure lemma, its premises proved in turn, at
-the predicates its type parameters are at: the closure of each method of its
-dictionary is the goal's own premise at one of the goal's type parameters,
-@anyIsMember@ at @Nat@, and at a data type the closure lemma of the
-instance's function, with its premises in turn.
+The site of a closure at a predicate: every code for @anyIs@; the type
+parameter a predicate is the goal's own of; a data type, at the predicates
+of those of its parameters its predicate takes.
 -}
-closureTactic :: Knowledge -> Goal -> Closure -> Map Int Pred -> Either String Builder
-closureTactic k g cl given = (\blocks -> "exact " <> fromText (closureLemma cl) <> mconcat blocks) <$> traverse block (closurePremisesOf cl)
-  where
-    block = \case
-      PClosure mq i ->
-        (\b -> " { " <> b <> " }") <$> case Map.lookup i given of
-          Just q
-            | q == anyPred -> Right "exact anyIsMember"
-            | Just j <- ownParam q ->
-                maybe (Left ("no premise states the closure of " <> T.unpack (renderQualName mq) <> " here")) (Right . ("exact " <>) . fromText . gpName) (find ((== PClosure mq j) . gpPremise) (goalPremises g))
-            | Pred isCore ps <- q
-            , (dn, used) : _ <- [(dn, used) | (dn, (p', used)) <- Map.toList (knowMembership k), p' == isCore] -> do
-                f <- maybe (Left ("no instance's function for " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn)) Right $ do
-                  GMethod m <- Map.lookup mq (envGlobals (knowEnv k))
-                  inst <- Map.lookup (methodClass m, dn) (envInstances (knowEnv k))
-                  Map.lookup mq (instFunctions inst)
-                cl' <- maybe (Left ("the function of " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn <> " has no closure lemma")) Right (Map.lookup (funCore f) (knowClosures k))
-                -- The instance's type parameters are its type's, in order.
-                closureTactic k g cl' (Map.fromList [(u, parameterPredicate c) | (u, c) <- zip used ps])
-          _ -> Left ("the predicate of the type parameter " <> show i <> " of a closure is not known")
-      PLaw {} -> Left "internal: a law among the premises of a closure"
-    -- The type parameter of the goal's theorem a predicate is the own one of.
-    ownParam = \case
-      Pred w [] -> listToMaybe [slotParam s | (s, Ref _ n) <- zip (goalDict g) (placeRefs (goalDict g)), isMembershipSlot s, n == w]
-      _ -> Nothing
+siteOfPred :: Knowledge -> Goal -> Pred -> Site
+siteOfPred k g q
+  | q == anyPred = SiteAny
+  | Just j <- ownParam g q = SiteParam j
+  | Pred isCore ps <- q
+  , (dn, used) : _ <- [(dn, used) | (dn, (p', used)) <- Map.toList (knowMembership k), p' == isCore] =
+      SiteData dn [parameterPredicate <$> lookup u (zip used ps) | u <- [0 .. maximum (-1 : used)]]
+  | otherwise = SiteUnknown
+
+-- | The type parameter of the goal's theorem a predicate is the own one of.
+ownParam :: Goal -> Pred -> Maybe Int
+ownParam g = \case
+  Pred w [] -> listToMaybe [slotParam s | (s, Ref _ n) <- zip (goalDict g) (placeRefs (goalDict g)), isMembershipSlot s, n == w]
+  _ -> Nothing
 
 spineOf :: Located R.Expr -> (Located R.Expr, [Located R.Expr])
 spineOf = go []
