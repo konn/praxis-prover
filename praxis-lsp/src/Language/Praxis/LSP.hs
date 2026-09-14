@@ -119,9 +119,9 @@ publish uri = do
       publishDiagnostics 100 uri (Just (virtualFileVersion f)) (partitionBySource (map (diagnostic (virtualFileText f)) (analyse lang (virtualFileText f))))
     _ -> pure ()
 
--- | A report as a diagnostic, spanning from its position to the end of the line.
+-- | A report as a diagnostic, spanning from its position to its end, or else to the end of the line.
 diagnostic :: Text -> Report -> Diagnostic
-diagnostic text (Report line column severity message) =
+diagnostic text (Report line column severity message stop) =
   Diagnostic
     { _range = Range start end
     , _severity = Just severity
@@ -135,7 +135,7 @@ diagnostic text (Report line column severity message) =
     }
   where
     start = Position (fromIntegral (line - 1)) (fromIntegral (column - 1))
-    end = Position (fromIntegral (line - 1)) (fromIntegral (max column (lineLength line)))
+    end = maybe (Position (fromIntegral (line - 1)) (fromIntegral (max column (lineLength line)))) (\(l, c) -> Position (fromIntegral (l - 1)) (fromIntegral (c - 1))) stop
     lineLength l = maybe column T.length (listToMaybe (drop (l - 1) (T.lines text)))
 
 -- * Analysis
@@ -157,6 +157,8 @@ data Report = Report
   , reportColumn :: !Int
   , reportSeverity :: !DiagnosticSeverity
   , reportMessage :: !Text
+  , reportEnd :: !(Maybe (Int, Int))
+  -- ^ where it ends, when known: the line, and the column after its last character
   }
   deriving (Show, Eq)
 
@@ -171,7 +173,7 @@ analysePrf :: Text -> [Report]
 analysePrf text = case checkQuote mempty Map.empty Set.empty id "" text of
   Left err ->
     let (line, column) = fromMaybe (1, 1) (checkErrorPosition err)
-     in [Report line column DiagnosticSeverity_Error (T.pack (renderCheckError err))]
+     in [Report line column DiagnosticSeverity_Error (T.pack (renderCheckError err)) Nothing]
   Right _ -> []
 
 {- |
@@ -181,13 +183,13 @@ known, and a @sorry@ as information with the goal it stopped at.
 -}
 analysePra :: Text -> [Report]
 analysePra text = case builtinLemmas of
-  Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack err)]
+  Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack err) Nothing]
   Right base -> case parseQuoteIn (lemmaSorts base) (schemaScope builtin) (T.unpack text) of
     Left err ->
       let (line, column) = syntaxErrorPosition err
-       in [Report line column DiagnosticSeverity_Error (T.pack (displayException err))]
+       in [Report line column DiagnosticSeverity_Error (T.pack (displayException err)) Nothing]
     Right (_, decls) -> case signatureEnv builtin of
-      Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack (displayException err))]
+      Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack (displayException err)) Nothing]
       Right kernel -> go kernel (withoutDeclared decls base) decls
   where
     go _ _ [] = []
@@ -199,7 +201,7 @@ analysePra text = case builtinLemmas of
           severity = case errorFailure err of
             Unfinished -> DiagnosticSeverity_Information
             _ -> DiagnosticSeverity_Error
-       in Report line column severity (T.pack (unlocated (renderSchemaTacticError builtin err)))
+       in Report line column severity (T.pack (unlocated (renderSchemaTacticError builtin err))) Nothing
     -- The position opens the rendering; the diagnostic carries it already.
     unlocated s = case break (== ':') s of
       (l, ':' : rest) | all (`elem` ['0' .. '9']) l, (c, ':' : ' ' : msg) <- break (== ':') rest, all (`elem` ['0' .. '9']) c, not (null c) -> msg
@@ -314,10 +316,10 @@ declaration or at the tactic which failed.
 -}
 analysePx :: Text -> [Report]
 analysePx text = case surfacePrelude of
-  Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err))]
+  Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err)) Nothing]
   Right p -> map report (Surface.checkedReports (Surface.checkSource p "<document>" text))
   where
-    report (Surface.Report (Span (l, c) _) sev msg) = Report (max 1 l) (max 1 c) (severity sev) msg
+    report (Surface.Report (Span (l, c) (l', c')) sev msg) = Report (max 1 l) (max 1 c) (severity sev) msg (Just (max 1 l', max 1 c'))
     severity = \case
       Surface.SevError -> DiagnosticSeverity_Error
       Surface.SevInfo -> DiagnosticSeverity_Information

@@ -23,7 +23,7 @@ tests =
         analyse Pra proofs @?= []
     , testCase "a sorry is reported as information, with the goal" $
         analyse Pra (proofs <> "\ntheorem open : a = 0 |- a = 0 /\\ a = 0\nby ConjR { Id } { sorry }\n")
-          @?= [Report 8 19 DiagnosticSeverity_Information "sorry: the proof stops here\n  H1 : a = 0\n  |- a = 0"]
+          @?= [Report 8 19 DiagnosticSeverity_Information "sorry: the proof stops here\n  H1 : a = 0\n  |- a = 0" Nothing]
     , testCase "a failing tactic is reported at its position" $ do
         let reports = analyse Pra "theorem wrong : |- 2 = 3\nby refl\n"
         map reportLine reports @?= [2]
