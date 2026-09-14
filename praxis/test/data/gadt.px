@@ -65,3 +65,15 @@ data SameVec {a} {n} {m} (l : Vec a n) (r : Vec a m) where
 same-eq : {xs : Vec a n} -> {ys : Vec a m} -> (p : SameVec xs ys) -> xs ≡ ys
 same-eq BothNil = rfl
 same-eq (BothCons q) = cong (same-eq q)
+
+-- An implicit value its clauses bind is taken at runtime: where the function
+-- is applied, it is found from the type expected, and passed.
+replicate-vec : {n : nat} -> a -> Vec a n
+replicate-vec {0} x = nil
+replicate-vec {S k} x = x :- replicate-vec x
+
+len : {n : nat} -> Vec a n -> Nat
+len {n} v = n
+
+len-replicate : {n : nat} -> (x : a) -> len (replicate-vec x : Vec a n) ≡ n
+len-replicate x = rfl

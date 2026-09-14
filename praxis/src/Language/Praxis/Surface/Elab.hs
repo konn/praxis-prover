@@ -778,7 +778,7 @@ elabInstance fx env sp idl = do
       let mine = [c | c <- clauses, clauseHead c == Just (last (methodQual m))]
           (args, result) = arrows (schemeType (funScheme f))
       when (null mine) $ Left (ElabError sp ("no clauses for the method " <> T.unpack (segmentText (last (methodQual m)))))
-      forM mine \c -> runTC (elabFunClause fx e f args result c)
+      forM mine \c -> runTC (elabFunClause fx e f [] args result c)
     define clauses (e, items) (m, f) = do
       fcs <- methodClauses clauses e m f
       let (args, result) = arrows (schemeType (funScheme f))
@@ -1039,6 +1039,7 @@ elabIx env vals le@(Located sp e) = case e of
       GFun f : _ -> do
         unless (length args == funArity f) $ Left (ElabError hsp (T.unpack (qnameText q) <> " takes " <> show (funArity f) <> " arguments"))
         unless (null (funSlots f)) $ Left (ElabError hsp "a function under constraints, in an index: not supported")
+        unless (null (funRuntime f)) $ Left (ElabError hsp "a function taking implicit values at runtime, in an index: not supported yet")
         IxFun (funCore f) <$> traverse (elabIx env vals) args
       _ -> Left (ElabError hsp ("not a value in scope here: " <> T.unpack (qnameText q)))
     isValueHead = \case
@@ -1134,7 +1135,7 @@ elabDecl fx env sp name ty0 clauses = do
       full <- dictionaryOf env paramNames constraints
       given <- constraintClasses env paramNames constraints
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] (values <> binderTys)]
-      prop0 <- runTC (elabProp env full ctx0 body)
+      prop0 <- runTC (elabProp env {envScope = scope} full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
       let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
@@ -1151,16 +1152,26 @@ elabDecl fx env sp name ty0 clauses = do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       fty <- elabTypeIn env scope body
       full <- dictionaryOf env paramNames constraints
+      -- The implicit values its clauses bind, {n}, in order: taken at runtime, before its arguments.
+      boundImplicits <- fmap (maximum . (0 :)) . forM clauses $ \(R.Clause lhs0 _) -> do
+        lhs <- resolved fx lhs0
+        pure (maybe 0 (\(_, parts) -> length [() | Left _ <- parts]) (lhsParts lhs))
+      when (boundImplicits > length values) $
+        Left (ElabError sp ("its clauses bind " <> show boundImplicits <> " implicit values, and its signature has " <> show (length values)))
       let (args, result) = arrows fty
+          runtime = [0 .. boundImplicits - 1]
+          runtimeTys = [snd (values !! i) | i <- runtime]
           scheme = Scheme params values fty
-          (env1, info1) = addFunction env name scheme (length args) full
+          (env1, info1) = setFunRuntime runtime (addFunction env name scheme (length args) full)
       unless (all firstOrder (result : args)) $ Left (ElabError (location body) "a function of functions: its arguments and its result are values, which are first-order")
-      fcs1 <- forM clauses \c -> runTC (elabFunClause fx env1 {envScope = scope} info1 args result c)
+      forM_ (zip runtime runtimeTys) \(i, t) ->
+        when (t == THole) $ Left (ElabError sp ("the type of the implicit value " <> T.unpack (fst (values !! i)) <> " is not known; write it, {" <> T.unpack (fst (values !! i)) <> " : T}"))
+      fcs1 <- forM clauses \c -> runTC (elabFunClause fx env1 {envScope = scope} info1 runtimeTys args result c)
       -- The function takes the places of its dictionary its clauses use.
       let (used, fcs) = pruneDictionary info1 fcs1
-          (env2, info) = addFunction env name scheme (length args) used
-      impossible <- coverage args fcs
-      pure (registerUnfoldings info fcs env2, IFun (FunDef info args result fcs sp impossible))
+          (env2, info) = setFunRuntime runtime (addFunction env name scheme (length args) used)
+      impossible <- coverage (runtimeTys <> args) fcs
+      pure (registerUnfoldings info fcs env2, IFun (FunDef info (runtimeTys <> args) result fcs sp impossible))
   where
     checkBinder seen (Located nsp n)
       | n `elem` seen = Left (ElabError nsp ("the variable " <> T.unpack n <> " is bound twice"))
@@ -1295,7 +1306,8 @@ pruneDictionary info fcs = (kept, map prune fcs)
   where
     full = funSlots info
     self = funCore info
-    arity = funArity info
+    -- A recursive call's own arguments: the implicit values taken at runtime, then the explicit ones.
+    arity = length (funRuntime info) + funArity info
     refs = placeRefs full
     used = nub (concatMap (usedIn . fromScope . fcBody) fcs)
     keep = [r `elem` used | r <- refs]
@@ -1449,15 +1461,35 @@ lhsParts = go []
 
 -- * Clauses
 
-elabFunClause :: Fixities -> Env -> FunInfo -> [Ty] -> Ty -> R.Clause -> TC FunClause
-elabFunClause fx env info args result (R.Clause lhs0 (Located rsp rhs)) = do
+elabFunClause :: Fixities -> Env -> FunInfo -> [Ty] -> [Ty] -> Ty -> R.Clause -> TC FunClause
+elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs)) = do
   lhs <- liftE (resolved fx lhs0)
-  explicit <- case lhsParts lhs of
-    Just (_, parts) -> pure [p | Right p <- parts]
+  (implicit, explicit) <- case lhsParts lhs of
+    Just (_, parts) -> pure ([p | Left p <- parts], [p | Right p <- parts])
     Nothing -> failAt (location lhs) "a clause: the function's name applied to patterns"
   unless (length explicit == length args) $
     failAt (location lhs) (T.unpack (renderQualName (funQual info)) <> " takes " <> show (length args) <> " arguments")
-  (pats, vars, refined) <- patterns env (zip args explicit)
+  -- The implicit values it takes at runtime, each matched by a pattern, or by none; what one
+  -- matches on holds of the value parameter it is, where the explicit patterns are matched.
+  let implicit' = implicit <> replicate (length runtimeTys - length implicit) (Located (location lhs) R.EWildcard)
+  (ipats, ivars, s0) <- patterns env (zip runtimeTys implicit')
+  s1 <-
+    foldM
+      ( \s (i, (p, a)) -> case patternIx p of
+          Nothing -> pure s
+          Just x -> case unifyIx flexibleKey (IxParam i) x s of
+            Unified s' -> pure s'
+            Clash why -> failAt (location a) ("this pattern can never match here: " <> why)
+            Stuck why -> failAt (location a) ("cannot match on this value: " <> why)
+      )
+      s0
+      (zip [0 ..] (zip ipats implicit'))
+  (epats, evars, refined) <- patternsFrom env s1 (zip args explicit)
+  let pats = ipats <> epats
+      vars = ivars <> evars
+  case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | (n, _) <- vars]), k > 1] of
+    n : _ -> failAt (location lhs) ("the variable " <> T.unpack n <> " is bound twice")
+    [] -> pure ()
   -- What matching concluded of the signature's value parameters holds in the body.
   let scope = envScope env
       envBody = env {envScope = scope {tsValues = [(v, applyIx refined x) | (v, x) <- tsValues scope]}}
@@ -1467,6 +1499,15 @@ elabFunClause fx env info args result (R.Clause lhs0 (Located rsp rhs)) = do
       checkTerm envBody (funSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' (applyTy refined result)
     _ -> failAt rsp "a function's clause is a term, not a proof"
   pure (FunClause pats vars (toScope (fmap B body)) (R.spanning (location lhs) rsp))
+
+-- | The index a pattern stands for, where it stands for one: its variables the clause's.
+patternIx :: Pattern -> Maybe Ix
+patternIx = \case
+  PNat n -> Just (IxNat n)
+  PSucc p -> IxSucc <$> patternIx p
+  PVar (Hint v) -> Just (IxVar v)
+  PCon (Ref _ c) subs -> IxCon c <$> traverse patternIx subs
+  _ -> Nothing
 
 elabProofClause :: Fixities -> Env -> [Ty] -> R.Clause -> TC ProofClause
 elabProofClause fx env binderTys (R.Clause lhs0 rhs) = do
@@ -1486,8 +1527,12 @@ data types in the GADT style concluded of the indices, the variables' types
 at it.
 -}
 patterns :: Env -> [(Ty, Located R.Expr)] -> TC ([Pattern], [(Text, Ty)], Subst)
-patterns env pts = do
-  (results, refined) <- foldM (\(acc, s) (t, p) -> (\(pat, vs, s') -> (acc <> [(pat, vs)], s')) <$> elabPattern env s (applyTy s t) p) ([], emptySubst) pts
+patterns env = patternsFrom env emptySubst
+
+-- | 'patterns', from what is known of the indices already.
+patternsFrom :: Env -> Subst -> [(Ty, Located R.Expr)] -> TC ([Pattern], [(Text, Ty)], Subst)
+patternsFrom env s0 pts = do
+  (results, refined) <- foldM (\(acc, s) (t, p) -> (\(pat, vs, s') -> (acc <> [(pat, vs)], s')) <$> elabPattern env s (applyTy s t) p) ([], s0) pts
   let vars = [(n, applyTy refined t) | (n, t) <- concatMap snd results]
   case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | (n, _) <- vars]), k > 1] of
     n : _ -> failAt (spanOf pts) ("the variable " <> T.unpack n <> " is bound twice")
@@ -1759,13 +1804,20 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
         let n = (length (schemeParams (funScheme f)), length (schemeValues (funScheme f)))
             (doms, res) = splitArrows (funArity f) (schemeType (funScheme f))
             fn = Global (Ref RefFunction (funCore f))
-        pure $ AppHead n doms res \s ->
+            -- A value parameter of the enclosing signature, where the clause has it as a variable.
+            valueParam i = listToMaybe [v | (v, IxParam j) <- tsValues (envScope env), j == i] >>= \v -> Var . fst <$> lookup v ctx
+            -- The implicit values it takes at runtime, as found: terms of what is in scope.
+            passed s = forM (funRuntime f) \i -> case IM.lookup i (asValues s) >>= ixToExprWith (\v -> Var . fst <$> lookup v ctx) valueParam of
+              Just x -> pure x
+              Nothing -> failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (renderQualName (funQual f)) <> " is not determined here, as a value")
+        pure $ AppHead n doms res \s -> do
+          pre <- passed s
           if null (funSlots f)
-            then pure (apps fn)
+            then pure (\as -> apps fn (pre <> as))
             else do
               -- Its dictionary at the types its parameters are at, after its arguments.
               dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]])
-              pure \as -> apps fn (as <> map vacuous dict)
+              pure \as -> apps fn (pre <> as <> map vacuous dict)
       GCtor c -> case dataOfCtor env c of
         Just d -> do
           let n = length (dataParams d)

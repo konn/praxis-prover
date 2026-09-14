@@ -34,6 +34,7 @@ module Language.Praxis.Surface.Index (
 
   -- * Terms
   ixToExpr,
+  ixToExprWith,
   isPattern,
 ) where
 
@@ -162,7 +163,11 @@ value parameter by none: a value parameter of a signature is implicit, and no
 value a function is given.  Nothing when it mentions one, or a hole.
 -}
 ixToExpr :: (Text -> Maybe (Expr a)) -> Ix -> Maybe (Expr a)
-ixToExpr var = go
+ixToExpr var = ixToExprWith var (const Nothing)
+
+-- | 'ixToExpr', a value parameter by the function given too: where the parameter's value is in scope, as a variable.
+ixToExprWith :: (Text -> Maybe (Expr a)) -> (Int -> Maybe (Expr a)) -> Ix -> Maybe (Expr a)
+ixToExprWith var param = go
   where
     go = \case
       IxNat n -> Just (Nat n)
@@ -170,7 +175,7 @@ ixToExpr var = go
       IxVar v -> var v
       IxCon c xs -> apps (Global (Ref RefConstructor c)) <$> traverse go xs
       IxFun f xs -> apps (Global (Ref (if f `elem` builtins then RefBuiltin else RefFunction) f)) <$> traverse go xs
-      IxParam _ -> Nothing
+      IxParam i -> param i
       IxHole -> Nothing
     builtins = ["add", "sub", "mul", "pow"] :: [Text]
 

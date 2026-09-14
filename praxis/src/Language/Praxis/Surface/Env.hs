@@ -48,6 +48,7 @@ module Language.Praxis.Surface.Env (
   addFunction,
   addTheorem,
   setTheoremIndices,
+  setFunRuntime,
   explicitPositions,
   addClass,
   addLaws,
@@ -152,6 +153,11 @@ data FunInfo = FunInfo
   , funCore :: !Text
   , funSlots :: ![Slot]
   -- ^ its dictionary, in order: the methods its constraints give it which it uses
+  , funRuntime :: ![Int]
+  {- ^ the value parameters it takes at runtime, by position, before its
+  arguments: the implicit values its clauses bind, which an application
+  finds from the types and passes
+  -}
   }
   deriving stock (Show)
 
@@ -379,7 +385,7 @@ addFunction :: Env -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)
 addFunction env name sch arity slots = (env', info)
   where
     q = qualify env [name]
-    info = FunInfo q sch arity (coreOf q) slots
+    info = FunInfo q sch arity (coreOf q) slots []
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)
@@ -387,6 +393,12 @@ addFunction env name sch arity slots = (env', info)
         , envNamespaces = Map.insertWith Map.union q Map.empty (envNamespaces env)
         , envDisplay = Map.insert (funCore info) (segmentText name) (envDisplay env)
         }
+
+-- | The value parameters a function takes at runtime, recorded in its information and in the environment.
+setFunRuntime :: [Int] -> (Env, FunInfo) -> (Env, FunInfo)
+setFunRuntime runtime (env, info) = (env {envGlobals = Map.insert (funQual info) (GFun info') (envGlobals env)}, info')
+  where
+    info' = info {funRuntime = runtime}
 
 -- | A theorem's binders' indices and its value parameters, recorded in its information and in the environment.
 setTheoremIndices :: [(Int, Text, Ix)] -> [Text] -> (Env, TheoremInfo) -> (Env, TheoremInfo)
@@ -451,7 +463,7 @@ addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> [Slot] -> 
 addInstanceFunction env instance' method sch arity slots = (env', info)
   where
     q = instance' <> [method]
-    info = FunInfo q sch arity (coreOf q) slots
+    info = FunInfo q sch arity (coreOf q) slots []
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)

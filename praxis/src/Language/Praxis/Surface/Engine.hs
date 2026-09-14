@@ -511,8 +511,9 @@ indexSpecOf k fd
     posts0 = case fdResult fd of
       TData dn _ xs@(_ : _) -> zip (fnsOf dn) xs
       _ -> []
-    -- The first index of an argument which is a value parameter, bare, defines it.
-    definitions = foldl define [] (zip [0 :: Int ..] pres0)
+    -- A value parameter taken at runtime is its argument, which comes first; the first
+    -- index of an argument which is another value parameter, bare, defines that one.
+    definitions = foldl define [(i, (-1, CVar (cores !! pos))) | (pos, i) <- zip [0 ..] (funRuntime info)] (zip [0 :: Int ..] pres0)
     define acc (j, (fn, a, x)) = case normIx x of
       IxParam i | i `notElem` map fst acc -> acc <> [(i, (j, CSym fn [CVar (cores !! a)]))]
       _ -> acc

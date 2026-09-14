@@ -439,7 +439,8 @@ compileFunction env fd = do
     recursiveFields ps fc = mapMaybe (\case (Field j, True) -> Just j; _ -> Nothing) [(p, i `elem` recVars core fc) | (i, p) <- zip [0 ..] ps]
     -- A recursive call: on a field of the scrutinee, the function's other arguments unchanged.
     recursiveCall c userOthers ps _fc k h callArgs = do
-      unless (length callArgs == length userOthers + 1) $ Left "a recursive call with the wrong number of arguments"
+      unless (length callArgs == length userOthers + 1) $
+        Left ("a recursive call with " <> show (length callArgs) <> " arguments, where the function takes " <> show (length userOthers + 1))
       field <- case fst (callArgs !! c) of
         Just i | Field j <- ps !! i -> Right j
         _ -> Left "a recursive call must pass a field of the matched constructor where the function matches"

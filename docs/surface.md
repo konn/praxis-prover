@@ -340,6 +340,21 @@ there, as `tail xs` at `xs : Vec a 0` is. Indices are compared in normal
 form, the arithmetic of `Nat` evaluated as the core's definitional equality
 does: `n + 1` is `S n`, but `0 + n` is not `n`.
 
+An implicit value a function's clauses bind, `{n}`, is taken at runtime: the
+function's code has it as an argument before its own, and an application
+passes the value found for it, which must then be a term of what is in scope
+there. A clause may match on it as on an argument, and what it matches holds
+of the indices of the other arguments and of the result:
+
+```
+replicate-vec : {n : nat} -> a -> Vec a n
+replicate-vec {0} x = nil
+replicate-vec {S k} x = x :- replicate-vec x
+```
+
+An implicit value no clause binds stays out of the code, found for the types
+alone, as `n` in `tail`.
+
 Matching a constructor refines what a clause knows: `(_ :- tl)` against
 `Vec a (S n)` gives `tl` the type `Vec a n`. A constructor whose result's
 indices clash with those of the argument's type — `nil`, of length 0, at

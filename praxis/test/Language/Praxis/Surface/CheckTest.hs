@@ -127,6 +127,8 @@ checkTests =
         -- Theorems over its values: the index a bare value, a case its indices exclude, an appeal needing an index;
         -- and over a data type whose head has implicit parameters, its indices lists.
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.length-index", "Gadt.head-tail", "Gadt.head-tail-two", "Gadt.same-eq"]
+        -- Implicit values its clauses bind, taken at runtime: matched on, found and passed.
+        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.replicate-vec.#index", "Gadt.len-replicate"]
         -- The membership of its results, under the indices of its argument: a rule over its type parameter's predicate.
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (any (("rule u_Gadt_s" <> f <> "_s_x23_closed ") `T.isPrefixOf`) (checkedCore c))) ["tail", "tail_dtwo", "head", "first"]
     , testCase "an index which cannot be, a clause missing or never matching, and a kind which disagrees, are refused" $ do
