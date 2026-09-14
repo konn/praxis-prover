@@ -64,3 +64,9 @@ min-nat (S n) (S m) = S (min-nat n m)
 
 min-succ : (n m : nat) -> min-nat (S n) (S m) ≡ S (min-nat n m)
 min-succ n m = rfl
+
+-- The comparison, from its evidence: the induction hypothesis the comparison
+-- the goal is once both are unfolded, S n < S m being n < m.
+lt-of-plt : {n m : nat} -> PLt n m -> (n < m)
+lt-of-plt ZeroSucc = rfl
+lt-of-plt (SuccSucc p) = lt-of-plt p

@@ -476,6 +476,16 @@ definitional equality only on what remains (functions applied to variables).
 step's goal. A recursive call in a proof term names the induction hypothesis
 at its argument; a lemma name is `exact`, `cong e` is `cong`.
 
+A hypothesis whose equation is not the goal's, but reduces to the same
+equation, proves it by a `calc` (`Engine.hypothesisBridge`): the goal's left
+side rewritten down to its normal form, the hypothesis's left side up from
+it, the hypothesis, its right side down, and the goal's right side up, each
+step an unfolding lemma. Ahead of the definitions' unfolding lemmas, the
+engine rewrites by two equations of the library, from left to right:
+`succSubSucc`, `S m - S n = m - n`, and `zeroMinus`, `0 - n = 0`
+(`Prelude.preludeUnfoldings`), which is what the arithmetic of a comparison
+needs, `lt (S n) (S m)` being `lt n m`.
+
 A lemma applied to arguments, `app-nil (rev xs)`, is appealed to the same
 way, and the core finds its instance. Before the appeal, the engine proves
 each membership the lemma's statement needs at those arguments that no

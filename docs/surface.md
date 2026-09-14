@@ -490,7 +490,16 @@ unfolding lemmas wherever a function meets a constructor — a module's
 functions', and those of the core's arithmetic and of the prelude, `add x (S y)`
 to `S (add x y)` — then compared, the core's definitional equality taking only
 what is left. A comparison is its equation in the core, `s < t` the equation
-`lt s t = 1`, so `rfl` proves `0 < S m`, and `cong` rewrites in it.
+`lt s t = 1`, so `rfl` proves `0 < S m`, and `cong` rewrites in it. The
+arithmetic of a comparison is rewritten by the library's equations too,
+`S m - S n` to `m - n` and `0 - n` to `0`, so that `S n < S m` is `n < m` once
+unfolded, and `n < 0` a clash. A hypothesis, or the induction hypothesis a
+recursive call names, proves a goal it is once both are unfolded:
+```
+lt-of-plt : {n m : nat} -> PLt n m -> (n < m)
+lt-of-plt ZeroSucc = rfl
+lt-of-plt (SuccSucc p) = lt-of-plt p
+```
 
 A lemma applies at any arguments of its types: `app-nil (rev xs)` proves
 `app (rev xs) Nil ≡ rev xs`. A value of a data type the lemma quantifies over

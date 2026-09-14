@@ -109,23 +109,37 @@ and @cong@ rewrite by, as by a module's own functions, @add_S@ taking
 out, as is one a side of which is no such term.
 -}
 preludeUnfoldings :: Prelude -> [(T.Text, CT, CT)]
-preludeUnfoldings p = case unfoldings (schemaScope sig [] []) of
-  Left _ -> []
-  Right us ->
-    [ (T.pack (unfoldingName u), l, r)
-    | u <- us
-    , Map.member (unfoldingName u) (preludeLemmas p)
-    , _ :|- Atm (a :=== b) <- [unfoldingStatement u]
-    , Just l <- [termOf a]
-    , Just r <- [termOf b]
-    ]
+preludeUnfoldings p = rewrites <> definitions
   where
+    definitions = case unfoldings (schemaScope sig [] []) of
+      Left _ -> []
+      Right us ->
+        [ (T.pack (unfoldingName u), l, r)
+        | u <- us
+        , Map.member (unfoldingName u) (preludeLemmas p)
+        , _ :|- Atm (a :=== b) <- [unfoldingStatement u]
+        , Just l <- [termOf a]
+        , Just r <- [termOf b]
+        ]
+    -- Equations of the library rewritten by as by an unfolding, from left to
+    -- right, and before the definitions, which would take the same terms
+    -- apart otherwise: what the arithmetic of a comparison needs, S n < S m
+    -- being n < m, and n < 0 nothing.
+    rewrites =
+      [ (T.pack n, l, r)
+      | n <- ["succSubSucc", "zeroMinus"]
+      , Just lemma <- [Map.lookup n (preludeLemmas p)]
+      , null (lemmaPremises lemma)
+      , _ :|- Atm (a :=== b) <- [lemmaGoal lemma]
+      , Just l <- [termOf a]
+      , Just r <- [termOf b]
+      ]
     sig = preludeSignature p
     termOf = go . canonicalise
     go :: Term SchemaName -> Maybe CT
     go = \case
       Var (Obj v) -> Just (CVar (T.pack v))
-      Var _ -> Nothing
+      Var (Meta _ v) -> Just (CVar (T.pack v))
       Lit n -> Just (CNum n)
       App (Primitive Succ) args -> CSym (T.pack "S") <$> traverse go (toList args)
       App f args

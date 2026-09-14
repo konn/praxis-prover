@@ -961,9 +961,16 @@ termProof k info n g le@(Located sp e) = case e of
     (Located _ (R.EName (QName [] (Ident w))), []) | w `elem` ["rfl", "refl"] -> closed <$> rflTactic k g sp
     -- What cannot be, from hypotheses whose equations clash once unfolded.
     _ | Bottom <- stripLocations (goalConcl g), Right tac <- refute k g -> pure (closed tac)
+    -- A hypothesis whose equation is the goal's once both are unfolded: the one taken to the other.
+    (Located _ (R.EName (QName [] (Ident w))), [])
+      | Just h <- lookup w (goalNames g)
+      , Just tac <- hypothesisBridge k g h ->
+          pure (closed tac)
     _ -> do
       ev <- evidence k info g le
-      pure (closed (evBefore ev <> exactAppeal ev))
+      -- A hypothesis as it is, an induction hypothesis a recursive call names among them: taken to the goal once both are unfolded, where they differ.
+      let bare = T.null (runBuilder (evBefore ev)) && T.null (runBuilder (evAfter ev))
+      pure (closed (fromMaybe (evBefore ev <> exactAppeal ev) (if bare then hypothesisBridge k g (evName ev) else Nothing)))
 
 {- |
 What a proof term refers to in the core — a hypothesis, an induction
@@ -1540,6 +1547,36 @@ functions are applied to variables only.
 -}
 rflTactic :: Knowledge -> Goal -> Span -> Either EngineError Builder
 rflTactic = rflWith "refl"
+
+-- | A term unfolded step by step, outermost first, as far as the unfolding lemmas go.
+reductionChain :: Knowledge -> CT -> [(Builder, CT)]
+reductionChain k = take 64 . go
+  where
+    go t = case unfoldStep k t of
+      Just (tac, t') -> (tac, t') : go t'
+      Nothing -> []
+
+{- |
+A hypothesis proving the goal once both are unfolded, each the equation the
+core states it as: a calculation from the goal's left side down to what the
+hypothesis's unfolds to, up to the hypothesis's left side, by it to its right
+side, and on to the goal's.  Nothing when they are the same as they are, or
+differ still once unfolded.
+-}
+hypothesisBridge :: Knowledge -> Goal -> Text -> Maybe Builder
+hypothesisBridge k g h = do
+  HProp p <- lookup h (goalHyps g)
+  Rel RelEq ga gb <- Just (stripLocations (asEquation (goalConcl g)))
+  Rel RelEq ha hb <- Just (stripLocations (asEquation p))
+  [l, r, a, b] <- either (const Nothing) Just (traverse (termCT CVar) [ga, gb, ha, hb])
+  guard (not (l == a && r == b))
+  let chain = reductionChain k
+      end t = maybe t snd (listToMaybe (reverse (chain t)))
+      down t = [(u, tac) | (tac, u) <- chain t]
+      up t = reverse [(u, tac) | ((tac, _), u) <- zip (chain t) (t : map snd (chain t))]
+  guard (end l == end a && end r == end b)
+  let steps = down l <> up a <> [(b, "exact " <> fromText h)] <> down b <> up r
+  pure ("calc " <> render l <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps])
 
 -- | A comparison as the equation the core states it as, @s < t@ as @lt s t = 1@; any other proposition as it is.
 asEquation :: Expr Text -> Expr Text
