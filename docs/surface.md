@@ -425,8 +425,8 @@ the successor. A value the statement quantifies over need not be named: in
 value, which a clause matches on as on any other. A right side is a proof term
 — a lemma or a hypothesis, `cong e`, `rfl` — a `calc`, or `by` tactics.
 Where the heads of the sides of an equation differ, `cong e` first unfolds
-them at their heads until they agree, so that the congruence is under what
-their definitions share: `length (x :- xs) ≡ Vec.#idx (x :- xs)` is
+them, outermost first, until their heads agree, so that the congruence is
+under what their definitions share: `length (x :- xs) ≡ Vec.#idx (x :- xs)` is
 `S (length xs) ≡ S (Vec.#idx xs)`.
 
 **By calculation.** `calc t₀ = t₁ := p₁ … = tₙ := pₙ` proves `t₀ = tₙ`; an
@@ -471,7 +471,7 @@ for every constructor and for every function whose result is of a data type.
 
 Implemented: the whole grammar above; data types, including higher-kinded
 parameters and nested and mutually referring types; functions matching on one
-argument, each constructor once, structurally recursive with unchanged other
+argument, each constructor once or `0` and `S n`, structurally recursive with unchanged other
 arguments; classes with superclasses, and their instances for data types and
 `Nat`, each use of a method resolved at the type it is used at; functions
 and theorems under constraints, schemas and rules over the methods they use;
@@ -491,8 +491,7 @@ indices whose types mention the parameters and the indices before them;
 type ascriptions; `.px` diagnostics.
 Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
-`if` in terms, nested patterns and matching on several arguments, matching
-and recursion on `Nat` in functions, overlapping first-match clauses, mutual recursion and
+`if` in terms, nested patterns and matching on several arguments, overlapping first-match clauses, mutual recursion and
 accumulating parameters, membership checking the fields of nested
 and higher-kinded parameters, and list-literal sugar. For indexed data types:
 the types of variables at indices of dependent types inferred rather than

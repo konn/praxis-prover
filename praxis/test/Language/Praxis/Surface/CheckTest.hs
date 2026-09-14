@@ -140,7 +140,9 @@ checkTests =
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
         c <- checkFile "test/data/nat.px"
         errors c @?= []
-        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero"]
+        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero", "NatTheorems.length-replicate", "NatTheorems.double-succ"]
+        -- A function matching on a value of Nat: its closure, by induction on the value.
+        assertBool "the closure of replicate" (any ("rule u_NatTheorems_sreplicate_s_x23_closed " `T.isPrefixOf`) (checkedCore c))
     , testCase "a clause on a numeral other than 0, and a proposition where a type is expected, are refused" $ do
         c <- checkFile "test/data/nat-bad.px"
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]

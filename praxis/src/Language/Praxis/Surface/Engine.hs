@@ -412,7 +412,7 @@ proveSpec k fd spec = do
   case columns of
     [] -> either (Right . Left) (done . closed) (caseProof g0)
     [c]
-      | isJust (argIs !! c) -> do
+      | isJust (argIs !! c) || fdArgs fd !! c == TNat -> do
           (cases, finish) <- induction k thm 0 g0 sp (names !! c) []
           either (Right . Left) (\tacs -> finish (map closed tacs) >>= done) (traverse caseProof cases)
       | otherwise -> Right (Left "the argument the clauses match on has no membership to induct on")
@@ -426,7 +426,12 @@ proveSpec k fd spec = do
     predicate = lemmaPredicate k dict
     argIs = map predicate (fdArgs fd)
     thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] []
-    columns = nub [i | fc <- fdClauses fd, (i, PCon {}) <- zip [0 ..] (fcPatterns fc)]
+    columns = nub [i | fc <- fdClauses fd, (i, p) <- zip [0 ..] (fcPatterns fc), matchedOn p]
+    matchedOn = \case
+      PCon {} -> True
+      PNat _ -> True
+      PSucc _ -> True
+      _ -> False
     pds = specPremises spec (knowEnv k) dict
     caseProof g = let (intro, g') = introduceImplications g in (intro <>) <$> specCase spec k g'
 
@@ -949,10 +954,10 @@ congUnfolded k g ev = fromMaybe (congAppeal ev) do
     sameHead x y = case (x, y) of
       (CSym f xs, CSym h ys) -> f == h && length xs == length ys
       _ -> x == y
-    -- The term unfolded at its head, step by step, by the unfolding lemma applying there.
-    headReductions t = take 32 case unfoldRedex k t of
-      Just (u, tac, t') | u == t -> (tac, t') : headReductions t'
-      _ -> []
+    -- The term unfolded step by step, outermost first, until the heads agree.
+    headReductions t = take 32 case unfoldStep k t of
+      Just (tac, t') -> (tac, t') : headReductions t'
+      Nothing -> []
 
 {- |
 The name, in the core, of what a proof term refers to — a hypothesis, an
@@ -1046,12 +1051,20 @@ evidence k info g le = case spineOf le of
       _ -> Right Nothing
     own sp p = maybe (Left (EngineError sp "a law at a type parameter no constraint with laws is on, or one the statement's methods do not determine")) (Right . gpName) (find ((== p) . gpPremise) (goalPremises g))
     -- A recursive call names the induction hypothesis at its argument.
-    recursive sp args = case args of
-      [Located _ (R.EName (QName [] (Ident v)))]
-        | Just (core, _) <- lookup v (goalVars g)
-        , Just ih <- lookup core (goalIH g) ->
-            Right ih
-      _ -> Left (EngineError sp "a recursive call must be at a field of the value matched on, which has an induction hypothesis")
+    -- The induction hypothesis a recursive call names: at the field it passes, the other values as they are, which the hypothesis keeps.
+    recursive sp args =
+      let varCore = \case
+            Located _ (R.EName (QName [] (Ident v))) -> fst <$> lookup v (goalVars g)
+            Located _ (R.EParen x) -> varCore x
+            _ -> Nothing
+          cores = map varCore args
+          ihs = [(j, ih) | (j, Just c) <- zip [0 :: Int ..] cores, Just ih <- [lookup c (goalIH g)]]
+       in case ihs of
+            [(j, ih)]
+              | length args == length (thmBinders info)
+              , and [c == Just b | (j', (c, b)) <- zip [0 ..] (zip cores (thmBinders info)), j' /= j] ->
+                  Right ih
+            _ -> Left (EngineError sp "a recursive call must be at a field of the value matched on, which has an induction hypothesis, and pass the other values as they are")
 
 -- | The head of a type an instance may be for: a data type, by its qualified name, or @Nat@.
 headOf :: Ty -> Maybe Text

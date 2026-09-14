@@ -59,6 +59,7 @@ import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
+import Language.Praxis.Surface.Types (Ty (TNat))
 import Text.Read (readMaybe)
 
 -- | A function in the core: its definition, and its lemmas with their declarations, in order.
@@ -115,7 +116,10 @@ places = fmap concat . traverse one . zip [0 ..]
       PVar _ -> Right [Arg i]
       PWild -> Right []
       PCon _ subs -> concat <$> traverse field (zip [0 ..] subs)
-      _ -> Left "numeral and successor patterns are not supported yet"
+      -- 0 binds nothing; the successor its predecessor, the one field of a value of Nat.
+      PNat 0 -> Right []
+      PSucc sub -> field (0, sub)
+      _ -> Left "a numeral other than 0 in a pattern: write it S n"
     field (j, p) = case p of
       PVar _ -> Right [Field j]
       PWild -> Right []
@@ -123,7 +127,7 @@ places = fmap concat . traverse one . zip [0 ..]
 
 compileFunction :: Env -> FunDef -> Either String Compiled
 compileFunction env fd = do
-  let columns = nub [i | fc <- clauses, (i, PCon {}) <- zip [0 ..] (fcPatterns fc)]
+  let columns = nub [i | fc <- clauses, (i, p) <- zip [0 ..] (fcPatterns fc), matchesOn p]
   when (null clauses) $ Left "a function with no clauses"
   case columns of
     [] -> do
@@ -137,6 +141,7 @@ compileFunction env fd = do
       rhs <- clauseRhs ps fc
       let triples = [(CSym core (patternArgs ps fc <> dict), rhs, "refl")]
       pure (Compiled [definition b] (unfoldings triples) (table triples))
+    [c] | fdArgs fd !! c == TNat -> natColumn c
     [c] -> do
       let ctorRefs = [r | fc <- clauses, PCon r _ <- [fcPatterns fc !! c]]
       ctorsSeen <- forM ctorRefs \(Ref _ r) -> maybe (Left "internal: an unknown constructor") Right (ctorByCore env r)
@@ -271,6 +276,96 @@ compileFunction env fd = do
     inDef = CVar . argName . (userArity +)
     inLemma = CVar . valueVar . T.pack . show
 
+    -- A pattern clauses are told apart by: a constructor, 0, or a successor.
+    matchesOn = \case
+      PCon {} -> True
+      PNat _ -> True
+      PSucc _ -> True
+      _ -> False
+
+    {- Matching on a value of Nat, in column c: a clause for 0 and one for S n,
+    told apart by the sign of the value, the predecessor the field; recursion
+    at the predecessor is course-of-values recursion on the value, as on a
+    code.  The unfolding lemmas are proved as a constructor's are, the tag, the
+    collapse and the field by the definitions of sgn and prd. -}
+    natColumn c = do
+      let isZero fc = case fcPatterns fc !! c of
+            PNat 0 -> True
+            _ -> False
+          isSucc fc = case fcPatterns fc !! c of
+            PSucc _ -> True
+            _ -> False
+      (zeroC, succC) <- case (filter isZero clauses, filter isSucc clauses) of
+        ([z], [s]) | length clauses == 2 -> Right (z, s)
+        _ -> Left "the clauses must match 0 and S n, each exactly once (no overlap, no catch-all) for now"
+      forM_' clauses \fc -> unless (all (\(i, p) -> i == c || isVar p) (zip [0 ..] (fcPatterns fc))) (Left "only one argument may be matched on, for now")
+      psZ <- places (fcPatterns zeroC)
+      psS <- places (fcPatterns succC)
+      let placesOf fc = if isZero fc then psZ else psS
+          recursive = callsSelf core (fcBody zeroC) || callsSelf core (fcBody succC)
+          others = [i | i <- [0 .. arity - 1], i /= c]
+          userOthers = [i | i <- [0 .. userArity - 1], i /= c]
+          defLemma = functionLemma info "#def"
+          defLhs = CSym core (take userArity vargs <> dict)
+          sgnT x = CSym "sgn" [x]
+          natPlace scr other ps i = case ps !! i of
+            Arg a -> other a
+            Field _ -> CSym "prd" [scr]
+          scrOf fc = if isZero fc then CNum 0 else CSym "S" [natFieldVar (placesOf fc) fc]
+      if not recursive
+        then do
+          b0 <- body (natPlace (args !! c) (args !!) psZ) inDef (const (Left "unreachable")) zeroC
+          bS <- body (natPlace (args !! c) (args !!) psS) inDef (const (Left "unreachable")) succC
+          let at' scr others' ps fc = either (error "internal") id (body (natPlace scr others' ps) inLemma (const (Left "")) fc)
+              dispatchAt scr others' = ifChain (sgnT scr) [at' scr others' psZ zeroC, at' scr others' psS succC]
+          proofs <- forM clauses \fc -> do
+            let ps = placesOf fc
+            rhs <- clauseRhs ps fc
+            let lhs = CSym core (patternArgs ps fc <> dict)
+            pure (lhs, rhs, calc lhs [(dispatchAt (scrOf fc) (argVar ps fc), "exact " <> fromText defLemma), (rhs, "refl")])
+          pure (Compiled [definition (ifChain (sgnT (args !! c)) [b0, bS])] ((defLemma, lemma defLemma vargs defLhs (dispatchAt (vargs !! c) (vargs !!)) "refl") : unfoldings proofs) (table proofs))
+        else do
+          let lamParams = ["k", "h"] <> map argName others
+              other i = CVar (argName i)
+          b0 <- body (natPlace (CVar "k") other psZ) inDef (recursiveCall c userOthers psZ zeroC (CVar "k") (CVar "h")) zeroC
+          bS <- body (natPlace (CVar "k") other psS) inDef (recursiveCall c userOthers psS succC (CVar "k") (CVar "h")) succC
+          let lam = runBuilder ("{λ " <> unwordsB (map fromText lamParams) <> ". " <> render (ifChain (sgnT (CVar "k")) [b0, bS]) <> "}")
+              cvrec scr rest = CRaw (runBuilder ("cvrec " <> fromText lam <> " " <> unwordsB (map render (scr : rest))))
+              hist scr rest = CRaw (runBuilder ("hist " <> fromText lam <> " " <> unwordsB (map render (scr : rest))))
+              betaLemma = functionLemma info "#beta"
+              vothers = map (vargs !!) others
+              stepAt scr rest ps fc = either (error "internal") id (body (natPlace scr (\i -> rest !! position others i) ps) inLemma (recursiveCall c userOthers ps fc scr (hist scr rest)) fc)
+              betaBody scr rest = ifChain (sgnT scr) [stepAt scr rest psZ zeroC, stepAt scr rest psS succC]
+          proofs <- forM clauses \fc -> do
+            let ps = placesOf fc
+            rhs <- clauseRhs ps fc
+            let n = natFieldVar ps fc
+                scr = scrOf fc
+                rest = [argVar ps fc i | i <- others]
+                h = hist scr rest
+                lhs = CSym core (patternArgs ps fc <> dict)
+                -- The branch at the value, the predecessor of a successor its variable.
+                branch = replaceCT (\u -> if u == CSym "prd" [scr] then Just n else Nothing) (stepAt scr rest ps fc)
+                recursiveHere = not (isZero fc) && callsSelf core (fcBody fc)
+                viaHist = replaceCT (\u -> if u == CSym "at" [h, scr, n] then Just (cvrec n rest) else Nothing) branch
+                viaDef = replaceCT (\u -> if u == cvrec n rest then Just (CSym core (argsWith c n (take (userArity - 1) rest) <> dict)) else Nothing) viaHist
+                haves
+                  | recursiveHere = "have L: ((lt " <> render n <> " " <> render scr <> ") = 1) { exact ltSucc }; have E: (" <> render (CSym "at" [h, scr, n]) <> " = " <> render (cvrec n rest) <> ") { exact histAt }; "
+                  | otherwise = ""
+                steps =
+                  [(cvrec scr rest, "exact " <> fromText defLemma), (betaBody scr rest, "exact " <> fromText betaLemma), (branch, "refl")]
+                    <> (if recursiveHere then [(viaHist, "cong E"), (viaDef, "cong " <> fromText defLemma)] else [])
+            pure (lhs, rhs, haves <> calc lhs steps)
+          pure
+            ( Compiled
+                [definition (cvrec (args !! c) (map (args !!) others))]
+                ( (defLemma, lemma defLemma vargs defLhs (cvrec (vargs !! c) vothers) "refl")
+                    : (betaLemma, lemma betaLemma vargs (cvrec (vargs !! c) vothers) (betaBody (vargs !! c) vothers) "refl")
+                    : unfoldings proofs
+                )
+                (table proofs)
+            )
+
     forM_' xs f = mapM_ f xs
     isVar = \case
       PVar _ -> True
@@ -313,7 +408,14 @@ compileFunction env fd = do
         | i >= userArity -> CVar (valueVar (T.pack (show (i - userArity))))
         | otherwise -> CVar ("v__x23_" <> T.pack (show i))
     fieldVars ps fc ci = [maybe (CVar ("v__x23_f" <> T.pack (show j))) (varOf fc) (lookup (Field j) (zip ps [0 ..])) | j <- [0 .. length (ctorFields ci) - 1]]
-    patternArgs ps fc = [case p of PCon (Ref _ r) _ -> maybe (CVar "?") (\ci -> CSym (ctorCore ci) (fieldVars ps fc ci)) (ctorByCore env r); _ -> argVar ps fc i | (i, p) <- zip [0 ..] (fcPatterns fc)]
+    patternArgs ps fc = [patternArg ps fc i p | (i, p) <- zip [0 ..] (fcPatterns fc)]
+    patternArg ps fc i = \case
+      PCon (Ref _ r) _ -> maybe (CVar "?") (\ci -> CSym (ctorCore ci) (fieldVars ps fc ci)) (ctorByCore env r)
+      PNat n -> CNum n
+      PSucc _ -> CSym "S" [natFieldVar ps fc]
+      _ -> argVar ps fc i
+    -- The predecessor a successor pattern binds, or a variable of its own.
+    natFieldVar ps fc = maybe (CVar "v__x23_f0") (varOf fc) (lookup (Field 0) (zip ps [0 ..]))
     clauseRhs ps fc = body (varOf fc) inLemma (\callArgs -> Right (CSym core (map snd callArgs <> dict))) fc <* pure ps
     table triples = [(functionLemma info n, lhs, rhs) | (n, (lhs, rhs, _)) <- zip names triples]
     argIndex ps i = case ps !! i of
@@ -344,7 +446,8 @@ compileFunction env fd = do
       forM_' [(i, a) | (i, (a, _)) <- zip [0 ..] callArgs, i /= c] \(i, a) -> case (a, [j | (j, Arg x) <- zip [0 ..] ps, x == i]) of
         (Just v, [j]) | v == j -> Right ()
         _ -> Left "a recursive call must pass the other arguments unchanged (primitive recursion)"
-      Right (CSym "at" [h, k, fieldT field k])
+      -- The field of a value of Nat is its predecessor.
+      Right (CSym "at" [h, k, if fdArgs fd !! c == TNat then CSym "prd" [k] else fieldT field k])
 
 {- |
 The binders of a rule over the parameters of a schema, by their names and

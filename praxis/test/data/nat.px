@@ -31,3 +31,26 @@ data PLt (n : nat) (m : nat) where
 plt-zero : {n m : nat} -> PLt n m -> 0 < m
 plt-zero ZeroSucc = rfl
 plt-zero (SuccSucc p) = rfl
+
+data List a = Nil | Cons a (List a)
+
+length : List a -> Nat
+length Nil = 0
+length (Cons _ xs) = S (length xs)
+
+-- A function matching on a value of Nat, recursive at the predecessor; its
+-- results are members of their type by induction on the value.
+replicate : Nat -> a -> List a
+replicate 0 x = Nil
+replicate (S n) x = Cons x (replicate n x)
+
+length-replicate : (n : nat) -> (x : a) -> length (replicate n x) ≡ n
+length-replicate 0 x = rfl
+length-replicate (S n) x = cong (length-replicate n x)
+
+double : Nat -> Nat
+double 0 = 0
+double (S n) = S (S (double n))
+
+double-succ : (n : nat) -> double (S n) ≡ S (S (double n))
+double-succ n = rfl
