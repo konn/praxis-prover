@@ -25,6 +25,7 @@ module Language.Praxis.Surface.Check (
 
   -- * Checking
   checkSource,
+  checkSourceWith,
 
   -- * The core state
   Core (..),
@@ -49,7 +50,7 @@ import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTact
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData)
-import Language.Praxis.Surface.Engine (Closure, EngineError (..), Knowledge (..), Unfolding (..), proveClosure, proveTheorem)
+import Language.Praxis.Surface.Engine (Closure, EngineError (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), proveClosure, proveSpec, proveTheorem)
 import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), renderQualName)
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
@@ -117,7 +118,15 @@ certifyDecl text core = do
 
 -- | Check a module's source: every report, and what was generated.
 checkSource :: Prelude -> FilePath -> Text -> Checked
-checkSource p file src = case parseModule file src of
+checkSource = checkSourceWith (\_ _ -> [])
+
+{- |
+Check a module's source, proving of each function the specifications given
+for it, after its closure lemma: each certified as its lemma @f.#name@, as a
+theorem is, and a failure reported.
+-}
+checkSourceWith :: (Env -> FunDef -> [Spec]) -> Prelude -> FilePath -> Text -> Checked
+checkSourceWith specsOf p file src = case parseModule file src of
   Left err ->
     let (l, c) = syntaxErrorPosition err
      in Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] []
@@ -127,7 +136,7 @@ checkSource p file src = case parseModule file src of
        in Checked [Report sp SevError (T.pack msg)] [] []
     Right fx ->
       let (env, items) = elabModule fx m
-       in runItems fx env (initialCore p) items
+       in runItems specsOf fx env (initialCore p) items
 
 data Run = Run
   { runCore :: !Core
@@ -139,8 +148,8 @@ data Run = Run
   , runClosures :: !(Map Text Closure)
   }
 
-runItems :: Fixities -> Env -> Core -> [Item] -> Checked
-runItems fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [] Map.empty) items)
+runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Core -> [Item] -> Checked
+runItems specsOf fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [] Map.empty) items)
   where
     finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r))
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}
@@ -165,12 +174,12 @@ runItems fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [
                 Right core' ->
                   let r2 = certifyAll (fdSpan fd) (r1 {runCore = core'}) lemmas
                       certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
-                   in closure fd (r2 {runUnfoldings = runUnfoldings r2 <> certified})
+                   in specify fd (closure fd (r2 {runUnfoldings = runUnfoldings r2 <> certified}))
       ITheorem td ->
         let name = T.unpack (renderQualName (thmQual (tdInfo td)))
          in case proveTheorem (knowledge r) td of
               Left (EngineError sp msg) -> report sp SevError msg r
-              Right decls -> certifyTheorem td name r decls
+              Right decls -> certifyTheorem (tdSpan td) name r decls
 
     knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r)
 
@@ -187,14 +196,23 @@ runItems fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [
               Right core' -> certifyClosure fd cl (r1 {runCore = core'}) rest
               Left err -> report (fdSpan fd) SevError ("internal: the generated lemma " <> T.unpack name <> " did not certify: " <> err) r1
 
+    -- The specifications asked of a function, each proved and certified as a theorem is; a failure is reported.
+    specify fd r0 = foldl (specified fd) r0 (specsOf env fd)
+    specified fd r s =
+      let name = T.unpack (renderQualName (funQual (fdInfo fd))) <> "." <> T.unpack (specName s)
+       in case proveSpec (knowledge r) fd s of
+            Left (EngineError sp msg) -> report sp SevError (name <> ": " <> msg) r
+            Right (Left why) -> report (fdSpan fd) SevError (name <> ": " <> why) r
+            Right (Right proof) -> certifyTheorem (fdSpan fd) name r (spDecls proof)
+
     -- A theorem's declarations, the auxiliary ones first; the first failure is the theorem's.
-    certifyTheorem td name r = \case
+    certifyTheorem sp name r = \case
       [] -> r {runCertified = T.pack name : runCertified r}
       (_, text) : rest ->
         let r1 = emit text r
          in case certifyDecl text (runCore r1) of
-              Right core' -> certifyTheorem td name (r1 {runCore = core'}) rest
-              Left err -> report (tdSpan td) SevError (name <> ": " <> err) r1
+              Right core' -> certifyTheorem sp name (r1 {runCore = core'}) rest
+              Left err -> report sp SevError (name <> ": " <> err) r1
 
     -- Generated lemmas: a failure is a bug of the generator, reported where the declaration is.
     certifyAll sp r lemmas = foldl (certifyOne sp) r lemmas

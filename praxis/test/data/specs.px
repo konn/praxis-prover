@@ -1,0 +1,13 @@
+module Specs where
+
+data List a = Nil | a : List a
+
+infixr 5 :
+
+copy : List a -> List a
+copy Nil = Nil
+copy (x : xs) = x : copy xs
+
+app : List a -> List a -> List a
+app Nil ys = ys
+app (x : xs) ys = x : app xs ys

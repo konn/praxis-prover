@@ -183,6 +183,21 @@ closures of the dictionary's methods are premises, and an appeal discharges
 them as it does a theorem's. A body whose membership is not established that
 way leaves the function without a closure lemma.
 
+**Specifications.** The closure lemma is one specification (`Engine.Spec`)
+among others, all proved by one generator (`Engine.proveSpec`). A
+specification states a postcondition at the application under the
+memberships of the arguments and preconditions over them. The generator
+proves it by induction on the argument the clauses match on, or outright,
+and hands each case to the specification's own prover, with the
+implications of its conclusion introduced. The closure lemma's
+postcondition is the membership of the result, and its prover resolves the
+membership of the body (`Engine.membershipCase`). An equational
+postcondition is proved by unfolding both sides and closing by `refl`, or
+by congruence from a hypothesis such as the induction hypothesis
+(`Engine.equationCase`). `Check.checkSourceWith` proves the specifications
+given of each function after its closure lemma, and certifies each as
+`f.#name`.
+
 ## The definitional-equality discipline
 
 Measured while designing this: `refl` on `app (C x xs) m = <its unfolding>`

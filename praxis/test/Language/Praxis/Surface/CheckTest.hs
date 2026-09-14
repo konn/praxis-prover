@@ -8,12 +8,14 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Language.Praxis.Surface.Check
-import Language.Praxis.Surface.Elab (Item (..), TheoremDef (..), elabModule)
-import Language.Praxis.Surface.Engine (theoremStatement)
+import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
+import Language.Praxis.Surface.Engine (Spec (..), equationCase, theoremStatement)
+import Language.Praxis.Surface.Env (CtorInfo (..), Env, FunInfo (..), constructorsNamed)
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude, prelude)
-import Language.Praxis.Surface.Syntax.Raw (Span (..))
+import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..), RelOp (..))
+import Language.Praxis.Surface.Syntax.Raw (Segment (..), Span (..), segmentText)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -115,7 +117,33 @@ checkTests =
         c <- checkFile "test/data/induction-names.px"
         errors c @?= []
         checkedTheorems c @?= ["InductionNames.only", "InductionNames.other", "InductionNames.nested"]
+    , testCase "a function's specifications are proved by the skeleton of its lemmas, each case by the specification's prover" $ do
+        p <- either assertFailure pure prelude
+        src <- TIO.readFile "test/data/specs.px"
+        let c = checkSourceWith specs p "test/data/specs.px" src
+            messages = [m | Report _ SevError m <- checkedReports c]
+        checkedTheorems c @?= ["Specs.copy.#spec", "Specs.app.#spec"]
+        assertBool "the false specification is refused, and nothing else" (length messages == 1 && any ("Specs.copy.#wrong" `T.isInfixOf`) messages)
     ]
+
+{- |
+Of @copy@, that it is the identity, and, falsely, that it is @Nil@; of
+@app@, that it is the identity where its second argument is @Nil@, a
+precondition.
+-}
+specs :: Env -> FunDef -> [Spec]
+specs env fd = case map segmentText (funQual (fdInfo fd)) of
+  [_, "copy"] ->
+    [ equational "#spec" (const []) (\xs applied -> Rel RelEq applied (Var (xs !! 0)))
+    , equational "#wrong" (const []) (\_ applied -> Rel RelEq applied nil)
+    ]
+  [_, "app"] -> [equational "#spec" (\xs -> [Rel RelEq (Var (xs !! 1)) nil]) (\xs applied -> Rel RelEq applied (Var (xs !! 0)))]
+  _ -> []
+  where
+    equational name pre post = Spec name pre post (\_ _ -> []) equationCase
+    nil = case constructorsNamed env (Ident "Nil") of
+      c : _ -> Global (Ref RefConstructor (ctorCore c))
+      [] -> error "no constructor Nil"
 
 checkFile :: FilePath -> IO Checked
 checkFile path = do

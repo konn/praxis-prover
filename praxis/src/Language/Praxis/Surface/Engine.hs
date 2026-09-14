@@ -47,6 +47,14 @@ module Language.Praxis.Surface.Engine (
   proveTheorem,
   proveClosure,
   EngineError (..),
+
+  -- * Specifications
+  Spec (..),
+  SpecProof (..),
+  proveSpec,
+  closureSpec,
+  membershipCase,
+  equationCase,
 ) where
 
 import Bound (instantiate)
@@ -268,64 +276,148 @@ proveTheorem k td = do
     counter = id
 
 {- |
-The closure lemma of a function whose result is of a data type, @f.#closed@:
-the memberships of its arguments of data types give the membership of its
-result.  It is proved by induction on the argument its clauses match on,
-each case the membership of the clause's body once its unfolding lemma
-rewrites the application, and outright when they match on none; the
-declarations, the auxiliary ones first.  Nothing when the result is not of a
-data type, or when the membership of a body cannot be established, as for a
+The closure lemma of a function whose result is of a data type or of a type
+parameter, @f.#closed@: the memberships of its arguments give the membership
+of its result, the specification 'closureSpec'.  Nothing when the result is
+of neither, or when the membership of a body cannot be established, as for a
 field whose type's membership does not constrain it.
 -}
 proveClosure :: Knowledge -> FunDef -> Either EngineError (Maybe (Closure, [(Text, Text)]))
-proveClosure k fd = case (fdResult fd, predicate (fdResult fd)) of
-  (TData _ _, Just (Pred resultIs ps)) -> attempt resultIs ps
-  (TParam _ [], Just (Pred resultIs ps)) -> attempt resultIs ps
+proveClosure k fd = case (fdResult fd, lemmaPredicate k (lemmaDictionary fd) (fdResult fd)) of
+  (result, Just (Pred resultIs ps))
+    | closes result ->
+        either (const Nothing) (\p -> Just (Closure (spLemma p) (fdArgs fd) (fdResult fd) (spPremises p), spDecls p)) <$> proveSpec k fd (closureSpec resultIs ps)
   _ -> Right Nothing
+  where
+    closes = \case
+      TData _ _ -> True
+      TParam _ [] -> True
+      _ -> False
+
+{- |
+The closure of a function, its results members by the predicate given: the
+closures of the methods of its dictionary its premises, under constraints
+with laws, and each case the membership of the body the unfolding lemma
+rewrites the application to.
+-}
+closureSpec :: Text -> [CT] -> Spec
+closureSpec resultIs ps =
+  Spec
+    { specName = "#closed"
+    , specPre = const []
+    , specPost = \_ applied -> Rel RelLt (Nat 0) (apps (Global (Ref RefBuiltin resultIs)) (map fromCT ps <> [applied]))
+    , specPremises = closurePremises
+    , specCase = membershipCase
+    }
+
+{- |
+A specification of a function, proved as its lemma @f.#name@: under the
+memberships of its arguments and the preconditions over them, the
+postcondition at its application.  The lemma is a rule over the function's
+dictionary and the predicates of its type parameters, with the premises
+given.  Each case — the function applied to a constructor, with the
+induction hypotheses at the recursive fields, or to variables when its
+clauses match on nothing — is proved by the case prover given, the
+implications of its conclusion introduced first.
+-}
+data Spec = Spec
+  { specName :: !Text
+  -- ^ the lemma's name in the function's namespace, as @#closed@
+  , specPre :: [Text] -> [Expr Text]
+  -- ^ the preconditions, over the core variables of the arguments
+  , specPost :: [Text] -> Expr Text -> Expr Text
+  -- ^ the postcondition, over those variables and the application
+  , specPremises :: Env -> [Slot] -> [PremiseDef]
+  -- ^ the premises of the rule, over the lemma's dictionary
+  , specCase :: Knowledge -> Goal -> Either String Builder
+  -- ^ the proof of a case
+  }
+
+-- | A specification proved: its lemma's core name, the premises of its rule, and the declarations proving it, the auxiliary ones first.
+data SpecProof = SpecProof
+  { spLemma :: !Text
+  , spPremises :: ![Premise]
+  , spDecls :: ![(Text, Text)]
+  }
+
+{- |
+A specification proved by the skeleton every lemma of a function shares: by
+induction on the argument its clauses match on, or outright when they match
+on none, each case by the specification's prover.  Left inside, with why,
+when a case is not proved, or the clauses match on several arguments, or on
+one whose type has no membership to induct on.
+-}
+proveSpec :: Knowledge -> FunDef -> Spec -> Either EngineError (Either String SpecProof)
+proveSpec k fd spec = do
+  premises <- either (Left . EngineError sp) Right (renderPremises predicate pds)
+  let applied = apps (Global (Ref RefFunction (funCore info))) (map Var cores <> ownDictionary (funSlots info))
+      hyps = [HMember p v | (v, Just p) <- zip cores argIs] <> map HProp (specPre spec cores)
+      g0 = Goal (zip (map hname [1 ..]) hyps) (specPost spec cores applied) (zip names (zip cores (fdArgs fd))) [] [] dict premises
+      done out = do
+        decl <- either (Left . EngineError sp) Right (declaration (thmCore thm) g0 (outTactic out))
+        Right (Right (SpecProof (thmCore thm) (map pdPremise pds) (outAux out <> [(thmCore thm, runBuilder decl)])))
+  case columns of
+    [] -> either (Right . Left) (done . closed) (caseProof g0)
+    [c]
+      | isJust (argIs !! c) -> do
+          (cases, finish) <- induction k thm 0 g0 sp (names !! c) []
+          either (Right . Left) (\tacs -> finish (map closed tacs) >>= done) (traverse caseProof cases)
+      | otherwise -> Right (Left "the argument the clauses match on has no membership to induct on")
+    _ -> Right (Left "the clauses match on several arguments")
   where
     info = fdInfo fd
     sp = fdSpan fd
     names = ["x" <> T.pack (show i) | i <- [0 .. length (fdArgs fd) - 1]]
     cores = map mangleVariable names
-    -- The predicates of the function's type parameters: parameters of the lemma's rule, after its dictionary's.
-    vars = nub (concatMap valueVariables (fdResult fd : fdArgs fd))
-    dict = funSlots info <> [membershipSlot i | i <- vars, membershipSlot i `notElem` funSlots info]
-    predicate = \case
-      TNat -> Nothing
-      t -> predicateOf (knowMembership k) (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip dict [n | Ref _ n <- placeRefs dict])) t
+    dict = lemmaDictionary fd
+    predicate = lemmaPredicate k dict
     argIs = map predicate (fdArgs fd)
-    thm = TheoremInfo (funQual info <> [Ident "#closed"]) (functionLemma info "#closed") cores (fdArgs fd) [] [] Nothing
+    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing
     columns = nub [i | fc <- fdClauses fd, (i, PCon {}) <- zip [0 ..] (fcPatterns fc)]
-    -- Under constraints with laws, the closures of the dictionary's methods are premises.
-    pds = closurePremises (knowEnv k) dict
-    attempt resultIs ps = do
-      premises <- either (Left . EngineError sp) Right (renderPremises predicate pds)
-      let applied = apps (Global (Ref RefFunction (funCore info))) (map Var cores <> ownDictionary (funSlots info))
-          hyps = [HMember p v | (v, Just p) <- zip cores argIs]
-          concl = Rel RelLt (Nat 0) (apps (Global (Ref RefBuiltin resultIs)) (map fromCT ps <> [applied]))
-          g0 = Goal (zip (map hname [1 ..]) hyps) concl (zip names (zip cores (fdArgs fd))) [] [] dict premises
-          done out = do
-            decl <- either (Left . EngineError sp) Right (declaration (thmCore thm) g0 (outTactic out))
-            Right (Just (Closure (thmCore thm) (fdArgs fd) (fdResult fd) (map pdPremise pds), outAux out <> [(thmCore thm, runBuilder decl)]))
-      case columns of
-        [] -> either (const (Right Nothing)) (done . closed) (caseTactic g0)
-        [c] | isJust (argIs !! c) -> do
-          (cases, finish) <- induction k thm 0 g0 sp (names !! c) []
-          case traverse caseTactic cases of
-            Left _ -> Right Nothing
-            Right tacs -> finish (map closed tacs) >>= done
-        _ -> Right Nothing
-    -- A case: the membership of the body the unfolding lemma rewrites the application to.
-    caseTactic g = case goalConcl g of
-      Rel RelLt (Nat 0) m -> do
-        ct <- termCT CVar m
-        (tac, ct') <- maybe (Left "no unfolding lemma rewrites the application") Right (unfoldStep k ct)
-        (p, body) <- case ct' of
-          CSym p as | b : rest <- reverse as -> Right (Pred p (reverse rest), b)
-          _ -> Left "internal: a membership of another shape"
-        proof <- membershipProof k g p body
-        Right ("calc (lt 0 " <> render ct <> ") = (lt 0 " <> render ct' <> ") by " <> tac <> " = 1 by (" <> proof <> ")")
-      _ -> Left "internal: not a membership"
+    pds = specPremises spec (knowEnv k) dict
+    caseProof g = let (intro, g') = introduceImplications g in (intro <>) <$> specCase spec k g'
+
+-- | The dictionary of a function's lemmas: its own, then the membership predicate of each type parameter its values are of, parameters of the lemma's rule.
+lemmaDictionary :: FunDef -> [Slot]
+lemmaDictionary fd = funSlots info <> [membershipSlot i | i <- vars, membershipSlot i `notElem` funSlots info]
+  where
+    info = fdInfo fd
+    vars = nub (concatMap valueVariables (fdResult fd : fdArgs fd))
+
+-- | The predicate of a type in a function's lemma: a type parameter's own, a place of the lemma's dictionary; none for @Nat@.
+lemmaPredicate :: Knowledge -> [Slot] -> Ty -> Maybe Pred
+lemmaPredicate k dict = \case
+  TNat -> Nothing
+  t -> predicateOf (knowMembership k) (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip dict [n | Ref _ n <- placeRefs dict])) t
+
+-- | The implications of a goal's conclusion introduced as hypotheses, named after the others: the tactic doing it, and the goal after.
+introduceImplications :: Goal -> (Builder, Goal)
+introduceImplications g = (mconcat ["ImplR as " <> fromText h <> "; " | (h, _) <- new], g {goalHyps = goalHyps g <> new, goalConcl = concl})
+  where
+    (antecedents, concl) = implications (goalConcl g)
+    new = [(hname (length (goalHyps g) + i), HProp a) | (i, a) <- zip [1 ..] antecedents]
+
+-- | A case of a closure lemma: the membership of the body the unfolding lemma rewrites the application to, discharged by resolution.
+membershipCase :: Knowledge -> Goal -> Either String Builder
+membershipCase k g = case stripLocations (goalConcl g) of
+  Rel RelLt (Nat 0) m -> do
+    ct <- termCT CVar m
+    (tac, ct') <- maybe (Left "no unfolding lemma rewrites the application") Right (unfoldStep k ct)
+    (p, body) <- case ct' of
+      CSym p as | b : rest <- reverse as -> Right (Pred p (reverse rest), b)
+      _ -> Left "internal: a membership of another shape"
+    proof <- membershipProof k g p body
+    Right ("calc (lt 0 " <> render ct <> ") = (lt 0 " <> render ct' <> ") by " <> tac <> " = 1 by (" <> proof <> ")")
+  _ -> Left "internal: not a membership"
+
+{- |
+A case of an equation: its sides rewritten by the unfolding lemmas as far as
+they go, as @rfl@ does, and what is left closed by the core's definitional
+equality, or by congruence from a hypothesis — at a recursive call, the
+induction hypothesis.
+-}
+equationCase :: Knowledge -> Goal -> Either String Builder
+equationCase k g = either (\(EngineError _ why) -> Left why) Right (rflWith "(refl | cong)" k g R.noSpan)
 
 {- |
 The declaration of a goal proved by a core tactic: a theorem, or, when the
@@ -937,7 +1029,11 @@ changes; then the core's definitional equality on what is left, whose
 functions are applied to variables only.
 -}
 rflTactic :: Knowledge -> Goal -> Span -> Either EngineError Builder
-rflTactic k g sp = case goalConcl g of
+rflTactic = rflWith "refl"
+
+-- | 'rflTactic', closing what is left by the tactic given rather than by @refl@ alone.
+rflWith :: Builder -> Knowledge -> Goal -> Span -> Either EngineError Builder
+rflWith bridge k g sp = case goalConcl g of
   Rel RelEq a b -> do
     l <- ct a
     r <- ct b
@@ -945,11 +1041,11 @@ rflTactic k g sp = case goalConcl g of
         rs = reductions r
         lEnd = last (l : map snd ls)
         rEnd = last (r : map snd rs)
-        steps = [(t, tac) | (tac, t) <- ls] <> [(rEnd, "refl") | lEnd /= rEnd] <> reverse [(t, tac) | ((tac, _), t) <- zip rs (r : map snd rs)]
+        steps = [(t, tac) | (tac, t) <- ls] <> [(rEnd, bridge) | lEnd /= rEnd] <> reverse [(t, tac) | ((tac, _), t) <- zip rs (r : map snd rs)]
     pure case steps of
       [] -> "refl"
       _ -> "calc " <> render l <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
-  At _ e -> rflTactic k g {goalConcl = e} sp
+  At _ e -> rflWith bridge k g {goalConcl = e} sp
   _ -> Left (EngineError sp "rfl: the goal is not an equation")
   where
     ct e = either (Left . EngineError sp) Right (termCT CVar e)
