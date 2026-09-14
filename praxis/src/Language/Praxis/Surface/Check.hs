@@ -58,7 +58,7 @@ import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityErr
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (Prelude (..))
+import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
 
 -- * Reports
@@ -145,7 +145,8 @@ checkSourceWith specsOf p file src = case parseModule file src of
        in Checked [Report sp SevError (T.pack msg)] [] [] Nothing
     Right fx ->
       let (env, items) = elabModule fx m
-       in runItems specsOf fx env (initialCore p) items
+       in -- The definitions of the prelude and of the core's builtins unfold as a module's own functions do.
+          runItems specsOf fx env (initialCore p) [Unfolding n l r | (n, l, r) <- preludeUnfoldings p] items
 
 data Run = Run
   { runCore :: !Core
@@ -158,8 +159,8 @@ data Run = Run
   , runIndexSpecs :: !(Map Text IndexSpec)
   }
 
-runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Core -> [Item] -> Checked
-runItems specsOf fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [] Map.empty Map.empty) items)
+runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Core -> [Unfolding] -> [Item] -> Checked
+runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 [] [] [] Map.empty unfoldings0 Map.empty Map.empty) items)
   where
     finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r))
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}

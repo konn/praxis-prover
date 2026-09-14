@@ -417,7 +417,12 @@ A theorem's right side is a proof in one of three styles, which nest freely.
 **By clauses** (Agda style). Clauses matching on a value of a data type
 prove the statement by structural induction on it, one clause per
 constructor; a recursive call of the theorem at a field of the matched
-constructor is the induction hypothesis there. A right side is a proof term
+constructor is the induction hypothesis there. Clauses matching on a value of
+`Nat`, one on `0` and one on `S n`, prove it by the core's induction, the
+recursive call at `n` the hypothesis; a numeral other than `0` is written as
+the successor. A value the statement quantifies over need not be named: in
+`PLt n m -> n < m` the type before the arrow to a proposition is that of a
+value, which a clause matches on as on any other. A right side is a proof term
 — a lemma or a hypothesis, `cong e`, `rfl` — a `calc`, or `by` tactics.
 Where the heads of the sides of an equation differ, `cong e` first unfolds
 them at their heads until they agree, so that the congruence is under what
@@ -442,8 +447,11 @@ h`, `unfold`, `simp only`, `constructor`, `left`, `right`, `exfalso`,
 and `case`; their translations are the next step of the engine.
 
 `rfl` is *surface* definitional equality: the sides are rewritten by the
-unfolding lemmas wherever a function meets a constructor, then compared,
-the core's definitional equality taking only what is left.
+unfolding lemmas wherever a function meets a constructor — a module's
+functions', and those of the core's arithmetic and of the prelude, `add x (S y)`
+to `S (add x y)` — then compared, the core's definitional equality taking only
+what is left. A comparison is its equation in the core, `s < t` the equation
+`lt s t = 1`, so `rfl` proves `0 < S m`, and `cong` rewrites in it.
 
 A lemma applies at any arguments of its types: `app-nil (rev xs)` proves
 `app (rev xs) Nil ≡ rev xs`. A value of a data type the lemma quantifies over
@@ -468,7 +476,8 @@ arguments; classes with superclasses, and their instances for data types and
 `Nat`, each use of a method resolved at the type it is used at; functions
 and theorems under constraints, schemas and rules over the methods they use;
 laws of classes, proved by each instance and premises of the theorems under
-the class; theorems by clauses on one value, by `calc`, and by the tactics
+the class; theorems by clauses on one value, of a data type or of `Nat`, by
+`calc`, and by the tactics
 listed, a lemma applying at any arguments through the closure lemmas of
 functions; instances under contexts; membership predicates taking those of
 a type's parameters; data types in the GADT style indexed by values of `Nat`
@@ -483,7 +492,7 @@ type ascriptions; `.px` diagnostics.
 Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
 `if` in terms, nested patterns and matching on several arguments, matching
-and recursion on `Nat`, overlapping first-match clauses, mutual recursion and
+and recursion on `Nat` in functions, overlapping first-match clauses, mutual recursion and
 accumulating parameters, membership checking the fields of nested
 and higher-kinded parameters, and list-literal sugar. For indexed data types:
 the types of variables at indices of dependent types inferred rather than

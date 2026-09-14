@@ -932,7 +932,7 @@ may itself unfold.
 -}
 congUnfolded :: Knowledge -> Goal -> Evidence -> Builder
 congUnfolded k g ev = fromMaybe (congAppeal ev) do
-  Rel RelEq a b <- Just (stripLocations (goalConcl g))
+  Rel RelEq a b <- Just (stripLocations (asEquation (goalConcl g)))
   l <- either (const Nothing) Just (termCT CVar a)
   r <- either (const Nothing) Just (termCT CVar b)
   guard (not (sameHead l r))
@@ -1457,9 +1457,20 @@ functions are applied to variables only.
 rflTactic :: Knowledge -> Goal -> Span -> Either EngineError Builder
 rflTactic = rflWith "refl"
 
+-- | A comparison as the equation the core states it as, @s < t@ as @lt s t = 1@; any other proposition as it is.
+asEquation :: Expr Text -> Expr Text
+asEquation e = case stripLocations e of
+  Rel RelLt a b -> holds "lt" a b
+  Rel RelLe a b -> holds "le" a b
+  Rel RelGt a b -> holds "lt" b a
+  Rel RelGe a b -> holds "le" b a
+  _ -> e
+  where
+    holds f x y = Rel RelEq (apps (Global (Ref RefBuiltin f)) [x, y]) (Nat 1)
+
 -- | 'rflTactic', closing what is left by the tactic given rather than by @refl@ alone.
 rflWith :: Builder -> Knowledge -> Goal -> Span -> Either EngineError Builder
-rflWith bridge k g sp = case goalConcl g of
+rflWith bridge k g sp = case asEquation (goalConcl g) of
   Rel RelEq a b -> do
     l <- ct a
     r <- ct b
@@ -1472,7 +1483,7 @@ rflWith bridge k g sp = case goalConcl g of
       [] -> "refl"
       _ -> "calc " <> render l <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
   At _ e -> rflWith bridge k g {goalConcl = e} sp
-  _ -> Left (EngineError sp "rfl: the goal is not an equation")
+  _ -> Left (EngineError sp "rfl: the goal is not an equation, nor a comparison")
   where
     ct e = either (Left . EngineError sp) Right (termCT CVar e)
     reductions t = case unfoldStep k t of
@@ -1527,7 +1538,59 @@ Induction on a variable of a data type: the goals of its cases, each an
 auxiliary theorem, and the proof of the goal from their proofs.
 -}
 induction :: Knowledge -> TheoremInfo -> Counter -> Goal -> Span -> Text -> [Text] -> Either EngineError ([Goal], [Out] -> Either EngineError Out)
-induction k info _ g sp v _ = do
+induction k info n g sp v names = case lookup v (goalVars g) of
+  Just (core, TNat) -> natInduction info g sp core
+  _ -> dataInduction k info n g sp v names
+
+{- |
+Induction on a value of @Nat@, by the core's own: a case for @0@, and one for
+the successor of the eigenvariable, under the induction hypothesis at it.
+The hypotheses mentioning the value join the induction formula, and each case
+has them again at its instance, as the core's @induction@ gives them.  Each
+case is an auxiliary theorem, which the case in the core appeals to.
+-}
+natInduction :: TheoremInfo -> Goal -> Span -> Text -> Either EngineError ([Goal], [Out] -> Either EngineError Out)
+natInduction info g sp core = pure ([base, step], finish)
+  where
+    eigen = case [name | i <- [0 :: Int ..], let name = "e_" <> T.pack (show i), name `notElem` map (fst . snd) (goalVars g)] of
+      name : _ -> name
+      [] -> "e"
+    dependent = [(h, p) | (h, HProp p) <- goalHyps g, core `elem` foldr (:) [] p]
+    kept = [(h, hy) | (h, hy) <- goalHyps g, h `notElem` map fst dependent]
+    at x e = e >>= \w -> if w == core then x else Var w
+    motive = foldr (Arrow . snd) (goalConcl g) dependent
+    successor = App (Global (Ref RefBuiltin "S")) (Var eigen)
+    others = [(nm, x) | (nm, x) <- goalVars g, fst x /= core]
+    keptNames = [(s, hname i) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
+    ihName = hname (length kept + 1)
+    numbered = zip (map hname [1 ..])
+    base = Goal (numbered (map snd kept <> [HProp (at (Nat 0) p) | (_, p) <- dependent])) (at (Nat 0) (goalConcl g)) others keptNames [] (goalDict g) (goalPremises g)
+    step =
+      Goal
+        (numbered (map snd kept <> [HProp (at (Var eigen) motive)] <> [HProp (at successor p) | (_, p) <- dependent]))
+        (at successor (goalConcl g))
+        (("#0", (eigen, TNat)) : others)
+        (("IH", ihName) : keptNames)
+        [(eigen, ihName)]
+        (goalDict g)
+        (goalPremises g)
+    tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
+    segment = \case
+      Ident t -> t
+      Op t -> t
+    auxName i = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
+    finish outs = do
+      decls <- forM (zip3 [0 ..] [base, step] outs) \(i, cg, o) -> do
+        decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
+        pure (outAux o <> [(auxName i, runBuilder decl)])
+      params <- traverse (either (Left . EngineError sp) Right . ruleParams) [base, step]
+      let blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
+          appeal i = "exact " <> fromText (auxName i) <> staticArgs (params !! i) <> blocks
+      pure (Out ("induction " <> fromText core <> " as " <> fromText eigen <> " { " <> appeal 0 <> " } { " <> appeal 1 <> " }") (concat decls))
+
+-- | Induction on a value of a data type, by its code: 'induction' there.
+dataInduction :: Knowledge -> TheoremInfo -> Counter -> Goal -> Span -> Text -> [Text] -> Either EngineError ([Goal], [Out] -> Either EngineError Out)
+dataInduction k info _ g sp v _ = do
   (core, ty) <- maybe (Left (EngineError sp ("not a variable in scope: " <> T.unpack v))) Right (lookup v (goalVars g))
   (dat, typeArgs) <- case ty of
     TData dn targs _ -> maybe (Left (EngineError sp ("not a data type: " <> T.unpack dn))) (\d -> Right (d, targs)) (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
@@ -1742,14 +1805,19 @@ mkScript k appeal dat isAt fieldPred t memberHyp m motive reverted = do
           <> ") by cong Km = 1 by exact A1"
     motiveAt x = motive >>= \w -> if w == t then x else Var w
     motiveCode x = codeOf (motiveAt (fromCT x))
-    -- The truth of a term, 0 < u, is its own code, u: reflect and reify have nothing to do on it.
-    ownCode = case stripLocations motive of
-      Rel RelLt (Nat 0) (Nat 0) -> False
-      Rel RelLt (Nat 0) _ -> True
-      _ -> False
-    codeOf e = case stripLocations e of
-      Rel RelLt (Nat 0) u | ownCode -> render <$> termCT CVar u
+    -- The truth of a term, 0 < u or u > 0, which the core states alike, is its own
+    -- code, u: reflect and reify have nothing to do on it.  Where it was written.
+    truthOf e = case stripLocations e of
+      Rel RelLt a u | isZero a -> Just u
+      Rel RelGt u a | isZero a -> Just u
+      _ -> Nothing
+    ownCode = maybe False (not . isZero) (truthOf motive)
+    codeOf e = case truthOf e of
+      Just u | ownCode -> render <$> termCT CVar u
       _ -> (\f -> "[[" <> f <> "]]") <$> formula e
+    isZero x = case stripLocations x of
+      Nat 0 -> True
+      _ -> False
     finishing = case reverted of
       [] -> Right "exact R1"
       _ -> Right (implEliminations "R1" (map fst reverted))
@@ -1774,31 +1842,43 @@ fromCT = \case
 -- | A proof by clauses matching on one value: induction on it, each clause a case, its recursive calls the induction hypotheses.
 byClauses :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Builder, [(Text, Text)])
 byClauses k info g td pcs = do
-  let columns = nub [i | pc <- pcs, (i, PCon {}) <- zip [0 ..] (pcPatterns pc)]
+  let columns = nub [i | pc <- pcs, (i, p) <- zip [0 ..] (pcPatterns pc), matchesOn p]
   c <- case columns of
     [c] -> Right c
-    [] -> Left (EngineError (tdSpan td) "several clauses, none matching on a constructor")
+    [] -> Left (EngineError (tdSpan td) "several clauses, none matching on a constructor, 0 or S")
     _ -> Left (EngineError (tdSpan td) "clauses matching on several values are not supported yet")
-  let (binder, _) = tdBinders td !! c
+  let (binder, bty) = tdBinders td !! c
+  unless (null [() | pc <- pcs, PNat j <- [pcPatterns pc !! c], j > 0]) $
+    Left (EngineError (tdSpan td) "a clause on a numeral other than 0: write it S n, matching on the successor")
   (cases, finish) <- induction k info 0 g (tdSpan td) binder []
   outs <- forM (zip [0 :: Int ..] cases) \(i, cg) -> do
-    let ctor = dataCtorsOf binder !! i
-    case find (matches ctor c) pcs of
-      -- A constructor the binder's indices exclude needs no clause: the case is refuted.
-      Nothing -> either (\_ -> Left (EngineError (tdSpan td) ("no clause for the constructor " <> T.unpack (renderQualName (ctorQual ctor))))) (Right . closed) (refute k cg)
+    -- What the case is, whether a clause's pattern is for it, and the names that pattern gives the fields.
+    let (what, fits, fieldsOf) = case bty of
+          TNat
+            | i == 0 -> ("0", \case PNat 0 -> True; _ -> False, const [])
+            | otherwise -> ("S n", \case PSucc _ -> True; _ -> False, \case PSucc p -> [fieldName (0 :: Int) p]; _ -> [])
+          _ ->
+            let ctor = dataCtorsOf binder !! i
+             in ( "the constructor " <> T.unpack (renderQualName (ctorQual ctor))
+                , \case PCon (Ref _ r) _ -> r == ctorCore ctor; _ -> False
+                , \case PCon _ subs -> [fieldName j p | (j, p) <- zip [0 :: Int ..] subs]; _ -> []
+                )
+    case find (fits . (!! c) . pcPatterns) pcs of
+      -- A case the binder's indices exclude needs no clause: it is refuted.
+      Nothing -> either (\_ -> Left (EngineError (tdSpan td) ("no clause for " <> what))) (Right . closed) (refute k cg)
       Just pc -> do
-        let names = [n | (n, _) <- pcVars pc]
-            fieldNames = [fieldName j p | PCon _ subs <- [pcPatterns pc !! c], (j, p) <- zip [0 :: Int ..] subs]
-            others = [n | (j, PVar (Hint n)) <- zip [0 ..] (pcPatterns pc), j /= c]
-            cg' = introduce fieldNames cg
+        let others = [n | (j, PVar (Hint n)) <- zip [0 :: Int ..] (pcPatterns pc), j /= c]
+            cg' = introduce (fieldsOf (pcPatterns pc !! c)) cg
             cg'' = rename (zip [n | (n, _) <- tdBinders td, n /= binder] others) cg'
-        _ <- pure names
         proveRhs k info 0 cg'' (pcRhs pc)
   out <- finish outs
   pure (outTactic out, outAux out)
   where
-    matches ctor c pc = case pcPatterns pc !! c of
-      PCon (Ref _ r) _ -> r == ctorCore ctor
+    -- A pattern cases are told apart by: a constructor, 0, or a successor.
+    matchesOn = \case
+      PCon {} -> True
+      PNat _ -> True
+      PSucc _ -> True
       _ -> False
     -- The name a pattern gives the field of the code at a position, or the field's own: by position, since a stored implicit argument has no pattern.
     fieldName j = \case

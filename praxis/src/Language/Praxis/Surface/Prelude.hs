@@ -19,24 +19,30 @@ module Language.Praxis.Surface.Prelude (
   prelude,
   preludeDefinitions,
   preludeProofs,
+  preludeUnfoldings,
 ) where
 
 import Control.Exception (displayException)
 import Control.Monad (foldM)
 import Data.Bifunctor (first)
+import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Language.Haskell.TH.Syntax (addDependentFile, lift, makeRelativeToProject, runIO)
 import Language.Praxis.PRA.Library (libraryScope)
 import Language.Praxis.PRA.PrimitiveRecursion (builtin)
+import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (parseEquations)
 import Language.Praxis.PRA.PrimitiveRecursion.Environment (CompiledEnv, compileDefinitions, compiledEnvironment, environmentSignature, extendEnvironment)
-import Language.Praxis.PRA.Signature (Signature)
+import Language.Praxis.PRA.PrimitiveRecursion.Function (Function (..))
+import Language.Praxis.PRA.Signature (Signature, symbolName, symbolOfFunction)
+import Language.Praxis.PRA.Syntax (Atomic (..), Formula (..), Sequent (..), Term (..), canonicalise)
 import Language.Praxis.PRA.Tactic (Certified (..), Env, Lemma (..), signatureEnv)
 import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
-import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaName, renderSchemaTacticError, schemaScope)
-import Language.Praxis.PRA.Tactic.Unfolding (renderUnfoldingError, unfoldingLemmas)
+import Language.Praxis.PRA.Tactic.Quote (SchemaName (..), checkDecl, renderSchemaName, renderSchemaTacticError, schemaScope)
+import Language.Praxis.PRA.Tactic.Unfolding (Unfolding (..), renderUnfoldingError, unfoldingLemmas, unfoldings)
+import Language.Praxis.Surface.CoreText (CT (..))
 import System.IO (IOMode (ReadMode), hGetContents', hSetEncoding, utf8, withFile)
 
 -- | The text of @src-pra/prelude.prf@, as it was when the package was built.
@@ -94,3 +100,34 @@ prelude = do
     certify env sig known d = case checkDecl env known d of
       Right (_, lemma) -> Right (Map.insert (declName d) lemma known)
       Left err -> Left (declName d <> ": " <> renderSchemaTacticError sig err)
+
+{- |
+The unfolding lemmas of the prelude's definitions and of 'builtin', by name,
+with their sides as the surface language's engine writes terms: what @rfl@
+and @cong@ rewrite by, as by a module's own functions, @add_S@ taking
+@add x (S y)@ to @S (add x y)@.  A lemma the prelude did not certify is left
+out, as is one a side of which is no such term.
+-}
+preludeUnfoldings :: Prelude -> [(T.Text, CT, CT)]
+preludeUnfoldings p = case unfoldings (schemaScope sig [] []) of
+  Left _ -> []
+  Right us ->
+    [ (T.pack (unfoldingName u), l, r)
+    | u <- us
+    , Map.member (unfoldingName u) (preludeLemmas p)
+    , _ :|- Atm (a :=== b) <- [unfoldingStatement u]
+    , Just l <- [termOf a]
+    , Just r <- [termOf b]
+    ]
+  where
+    sig = preludeSignature p
+    termOf = go . canonicalise
+    go :: Term SchemaName -> Maybe CT
+    go = \case
+      Var (Obj v) -> Just (CVar (T.pack v))
+      Var _ -> Nothing
+      Lit n -> Just (CNum n)
+      App (Primitive Succ) args -> CSym (T.pack "S") <$> traverse go (toList args)
+      App f args
+        | Just s <- symbolOfFunction f sig -> CSym (T.pack (symbolName s)) <$> traverse go (toList args)
+        | otherwise -> Nothing

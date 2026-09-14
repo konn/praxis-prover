@@ -1,0 +1,33 @@
+module NatTheorems where
+
+-- By clauses on a value of Nat: a case for 0, and one for S n, the recursive
+-- call at n its induction hypothesis.
+zero-add : (n : nat) -> 0 + n ≡ n
+zero-add 0 = rfl
+zero-add (S n) = cong (zero-add n)
+
+-- The same, by the tactic.
+zero-add-by : (n : nat) -> 0 + n ≡ n
+zero-add-by n = by
+  induction n
+  { rfl }
+  { cong IH }
+
+-- A comparison is its equation in the core, lt 0 (S m) = 1, which unfolding
+-- the definitions proves.
+zero-lt-succ : (m : nat) -> 0 < S m
+zero-lt-succ m = rfl
+
+zero-lt-succ-by-cases : (m : nat) -> 0 < S m
+zero-lt-succ-by-cases 0 = rfl
+zero-lt-succ-by-cases (S n) = rfl
+
+data PLt (n : nat) (m : nat) where
+  ZeroSucc : {m : nat} -> PLt 0 (S m)
+  SuccSucc : {n m : nat} -> PLt n m -> PLt (S n) (S m)
+
+-- A value quantified over without a name: the type before an arrow to a
+-- proposition.
+plt-zero : {n m : nat} -> PLt n m -> 0 < m
+plt-zero ZeroSucc = rfl
+plt-zero (SuccSucc p) = rfl

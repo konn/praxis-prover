@@ -137,6 +137,14 @@ checkTests =
           [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64])]
         assertBool "fine is certified" ("GadtBad.fine.#index" `elem` checkedTheorems c)
         assertBool "nothing refused is certified" (not (any (`elem` checkedTheorems c) ["GadtBad.impossible.#index", "GadtBad.tail-zero.#index", "GadtBad.nil-any.#index", "GadtBad.length-any"]))
+    , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
+        c <- checkFile "test/data/nat.px"
+        errors c @?= []
+        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero"]
+    , testCase "a clause on a numeral other than 0, and a proposition where a type is expected, are refused" $ do
+        c <- checkFile "test/data/nat-bad.px"
+        let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
+        mapM_ (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls)) [("one-lt", [4, 5, 6]), ("prop-arg", [9, 10])]
     , testCase "a function's specifications are proved by the skeleton of its lemmas, each case by the specification's prover" $ do
         p <- either assertFailure pure prelude
         src <- TIO.readFile "test/data/specs.px"

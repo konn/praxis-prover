@@ -1,0 +1,10 @@
+module NatBad where
+
+-- A clause on a numeral other than 0.
+one-lt : (m : nat) -> 0 < S m
+one-lt 1 = rfl
+one-lt m = rfl
+
+-- A proposition where a type is expected.
+prop-arg : {n m : nat} -> (n < m) -> Nat
+prop-arg p = 0

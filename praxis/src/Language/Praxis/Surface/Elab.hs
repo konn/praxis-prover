@@ -1005,7 +1005,9 @@ elabTypeIn env sc le@(Located sp e) = case e of
           xs <- forM [0 .. ni - 1] \j -> maybe (Left (unfound ("index " <> show j))) Right (IM.lookup j (asValues found))
           pure (TData (renderQualName (dataQual dd)) ts (map normIx xs))
         [] -> Left (ElabError hsp ("not a type: " <> T.unpack (qnameText q)))
-    _ -> Left (ElabError sp "a type")
+    _
+      | isProp le -> Left (ElabError sp "a proposition where a type is expected: the arguments and the result of a function are types")
+      | otherwise -> Left (ElabError sp "a type")
 
 {- |
 An index in a type: a value in scope, a numeral, the successor, the
@@ -1101,7 +1103,7 @@ elabDecl fx env sp name ty0 clauses = do
       (implicits, rest0) = implicitBinders ty1
       (inner, rest) = constraintsOf rest0
       constraints = outer <> inner
-      (binders, body) = valueBinders rest
+      (binders, body) = statementBinders rest
       signed = map snd binders <> [body | not (isProp body)]
       typeImplicits = [n | (n, mt) <- implicits, maybe True isTypeExpr mt]
       valueImplicits = [(n, t) | (n, Just t) <- implicits, not (isTypeExpr t)]
@@ -1386,6 +1388,22 @@ valueBinders = \case
     | all (\(R.Binder _ _ t) -> isJust t) bs ->
         let (more, b) = valueBinders body in ([(n, t) | R.Binder _ ns mt <- bs, t <- maybeToList mt, n <- ns] <> more, b)
   e -> ([], e)
+
+{- |
+The binders of a signature: the named ones, and, before an arrow to a
+proposition, a type, which is a value the statement quantifies over without
+naming it, @PLt n m -> n < m@; the name it is given, @_1@, @_2@, …, stands
+for none a clause may use.
+-}
+statementBinders :: Located R.Expr -> ([(Located Text, Located R.Expr)], Located R.Expr)
+statementBinders = go (1 :: Int)
+  where
+    go k e = case valueBinders e of
+      ([], Located _ (R.EArrow a b))
+        | not (isProp a) && isProp b ->
+            let (more, body) = go (k + 1) b in ((Located (location a) ("_" <> T.pack (show k)), a) : more, body)
+      ([], body) -> ([], body)
+      (named, body) -> let (more, body') = go k body in (named <> more, body')
 
 -- | Whether an expression is a proposition rather than a type, by its form.
 isProp :: Located R.Expr -> Bool
