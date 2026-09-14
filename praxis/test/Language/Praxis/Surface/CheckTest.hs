@@ -129,6 +129,8 @@ checkTests =
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.length-index", "Gadt.head-tail", "Gadt.head-tail-two", "Gadt.same-eq"]
         -- Implicit values its clauses bind, taken at runtime: matched on, found and passed.
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.replicate-vec.#index", "Gadt.len-replicate"]
+        -- Implicit arguments in braces: a function's value passed as given, a constructor's, a data type's in a type.
+        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.three-is", "Gadt.zero-of-three.#index"]
         -- Proofs as arguments: each an obligation, certified, of the call's precondition or of what cannot be.
         let obligationsOf f = [n | n <- checkedTheorems c, ("Gadt." <> f <> ".#obligation") `T.isPrefixOf` n]
         assertBool "the obligation of head-of-two's call" (not (null (obligationsOf "head-of-two")))
@@ -142,7 +144,7 @@ checkTests =
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
         mapM_
           (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls))
-          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64]), ("bad-proof", [71, 72])]
+          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64]), ("bad-proof", [71, 72]), ("bad-implicit", [78, 79]), ("extra-implicit", [82, 83]), ("kind-implicit", [86, 87])]
         assertBool "fine is certified" ("GadtBad.fine.#index" `elem` checkedTheorems c)
         assertBool "nothing refused is certified" (not (any (`elem` checkedTheorems c) ["GadtBad.impossible.#index", "GadtBad.tail-zero.#index", "GadtBad.nil-any.#index", "GadtBad.length-any"]))
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do

@@ -70,3 +70,18 @@ head-safe h nil = absurd h
 
 bad-proof : Vec a 0 -> a
 bad-proof v = head-safe rfl v
+
+data Fin (n : nat) where
+  fzero : {m : nat} -> Fin (S m)
+
+-- An implicit argument the type expected disagrees with: fzero {0} is of Fin 1.
+bad-implicit : Fin 3
+bad-implicit = fzero {0}
+
+-- An implicit argument too many.
+extra-implicit : Fin 3
+extra-implicit = fzero {2} {2}
+
+-- An implicit argument of a type its parameter does not have.
+kind-implicit : Fin 1
+kind-implicit = fzero {nil}

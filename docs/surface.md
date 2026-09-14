@@ -340,6 +340,14 @@ there, as `tail xs` at `xs : Vec a 0` is. Indices are compared in normal
 form, the arithmetic of `Nat` evaluated as the core's definitional equality
 does: `n + 1` is `S n`, but `0 + n` is not `n`.
 
+An implicit argument may also be given, in braces before the explicit ones,
+where nothing else determines it or to say which: `replicate-vec {3} x`, a
+function's implicit values in the order its signature has them; `fzero {2}`,
+a constructor's implicit arguments in the order of its signature; and in a
+type, `SameVec {Nat} nil nil`, a data type's implicit parameters, its types
+then its indices. Each is of its parameter's type, and must agree with what
+the type expected and the arguments say of it.
+
 An implicit value a function's clauses bind, `{n}`, is taken at runtime: the
 function's code has it as an argument before its own, and an application
 passes the value found for it, which must then be a term of what is in scope
@@ -560,12 +568,13 @@ implicit parameters of data types, found from the indices written, and
 indices whose types mention the parameters and the indices before them;
 implicit values a function's clauses bind, taken at runtime; proofs as
 arguments, each application's checked as an obligation, and `absurd`;
-type ascriptions; `.px` diagnostics.
+implicit arguments given in braces, `C {n}`; type ascriptions; `.px`
+diagnostics.
 Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
 `if` in terms, nested patterns and matching on several arguments not all of `Nat`, overlapping first-match clauses, mutual recursion and
 accumulating parameters, membership checking the fields of nested
 and higher-kinded parameters, and list-literal sugar. For indexed data types:
 the types of variables at indices of dependent types inferred rather than
-written; explicit implicit arguments, `C {n}`; and explicit value binders in
+written; and explicit value binders in
 the signatures of functions.

@@ -87,3 +87,18 @@ head-safe h nil = absurd h
 
 head-of-two : Vec a 2 -> a
 head-of-two v = head-safe rfl v
+
+-- Implicit arguments in braces: a function's value, which nothing else here
+-- determines; a constructor's; and in a type, a data type's type parameter,
+-- which the indices written leave open.
+three : a -> Nat
+three x = len (replicate-vec {3} x)
+
+three-is : (x : a) -> three x ≡ 3
+three-is x = rfl
+
+zero-of-three : Fin 3
+zero-of-three = fzero {2}
+
+both-nil : SameVec {Nat} nil nil
+both-nil = BothNil
