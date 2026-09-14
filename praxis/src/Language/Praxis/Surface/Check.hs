@@ -39,6 +39,8 @@ import Control.Monad (foldM)
 import Data.Bifunctor (first)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (parseEquations)
@@ -72,11 +74,16 @@ data Report = Report
   }
   deriving stock (Show, Eq)
 
--- | The findings, the core text generated, in order, and the theorems certified, by their surface names.
+{- |
+The findings, the core text generated, in order, and the theorems certified,
+by their surface names; and, once the module elaborated, what the engine and
+the core know after it.
+-}
 data Checked = Checked
   { checkedReports :: ![Report]
   , checkedCore :: ![Text]
   , checkedTheorems :: ![Text]
+  , checkedFinal :: !(Maybe (Knowledge, Core))
   }
 
 -- * The core state
@@ -89,10 +96,12 @@ data Core = Core
   , coreLemmas :: !(Map String (PRA.Lemma SchemaName))
   , coreMembership :: !(Map Text (Text, [Int]))
   -- ^ the membership predicate of each data type encoded, by its qualified name, with the parameters it takes the predicates of
+  , coreVariadic :: !(Set Text)
+  -- ^ the membership predicates which are variadic templates, taking what a closure given as their parameter captures
   }
 
 initialCore :: Prelude -> Core
-initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeLemmas p) Map.empty
+initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeLemmas p) Map.empty Set.empty
 
 -- | Extend the core with definitions, as @prf@ equations.
 addDefinitions :: [Text] -> Core -> Either String Core
@@ -129,11 +138,11 @@ checkSourceWith :: (Env -> FunDef -> [Spec]) -> Prelude -> FilePath -> Text -> C
 checkSourceWith specsOf p file src = case parseModule file src of
   Left err ->
     let (l, c) = syntaxErrorPosition err
-     in Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] []
+     in Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing
   Right m -> case moduleFixities m of
     Left ferr ->
       let (sp, msg) = renderFixityError ferr
-       in Checked [Report sp SevError (T.pack msg)] [] []
+       in Checked [Report sp SevError (T.pack msg)] [] [] Nothing
     Right fx ->
       let (env, items) = elabModule fx m
        in runItems specsOf fx env (initialCore p) items
@@ -151,19 +160,23 @@ data Run = Run
 runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Core -> [Item] -> Checked
 runItems specsOf fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [] Map.empty) items)
   where
-    finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r))
+    finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r))
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}
     emit t r = r {runText = t : runText r}
 
     step r = \case
       IFailed (ElabError sp msg) -> report sp SevError msg r
       IData info sp ->
-        let Encoded eqns lemmas members params = encodeData (`Map.lookup` coreMembership (runCore r)) info
+        let Encoded eqns lemmas members params variadic = encodeData (`Map.lookup` coreMembership (runCore r)) (`Set.member` coreVariadic (runCore r)) info
             r1 = foldl (flip emit) r eqns
          in case addDefinitions eqns (runCore r1) of
               Left err -> report sp SevError ("the encoding of " <> T.unpack (renderQualName (dataQual info)) <> " was rejected: " <> err) r1
               Right core' ->
-                let core'' = core' {coreMembership = Map.insert (renderQualName (dataQual info)) (dataIs info, params) (coreMembership core')}
+                let core'' =
+                      core'
+                        { coreMembership = Map.insert (renderQualName (dataQual info)) (dataIs info, params) (coreMembership core')
+                        , coreVariadic = (if variadic then Set.insert (dataIs info) else id) (coreVariadic core')
+                        }
                  in certifyAll sp (r1 {runCore = core'', runMembers = Map.union (Map.fromList members) (runMembers r1)}) lemmas
       IFun fd -> case compileFunction env fd of
         Left err -> report (fdSpan fd) SevError (T.unpack (renderQualName (funQual (fdInfo fd))) <> ": " <> err) r
@@ -181,7 +194,7 @@ runItems specsOf fx env core0 items = finish (foldl step (Run core0 [] [] [] Map
               Left (EngineError sp msg) -> report sp SevError msg r
               Right decls -> certifyTheorem (tdSpan td) name r decls
 
-    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r)
+    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r))
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of

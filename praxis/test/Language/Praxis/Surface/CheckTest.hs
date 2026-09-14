@@ -4,18 +4,21 @@
 module Language.Praxis.Surface.CheckTest (checkTests) where
 
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Builder.Linear (runBuilder)
 import Data.Text.IO qualified as TIO
 import Language.Praxis.Surface.Check
+import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, predicateOver, predicateParam)
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
-import Language.Praxis.Surface.Engine (Spec (..), equationCase, theoremStatement)
-import Language.Praxis.Surface.Env (CtorInfo (..), Env, FunInfo (..), constructorsNamed)
+import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, membershipProof, theoremStatement)
+import Language.Praxis.Surface.Env (CtorInfo (..), Env, FunInfo (..), Global (..), constructorsNamed, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude, prelude)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..), RelOp (..))
-import Language.Praxis.Surface.Syntax.Raw (Segment (..), Span (..), segmentText)
+import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..), segmentText)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -124,6 +127,29 @@ checkTests =
             messages = [m | Report _ SevError m <- checkedReports c]
         checkedTheorems c @?= ["Specs.copy.#spec", "Specs.app.#spec"]
         assertBool "the false specification is refused, and nothing else" (length messages == 1 && any ("Specs.copy.#wrong" `T.isInfixOf`) messages)
+    , testCase "a membership predicate of one parameter is variadic: at a closure capturing a variable, the type's lemmas and a function's closure lemma apply" $ do
+        p <- either assertFailure pure prelude
+        src <- TIO.readFile "test/data/specs.px"
+        (k, core) <- maybe (assertFailure "the module did not elaborate") pure (checkedFinal (checkSource p "test/data/specs.px" src))
+        let env = knowEnv k
+        (listIs, _) <- maybe (assertFailure "no membership predicate for List") pure (Map.lookup "Specs.List" (knowMembership k))
+        assertBool "List's predicate is variadic" (listIs `Set.member` knowVariadic k)
+        cons <- case constructorsNamed env (Op ":") of
+          c : _ -> pure (ctorCore c)
+          [] -> assertFailure "no constructor (:)"
+        copy <- case [f | GFun f <- resolve env (QName [] (Ident "copy"))] of
+          f : _ -> pure (funCore f)
+          [] -> assertFailure "no function copy"
+        -- The elements below b, a closure capturing b; and the lists of them.
+        let below = predicateOver "x" (CSym "lt" [CVar "x", CVar "b"])
+            lists = Pred listIs [predicateParam below]
+            g = Goal [("H1", HMember below "a"), ("H2", HMember lists "xs")] Top [] [] [] [] []
+            hyps = membershipText below (CVar "a") <> ", " <> membershipText lists (CVar "xs")
+            prove name t = do
+              tactic <- either assertFailure pure (membershipProof k g lists t)
+              either assertFailure pure (certifyDecl (runBuilder ("theorem " <> name <> " : " <> hyps <> " |- " <> membershipText lists t <> "\nby " <> tactic)) core)
+        -- Through the introduction of (:), and through the closure lemma of copy.
+        mapM_ (uncurry prove) [("consBelow", CSym cons [CVar "a", CVar "xs"]), ("copyBelow", CSym copy [CVar "xs"])]
     ]
 
 {- |

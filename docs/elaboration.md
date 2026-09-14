@@ -136,6 +136,22 @@ recorded (`encodedMembers`, a `FieldPred` over the type's parameters). It is
 the single source both the inversion and the proof engine read: they cannot
 disagree.
 
+**Predicates capturing terms.** A membership predicate of one parameter is a
+variadic template, `T.is {p0} n $[ys]`, when two conditions hold: some field
+is of the parameter, and every other field passes the parameter's predicate
+on only to a variadic predicate of one parameter in turn. The parameter may
+then be any predicate on the element's code: a closure over the terms it
+captures, in the canonical form the core abstracts a term to
+(`CoreText.predicateOver`). The elements below `b` are `{λ x y_1. lt x y_1}`
+capturing `b`, and the lists of them are `List.is {λ x y_1. lt x y_1} xs b`,
+the captured terms after the arguments. The template passes them to its
+step, `cvrec {λ k h. … p0 field $[ys] …} n`, whose λ the core closes over
+them. With nothing captured it is the plain predicate. So its lemmas, rules
+over the parameter, hold at every closure: the kernel instantiates them at
+the closure's code and appends what it captures. A predicate of several
+parameters stays a plain schema, since the kernel's variadic schemas take
+one parameter.
+
 ## Functions
 
 `Compile` turns clauses into one prf definition. Functions are type-erased

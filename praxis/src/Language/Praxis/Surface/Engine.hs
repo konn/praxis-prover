@@ -46,6 +46,7 @@ module Language.Praxis.Surface.Engine (
   Knowledge (..),
   proveTheorem,
   proveClosure,
+  membershipProof,
   EngineError (..),
 
   -- * Specifications
@@ -64,6 +65,7 @@ import Data.List (find, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
+import Data.Set (Set)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -183,6 +185,10 @@ data Knowledge = Knowledge
   , knowUnfoldings :: ![Unfolding]
   , knowClosures :: !(Map Text Closure)
   -- ^ the closure lemma of each function which has one, by the function's core name
+  , knowVariadic :: !(Set Text)
+  {- ^ the membership predicates which are variadic templates: a closure
+  capturing terms may be their parameter, 'PredClosure'
+  -}
   }
 
 data EngineError = EngineError !Span !String
@@ -403,9 +409,7 @@ membershipCase k g = case stripLocations (goalConcl g) of
   Rel RelLt (Nat 0) m -> do
     ct <- termCT CVar m
     (tac, ct') <- maybe (Left "no unfolding lemma rewrites the application") Right (unfoldStep k ct)
-    (p, body) <- case ct' of
-      CSym p as | b : rest <- reverse as -> Right (Pred p (reverse rest), b)
-      _ -> Left "internal: a membership of another shape"
+    (p, body) <- maybe (Left "internal: a membership of another shape") Right (splitMembership ct')
     proof <- membershipProof k g p body
     Right ("calc (lt 0 " <> render ct <> ") = (lt 0 " <> render ct' <> ") by " <> tac <> " = 1 by (" <> proof <> ")")
   _ -> Left "internal: not a membership"
@@ -1108,7 +1112,7 @@ induction k info _ g sp v _ = do
   (isCore, used) <- maybe (Left (EngineError sp "the data type has no membership predicate")) Right (Map.lookup self (knowMembership k))
   -- The value's membership, and the predicates of its type's parameters it is at.
   (memberHyp, valuePs) <- maybe (Left (EngineError sp (T.unpack v <> " has no membership hypothesis"))) Right (listToMaybe [(h, ps) | (h, HMember (Pred p ps) x) <- goalHyps g, p == isCore, x == core])
-  let isAt x = CSym isCore (valuePs <> [x])
+  let isAt = predicateAt (Pred isCore valuePs)
       fieldPred = fieldPredicate used valuePs
   let mentions = \case
         HProp p -> core `elem` foldr (:) [] p
@@ -1319,6 +1323,8 @@ fromCT = \case
   CRaw t -> Global (Ref RefBuiltin t)
   CStatic t -> Global (Ref RefStatic t)
   CPartial f dict n -> apps (Global (Ref (RefPartial n) f)) (map fromCT dict)
+  -- A closure is no surface term; the predicates of types, which alone reach here, are none.
+  CClosure {} -> Hole
 
 -- * By clauses
 

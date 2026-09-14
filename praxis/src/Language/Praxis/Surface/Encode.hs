@@ -59,6 +59,8 @@ data Encoded = Encoded
   -- ^ for each constructor, by its core name, the fields whose membership its branch of the predicate checks, with their predicates
   , encodedParams :: ![Int]
   -- ^ the parameters of the type whose predicates its own takes, those its fields' memberships use
+  , encodedVariadic :: !Bool
+  -- ^ whether its predicate is a variadic template, taking the terms its parameter's predicate captures
   }
 
 {- |
@@ -126,11 +128,21 @@ paramCT = \case
   ParamData p [] -> CStatic p
   ParamData p ps -> CPartial p (map paramCT ps) 1
 
--- | A field's predicate applied to a term: the code whose truth is the term's membership.
-fieldCode :: FieldPred -> CT -> CT
-fieldCode fp x = case fp of
-  FieldParam i -> CSym (paramName i) [x]
-  FieldData p ps -> CSym p (map paramCT ps <> [x])
+{- |
+A field's predicate applied to a term: the code whose truth is the term's
+membership, the terms given after the term where the predicate of a
+parameter is applied, or passed on as a parameter.
+-}
+fieldCodeWith :: [CT] -> FieldPred -> CT -> CT
+fieldCodeWith extras fp x = case fp of
+  FieldParam i -> CSym (paramName i) ([x] <> extras)
+  FieldData p ps
+    | any passed ps -> CSym p (map paramCT ps <> [x] <> extras)
+    | otherwise -> CSym p (map paramCT ps <> [x])
+  where
+    passed = \case
+      ParamOf _ -> True
+      _ -> False
 
 raw :: Segment -> Text
 raw = \case
@@ -158,9 +170,13 @@ on the tag, each branch the exact shape and the memberships of the fields.
 The predicates of the data types already encoded are given by name.
 -}
 membershipBody :: (Text -> Maybe (Text, [Int])) -> DataInfo -> CT -> CT -> CT
-membershipBody known d k h = ifChain (hdT k) (map branch (dataCtors d))
+membershipBody = membershipBodyWith []
+
+-- | 'membershipBody', the terms given after each field where its parameter's predicate is applied or passed on.
+membershipBodyWith :: [CT] -> (Text -> Maybe (Text, [Int])) -> DataInfo -> CT -> CT -> CT
+membershipBodyWith extras known d k h = ifChain (hdT k) (map branch (dataCtors d))
   where
-    branch c = case fieldMemberships known d c k h of
+    branch c = case fieldMembershipsWith extras known d c k h of
       [] -> shape c
       ms -> CSym "conj" [shape c, conjs (map snd ms)]
     shape c = CSym "eq" [k, CSym (ctorCore c) [fieldT j k | j <- [0 .. length (ctorFields c) - 1]]]
@@ -175,28 +191,58 @@ index and the code of its membership, a field of the type itself through the
 history.
 -}
 fieldMemberships :: (Text -> Maybe (Text, [Int])) -> DataInfo -> CtorInfo -> CT -> CT -> [(Int, CT)]
-fieldMemberships known d c k h = [(j, code j fp) | (j, fp) <- fieldPreds known d (predicateParams known d) c]
+fieldMemberships = fieldMembershipsWith []
+
+-- | 'fieldMemberships', the terms given after each field where its parameter's predicate is applied or passed on.
+fieldMembershipsWith :: [CT] -> (Text -> Maybe (Text, [Int])) -> DataInfo -> CtorInfo -> CT -> CT -> [(Int, CT)]
+fieldMembershipsWith extras known d c k h = [(j, code j fp) | (j, fp) <- fieldPreds known d (predicateParams known d) c]
   where
     code j = \case
       FieldData p _ | p == dataIs d -> CSym "at" [h, k, fieldT j k]
-      fp -> fieldCode fp (fieldT j k)
+      fp -> fieldCodeWith extras fp (fieldT j k)
 
 -- | The step function of the membership predicate, as a schema parameter.
 membershipLambda :: (Text -> Maybe (Text, [Int])) -> DataInfo -> Text
-membershipLambda known d = runBuilder ("{λ k h. " <> render (membershipBody known d (CVar "k") (CVar "h")) <> "}")
+membershipLambda = membershipLambdaWith []
+
+-- | 'membershipLambda', the terms given after each field where its parameter's predicate is applied or passed on.
+membershipLambdaWith :: [CT] -> (Text -> Maybe (Text, [Int])) -> DataInfo -> Text
+membershipLambdaWith extras known d = runBuilder ("{λ k h. " <> render (membershipBodyWith extras known d (CVar "k") (CVar "h")) <> "}")
 
 {- |
 The definitions and lemmas of a data type, given the membership predicates
 of the data types encoded before it, with the parameters each takes.  The
 type's own predicate takes the predicates of the parameters its fields'
 memberships use, @T.is {p0} n@, and its lemmas are then rules over them.
+
+A predicate of one parameter, which some field is of and which every other
+field passes on only to a variadic predicate of one parameter in turn, is a
+variadic template, @T.is {p0} n $[ys]@: at a predicate capturing terms, a
+closure, it takes those terms and passes them on to the closure and to the
+predicates it passes it to.  With none it is the plain predicate, so its
+lemmas, stated there as rules over the parameter, hold at every closure.
 -}
-encodeData :: (Text -> Maybe (Text, [Int])) -> DataInfo -> Encoded
-encodeData known d = Encoded equations lemmas members params
+encodeData :: (Text -> Maybe (Text, [Int])) -> (Text -> Bool) -> DataInfo -> Encoded
+encodeData known isVariadic d = Encoded equations lemmas members params variadic
   where
     ctors = dataCtors d
     isCore = dataIs d
     params = predicateParams known d
+    fieldsOf = [fieldPreds known d params c | c <- ctors]
+    variadic = case params of
+      [i] -> any (any ((== FieldParam i) . snd)) fieldsOf && all (all (passes i . snd)) fieldsOf
+      _ -> False
+    -- A field's membership passes the parameter's predicate on where it can take what a closure captures.
+    passes i = \case
+      FieldParam _ -> True
+      FieldData q ps
+        | q == isCore -> True
+        | ps == [ParamOf i] -> isVariadic q
+        | otherwise -> not (any uses ps)
+    uses = \case
+      ParamOf _ -> True
+      ParamAny -> False
+      ParamData _ ps -> any uses ps
     -- The predicate at its parameters, applied: the code whose truth is the membership of x.
     isAt x = CSym isCore ([CStatic (paramName i) | i <- params] <> [x])
     paramsHead = if null params then "" else " {" <> intercalateB ", " (map (fromText . paramName) params) <> "}"
@@ -231,7 +277,13 @@ encodeData known d = Encoded equations lemmas members params
       | c <- ctors
       , let fields = ["a" <> T.pack (show j) | j <- [0 .. length (ctorFields c) - 1]]
       ]
-        <> [runBuilder (fromText isCore <> paramsHead <> " n = " <> if null ctors then "0" else "cvrec " <> fromText lam <> " n")]
+        <> [ runBuilder
+               ( fromText isCore
+                   <> paramsHead
+                   <> (if variadic then " n $[ys] = " else " n = ")
+                   <> if null ctors then "0" else "cvrec " <> fromText (if variadic then membershipLambdaWith [CVar "$[ys]"] known d else lam) <> " n"
+               )
+           ]
 
     lemmas = concatMap ctorLemmas ctors <> collapses <> membership <> map intro ctors <> [inversion]
     members = [(ctorCore c, fieldPreds known d params c) | c <- ctors]

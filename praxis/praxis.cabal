@@ -128,3 +128,4 @@ test-suite praxis-test
     tasty-hunit,
     tasty-quickcheck,
     text,
+    text-builder-linear,

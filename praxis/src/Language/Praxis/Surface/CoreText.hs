@@ -35,8 +35,12 @@ module Language.Praxis.Surface.CoreText (
   propText,
   Pred (..),
   membershipText,
+  predicateAt,
   predicateParam,
   parameterPredicate,
+  predicateOver,
+  applySchema,
+  splitMembership,
   valueVar,
 
   -- * Builders
@@ -45,7 +49,7 @@ module Language.Praxis.Surface.CoreText (
 ) where
 
 import Bound (Var (..), fromScope)
-import Data.List (intersperse, partition)
+import Data.List (intersperse, mapAccumL, partition)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec)
@@ -71,6 +75,12 @@ data CT
     dictionary's
     -}
     CPartial !Text ![CT] !Int
+  | {- | a predicate standing as the parameter of a variadic schema, closed
+    over the terms it captures: its binders, the element's and then a slot
+    for each captured term; its body over them; and those terms, which the
+    schema's application takes after its arguments
+    -}
+    CClosure ![Text] !CT ![CT]
   deriving stock (Show, Eq)
 
 {- |
@@ -93,12 +103,14 @@ render = \case
     let ys = [CVar ("y_" <> T.pack (show i)) | i <- [1 .. n]]
         (statics, values) = partition isParameter dict
      in "{λ " <> unwordsB (map render ys) <> ". " <> render (CSym f (statics <> ys <> values)) <> "}"
+  CClosure params body _ -> "{λ " <> unwordsB (map fromText params) <> ". " <> render body <> "}"
 
 -- | Whether a term stands as the parameter of a schema.
 isParameter :: CT -> Bool
 isParameter = \case
   CStatic _ -> True
   CPartial {} -> True
+  CClosure {} -> True
   _ -> False
 
 hdT, tlT :: CT -> CT
@@ -124,6 +136,8 @@ replaceCT f t = case f t of
   Nothing -> case t of
     CSym g args -> CSym g (map (replaceCT f) args)
     CPartial g dict n -> CPartial g (map (replaceCT f) dict) n
+    -- A closure's body is closed over its binders: only what it captures is replaced.
+    CClosure ps body captured -> CClosure ps body (map (replaceCT f) captured)
     _ -> t
 
 -- | The variables of a term.
@@ -132,6 +146,7 @@ varsCT = \case
   CVar v -> [v]
   CSym _ args -> concatMap varsCT args
   CPartial _ dict _ -> concatMap varsCT dict
+  CClosure _ _ captured -> concatMap varsCT captured
   _ -> []
 
 -- * From the surface
@@ -213,27 +228,77 @@ propText fresh var = go var
 {- |
 A membership predicate: a symbol, with the parameters of its schema, the
 predicates of the parameters of its type: @T.is {p}@, a type parameter's own
-@w_2@, or @anyIs@, which every code satisfies.
+@w_2@, or @anyIs@, which every code satisfies.  Or any predicate on the
+element's code, as its canonical closure over the terms it captures
+('predicateOver'), which a variadic membership predicate takes as its
+parameter: @List.is {λ x y_1. lt x y_1} xs b@, the lists of elements below
+@b@.
 -}
-data Pred = Pred !Text ![CT]
+data Pred
+  = Pred !Text ![CT]
+  | {- | a closure: its binders, the element's and then a slot for each
+    captured term; its body over them; and those terms
+    -}
+    PredClosure ![Text] !CT ![CT]
   deriving stock (Show, Eq)
 
 -- | The hypothesis that a term is a member by a predicate: @0 < T.is {p} x@.
 membershipText :: Pred -> CT -> Builder
-membershipText (Pred p ps) x = "((lt 0 " <> render (CSym p (ps <> [x])) <> ") = 1)"
+membershipText p x = "((lt 0 " <> render (predicateAt p x) <> ") = 1)"
+
+-- | A predicate applied to a term: the code whose truth is the term's membership; a closure's body at the term and the terms it captures.
+predicateAt :: Pred -> CT -> CT
+predicateAt p x = case p of
+  Pred f ps -> applySchema f ps [x]
+  PredClosure params body captured -> replaceCT (\case CVar v | Just u <- lookup v (zip params (x : captured)) -> Just u; _ -> Nothing) body
+
+-- | A schema applied to its parameters and its arguments, and then to the terms its parameters capture, where a variadic schema takes them.
+applySchema :: Text -> [CT] -> [CT] -> CT
+applySchema f params args = CSym f (params <> args <> concat [captured | CClosure _ _ captured <- params])
 
 -- | A predicate standing as the parameter of a schema.
 predicateParam :: Pred -> CT
-predicateParam (Pred p ps)
-  | null ps = CStatic p
-  | otherwise = CPartial p ps 1
+predicateParam = \case
+  Pred p [] -> CStatic p
+  Pred p ps -> CPartial p ps 1
+  PredClosure params body captured -> CClosure params body captured
 
 -- | The predicate a parameter of a schema stands for.
 parameterPredicate :: CT -> Pred
 parameterPredicate = \case
   CStatic p -> Pred p []
   CPartial p ps _ -> Pred p ps
+  CClosure params body captured -> PredClosure params body captured
   _ -> Pred "anyIs" []
+
+-- | A membership code split into its predicate and the term it is of: a schema's parameters, the term, and after it what the parameters capture.
+splitMembership :: CT -> Maybe (Pred, CT)
+splitMembership = \case
+  CSym f args | (params, t : _) <- partition isParameter args -> Just (Pred f params, t)
+  _ -> Nothing
+
+{- |
+The predicate a body over a variable states, as the core abstracts it: a
+function applied to the variable alone is that function; any other body its
+canonical closure, over the variable and a slot for each maximal subterm not
+mentioning it, numerals included, in the order they occur, so that it is the
+same predicate whatever the captured terms become.  The slots are named
+@y_1@, @y_2@, …, which the variable must not be.
+-}
+predicateOver :: Text -> CT -> Pred
+predicateOver x body = case body of
+  CSym f [CVar y] | y == x -> Pred f []
+  _ ->
+    let (captured, body') = capture [] body
+     in PredClosure (x : map slot [1 .. length captured]) body' captured
+  where
+    slot i = "y_" <> T.pack (show (i :: Int))
+    capture acc t
+      | x `notElem` varsCT t, not (isParameter t) = (acc <> [t], CVar (slot (length acc + 1)))
+      | CSym f args <- t =
+          let (acc', args') = mapAccumL (\a u -> if isParameter u then (a, u) else capture a u) acc args
+           in (acc', CSym f args')
+      | otherwise = (acc, t)
 
 -- * Builders
 

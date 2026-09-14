@@ -144,7 +144,7 @@ load path = do
       , ldOrder = map (renderQualName . dataQual) datas
       , ldCtors = Set.fromList [ctorCore c | d <- datas, c <- dataCtors d]
       , ldPredicates = Map.fromList [(dataIs d, d) | d <- datas]
-      , ldMembership = foldl (\acc d -> Map.insert (renderQualName (dataQual d)) (dataIs d, encodedParams (encodeData (`Map.lookup` acc) d)) acc) Map.empty datas
+      , ldMembership = foldl (\acc d -> Map.insert (renderQualName (dataQual d)) (dataIs d, encodedParams (encodeData (`Map.lookup` acc) (const False) d)) acc) Map.empty datas
       , ldUnfoldings = Map.fromList unfoldings
       , ldBuiltin = builtin
       }
