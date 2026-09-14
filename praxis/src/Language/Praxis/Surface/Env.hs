@@ -49,6 +49,7 @@ module Language.Praxis.Surface.Env (
   addTheorem,
   setTheoremIndices,
   setFunRuntime,
+  setFunProofs,
   explicitPositions,
   addClass,
   addLaws,
@@ -153,6 +154,11 @@ data FunInfo = FunInfo
   , funCore :: !Text
   , funSlots :: ![Slot]
   -- ^ its dictionary, in order: the methods its constraints give it which it uses
+  , funProofs :: ![(Int, Scope Int Expr Void)]
+  {- ^ the proofs it takes: the position of each among its arguments, and
+  the proposition it is of, over its value parameters — a precondition,
+  which an application gives a proof of, and its code does not take
+  -}
   , funRuntime :: ![Int]
   {- ^ the value parameters it takes at runtime, by position, before its
   arguments: the implicit values its clauses bind, which an application
@@ -385,7 +391,7 @@ addFunction :: Env -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)
 addFunction env name sch arity slots = (env', info)
   where
     q = qualify env [name]
-    info = FunInfo q sch arity (coreOf q) slots []
+    info = FunInfo q sch arity (coreOf q) slots [] []
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)
@@ -393,6 +399,12 @@ addFunction env name sch arity slots = (env', info)
         , envNamespaces = Map.insertWith Map.union q Map.empty (envNamespaces env)
         , envDisplay = Map.insert (funCore info) (segmentText name) (envDisplay env)
         }
+
+-- | The proofs a function takes, recorded in its information and in the environment.
+setFunProofs :: [(Int, Scope Int Expr Void)] -> (Env, FunInfo) -> (Env, FunInfo)
+setFunProofs proofs (env, info) = (env {envGlobals = Map.insert (funQual info) (GFun info') (envGlobals env)}, info')
+  where
+    info' = info {funProofs = proofs}
 
 -- | The value parameters a function takes at runtime, recorded in its information and in the environment.
 setFunRuntime :: [Int] -> (Env, FunInfo) -> (Env, FunInfo)
@@ -463,7 +475,7 @@ addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> [Slot] -> 
 addInstanceFunction env instance' method sch arity slots = (env', info)
   where
     q = instance' <> [method]
-    info = FunInfo q sch arity (coreOf q) slots []
+    info = FunInfo q sch arity (coreOf q) slots [] []
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)

@@ -129,6 +129,10 @@ checkTests =
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.length-index", "Gadt.head-tail", "Gadt.head-tail-two", "Gadt.same-eq"]
         -- Implicit values its clauses bind, taken at runtime: matched on, found and passed.
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.replicate-vec.#index", "Gadt.len-replicate"]
+        -- Proofs as arguments: each an obligation, certified, of the call's precondition or of what cannot be.
+        let obligationsOf f = [n | n <- checkedTheorems c, ("Gadt." <> f <> ".#obligation") `T.isPrefixOf` n]
+        assertBool "the obligation of head-of-two's call" (not (null (obligationsOf "head-of-two")))
+        assertBool "the obligation of head-safe's absurd" (not (null (obligationsOf "head-safe")))
         -- The membership of its results, under the indices of its argument: a rule over its type parameter's predicate.
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (any (("rule u_Gadt_s" <> f <> "_s_x23_closed ") `T.isPrefixOf`) (checkedCore c))) ["tail", "tail_dtwo", "head", "first"]
     , testCase "an index which cannot be, a clause missing or never matching, and a kind which disagrees, are refused" $ do
@@ -136,7 +140,7 @@ checkTests =
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
         mapM_
           (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls))
-          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64])]
+          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64]), ("bad-proof", [71, 72])]
         assertBool "fine is certified" ("GadtBad.fine.#index" `elem` checkedTheorems c)
         assertBool "nothing refused is certified" (not (any (`elem` checkedTheorems c) ["GadtBad.impossible.#index", "GadtBad.tail-zero.#index", "GadtBad.nil-any.#index", "GadtBad.length-any"]))
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
@@ -145,7 +149,7 @@ checkTests =
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero", "NatTheorems.length-replicate", "NatTheorems.double-succ"]
         -- A function matching on a value of Nat: its closure, by induction on the value.
         assertBool "the closure of replicate" (any ("rule u_NatTheorems_sreplicate_s_x23_closed " `T.isPrefixOf`) (checkedCore c))
-    , testCase "a clause on a numeral other than 0, and a proposition where a type is expected, are refused" $ do
+    , testCase "a clause on a numeral other than 0, and a proof matched on as a value, are refused" $ do
         c <- checkFile "test/data/nat-bad.px"
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
         mapM_ (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls)) [("one-lt", [4, 5, 6]), ("prop-arg", [9, 10])]

@@ -225,7 +225,7 @@ statementGoal membership td = do
   forM_ (tdBinders td) \(n, t) ->
     unless (firstOrder t) $ Left ("the value " <> T.unpack n <> " is not of a first-order type")
   premises <- renderPremises predicate (tdPremises td)
-  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> indexHyps <> map HProp antecedents)] conclusion vars [] [] (tdSlots td) premises)
+  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> indexHyps <> map HProp antecedents)] conclusion vars hypNames [] (tdSlots td) premises)
   where
     binderCores = [mangleVariable n | (n, _) <- tdBinders td]
     valueCores = [mangleVariable n | (n, _) <- tdValues td]
@@ -249,6 +249,8 @@ statementGoal membership td = do
       [HMember p core | ((_, t), core) <- zip (tdBinders td) binderCores, Just p <- [predicate t]]
         <> [HMember p core | (i, ((_, t), core)) <- zip [0 :: Int ..] (zip (tdValues td) valueCores), i `notElem` map fst defined, Just p <- [predicate t]]
     indexHyps = [HProp (Rel RelEq (fromCT (CSym fn [CVar (binderCores !! k)])) (fromCT x)) | (fn, k, x) <- indexEqs]
+    -- The leading antecedents a proof may name: a function's clause's proofs.
+    hypNames = [(nm, hname (length members + length indexHyps + j)) | (j, nm) <- zip [1 ..] (tdHypNames td)]
 
 {- |
 The equations of the indices of a theorem's binders, over the core variables
@@ -585,11 +587,12 @@ refute k g = case [(n, l) | (n, l, r) <- eqs, clash l r] of
     clash l r = (l == CNum 0 && successor r) || (successor l && r == CNum 0)
     successor = \case
       CSym "S" [_] -> True
+      CNum j -> j > 0
       _ -> False
 
 -- | The equations among a goal's hypotheses, by their names, their sides as core terms.
 goalEquations :: Goal -> [(Text, CT, CT)]
-goalEquations g = [(h, l, r) | (h, HProp p) <- goalHyps g, Rel RelEq a b <- [stripLocations p], Right l <- [termCT CVar a], Right r <- [termCT CVar b]]
+goalEquations g = [(h, l, r) | (h, HProp p) <- goalHyps g, Rel RelEq a b <- [stripLocations (asEquation p)], Right l <- [termCT CVar a], Right r <- [termCT CVar b]]
 
 {- |
 The equations among a goal's hypotheses, unfolded and taken apart: each
@@ -893,6 +896,8 @@ termProof k info n g le@(Located sp e) = case e of
       ev <- evidence k info g arg
       pure (closed (evBefore ev <> congUnfolded k g ev))
     (Located _ (R.EName (QName [] (Ident w))), []) | w `elem` ["rfl", "refl"] -> closed <$> rflTactic k g sp
+    -- What cannot be, from hypotheses whose equations clash once unfolded.
+    _ | Bottom <- stripLocations (goalConcl g), Right tac <- refute k g -> pure (closed tac)
     _ -> do
       ev <- evidence k info g le
       pure (closed (evBefore ev <> exactAppeal ev))

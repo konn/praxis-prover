@@ -355,6 +355,25 @@ replicate-vec {S k} x = x :- replicate-vec x
 An implicit value no clause binds stays out of the code, found for the types
 alone, as `n` in `tail`.
 
+A function may take a proof: a proposition among its domains, `(0 < n) ->`,
+is a precondition, which its code does not take. A clause names the proof,
+`h`, or matches it by `_`, a proposition having no constructors. Every
+application gives a proof of the precondition there, a proof term as a
+theorem's clause has; it is checked as a theorem of its own, an obligation,
+over the clause's variables and under the clause's own preconditions, by the
+names the clause gives them. `absurd p`, `p` a proof of `⊥`, is a value of any
+type, for a case the preconditions exclude; a hypothesis whose equation
+clashes once unfolded, as `0 < 0` does, is such a proof.
+
+```
+head-safe : {n : nat} -> (0 < n) -> Vec a n -> a
+head-safe h (x :- _) = x
+head-safe h nil = absurd h
+
+head-of-two : Vec a 2 -> a
+head-of-two v = head-safe rfl v
+```
+
 Matching a constructor refines what a clause knows: `(_ :- tl)` against
 `Vec a (S n)` gives `tl` the type `Vec a n`. A constructor whose result's
 indices clash with those of the argument's type — `nil`, of length 0, at
@@ -503,6 +522,8 @@ by certified index and closure lemmas; theorems over their values, the
 indices of their binders as hypotheses and the cases these exclude refuted;
 implicit parameters of data types, found from the indices written, and
 indices whose types mention the parameters and the indices before them;
+implicit values a function's clauses bind, taken at runtime; proofs as
+arguments, each application's checked as an obligation, and `absurd`;
 type ascriptions; `.px` diagnostics.
 Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and

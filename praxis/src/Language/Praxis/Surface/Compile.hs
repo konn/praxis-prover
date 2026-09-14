@@ -505,12 +505,14 @@ bodyCT info userArity var dvar rec fc = go (fromScope (fcBody fc))
       (Global (Ref RefValueParam k), []) -> dvar <$> maybe (Left "internal: a value of the dictionary at no position") Right (readMaybe (T.unpack k))
       (Global (Ref _ r), as)
         | r == core -> do
-            let (users, passed) = splitAt userArity as
+            let (users, passed) = splitAt userArity (dropProofs as)
             unless (map stripLocations passed == own) $
               Left "a recursive call passes the dictionary on unchanged: primitive recursion keeps the parameters of its schema"
             cts <- traverse go users
             rec (zip (map variable users) cts)
-        | otherwise -> CSym r <$> traverse go as
+        | otherwise -> CSym r <$> traverse go (dropProofs as)
+      -- A proof given for what cannot be, absurd p: a value of any type, 0.
+      (ProofArg {}, _) -> Right (CNum 0)
       (Nat n, []) -> Right (CNum n)
       _ -> Left "no core term for this expression"
     -- The pattern variable an argument is, when it is one.

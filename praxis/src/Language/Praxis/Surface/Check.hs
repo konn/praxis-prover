@@ -189,12 +189,16 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 
                 Right core' ->
                   let r2 = certifyAll (fdSpan fd) (r1 {runCore = core'}) lemmas
                       certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
-                   in specify fd (indexed fd (closure fd (r2 {runUnfoldings = runUnfoldings r2 <> certified})))
-      ITheorem td ->
-        let name = T.unpack (renderQualName (thmQual (tdInfo td)))
-         in case proveTheorem (knowledge r) td of
-              Left (EngineError sp msg) -> report sp SevError msg r
-              Right decls -> certifyTheorem (tdSpan td) name r decls
+                   in -- Then what the proofs its clauses give must prove.
+                      foldl proveAndCertify (specify fd (indexed fd (closure fd (r2 {runUnfoldings = runUnfoldings r2 <> certified})))) (fdObligations fd)
+      ITheorem td -> proveAndCertify r td
+
+    -- A theorem, or the obligation a proof in a function's clause is: proved, and certified.
+    proveAndCertify r td =
+      let name = T.unpack (renderQualName (thmQual (tdInfo td)))
+       in case proveTheorem (knowledge r) td of
+            Left (EngineError sp msg) -> report sp SevError msg r
+            Right decls -> certifyTheorem (tdSpan td) name r decls
 
     knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r)
 

@@ -31,6 +31,9 @@ module Language.Praxis.Surface.Syntax (
   stripLocations,
   spine,
   apps,
+  isProofArg,
+  dropProofs,
+  proofArgs,
   mapGlobals,
   globalsOf,
 
@@ -49,7 +52,8 @@ import Control.Monad (ap)
 import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1, showsPrec1)
 import Data.List (elemIndex)
 import Data.Text (Text)
-import Language.Praxis.Surface.Syntax.Raw (Quantifier (..), Span)
+import Language.Praxis.Surface.Syntax.Raw (Located, Quantifier (..), Span)
+import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Numeric.Natural (Natural)
 import Text.Show (showListWith)
 
@@ -161,6 +165,11 @@ data Expr a
     Universe
   | -- | @_@
     Hole
+  | {- | a proof given where a proposition is expected, which the code does
+    not take: the proposition, and the proof as it was written, which is
+    checked apart
+    -}
+    ProofArg (Expr a) !(Irrelevant (Located R.Expr))
   deriving stock (Functor, Foldable, Traversable)
 
 instance Applicative Expr where
@@ -187,6 +196,7 @@ instance Monad Expr where
     Bottom -> Bottom
     Universe -> Universe
     Hole -> Hole
+    ProofArg p r -> ProofArg (p >>= k) r
 
 -- | α-equivalence: binders compare by index, hints and spans not at all.
 instance Eq1 Expr where
@@ -212,6 +222,7 @@ instance Eq1 Expr where
       go Bottom Bottom = True
       go Universe Universe = True
       go Hole Hole = True
+      go (ProofArg p _) (ProofArg q _) = go p q
       go _ _ = False
 
 -- | For debugging: the constructors, spans left out.
@@ -238,6 +249,7 @@ instance Show1 Expr where
         Bottom -> showString "Bottom"
         Universe -> showString "Universe"
         Hole -> showString "Hole"
+        ProofArg p _ -> con d "ProofArg" [flip go p]
       scope :: forall b. (Show b) => Scope b Expr a -> Int -> ShowS
       scope b d = liftShowsPrec sp sl d b
       con d name fields = showParen (d > 10) (showString name . foldr (\f acc -> showChar ' ' . f 11 . acc) id fields)
@@ -268,6 +280,25 @@ spine = go []
 apps :: Expr a -> [Expr a] -> Expr a
 apps = foldl App
 
+-- | Whether an argument is a proof, which the code does not take.
+isProofArg :: Expr a -> Bool
+isProofArg = \case
+  At _ e -> isProofArg e
+  ProofArg {} -> True
+  _ -> False
+
+-- | The arguments the code takes: those which are not proofs.
+dropProofs :: [Expr a] -> [Expr a]
+dropProofs = filter (not . isProofArg)
+
+-- | The proofs an expression gives, in order: each proposition, and the proof as it was written.
+proofArgs :: Expr a -> [(Expr a, Located R.Expr)]
+proofArgs = \case
+  ProofArg p (Irrelevant r) -> [(p, r)]
+  App f x -> proofArgs f <> proofArgs x
+  At _ e -> proofArgs e
+  _ -> []
+
 -- | Every global reference replaced as the function says, under binders too.
 mapGlobals :: (Ref -> Ref) -> Expr a -> Expr a
 mapGlobals f = go
@@ -292,6 +323,7 @@ mapGlobals f = go
       Bottom -> Bottom
       Universe -> Universe
       Hole -> Hole
+      ProofArg p r -> ProofArg (go p) r
 
 -- | The global references of an expression, under binders too.
 globalsOf :: Expr a -> [Ref]
@@ -311,6 +343,7 @@ globalsOf = go
       Rel _ a b -> go a <> go b
       Conn _ a b -> go a <> go b
       Not a -> go a
+      ProofArg p _ -> go p
       _ -> []
 
 -- * Patterns

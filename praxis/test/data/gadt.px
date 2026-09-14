@@ -77,3 +77,13 @@ len {n} v = n
 
 len-replicate : {n : nat} -> (x : a) -> len (replicate-vec x : Vec a n) ≡ n
 len-replicate x = rfl
+
+-- A proof as an argument: its proposition a precondition, the proof named in
+-- the clauses and given at each call, where it is checked; absurd takes a
+-- proof of what cannot be, and is a value of any type.
+head-safe : {n : nat} -> (0 < n) -> Vec a n -> a
+head-safe h (x :- _) = x
+head-safe h nil = absurd h
+
+head-of-two : Vec a 2 -> a
+head-of-two v = head-safe rfl v

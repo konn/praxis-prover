@@ -171,7 +171,9 @@ termCT var = go
       (Global (Ref RefStatic core), []) -> Right (CStatic core)
       (Global (Ref RefValueParam k), []) -> Right (CVar (valueVar k))
       (Global (Ref (RefPartial n) core), dict) -> (\d -> CPartial core d n) <$> traverse go dict
-      (Global (Ref _ core), args) -> CSym core <$> traverse go args
+      (Global (Ref _ core), args) -> CSym core <$> traverse go (dropProofs args)
+      -- A proof given for what cannot be, absurd p: a value of any type, 0.
+      (ProofArg {}, _) -> Right (CNum 0)
       (h, _) -> Left ("no core term for " <> shape h)
     shape = \case
       Lam {} -> "a λ"

@@ -62,3 +62,11 @@ data Lost {k} (n : nat) where
 -- An index of a type its kind does not admit.
 bad-kind : Vec a nil -> Nat
 bad-kind v = 0
+
+-- A proof given which proves nothing of the kind: 0 < 0.
+head-safe : {n : nat} -> (0 < n) -> Vec a n -> a
+head-safe h (x :- _) = x
+head-safe h nil = absurd h
+
+bad-proof : Vec a 0 -> a
+bad-proof v = head-safe rfl v
