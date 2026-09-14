@@ -379,6 +379,26 @@ head-of-two : Vec a 2 -> a
 head-of-two v = head-safe rfl v
 ```
 
+Clauses may match on several values of `Nat` at once, implicit values among
+them, each combination of `0` and a successor covered once; a recursive call
+passes each value or its predecessor, and at least one predecessor. The
+function's lemmas are then proved by induction on the code of the tuple of
+the values:
+
+```
+data PLt (n : nat) (m : nat) where
+  ZeroSucc : {m : nat} -> PLt 0 (S m)
+  SuccSucc : {n m : nat} -> PLt n m -> PLt (S n) (S m)
+
+plt-of-lt : {n m : nat} -> (n < m) -> PLt n m
+plt-of-lt {0} {S m} h = ZeroSucc
+plt-of-lt {S n} {S m} h = SuccSucc (plt-of-lt h)
+plt-of-lt {n} {0} h = absurd h
+```
+
+The recursive call's precondition, `n < m`, is its obligation, proved from
+`h : S n < S m` once unfolded; `h : n < 0` clashes, so `absurd h` there.
+
 Matching a constructor refines what a clause knows: `(_ :- tl)` against
 `Vec a (S n)` gives `tl` the type `Vec a n`. A constructor whose result's
 indices clash with those of the argument's type — `nil`, of length 0, at
@@ -521,7 +541,8 @@ Implemented: the whole grammar above; data types, including higher-kinded
 parameters and nested and mutually referring types; functions matching on one
 argument, each constructor once or `0` and `S n`, structurally recursive with unchanged other
 arguments, or on several values of `Nat` at once, each case of `0` and `S`
-once, recursive at predecessors through the code of their tuple; classes with superclasses, and their instances for data types and
+once, recursive at predecessors through the code of their tuple, their closure
+and index lemmas by induction on that code; classes with superclasses, and their instances for data types and
 `Nat`, each use of a method resolved at the type it is used at; functions
 and theorems under constraints, schemas and rules over the methods they use;
 laws of classes, proved by each instance and premises of the theorems under

@@ -65,6 +65,15 @@ min-nat (S n) (S m) = S (min-nat n m)
 min-succ : (n m : nat) -> min-nat (S n) (S m) ≡ S (min-nat n m)
 min-succ n m = rfl
 
+-- The evidence of a comparison, from the comparison: implicit values taken at
+-- runtime and matched on together, a proof as an argument, and the recursion
+-- at both predecessors. Its results are members of PLt, at the indices its
+-- type says, by induction on the code of the pair of its values.
+plt-of-lt : {n m : nat} -> (n < m) -> PLt n m
+plt-of-lt {0} {S m} h = ZeroSucc
+plt-of-lt {S n} {S m} h = SuccSucc (plt-of-lt h)
+plt-of-lt {n} {0} h = absurd h
+
 -- The comparison, from its evidence: the induction hypothesis the comparison
 -- the goal is once both are unfolded, S n < S m being n < m.
 lt-of-plt : {n m : nat} -> PLt n m -> (n < m)

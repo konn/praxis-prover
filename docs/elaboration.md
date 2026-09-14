@@ -238,6 +238,22 @@ by congruence from a hypothesis such as the induction hypothesis
 given of each function after its closure lemma, and certifies each as
 `f.#name`.
 
+Clauses matching on several values of `Nat` at once are proved by
+course-of-values induction on the code of their tuple, `pair x₀ (pair x₁ …)`
+(`Engine.tupleInduction`). Every code is such a pair (`pairSurj`), so the
+motive needs no guard: the goal at the components of the code, `godelPi1 n`,
+…, with the hypotheses mentioning the values reverted into it. In the step
+each component is `0` or a successor (`zeroOrSucc`), and each combination is a
+case, an auxiliary theorem, with an induction hypothesis at each tuple the
+case's unfolding lemma recurses to: that tuple's code is below the case's
+(`pairLtL`, `pairLtR`), and `belowElim` looks it up. The core codes `0 < u` as
+`u`, so the code of the motive at a tuple with `0` in it is not the instance
+of its code: two helper lemmas, stated at variables and instantiated at each
+case, pass between the motive and its code. An induction hypothesis under
+preconditions is specialized where these are established — by a hypothesis,
+an obligation, or a hypothesis once unfolded — and its conjuncts are taken
+apart (`Engine.specializeIHs`), for the case's prover.
+
 **Indices.** A function whose signature's types have indices gets from them
 (`Engine.indexSpecOf`) the equations its arguments' indices satisfy — each an
 index function at an argument, and an index over the function's value

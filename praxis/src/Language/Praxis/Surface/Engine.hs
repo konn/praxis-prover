@@ -68,7 +68,7 @@ module Language.Praxis.Surface.Engine (
 import Bound (instantiate)
 import Control.Monad (foldM, forM, forM_, guard, unless)
 import Data.Char (isAlphaNum)
-import Data.List (find, nub)
+import Data.List (elemIndex, find, nub, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
@@ -406,10 +406,11 @@ data SpecProof = SpecProof
 
 {- |
 A specification proved by the skeleton every lemma of a function shares: by
-induction on the argument its clauses match on, or outright when they match
-on none, each case by the specification's prover.  Left inside, with why,
-when a case is not proved, or the clauses match on several arguments, or on
-one whose type has no membership to induct on.
+induction on the argument its clauses match on, or on the values of @Nat@
+they match on together ('tupleInduction'), or outright when they match on
+none, each case by the specification's prover.  Left inside, with why, when a
+case is not proved, or the clauses match on several arguments not all of
+@Nat@, or on one whose type has no membership to induct on.
 -}
 proveSpec :: Knowledge -> FunDef -> Spec -> Either EngineError (Either String SpecProof)
 proveSpec k fd spec = do
@@ -420,14 +421,18 @@ proveSpec k fd spec = do
       done out = do
         decl <- either (Left . EngineError sp) Right (declaration (thmCore thm) g0 (outTactic out))
         Right (Right (SpecProof (thmCore thm) (map pdPremise pds) (outAux out <> [(thmCore thm, runBuilder decl)])))
-  case columns of
+  case sort columns of
     [] -> either (Right . Left) (done . closed) (caseProof g0)
     [c]
       | isJust (argIs !! c) || fdArgs fd !! c == TNat -> do
           (cases, finish) <- induction k thm 0 g0 sp (names !! c) []
           either (Right . Left) (\tacs -> finish (map closed tacs) >>= done) (traverse caseProof cases)
       | otherwise -> Right (Left "the argument the clauses match on has no membership to induct on")
-    _ -> Right (Left "the clauses match on several arguments")
+    cs
+      | all (\c -> fdArgs fd !! c == TNat) cs -> do
+          (cases, finish) <- tupleInduction k thm g0 sp applied [cores !! c | c <- cs] cs
+          either (Right . Left) (\tacs -> finish (map closed tacs) >>= done) (traverse caseProof cases)
+      | otherwise -> Right (Left "the clauses match on several arguments, not all of them values of Nat")
   where
     info = fdInfo fd
     sp = fdSpan fd
@@ -444,7 +449,10 @@ proveSpec k fd spec = do
       PSucc _ -> True
       _ -> False
     pds = specPremises spec (knowEnv k) dict
-    caseProof g = let (intro, g') = introduceImplications g in (intro <>) <$> specCase spec k g'
+    caseProof g =
+      let (intro, g') = introduceImplications g
+          (specialized, g'') = specializeIHs k g'
+       in ((intro <> specialized) <>) <$> specCase spec k g''
 
 -- | The dictionary of a function's lemmas: its own, then the membership predicate of each type parameter its values are of, parameters of the lemma's rule.
 lemmaDictionary :: FunDef -> [Slot]
@@ -465,6 +473,45 @@ introduceImplications g = (mconcat ["ImplR as " <> fromText h <> "; " | (h, _) <
   where
     (antecedents, concl) = implications (goalConcl g)
     new = [(hname (length (goalHyps g) + i), HProp a) | (i, a) <- zip [1 ..] antecedents]
+
+{- |
+The induction hypotheses of a case, each under the preconditions reverted
+into its motive: specialized where those are established — each stated by a
+hypothesis, concluded by a proof the clauses give, or a hypothesis once both
+are unfolded — and the conjuncts of what it concludes taken apart, each a
+further hypothesis.  The tactic doing it, and the goal after.
+-}
+specializeIHs :: Knowledge -> Goal -> (Builder, Goal)
+specializeIHs k g0 = foldl one ("", g0) (zip [1 :: Int ..] (nub (map snd (goalIH g0))))
+  where
+    one acc@(tac, g) (i, h) = case lookup h (goalHyps g) of
+      Just (HProp p) -> case implications p of
+        ([], c) -> split acc h c
+        (ants, c)
+          | Just proofs <- traverse (antecedent g) ants
+          , Right cf <- formula c ->
+              let name = "IHs" <> T.pack (show i)
+               in split (tac <> "have " <> fromText name <> ": " <> cf <> " { " <> eliminate (fromText h) (zip [1 :: Int ..] proofs) <> " }; ", g {goalHyps = goalHyps g <> [(name, HProp c)]}) name c
+        _ -> acc
+      _ -> acc
+    eliminate cur = \case
+      [] -> "exact " <> cur
+      (q, pr) : rest -> let t = "T" <> fromDec q in "ImplL on " <> cur <> " as " <> t <> " { " <> pr <> " } { " <> eliminate t rest <> " }"
+    antecedent g a = case stripLocations (asEquation a) of
+      Rel RelEq x y
+        | Right l <- termCT CVar x
+        , Right r <- termCT CVar y ->
+            case preconditionsAt k g Map.empty [(l, r)] of
+              Right t -> Just (t <> "assumption")
+              Left _ -> listToMaybe [b | (h', HProp _) <- goalHyps g, Just b <- [hypothesisBridge k g {goalConcl = a} h']]
+      _ -> Nothing
+    split acc@(tac, g) h c = case stripLocations c of
+      Conn And a b ->
+        let l = h <> "l"
+            r = h <> "r"
+            acc' = (tac <> "ConjL on " <> fromText h <> " as " <> fromText l <> " " <> fromText r <> "; ", g {goalHyps = goalHyps g <> [(l, HProp a), (r, HProp b)]})
+         in split (split acc' l a) r b
+      _ -> acc
 
 -- | A case of a closure lemma: the membership of the body the unfolding lemma rewrites the application to, discharged by resolution.
 membershipCase :: Knowledge -> Goal -> Either String Builder
@@ -1708,6 +1755,276 @@ natInduction info g sp core = pure ([base, step], finish)
       let blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
           appeal i = "exact " <> fromText (auxName i) <> staticArgs (params !! i) <> blocks
       pure (Out ("induction " <> fromText core <> " as " <> fromText eigen <> " { " <> appeal 0 <> " } { " <> appeal 1 <> " }") (concat decls))
+
+{- |
+Induction on several values of @Nat@ at once, as a function recursing on them
+together does: course-of-values induction on the code of their tuple, @pair
+x0 (pair x1 …)@, which every code is, by @pairSurj@.  The motive is the goal
+at the components of the code, the hypotheses mentioning the values reverted
+into it.  In the step, each component is @0@ or a successor, by
+@zeroOrSucc@, and each combination is a case, an auxiliary theorem, under the
+induction hypotheses at the tuples the function's recursive calls there
+pass, as its unfolding lemma for the case has them: each looked up below the
+code by @belowElim@, since the code of a pair grows with its components
+(@pairLtL@, @pairLtR@).  The application given is the function's, at the
+goal's variables; the values are the variables given, at those positions.
+-}
+tupleInduction :: Knowledge -> TheoremInfo -> Goal -> Span -> Expr Text -> [Text] -> [Int] -> Either EngineError ([Goal], [Out] -> Either EngineError Out)
+tupleInduction k info g sp applied cols positions = do
+  appliedCT <- either (Left . EngineError sp) Right (termCT CVar applied)
+  let (fname, arity) = case appliedCT of
+        CSym f as -> (f, length as)
+        _ -> ("", 0)
+      -- The tuples the recursive calls pass in a case, below its own: each value, or its predecessor.
+      recursiveTuples vals =
+        let target = substCT (Map.fromList (zip cols vals)) appliedCT
+         in case unfoldRedex k target of
+              Just (u, _, rhs) | u == target -> nub [us | CSym f as <- subtermsCT rhs, f == fname, length as == arity, let us = map (as !!) positions, below us vals]
+              _ -> []
+      caseGoal combo =
+        let vals = [if b then CSym "S" [CVar e] else CNum 0 | (b, e) <- zip combo preds]
+            ihs = recursiveTuples vals
+            hyps = map snd kept <> [HProp (at u motive) | u <- ihs] <> [HProp (at vals p) | (_, p) <- dependent]
+            vars = [("#" <> T.pack (show i), (e, TNat)) | (i, (True, e)) <- zip [0 :: Int ..] (zip combo preds)] <> [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols]
+            ihCore j = hname (length kept + j)
+            ihNames = [(if length ihs == 1 then "IH" else "IH" <> T.pack (show j), ihCore j) | j <- [1 .. length ihs]]
+            keptNames = [(s, hname i) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
+         in (ihs, Goal (zip (map hname [1 ..]) hyps) (at vals (goalConcl g)) vars (ihNames <> keptNames) [(runBuilder (render (pairT u)), ihCore j) | (j, u) <- zip [1 ..] ihs] (goalDict g) (goalPremises g))
+      built = map caseGoal combos
+      cases = map snd built
+      finish outs = do
+        decls <- forM (zip3 [0 :: Int ..] cases outs) \(i, cg, o) -> do
+          decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
+          pure (outAux o <> [(auxName i, runBuilder decl)])
+        helpers <- either (Left . EngineError sp) Right helperDecls
+        params <- traverse (either (Left . EngineError sp) Right . ruleParams) cases
+        let appeal i = appealTo (auxName i) (params !! i)
+        script <- either (Left . EngineError sp) Right (tupleScript (fst <$> built) appeal)
+        pure (Out script (helpers <> concat decls))
+  pure (cases, finish)
+  where
+    kc = length cols
+    used = map (fst . snd) (goalVars g)
+    fresh nm = fromMaybe nm (find (`notElem` used) (nm : [nm <> "_" <> T.pack (show i) | i <- [0 :: Int ..]]))
+    eigen = fresh "e_k"
+    n = CVar eigen
+    preds = [fresh ("e_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
+    dependent = [(h, p) | (h, HProp p) <- goalHyps g, any (`elem` cols) (foldr (:) [] p)]
+    kept = [(h, hy) | (h, hy) <- goalHyps g, h `notElem` map fst dependent]
+    motive = foldr (Arrow . snd) (goalConcl g) dependent
+    at ts e = e >>= \w -> maybe (Var w) fromCT (lookup w (zip cols ts))
+    combos = sequence (replicate kc [False, True])
+    below us vs = and (zipWith (\u v -> u == v || v == CSym "S" [u]) us vs) && or (zipWith (/=) us vs)
+    subtermsCT t =
+      t : case t of
+        CSym _ xs -> concatMap subtermsCT xs
+        _ -> []
+    tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
+    segment = \case
+      Ident t -> t
+      Op t -> t
+    auxName i = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
+    blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
+    appealTo name params = "exact " <> fromText name <> staticArgs params <> blocks
+    helperName s = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> s])
+    belowName = helperName "below"
+    atName = helperName "at"
+    svars = [fresh ("s_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
+    wvars = [fresh ("w_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
+    helperGoal concl = Goal [] concl [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols] [] [] (goalDict g) (goalPremises g)
+    -- The motive at the components of a code, from what they are and the motive there.
+    substExpr vs = foldr (\(c, v) -> Arrow (Rel RelEq (fromCT c) (fromCT v))) (Arrow (at vs motive) (at (comps n) motive)) (zip (comps n) vs)
+    belowGoal = helperGoal (at (map CVar wvars) motive)
+    atGoal = helperGoal (substExpr (map CVar svars))
+    {- The motive between its formula and its code, at variables alone, where the
+    core's code of an instance is the instance of its code: at a tuple with 0 in
+    it, 0 < u is coded as u.  Below: the motive at a tuple from the truth of its
+    code at the components of the tuple's code, as the history gives it.  At: the
+    motive at the components of a code, from the motive at what they are. -}
+    helperDecls = do
+      let ws = map CVar wvars
+          ss = map CVar svars
+          es = ["E" <> fromDec i | i <- [0 .. kc - 1]]
+      codeBelow <- code (comps (pairT ws))
+      codeWs <- code ws
+      up <- upFrom ws
+      belowDecl <-
+        declareWith belowName ["(lt 0 " <> codeBelow <> ") = 1"] belowGoal $
+          if ownCode then up <> " = 1 by exact H1" else "have D: ((lt 0 " <> codeWs <> ") = 1) { " <> up <> " = 1 by exact H1 }; reflect D as D1; exact D1"
+      codeComps <- code (comps n)
+      stageCodes <- traverse code (drop 1 (scanl replaced (comps n) (zip [0 ..] ss)))
+      let calcT = "calc (lt 0 " <> codeComps <> ")" <> mconcat [" = (lt 0 " <> c <> ") by cong " <> e | (c, e) <- zip stageCodes es] <> " = 1 by exact C1"
+      at' <-
+        declareWith atName [] atGoal $
+          mconcat ["ImplR as " <> e <> "; " | e <- es]
+            <> if ownCode then "ImplR as C1; " <> calcT else "ImplR as HM; reify HM as C1; have C2: ((lt 0 " <> codeComps <> ") = 1) { " <> calcT <> " }; reflect C2 as C3; exact C3"
+      pure [(belowName, runBuilder belowDecl), (atName, runBuilder at')]
+    declareWith name extras g' tac = do
+      hs <- traverse (hypText . snd) (goalHyps g')
+      c <- formula (goalConcl g')
+      params <- ruleParams g'
+      let stmt = intercalateB ", " (extras <> hs) <> " |- " <> c
+      pure case params of
+        [] | null (goalPremises g') -> "theorem " <> fromText name <> " : " <> stmt <> "\nby " <> tac
+        _ -> "rule " <> fromText name <> ruleBinders params (sequentVars g') <> mconcat [" " <> gpBinder p | p <- goalPremises g'] <> " : " <> stmt <> "\nby " <> tac
+    -- The code of a tuple, and the components of a code.
+    pairT = \case
+      [x] -> x
+      x : xs -> CSym "pair" [x, pairT xs]
+      [] -> CNum 0
+    comps t = [if i == kc - 1 then iterate pi2 t !! i else CSym "godelPi1" [iterate pi2 t !! i] | i <- [0 .. kc - 1]]
+    pi2 x = CSym "godelPi2" [x]
+    -- The truth of a term, 0 < u, is its own code, u; any other motive has the code of its formula.
+    truthOf e = case stripLocations e of
+      Rel RelLt a u | isZero a -> Just u
+      Rel RelGt u a | isZero a -> Just u
+      _ -> Nothing
+    isZero x = case stripLocations x of
+      Nat 0 -> True
+      _ -> False
+    ownCode = maybe False (not . isZero) (truthOf motive)
+    code ts =
+      let e = at ts motive
+       in case truthOf e of
+            Just u | ownCode -> render <$> termCT CVar u
+            _ -> (\f -> "[[" <> f <> "]]") <$> formula e
+    -- Components of the code of a tuple taken apart, a projection of a pair at a time: each stage, and the lemma rewriting to it.
+    projections ts = case [(i, t', l) | (i, t) <- zip [0 :: Int ..] ts, Just (t', l) <- [projected t]] of
+      (i, t', l) : _ -> let ts' = take i ts <> [t'] <> drop (i + 1) ts in (ts', l) : projections ts'
+      [] -> []
+    projected = \case
+      CSym "godelPi1" [CSym "pair" [a, _]] -> Just (a, "pi1Pair")
+      CSym "godelPi2" [CSym "pair" [_, b]] -> Just (b, "pi2Pair")
+      CSym f xs -> case [(i, x', l) | (i, x) <- zip [0 :: Int ..] xs, Just (x', l) <- [projected x]] of
+        (i, x', l) : _ -> Just (CSym f (take i xs <> [x'] <> drop (i + 1) xs), l)
+        [] -> Nothing
+      _ -> Nothing
+    -- A code's components paired up again, innermost first: each stage, by pairSurj.
+    surjections t = case surjected t of
+      Just t' -> t' : surjections t'
+      Nothing -> []
+    surjected = \case
+      CSym "pair" [CSym "godelPi1" [z], CSym "godelPi2" [z']] | z == z' -> Just z
+      CSym f xs -> case [(i, x') | (i, x) <- zip [0 :: Int ..] xs, Just x' <- [surjected x]] of
+        (i, x') : _ -> Just (CSym f (take i xs <> [x'] <> drop (i + 1) xs))
+        [] -> Nothing
+      _ -> Nothing
+    -- The calculation from the motive's code at a tuple up to its code at the components of the tuple's code.
+    upFrom ts = do
+      let s0 = comps (pairT ts)
+          chain = projections s0
+      start <- code ts
+      steps <- forM (reverse (zip (s0 : map fst chain) (map snd chain))) \(s, l) -> (\c -> " = (lt 0 " <> c <> ") by cong " <> l) <$> code s
+      pure ("calc (lt 0 " <> start <> ")" <> mconcat steps)
+    replaced st (j, x) = take j st <> [x] <> drop (j + 1) st
+    tupleScript ihsOf appeal = do
+      bp <- ruleParams belowGoal
+      ap <- ruleParams atGoal
+      let xs = map CVar cols
+          appeals = (appeal, appealTo belowName bp, appealTo atName ap)
+      codeC <- code (comps (pairT xs))
+      codeX <- code xs
+      up <- upFrom xs
+      step <- dispatch ihsOf appeals 0 []
+      pure
+        ( "have C: ((lt 0 "
+            <> codeC
+            <> ") = 1) { exact cvInduction "
+            <> fromText eigen
+            <> " ("
+            <> render (pairT xs)
+            <> ") { "
+            <> step
+            <> " } }; have "
+            <> (if ownCode then "R1" else "R")
+            <> ": ((lt 0 "
+            <> codeX
+            <> ") = 1) { "
+            <> up
+            <> " = 1 by exact C }; "
+            <> (if ownCode then "" else "reflect R as R1; ")
+            <> eliminations "R1" (map fst dependent)
+        )
+    eliminations h = \case
+      [] -> "exact " <> h
+      x : xs -> "ImplL on " <> h <> " as " <> h <> "i { exact " <> fromText x <> " } { " <> eliminations (h <> "i") xs <> " }"
+    -- The step: each component 0 or a successor, in turn, and a case at each combination.
+    dispatch ihsOf appeals i combo
+      | i == kc = leaf ihsOf appeals combo
+      | otherwise = do
+          let c = render (comps n !! i)
+              z = "Z" <> fromDec i
+          a <- dispatch ihsOf appeals (i + 1) (combo <> [False])
+          b <- dispatch ihsOf appeals (i + 1) (combo <> [True])
+          pure ("have " <> z <> ": ((" <> c <> ") = 0 \\/ (" <> c <> ") = S (prd (" <> c <> "))) { exact zeroOrSucc }; DisjL on " <> z <> " as " <> z <> "a " <> z <> "b { " <> a <> " } { " <> b <> " }")
+    leaf ihsOf (appeal, belowAppeal, atAppeal) combo = do
+      let i = fromMaybe 0 (elemIndex combo combos)
+          cs' = comps n
+          vals = [if b then CSym "S" [CSym "prd" [c]] else CNum 0 | (b, c) <- zip combo cs']
+          zs = ["Z" <> fromDec j <> (if b then "b" else "a") | (j, b) <- zip [0 :: Int ..] combo]
+          -- The case's variables, the predecessors, at the components.
+          sigma = Map.fromList (zip preds [CSym "prd" [c] | c <- cs'])
+          ihs = map (map (substCT sigma)) (ihsOf !! i)
+          towardsComps = drop 1 (scanl replaced vals (zip [0 ..] cs'))
+          intros = mconcat ["ImplR as D" <> fromDec q <> "; " | q <- [1 .. length dependent]]
+          -- The motive at the components, from it at the case's values: its code is the goal.
+          eliminate cur = \case
+            [] -> if ownCode then "exact " <> cur else "reify " <> cur <> " as F1; exact F1"
+            (q, x) : rest -> let t = "T" <> fromDec (q :: Int) in "ImplL on " <> cur <> " as " <> t <> " { exact " <> x <> " } { " <> eliminate t rest <> " }"
+          kProof =
+            "have K: ("
+              <> render (pairT vals)
+              <> " = "
+              <> render n
+              <> ") { calc "
+              <> render (pairT vals)
+              <> mconcat [" = " <> render (pairT st) <> " by cong " <> z | (st, z) <- zip towardsComps zs]
+              <> mconcat [" = " <> render t <> " by cong pairSurj" | t <- surjections (pairT cs')]
+              <> " }; "
+      ihTexts <- forM (zip [0 :: Int ..] ihs) \(j, u) -> do
+        codeAt <- code (comps (pairT u))
+        mu <- formula (at u motive)
+        let pu = render (pairT u)
+            jd = fromDec j
+        pure
+          ( pairLtProof j u vals
+              <> ("have L" <> jd <> ": (" <> pu <> " < " <> render n <> ") { calc (" <> pu <> " < " <> render n <> ") = (" <> pu <> " < " <> render (pairT vals) <> ") by cong K = 1 by exact Q" <> jd <> "_0 }; ")
+              <> ("have IHc" <> jd <> ": ((lt 0 " <> codeAt <> ") = 1) { exact belowElim _ " <> render n <> " (" <> pu <> ") }; ")
+              <> ("have IHr" <> jd <> ": " <> mu <> " { " <> belowAppeal <> " }; ")
+          )
+      caseF <- formula (at vals motive)
+      substF <- formula (substExpr vals)
+      pure
+        ( kProof
+            <> mconcat ihTexts
+            <> ("have A: " <> caseF <> " { " <> intros <> appeal i <> " }; ")
+            <> ("have T: (" <> substF <> ") { " <> atAppeal <> " }; ")
+            <> eliminate "T" (zip [0 ..] (zs <> ["A"]))
+        )
+    -- The code of a tuple below the case's, component by component from the last: Qj_0 states it.
+    pairLtProof j us vs = snd (go 0)
+      where
+        nm p i = p <> fromDec (j :: Int) <> "_" <> fromDec (i :: Int)
+        suffix xs i = pairT (drop i xs)
+        go i
+          | i == kc - 1 =
+              if us !! i /= vs !! i
+                then (True, "have " <> nm "Q" i <> ": (" <> render (us !! i) <> " < " <> render (vs !! i) <> ") { exact ltSucc }; ")
+                else (False, "")
+          | otherwise =
+              let (lessTail, tailSteps) = go (i + 1)
+                  c' = us !! i
+                  c = vs !! i
+                  tailLe
+                    | lessTail = "have " <> nm "R" i <> ": (" <> render (suffix us (i + 1)) <> " <= " <> render (suffix vs (i + 1)) <> ") { exact ltLe on " <> nm "Q" (i + 1) <> " }; "
+                    | otherwise = "have " <> nm "R" i <> ": (" <> render (suffix vs (i + 1)) <> " <= " <> render (suffix vs (i + 1)) <> ") { exact leSelf }; "
+                  fact = "have " <> nm "Q" i <> ": (" <> render (suffix us i) <> " < " <> render (suffix vs i) <> ")"
+               in if c' /= c
+                    then (True, tailSteps <> "have " <> nm "P" i <> ": (" <> render c' <> " < " <> render c <> ") { exact ltSucc }; " <> tailLe <> fact <> " { exact pairLtL on " <> nm "P" i <> " " <> nm "R" i <> " }; ")
+                    else
+                      if lessTail
+                        then (True, tailSteps <> "have " <> nm "P" i <> ": (" <> render c <> " <= " <> render c <> ") { exact leSelf }; " <> fact <> " { exact pairLtR on " <> nm "P" i <> " " <> nm "Q" (i + 1) <> " }; ")
+                        else (False, tailSteps)
 
 -- | Induction on a value of a data type, by its code: 'induction' there.
 dataInduction :: Knowledge -> TheoremInfo -> Counter -> Goal -> Span -> Text -> [Text] -> Either EngineError ([Goal], [Out] -> Either EngineError Out)

@@ -151,6 +151,11 @@ checkTests =
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero", "NatTheorems.length-replicate", "NatTheorems.double-succ", "NatTheorems.min-succ", "NatTheorems.lt-of-plt"]
         -- A function matching on a value of Nat: its closure, by induction on the value.
         assertBool "the closure of replicate" (any ("rule u_NatTheorems_sreplicate_s_x23_closed " `T.isPrefixOf`) (checkedCore c))
+        -- Matching on two values of Nat at once: the recursive call's precondition, and m = 0 excluded, each an
+        -- obligation; the closure and the indices of the result, by induction on the code of the pair.
+        assertBool "the obligations of plt-of-lt" (length [n | n <- checkedTheorems c, "NatTheorems.plt-of-lt.#obligation" `T.isPrefixOf` n] >= 2)
+        assertBool "the closure of plt-of-lt" (any (\l -> "plt" `T.isInfixOf` l && "_x23_closed " `T.isInfixOf` l) (checkedCore c))
+        assertBool "the indices of plt-of-lt" ("NatTheorems.plt-of-lt.#index" `elem` checkedTheorems c)
     , testCase "a clause on a numeral other than 0, and a proof matched on as a value, are refused" $ do
         c <- checkFile "test/data/nat-bad.px"
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
