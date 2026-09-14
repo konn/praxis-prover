@@ -62,6 +62,7 @@ library
     Language.Praxis.Surface.Engine
     Language.Praxis.Surface.Env
     Language.Praxis.Surface.Fixity
+    Language.Praxis.Surface.Index
     Language.Praxis.Surface.Lexer
     Language.Praxis.Surface.Mangle
     Language.Praxis.Surface.Parser

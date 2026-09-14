@@ -152,6 +152,21 @@ the closure's code and appends what it captures. A predicate of several
 parameters stays a plain schema, since the kernel's variadic schemas take
 one parameter.
 
+**Indexed data types.** A data type in the GADT style is encoded as the data
+type its indices erased: its constructors' codes store their fields and the
+implicit arguments no field determines, and its membership predicate is the
+erased type's, as above. An implicit argument which is an index of a field's
+type — `n` of `(:-) : {n : nat} -> a -> Vec a n -> Vec a (S n)`, the index of
+its tail — is not stored. For each index the declaration generates an index
+function, `Vec.#idx` (`T.#idx-j` for several), a function by clauses as any
+other: at each constructor the index of its result, its fields and its stored
+arguments as they are, the arguments not stored recovered by the index
+functions of the fields' types: `Vec.#idx (x :- xs) = S (Vec.#idx xs)`. So
+`Vec a n` stands for the codes of `Vec a` whose `Vec.#idx` is `n`, and each
+value has exactly one index, a primitive recursive function of its code —
+which keeps induction on a value of an indexed type the core's induction on
+one variable, whatever the indices of the value's fields.
+
 ## Functions
 
 `Compile` turns clauses into one prf definition. Functions are type-erased
@@ -213,6 +228,33 @@ by congruence from a hypothesis such as the induction hypothesis
 (`Engine.equationCase`). `Check.checkSourceWith` proves the specifications
 given of each function after its closure lemma, and certifies each as
 `f.#name`.
+
+**Indices.** A function whose signature's types have indices gets from them
+(`Engine.indexSpecOf`) the equations its arguments' indices satisfy — each an
+index function at an argument, and an index over the function's value
+parameters — and those of its result. A value parameter which is, bare, the
+first index of an argument is eliminated, that index standing for it. Its
+closure lemma takes the arguments' equations as hypotheses, and a case whose
+hypotheses clash is refuted (`Engine.refute`): the equations are unfolded, a
+successor against a successor taken apart by `SuccInj`, and zero against a
+successor closed by `SuccNonZero`. That is how an omitted clause is
+justified. When its result has indices, its lemma `f.#index` states them
+(`Engine.indexSpec`), each case refuted or proved by `Engine.indexCase`: both
+sides unfolded, and what is left an equation at hand, a rewriting by one, or
+the index another function's `#index` gives its application, the indices its
+arguments must have found the same way and matched against those it asks.
+The resolver finds the indices of the arguments so where a closure lemma with
+such hypotheses is appealed to. A failure of either lemma refuses the
+function.
+
+**Matching and coverage.** The elaborator (`Elab.elabPattern`) unifies the
+indices of a constructor's result with those expected, the signature's value
+parameters and the constructor's implicit arguments the variables to solve
+(`Index.unifyIx`): a clash refuses the clause, and so does an index a function
+computes, which unification cannot see into. A constructor the clauses omit
+must clash there; `FunDef.fdImpossible` records it, and `Compile` gives its
+branch of the dispatch `0`, and it no unfolding lemma. None of this is
+trusted: the closure and index lemmas certify what the elaborator concluded.
 
 ## The definitional-equality discipline
 

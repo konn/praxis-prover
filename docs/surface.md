@@ -280,6 +280,64 @@ never sees them, except through the membership predicates of data types,
 which take the predicates of their type parameters. A theorem over a type
 parameter holds at every type it stands for.
 
+## Indexed data types
+
+A data type may be indexed by values, in the GADT style: its constructors
+are given by their signatures after `where`, each ending in the data type at
+its parameters and at indices.
+
+```
+data Vec a n where
+  nil : Vec a 0
+  (:-) : {n : nat} -> a -> Vec a n -> Vec a (S n)
+
+tail : Vec a (S n) -> Vec a n
+tail (_ :- tl) = tl
+```
+
+A parameter of the head is a type parameter or an index, as its kind says:
+`Type` (also `type`), or an arrow of such kinds, for a type; a value kind for
+an index, `nat` or a data type at types of no variable. The kind is given
+with the parameter, `data Vec a (n : nat) where`; after the parameters,
+`data Vec : type -> nat -> type where`; or in a kind signature before the
+declaration, `type Vec : type -> nat -> type`. Without one, a parameter is an
+index where a constructor's result has a numeral, a successor, arithmetic,
+or a variable of a value type there, and a type parameter otherwise. Type
+parameters come first, and are the same distinct variables in every
+constructor's result: a type is no index.
+
+A constructor's implicit arguments, `{n : nat}`, come before its fields, and
+a variable its indices mention which nothing binds is one too. The indices
+of its result are patterns — variables, numerals, `S` and constructors — so
+that matching on the constructor can solve them; indices elsewhere may apply
+functions and the arithmetic of `Nat`.
+
+A signature's free variables at indices are its implicit value parameters,
+as its free type variables are its type parameters: `n : Nat` in `tail`, and
+`{n : Nat}` may be written in front. They are found where the function is
+applied, from the type expected and the types of the arguments, by matching;
+an argument whose type's index does not match the one expected is refused
+there, as `tail xs` at `xs : Vec a 0` is. Indices are compared in normal
+form, the arithmetic of `Nat` evaluated as the core's definitional equality
+does: `n + 1` is `S n`, but `0 + n` is not `n`.
+
+Matching a constructor refines what a clause knows: `(_ :- tl)` against
+`Vec a (S n)` gives `tl` the type `Vec a n`. A constructor whose result's
+indices clash with those of the argument's type — `nil`, of length 0, at
+`S n` — can never match there: its clause may be omitted, and a clause for it
+is refused. Every other constructor must have its clause.
+
+A type may be ascribed to a term, `(e : T)`, `T` a type in the scope of the
+enclosing signature; a variable at an index of it which nothing binds stands
+for any value, so that `(Vec.nil : Vec a n)` is refused. A parenthesized `:`
+whose right side is no type is the operator `:`, a constructor.
+
+What a function says of indices is certified, or the function refused: its
+lemma `f.#index` states the indices of its result under those of its
+arguments; and a function omitting a constructor has its closure lemma,
+`f.#closed`, under the indices of its arguments, which is how the omission is
+justified.
+
 ## Propositions
 
 `s ≡ t` (also `=`), `s ≠ t`, `s < t`, `s ≤ t`, `s > t`, `s ≥ t` (on `Nat`),
@@ -361,10 +419,20 @@ laws of classes, proved by each instance and premises of the theorems under
 the class; theorems by clauses on one value, by `calc`, and by the tactics
 listed, a lemma applying at any arguments through the closure lemmas of
 functions; instances under contexts; membership predicates taking those of
-a type's parameters; `.px` diagnostics. Planned, in order: goal display in
-hover, the
+a type's parameters; data types in the GADT style indexed by values of `Nat`
+and of data types, their kinds given or inferred, with their index
+functions; implicit value parameters of signatures; matching which refines
+indices, and clauses omitted where their constructor is impossible, justified
+by certified index and closure lemmas; type ascriptions; `.px` diagnostics.
+Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
 `if` in terms, nested patterns and matching on several arguments, matching
 and recursion on `Nat`, overlapping first-match clauses, mutual recursion and
 accumulating parameters, membership checking the fields of nested
-and higher-kinded parameters, and list-literal sugar.
+and higher-kinded parameters, and list-literal sugar. For indexed data types:
+theorems over their values with the indices of their binders as hypotheses
+(until then a theorem's binder of an indexed type has the membership of its
+erased type alone, which is sound and less than it could say); implicit
+parameters of data types, whose kinds depend on others, `data SameVec {a}
+{n} {m} (l : Vec a n) (r : Vec a m)`; explicit implicit arguments, `C {n}`;
+and explicit value binders in the signatures of functions.

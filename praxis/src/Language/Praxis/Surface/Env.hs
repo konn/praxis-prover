@@ -18,6 +18,9 @@ module Language.Praxis.Surface.Env (
   QualName,
   DataInfo (..),
   CtorInfo (..),
+  GadtCtor (..),
+  TeleEntry (..),
+  Role (..),
   FunInfo (..),
   TheoremInfo (..),
   ClassInfo (..),
@@ -41,6 +44,7 @@ module Language.Praxis.Surface.Env (
   emptyEnv,
   qualify,
   addData,
+  addGadtData,
   addFunction,
   addTheorem,
   addClass,
@@ -68,7 +72,7 @@ import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Syntax (Expr)
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Kind, Scheme, Ty)
+import Language.Praxis.Surface.Types (Ix, Kind, Scheme, Ty, TyScope, emptyScope)
 
 -- * Globals
 
@@ -84,6 +88,10 @@ data DataInfo = DataInfo
   , dataCtors :: ![CtorInfo]
   , dataIs :: !Text
   -- ^ the core name of the membership predicate
+  , dataIndices :: ![Ty]
+  -- ^ the types of its indices, in order, for a data type in the GADT style; none otherwise
+  , dataIndexFns :: ![QualName]
+  -- ^ its index functions, one for each index, @T.#idx@ or @T.#idx-i@
   }
   deriving stock (Show)
 
@@ -94,8 +102,41 @@ data CtorInfo = CtorInfo
   , ctorFields :: ![Ty]
   -- ^ over the parameters of the data type
   , ctorCore :: !Text
+  , ctorGadt :: !(Maybe GadtCtor)
+  -- ^ its signature, for a constructor in the GADT style
   }
   deriving stock (Show)
+
+{- |
+A constructor in the GADT style, beyond the fields its code stores: its
+telescope, its implicit arguments and its fields in order, and the indices of
+its result over the telescope, @IxParam i@ for its @i@-th entry.
+-}
+data GadtCtor = GadtCtor
+  { gcTele :: ![TeleEntry]
+  , gcResult :: ![Ix]
+  }
+  deriving stock (Show)
+
+-- | An entry of a constructor's telescope: its name, its type over the type's parameters and the entries before it, and where the code has it.
+data TeleEntry = TeleEntry
+  { teName :: !Text
+  , teType :: !Ty
+  , teRole :: !Role
+  }
+  deriving stock (Show)
+
+{- |
+Where a constructor's code has an entry of its telescope: a field it is
+applied to, stored at that position of the code; an implicit argument stored
+at that position; or an implicit argument the code does not store, recovered
+as the index @j@ of the field at position @k@, @Recovered k j@.
+-}
+data Role
+  = Explicit !Int
+  | Stored !Int
+  | Recovered !Int !Int
+  deriving stock (Show, Eq)
 
 data FunInfo = FunInfo
   { funQual :: !QualName
@@ -277,10 +318,12 @@ data Env = Env
   -- ^ every core name, with the surface name it stands for
   , envInstances :: !(Map (QualName, Text) InstanceInfo)
   -- ^ each instance, by its class and the head of its type: one for each
+  , envScope :: !TyScope
+  -- ^ what the names of a type written in a term stand for: the enclosing signature's parameters
   }
 
 emptyEnv :: QualName -> Env
-emptyEnv m = Env m Map.empty Map.empty Map.empty [] Map.empty Map.empty
+emptyEnv m = Env m Map.empty Map.empty Map.empty [] Map.empty Map.empty emptyScope
 
 -- | A name of the module, qualified.
 qualify :: Env -> [Segment] -> QualName
@@ -296,11 +339,15 @@ coreOf = mangleGlobal . map segmentText'
 
 -- | Add a data type and its constructors; the type opens a namespace holding them.
 addData :: Env -> Segment -> [(Text, Kind)] -> [(Segment, [Ty])] -> (Env, DataInfo)
-addData env name params ctors = (env', info)
+addData env name params ctors = addGadtData env name params [] [] [(c, fs, Nothing) | (c, fs) <- ctors]
+
+-- | Add a data type whose constructors may be in the GADT style, with the types of its indices and its index functions.
+addGadtData :: Env -> Segment -> [(Text, Kind)] -> [Ty] -> [QualName] -> [(Segment, [Ty], Maybe GadtCtor)] -> (Env, DataInfo)
+addGadtData env name params indices indexFns ctors = (env', info)
   where
     q = qualify env [name]
-    info = DataInfo q params [CtorInfo (q <> [c]) q i fs (coreOf (q <> [c])) | (i, (c, fs)) <- zip [0 ..] ctors] (coreOf (q <> [Ident "is"]))
-    members = Map.fromList [(c, q <> [c]) | (c, _) <- ctors]
+    info = DataInfo q params [CtorInfo (q <> [c]) q i fs (coreOf (q <> [c])) g | (i, (c, fs, g)) <- zip [0 ..] ctors] (coreOf (q <> [Ident "is"])) indices indexFns
+    members = Map.fromList [(c, q <> [c]) | (c, _, _) <- ctors]
     env' =
       env
         { envGlobals = Map.insert q (GData info) (foldr (\c -> Map.insert (ctorQual c) (GCtor c)) (envGlobals env) (dataCtors info))

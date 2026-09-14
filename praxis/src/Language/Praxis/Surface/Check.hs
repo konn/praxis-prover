@@ -52,7 +52,7 @@ import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTact
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData)
-import Language.Praxis.Surface.Engine (Closure, EngineError (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), proveClosure, proveSpec, proveTheorem)
+import Language.Praxis.Surface.Engine (Closure, EngineError (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem)
 import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), renderQualName)
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
@@ -155,10 +155,11 @@ data Run = Run
   , runMembers :: !(Map Text [(Int, FieldPred)])
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
+  , runIndexSpecs :: !(Map Text IndexSpec)
   }
 
 runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Core -> [Item] -> Checked
-runItems specsOf fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [] Map.empty) items)
+runItems specsOf fx env core0 items = finish (foldl step (Run core0 [] [] [] Map.empty [] Map.empty Map.empty) items)
   where
     finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r))
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}
@@ -187,19 +188,21 @@ runItems specsOf fx env core0 items = finish (foldl step (Run core0 [] [] [] Map
                 Right core' ->
                   let r2 = certifyAll (fdSpan fd) (r1 {runCore = core'}) lemmas
                       certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
-                   in specify fd (closure fd (r2 {runUnfoldings = runUnfoldings r2 <> certified}))
+                   in specify fd (indexed fd (closure fd (r2 {runUnfoldings = runUnfoldings r2 <> certified})))
       ITheorem td ->
         let name = T.unpack (renderQualName (thmQual (tdInfo td)))
          in case proveTheorem (knowledge r) td of
               Left (EngineError sp msg) -> report sp SevError msg r
               Right decls -> certifyTheorem (tdSpan td) name r decls
 
-    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r))
+    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r)
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of
       Left (EngineError sp msg) -> report sp SevError ("internal: the closure of " <> T.unpack (renderQualName (funQual (fdInfo fd))) <> ": " <> msg) r
-      Right Nothing -> r
+      Right Nothing
+        | not (null (fdImpossible fd)) -> report (fdSpan fd) SevError (T.unpack (renderQualName (funQual (fdInfo fd))) <> ": the membership of its results, under the indices of its arguments, could not be proved") r
+        | otherwise -> r
       Right (Just (cl, decls)) -> certifyClosure fd cl r decls
     certifyClosure fd cl r = \case
       [] -> r {runClosures = Map.insert (funCore (fdInfo fd)) cl (runClosures r)}
@@ -208,6 +211,20 @@ runItems specsOf fx env core0 items = finish (foldl step (Run core0 [] [] [] Map
          in case certifyDecl text (runCore r1) of
               Right core' -> certifyClosure fd cl (r1 {runCore = core'}) rest
               Left err -> report (fdSpan fd) SevError ("internal: the generated lemma " <> T.unpack name <> " did not certify: " <> err) r1
+
+    -- The indices a function over indexed types gives its result, certified as its lemma f.#index: a failure refuses it.
+    indexed fd r = case indexSpecOf (knowledge r) fd of
+      Nothing -> r
+      Just s
+        | null (ixsPost s) -> r {runIndexSpecs = Map.insert (funCore (fdInfo fd)) s (runIndexSpecs r)}
+        | otherwise ->
+            let name = T.unpack (renderQualName (funQual (fdInfo fd)))
+             in case proveSpec (knowledge r) fd (indexSpec s) of
+                  Left (EngineError sp msg) -> report sp SevError (name <> ": " <> msg) r
+                  Right (Left why) -> report (fdSpan fd) SevError (name <> ": the indices of its result: " <> why) r
+                  Right (Right proof) ->
+                    let r' = certifyTheorem (fdSpan fd) (name <> ".#index") r (spDecls proof)
+                     in if Map.member (T.unpack (ixsLemma s)) (coreLemmas (runCore r')) then r' {runIndexSpecs = Map.insert (funCore (fdInfo fd)) s (runIndexSpecs r')} else r'
 
     -- The specifications asked of a function, each proved and certified as a theorem is; a failure is reported.
     specify fd r0 = foldl (specified fd) r0 (specsOf env fd)

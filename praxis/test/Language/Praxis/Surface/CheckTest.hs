@@ -120,6 +120,20 @@ checkTests =
         c <- checkFile "test/data/induction-names.px"
         errors c @?= []
         checkedTheorems c @?= ["InductionNames.only", "InductionNames.other", "InductionNames.nested"]
+    , testCase "a data type in the GADT style: a function omits a constructor impossible at its indices, and what it says of indices certifies" $ do
+        c <- checkFile "test/data/gadt.px"
+        errors c @?= []
+        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.tail.#index", "Gadt.tail-two.#index", "Gadt.zero-of.#index"]
+        -- The membership of its results, under the indices of its argument: a rule over its type parameter's predicate.
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (any (("rule u_Gadt_s" <> f <> "_s_x23_closed ") `T.isPrefixOf`) (checkedCore c))) ["tail", "tail_dtwo", "head", "first"]
+    , testCase "an index which cannot be, a clause missing or never matching, and a kind which disagrees, are refused" $ do
+        c <- checkFile "test/data/gadt-bad.px"
+        let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
+        mapM_
+          (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls))
+          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44])]
+        assertBool "fine is certified" ("GadtBad.fine.#index" `elem` checkedTheorems c)
+        assertBool "nothing refused is certified" (not (any (`elem` checkedTheorems c) ["GadtBad.impossible.#index", "GadtBad.tail-zero.#index", "GadtBad.nil-any.#index"]))
     , testCase "a function's specifications are proved by the skeleton of its lemmas, each case by the specification's prover" $ do
         p <- either assertFailure pure prelude
         src <- TIO.readFile "test/data/specs.px"

@@ -1,0 +1,48 @@
+module GadtBad where
+
+data Vec a n where
+  nil : Vec a 0
+  (:-) : {n: nat} -> a -> Vec a n -> Vec a (S n)
+
+infixr 5 :-
+
+tail : Vec a (S n) -> Vec a n
+tail (_ :- tl) = tl
+
+-- tail at nil, whose length is no successor, as the value of any type.
+impossible : {a: Type} -> a
+impossible = tail (Vec.nil : Vec a n)
+
+-- Refused for its index alone: 0 is no successor.
+tail-zero : {a : Type} -> Vec a 0 -> Vec a 0
+tail-zero xs = tail xs
+
+-- Refused for its index alone: nil is of length 0, not n.
+nil-any : {a : Type} -> {n : Nat} -> Vec a n
+nil-any = Vec.nil
+
+-- The clause for nil is missing where nil can match.
+head-any : Vec a n -> a
+head-any (x :- _) = x
+
+-- A clause which can never match: nil at a successor.
+never : Vec a (S n) -> Nat
+never nil = 0
+never (_ :- _) = 1
+
+-- A kind signature the parameter's kind disagrees with.
+type Box : type -> type
+data Box (n : nat) where
+  box : Box 0
+
+-- A type standing as an index.
+data Expr t where
+  lit : Nat -> Expr Nat
+
+-- A value where a type is expected.
+bad-type : Vec 0 Nat -> Nat
+bad-type v = 0
+
+-- Fine, after all that.
+fine : Vec a (S n) -> Vec a n
+fine v = tail v

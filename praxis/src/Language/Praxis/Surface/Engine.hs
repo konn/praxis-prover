@@ -56,10 +56,16 @@ module Language.Praxis.Surface.Engine (
   closureSpec,
   membershipCase,
   equationCase,
+  indexCase,
+
+  -- * Indices
+  IndexSpec (..),
+  indexSpecOf,
+  indexSpec,
 ) where
 
 import Bound (instantiate)
-import Control.Monad (forM, forM_, guard, unless)
+import Control.Monad (foldM, forM, forM_, guard, unless)
 import Data.Char (isAlphaNum)
 import Data.List (find, nub)
 import Data.Map.Strict (Map)
@@ -82,7 +88,7 @@ import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), s
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ty (..), firstOrder, mergeTy, renderTy)
+import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), firstOrder, mergeTy, normIx, renderTy)
 
 -- * Goals
 
@@ -169,6 +175,10 @@ data Closure = Closure
   , closureResultTy :: !Ty
   , closurePremisesOf :: ![Premise]
   -- ^ the premises of the rule it is: the closures of the methods of the function's dictionary
+  , closurePre :: ![(Text, Int, CT)]
+  -- ^ the indices its arguments must have, under which it holds: an index function, the argument's position, and the index, over its lemma's variables
+  , closureValues :: ![Text]
+  -- ^ the variables of those indices its arguments do not give: its value parameters
   }
 
 -- | What the engine knows of the module so far.
@@ -189,6 +199,8 @@ data Knowledge = Knowledge
   {- ^ the membership predicates which are variadic templates: a closure
   capturing terms may be their parameter, 'PredClosure'
   -}
+  , knowIndexSpecs :: !(Map Text IndexSpec)
+  -- ^ what each function over indexed types says of indices, by its core name
   }
 
 data EngineError = EngineError !Span !String
@@ -292,7 +304,12 @@ proveClosure :: Knowledge -> FunDef -> Either EngineError (Maybe (Closure, [(Tex
 proveClosure k fd = case (fdResult fd, lemmaPredicate k (lemmaDictionary fd) (fdResult fd)) of
   (result, Just (Pred resultIs ps))
     | closes result ->
-        either (const Nothing) (\p -> Just (Closure (spLemma p) (fdArgs fd) (fdResult fd) (spPremises p), spDecls p)) <$> proveSpec k fd (closureSpec resultIs ps)
+        let spec = indexSpecOf k fd
+            pre = maybe [] ixsPre spec
+            values = maybe [] ixsValues spec
+            -- Under the indices of its arguments, a case they clash in refuted.
+            closure = (closureSpec resultIs ps) {specPre = preExprs pre, specCase = \kk gg -> either (const (membershipCase kk gg)) Right (refute kk gg)}
+         in either (const Nothing) (\p -> Just (Closure (spLemma p) (fdArgs fd) (fdResult fd) (spPremises p) pre values, spDecls p)) <$> proveSpec k fd closure
   _ -> Right Nothing
   where
     closes = \case
@@ -422,6 +439,336 @@ induction hypothesis.
 -}
 equationCase :: Knowledge -> Goal -> Either String Builder
 equationCase k g = either (\(EngineError _ why) -> Left why) Right (rflWith "(refl | cong)" k g R.noSpan)
+
+-- * Indices
+
+{- |
+What a function over data types in the GADT style says of indices, over the
+variables of its lemmas — its arguments, @x0@, @x1@, …, and those of its value
+parameters no argument's index defines: the indices its arguments have, each
+an index function, the argument's position and the index; and those of its
+result, each an index function and the index, which its lemma @f.#index@
+states.  A value parameter which is, bare, an index of an argument is that
+index: @append : Vec a m -> Vec a n -> Vec a (m + n)@ says @idx (append x0
+x1) = idx x0 + idx x1@, under no index of its arguments.
+-}
+data IndexSpec = IndexSpec
+  { ixsLemma :: !Text
+  , ixsArgs :: ![Text]
+  , ixsValues :: ![Text]
+  , ixsPre :: ![(Text, Int, CT)]
+  , ixsPost :: ![(Text, CT)]
+  }
+
+-- | What a function says of indices, when the types of its signature have any.
+indexSpecOf :: Knowledge -> FunDef -> Maybe IndexSpec
+indexSpecOf k fd
+  | null pres0 && null posts0 = Nothing
+  | otherwise = Just (IndexSpec (functionLemma info "#index") cores kept pres posts)
+  where
+    info = fdInfo fd
+    env = knowEnv k
+    values = map fst (schemeValues (funScheme info))
+    valueVar i = mangleVariable ("#" <> (values !! i))
+    cores = [mangleVariable ("x" <> T.pack (show i)) | i <- [0 .. length (fdArgs fd) - 1]]
+    fnsOf dn = [funCore f | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn, q <- dataIndexFns dd, Just (GFun f) <- [Map.lookup q (envGlobals env)]]
+    pres0 = [(fn, a, x) | (a, TData dn _ xs@(_ : _)) <- zip [0 ..] (fdArgs fd), (fn, x) <- zip (fnsOf dn) xs]
+    posts0 = case fdResult fd of
+      TData dn _ xs@(_ : _) -> zip (fnsOf dn) xs
+      _ -> []
+    -- The first index of an argument which is a value parameter, bare, defines it.
+    definitions = foldl define [] (zip [0 :: Int ..] pres0)
+    define acc (j, (fn, a, x)) = case normIx x of
+      IxParam i | i `notElem` map fst acc -> acc <> [(i, (j, CSym fn [CVar (cores !! a)]))]
+      _ -> acc
+    defining = [j | (_, (j, _)) <- definitions]
+    ct = ixCT (\i -> maybe (CVar (valueVar i)) snd (lookup i definitions)) . normIx
+    pres = [(fn, a, ct x) | (j, (fn, a, x)) <- zip [0 ..] pres0, j `notElem` defining]
+    posts = [(fn, ct x) | (fn, x) <- posts0]
+    kept = [valueVar i | i <- [0 .. length values - 1], i `notElem` map fst definitions]
+
+-- | An index as a core term, the value parameters by the function given.
+ixCT :: (Int -> CT) -> Ix -> CT
+ixCT param = go
+  where
+    go = \case
+      IxParam i -> param i
+      IxVar v -> CVar v
+      IxHole -> CVar "?"
+      IxNat n -> CNum n
+      IxSucc x -> CSym "S" [go x]
+      IxCon c xs -> CSym c (map go xs)
+      IxFun f xs -> CSym f (map go xs)
+
+-- | The indices a function's arguments must have, as the propositions of its lemmas' hypotheses, over its arguments' core variables.
+preExprs :: [(Text, Int, CT)] -> [Text] -> [Expr Text]
+preExprs pre cores = [Rel RelEq (fromCT (CSym fn [CVar (cores !! a)])) (fromCT x) | (fn, a, x) <- pre, a < length cores]
+
+{- |
+The specification of the indices of a function's result, @f.#index@: under
+the memberships of its arguments and the indices they have, those of its
+result.  Each case is refuted, where the indices its hypotheses give clash,
+or proved by 'indexCase'.
+-}
+indexSpec :: IndexSpec -> Spec
+indexSpec s =
+  Spec
+    { specName = "#index"
+    , specPre = preExprs (ixsPre s)
+    , specPost = \_ applied -> conjunction [Rel RelEq (App (Global (Ref RefFunction fn)) applied) (fromCT x) | (fn, x) <- ixsPost s]
+    , specPremises = closurePremises
+    , specCase = indexCase
+    }
+  where
+    conjunction = \case
+      [e] -> e
+      e : es -> Conn And e (conjunction es)
+      [] -> Top
+
+{- |
+A case of a specification of indices: refuted where the equations of
+indices among its hypotheses clash, once unfolded and taken apart; otherwise
+its conclusion, equations of indices, each side unfolded, and what is left by
+an equation at hand, or by the index specifications of the functions it
+applies.
+-}
+indexCase :: Knowledge -> Goal -> Either String Builder
+indexCase k g = case refute k g of
+  Right tac -> Right tac
+  Left _ -> do
+    let (prep, eqs) = digest k g
+    (prep <>) <$> conclude k g eqs (goalConcl g)
+
+-- | The goal closed by a clash of the equations of indices among its hypotheses, once unfolded and taken apart: zero against a successor.
+refute :: Knowledge -> Goal -> Either String Builder
+refute k g = case [(n, l) | (n, l, r) <- eqs, clash l r] of
+  (n, l) : _ -> Right (prep <> (if l == CNum 0 then "symmetry " <> fromText n <> " as IxR; " else "") <> "SuccNonZero")
+  [] -> Left "no equation of indices clashes"
+  where
+    (prep, eqs) = digest k g
+    clash l r = (l == CNum 0 && successor r) || (successor l && r == CNum 0)
+    successor = \case
+      CSym "S" [_] -> True
+      _ -> False
+
+-- | The equations among a goal's hypotheses, by their names, their sides as core terms.
+goalEquations :: Goal -> [(Text, CT, CT)]
+goalEquations g = [(h, l, r) | (h, HProp p) <- goalHyps g, Rel RelEq a b <- [stripLocations p], Right l <- [termCT CVar a], Right r <- [termCT CVar b]]
+
+{- |
+The equations among a goal's hypotheses, unfolded and taken apart: each
+unfolded by the unfolding lemmas, stated as a new hypothesis when that
+changes it; a successor against a successor taken apart by injectivity, again
+and again.  The tactic stating them, and every equation at hand, by name.
+-}
+digest :: Knowledge -> Goal -> (Builder, [(Text, CT, CT)])
+digest k g = foldl one ("", []) (zip [1 :: Int ..] (goalEquations g))
+  where
+    one (tac, acc) (i, (h, l, r)) =
+      let name = "Ix" <> T.pack (show i)
+          (tac1, h1, l1, r1) = case restate k h l r name of
+            Just (t, l', r') -> (t, name, l', r')
+            Nothing -> ("", h, l, r)
+          (tac2, derived) = injective h1 l1 r1
+       in (tac <> tac1 <> tac2, acc <> [(h, l, r)] <> [(h1, l1, r1) | h1 /= h] <> derived)
+    -- A successor against a successor: the predecessors, again and again.
+    injective h l r = case (l, r) of
+      (CSym "S" [a], CSym "S" [b]) ->
+        let n = h <> "i"
+            (t, more) = injective n a b
+         in ("SuccInj on " <> fromText h <> " as " <> fromText n <> "; " <> t, (n, a, b) : more)
+      _ -> ("", [])
+
+-- | A hypothesis @l = r@ unfolded, @l' = r'@, stated under the name given when that changes it: the tactic, and the sides.
+restate :: Knowledge -> Text -> CT -> CT -> Text -> Maybe (Builder, CT, CT)
+restate k h l r name
+  | null ls && null rs = Nothing
+  | otherwise = Just ("have " <> fromText name <> ": " <> equationText l' r' <> " { calc " <> render l' <> back ls l <> " = " <> render r <> " by exact " <> fromText h <> forth rs <> " }; ", l', r')
+  where
+    ls = reductionsOf k l
+    rs = reductionsOf k r
+    l' = lastTerm l ls
+    r' = lastTerm r rs
+
+-- | The unfolding steps of a term, each the tactic and the term after it.
+reductionsOf :: Knowledge -> CT -> [(Builder, CT)]
+reductionsOf k t = case unfoldStep k t of
+  Nothing -> []
+  Just (tac, t') -> (tac, t') : reductionsOf k t'
+
+-- | The term a chain of unfoldings ends in.
+lastTerm :: CT -> [(Builder, CT)] -> CT
+lastTerm t steps = case reverse steps of
+  (_, u) : _ -> u
+  [] -> t
+
+-- | The steps of a calculation from the end of a term's unfoldings back to the term.
+back :: [(Builder, CT)] -> CT -> Builder
+back steps t0 = mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- reverse (zip (t0 : map snd (take (length steps - 1) steps)) (map fst steps))]
+
+-- | The steps of a calculation along a term's unfoldings.
+forth :: [(Builder, CT)] -> Builder
+forth steps = mconcat [" = " <> render t <> " by " <> tac | (tac, t) <- steps]
+
+-- | An equation of core terms, as a formula.
+equationText :: CT -> CT -> Builder
+equationText l r = "(" <> render l <> " = " <> render r <> ")"
+
+-- | The conclusion of a goal, equations of indices, each proved by 'indexEquation'; a conjunction split.
+conclude :: Knowledge -> Goal -> [(Text, CT, CT)] -> Expr Text -> Either String Builder
+conclude k g eqs concl = case stripLocations concl of
+  Rel RelEq a b -> do
+    l <- termCT CVar a
+    r <- termCT CVar b
+    indexEquation k g eqs l r
+  Conn And a b -> (\x y -> "ConjR { " <> x <> " } { " <> y <> " }") <$> conclude k g eqs a <*> conclude k g eqs b
+  Top -> Right "refl"
+  _ -> Left "the conclusion is no equation of indices"
+
+-- | An equation of indices: both sides unfolded, and what is left closed by 'closeEq'.
+indexEquation :: Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> CT -> Either String Builder
+indexEquation k g eqs l r = do
+  let ls = reductionsOf k l
+      rs = reductionsOf k r
+      l' = lastTerm l ls
+      r' = lastTerm r rs
+  mid <- closeEq indexFuel k g eqs l' r'
+  pure
+    if null ls && null rs
+      then mid
+      else "calc " <> render l <> forth ls <> (if l' == r' then "" else " = " <> render r' <> " by (" <> mid <> ")") <> back rs r
+
+-- | How many index specifications a proof of an equation of indices goes through, one after another.
+indexFuel :: Int
+indexFuel = 16
+
+{- |
+An equation of indices, both sides unfolded: equal; an equation at hand,
+either way round, or rewriting by one; or the index the specification of a
+function gives an index function's application, and on from there.
+-}
+closeEq :: Int -> Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> CT -> Either String Builder
+closeEq fuel k g eqs l r
+  | canonical l == canonical r = Right "refl"
+  | n : _ <- [h | (h, a, b) <- eqs, a == l, b == r] = Right ("exact " <> fromText n)
+  | n : _ <- [h | (h, a, b) <- eqs, a == r, b == l] = Right ("symmetry " <> fromText n <> " as IxS; exact IxS")
+  | n : _ <- [h | (h, a, b) <- eqs, rewrites a b] = Right ("cong " <> fromText n)
+  | fuel <= 0 = Left ("cannot show " <> shown)
+  | Right (e, p) <- indexOf k g eqs l
+  , e /= l =
+      if e == r
+        then Right p
+        else (\rest -> "calc " <> render l <> " = " <> render e <> " by (" <> p <> ") = " <> render r <> " by (" <> rest <> ")") <$> closeEq (fuel - 1) k g eqs e r
+  | Right (e, p) <- indexOf k g eqs r
+  , e /= r =
+      let flipped = "have IxT: " <> equationText r e <> " { " <> p <> " }; symmetry IxT as IxU; exact IxU"
+       in if e == l
+            then Right flipped
+            else (\rest -> "calc " <> render l <> " = " <> render e <> " by (" <> rest <> ") = " <> render r <> " by (" <> flipped <> ")") <$> closeEq (fuel - 1) k g eqs l e
+  | otherwise = Left ("cannot show " <> shown)
+  where
+    shown = T.unpack (runBuilder (equationText l r))
+    rewrites a b = replaceCT (\t -> if t == a then Just b else Nothing) l == r || replaceCT (\t -> if t == b then Just a else Nothing) l == r
+
+{- |
+The index an index function gives a term, and a proof of the equation: an
+equation at hand stating it; its unfolding; or, at a function applied, the
+function's index specification, after the indices its arguments must have,
+found in turn, and the memberships of its arguments.
+-}
+indexOf :: Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> Either String (CT, Builder)
+indexOf k g eqs term = case term of
+  CSym fn [t]
+    | (n, e) : _ <- [(h, b) | (h, a, b) <- eqs, a == term] -> Right (e, "exact " <> fromText n)
+    | steps@(_ : _) <- reductionsOf k term -> Right (lastTerm term steps, "calc " <> render term <> forth steps)
+    | CSym h args <- t
+    , Just s <- Map.lookup h (knowIndexSpecs k)
+    , Just post <- lookup fn (ixsPost s) -> do
+        let named = zip (ixsArgs s) args
+        (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) named
+        mems <- argMemberships k g h args
+        Right (substCT (Map.fromList named <> sigma) post, mems <> haves <> "exact " <> fromText (ixsLemma s))
+  _ -> Left ("no index is known of " <> T.unpack (runBuilder (render term)))
+
+{- |
+The indices a lemma's arguments must have, at the arguments given by the
+lemma's variables: each found, and matched against the index the lemma asks,
+which gives its value parameters; stated as a hypothesis where none states
+it, for the appeal to the lemma to find.  The value parameters found, and the
+tactic.
+-}
+premisesAt :: Knowledge -> Goal -> [(Text, CT, CT)] -> [(Text, Int, CT)] -> [Text] -> [(Text, CT)] -> Either String (Map Text CT, Builder)
+premisesAt k g eqs pre values named = foldM one (Map.empty, "") pre
+  where
+    argMap = Map.fromList named
+    one (sigma, acc) (fn, a, pat) = do
+      arg <- maybe (Left "internal: an index of no argument") (Right . snd) (listToMaybe (drop a named))
+      let lhs = CSym fn [arg]
+      (e, proof) <- indexOf k g eqs lhs
+      sigma' <- maybe (Left ("the index " <> T.unpack (runBuilder (render e)) <> " of " <> T.unpack (runBuilder (render arg)) <> " is not " <> T.unpack (runBuilder (render (substCT argMap pat))))) Right (matchCT values (substCT argMap pat) e sigma)
+      let inst = substCT (argMap <> sigma') pat
+          proof' = if e == inst then proof else "calc " <> render lhs <> " = " <> render e <> " by (" <> proof <> ") = " <> render inst
+      pure (sigma', acc <> (if hasEquation g lhs inst then "" else "have " <> equationText lhs inst <> " { " <> proof' <> " }; "))
+
+-- | The memberships of a function's arguments its lemmas take as hypotheses, each proved and stated where no hypothesis states it.
+argMemberships :: Knowledge -> Goal -> Text -> [CT] -> Either String Builder
+argMemberships k g h args = do
+  cl <- maybe (Left ("the results of " <> T.unpack h <> " are not known to be members")) Right (Map.lookup h (knowClosures k))
+  fmap mconcat . forM (zip (closureArgTys cl) args) $ \(ty, a) -> case ty of
+    TNat -> Right ""
+    _ -> do
+      p <- maybe (Left ("the membership of " <> T.unpack (runBuilder (render a)) <> " is not known")) Right (termPred k g a)
+      if hasMembership g p a then Right "" else (\proof -> "have (" <> membershipText p a <> ") { " <> proof <> " }; ") <$> membershipProof k g p a
+
+-- | The membership predicate of a term, in a goal: a variable's, by its hypothesis; a function's result's, by its closure lemma at the predicates of its arguments.
+termPred :: Knowledge -> Goal -> CT -> Maybe Pred
+termPred k g = \case
+  CVar v -> listToMaybe [p | (_, HMember p x) <- goalHyps g, x == v]
+  CSym f args
+    | Just cl <- Map.lookup f (knowClosures k) -> do
+        given <- fmap Map.unions . forM (zip (closureArgTys cl) args) $ \(ty, a) -> case ty of
+          TParam j [] -> Map.singleton j <$> termPred k g a
+          TData dn targs _ -> do
+            Pred q ps <- termPred k g a
+            (q', used) <- Map.lookup dn (knowMembership k)
+            guard (q == q')
+            Just (Map.fromList [(j, parameterPredicate c) | (u, c) <- zip used ps, Just (TParam j []) <- [lookup u (zip [0 ..] targs)]])
+          _ -> Just Map.empty
+        predicateOf (knowMembership k) (`Map.lookup` given) (closureResultTy cl)
+  _ -> Nothing
+
+-- | Whether a hypothesis of the goal states the equation, as the core writes it.
+hasEquation :: Goal -> CT -> CT -> Bool
+hasEquation g l r = any (either (const False) ((== wanted) . runBuilder) . formula) [p | (_, HProp p) <- goalHyps g]
+  where
+    wanted = runBuilder (equationText l r)
+
+-- | A core term with variables replaced by the terms given.
+substCT :: Map Text CT -> CT -> CT
+substCT m = replaceCT \case
+  CVar v -> Map.lookup v m
+  _ -> Nothing
+
+-- | A core term with the successor of a numeral the next numeral, as the core's canonical numerals have it.
+canonical :: CT -> CT
+canonical = \case
+  CSym "S" [t] -> case canonical t of
+    CNum n -> CNum (n + 1)
+    t' -> CSym "S" [t']
+  CSym f ts -> CSym f (map canonical ts)
+  t -> t
+
+-- | Match a term against another, one-sided, the variables given taking what the other has there; a successor and a numeral as the successors they are.
+matchCT :: [Text] -> CT -> CT -> Map Text CT -> Maybe (Map Text CT)
+matchCT vars p t s = case (p, t) of
+  (CVar v, _) | v `elem` vars -> case Map.lookup v s of
+    Nothing -> Just (Map.insert v t s)
+    Just u -> if u == t then Just s else Nothing
+  (CSym "S" [p'], CNum n) | n > 0 -> matchCT vars p' (CNum (n - 1)) s
+  (CNum n, CSym "S" [t']) | n > 0 -> matchCT vars (CNum (n - 1)) t' s
+  (CSym f ps, CSym f' ts) | f == f', length ps == length ts -> foldM (\acc (x, y) -> matchCT vars x y acc) s (zip ps ts)
+  _ | p == t -> Just s
+  _ -> Nothing
 
 {- |
 The declaration of a goal proved by a core tactic: a theorem, or, when the
@@ -829,7 +1176,11 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
       OMember p (CSym _ args)
         | Just cl <- Map.lookup f (knowClosures k)
         , Just (given, argPs) <- argumentsOf cl p ->
-            Just (either Refuse (uncurry (afterMemberships [(a, q) | (a, Just q) <- zip args argPs])) (closureAppeal cl given))
+            let names = [mangleVariable ("x" <> T.pack (show i)) | i <- [0 .. length args - 1]]
+             in Just case (closureAppeal cl given, premisesAt k g (goalEquations g) (closurePre cl) (closureValues cl) (zip names args)) of
+                  (Left why, _) -> Refuse why
+                  (_, Left why) -> Refuse why
+                  (Right (subs, appeal), Right (_, haves)) -> afterMemberships [(a, q) | (a, Just q) <- zip args argPs] subs (\rs -> haves <> appeal rs)
       _ -> Nothing
     lawPremise = \case
       OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (renderQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))

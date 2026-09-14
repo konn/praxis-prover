@@ -359,7 +359,7 @@ atomP :: Parser (Located Expr)
 atomP =
   choice
     [ located (ENat . fromInteger <$> natural)
-    , located (EType <$ keyword "Type")
+    , located (EType <$ (keyword "Type" <|> keyword "type"))
     , located (EWildcard <$ wildcard)
     , located (EName (unqualified (Op "⊤")) <$ symbol "⊤")
     , located (EName (unqualified (Op "⊥")) <$ symbol "⊥")

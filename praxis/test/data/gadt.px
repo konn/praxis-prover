@@ -1,0 +1,37 @@
+module Gadt where
+
+-- A data type indexed by a value, in the GADT style: the lists of a length.
+data Vec a n where
+  nil : Vec a 0
+  (:-) : {n: nat} -> a -> Vec a n -> Vec a (S n)
+
+infixr 5 :-
+
+-- nil is impossible at S n: its clause is omitted, and why is certified.
+tail : Vec a (S n) -> Vec a n
+tail (_ :- tl) = tl
+
+head : Vec a (S n) -> a
+head (x :- _) = x
+
+-- The index of the argument, found through tail's own twice.
+tail-two : Vec a (S (S n)) -> Vec a n
+tail-two v = tail (tail v)
+
+-- A kind given with the parameter; fzero stores its implicit argument,
+-- which no field of it determines.
+data Fin (n : nat) where
+  fzero : {m : nat} -> Fin (S m)
+  fsucc : {m : nat} -> Fin m -> Fin (S m)
+
+zero-of : Fin 3
+zero-of = fzero
+
+-- A kind in a kind signature.
+type Vec2 : type -> nat -> type
+data Vec2 a n where
+  nil2 : Vec2 a 0
+  cons2 : {n : nat} -> a -> Vec2 a n -> Vec2 a (S n)
+
+first : Vec2 a (S n) -> a
+first (cons2 x _) = x

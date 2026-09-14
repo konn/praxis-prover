@@ -47,7 +47,7 @@ module Language.Praxis.Surface.Compile (
 import Bound (Scope, Var (..), fromScope)
 import Control.Monad (forM, unless, when)
 import Data.List (nub)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (catMaybes, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
@@ -144,8 +144,8 @@ compileFunction env fd = do
         ci : _ -> maybe (Left "internal: a constructor of no data type") Right (dataOfCtor env ci)
         [] -> Left "internal: no constructor"
       let ctors = dataCtors dat
-      unless (length clauses == length ctors && all (\ci -> length [() | cj <- ctorsSeen, ctorCore cj == ctorCore ci] == 1) ctors) $
-        Left "the clauses must match each constructor of the scrutinee's type exactly once (no overlap, no catch-all) for now"
+      unless (all (\ci -> let k = length [() | cj <- ctorsSeen, ctorCore cj == ctorCore ci] in k == 1 || (k == 0 && ctorCore ci `elem` fdImpossible fd)) ctors) $
+        Left "the clauses must match each constructor of the scrutinee's type exactly once, but those impossible at the indices of its signature (no overlap, no catch-all) for now"
       forM_' clauses \fc -> unless (all (\(i, p) -> i == c || isVar p) (zip [0 ..] (fcPatterns fc))) (Left "only one argument may be matched on, for now")
       infos <- forM clauses \fc -> do
         ps <- places (fcPatterns fc)
@@ -158,15 +158,16 @@ compileFunction env fd = do
           others = [i | i <- [0 .. arity - 1], i /= c]
           userOthers = [i | i <- [0 .. userArity - 1], i /= c]
           byIndex = [(ctorIndex ci, x) | x@(_, _, ci) <- infos]
-          ordered = [x | i <- [0 .. length ctors - 1], Just x <- [lookup i byIndex]]
+          orderedM = [lookup i byIndex | i <- [0 .. length ctors - 1]]
+          ordered = catMaybes orderedM
           defLemma = functionLemma info "#def"
           defLhs = CSym core (take userArity vargs <> dict)
       if not recursive
         then do
-          branches <- forM ordered \(fc, ps, _) ->
+          branches <- forM orderedM $ maybe (Right (CNum 0)) \(fc, ps, _) ->
             body (placeCT (args !! c) (\i -> args !! i) ps) inDef (const (Left "unreachable")) fc
           let dispatch = ifChain (hdT (args !! c)) branches
-              dispatchAt scr others' = ifChain (hdT scr) [either (error "internal") id (body (placeCT scr others' ps) inLemma (const (Left "")) fc) | (fc, ps, _) <- ordered]
+              dispatchAt scr others' = ifChain (hdT scr) [maybe (CNum 0) (\(fc, ps, _) -> either (error "internal") id (body (placeCT scr others' ps) inLemma (const (Left "")) fc)) m | m <- orderedM]
           proofs <- forM ordered \(fc, ps, ci) -> do
             rhs <- clauseRhs ps fc
             let scr = CSym (ctorCore ci) (fieldVars ps fc ci)
@@ -184,7 +185,7 @@ compileFunction env fd = do
           let lamParams = ["k", "h"] <> map argName others
               other i = CVar (argName i)
               recCall ps fc k h callArgs = recursiveCall c userOthers ps fc k h callArgs
-          branches <- forM ordered \(fc, ps, _) ->
+          branches <- forM orderedM $ maybe (Right (CNum 0)) \(fc, ps, _) ->
             body (placeCT (CVar "k") other ps) inDef (recCall ps fc (CVar "k") (CVar "h")) fc
           let lam = runBuilder ("{λ " <> unwordsB (map fromText lamParams) <> ". " <> render (ifChain (hdT (CVar "k")) branches) <> "}")
               cvrec scr rest = CRaw (runBuilder ("cvrec " <> fromText lam <> " " <> unwordsB (map render (scr : rest))))
@@ -192,7 +193,7 @@ compileFunction env fd = do
               betaLemma = functionLemma info "#beta"
               vothers = map (vargs !!) others
               stepAt scr rest ps fc = either (error "internal") id (body (placeCT scr (\i -> rest !! position others i) ps) inLemma (recursiveCall c userOthers ps fc scr (hist scr rest)) fc)
-              betaBody scr rest = ifChain (hdT scr) [stepAt scr rest ps fc | (fc, ps, _) <- ordered]
+              betaBody scr rest = ifChain (hdT scr) [maybe (CNum 0) (\(fc, ps, _) -> stepAt scr rest ps fc) m | m <- orderedM]
           proofs <- forM ordered \(fc, ps, ci) -> do
             rhs <- clauseRhs ps fc
             let fields = fieldVars ps fc ci

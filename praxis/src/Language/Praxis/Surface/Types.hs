@@ -31,6 +31,8 @@ module Language.Praxis.Surface.Types (
   Ix (..),
   Scheme (..),
   monoScheme,
+  TyScope (..),
+  emptyScope,
   renderTy,
   renderTyWith,
   renderIx,
@@ -117,6 +119,21 @@ data Scheme = Scheme
 monoScheme :: Ty -> Scheme
 monoScheme = Scheme [] []
 
+{- |
+What the names in a type written in a signature, or in a term, stand for:
+the type parameters, by position, and the values its indices may mention, as
+the indices they are — a value parameter of the signature, or a variable.
+-}
+data TyScope = TyScope
+  { tsTypes :: ![Text]
+  , tsValues :: ![(Text, Ix)]
+  }
+  deriving stock (Show, Eq)
+
+-- | No names.
+emptyScope :: TyScope
+emptyScope = TyScope [] []
+
 -- | The parameters a type mentions, by index.
 tyParams :: Ty -> [Int]
 tyParams = \case
@@ -192,7 +209,8 @@ renderIxAt values = go
     go :: Int -> Ix -> String
     go d = \case
       IxParam i -> if i < length values then T.unpack (values !! i) else "#" <> show i
-      IxVar v -> T.unpack v
+      -- A variable matching introduced, #n@line:col, or one an ascription quantifies, @n, by its name.
+      IxVar v -> T.unpack (T.takeWhile (/= '@') (T.dropWhile (`elem` ("#@" :: String)) v))
       IxHole -> "_"
       IxNat n -> show n
       IxSucc x -> paren (d > 1) ("S " <> go 2 x)
