@@ -51,7 +51,11 @@ higher type, which defines Ackermann's function, and is refused. A
 through to it, which is how a closure captures variables: a λ must be
 closed, and μ, ∀ and ∃ capture the maximal subterms of their body not
 mentioning the bound variable (canonical closure conversion), so that
-substituting into a captured term yields the same code again.
+substituting into a captured term yields the same code again. A λ standing
+as the parameter of a variadic schema is closed the same way when it
+mentions a variable bound outside it, `count {λ i. i < a} n` being
+`count {λ i y. i < y} n a`. So a template may pass its variadic arguments
+on through a λ, `wrap {P} n $[xs] = count {λ i. P i $[xs]} n`.
 
 `Signature` (`PRA.Signature`) names the results: plain symbols (with the
 Haskell binding their code lives in, for splicing, and the equations they were

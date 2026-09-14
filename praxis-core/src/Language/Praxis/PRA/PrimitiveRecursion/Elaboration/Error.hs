@@ -247,8 +247,8 @@ instance Exception ElaborationError where
     LambdaArityMismatch schema expected given ->
       "Schema " <> T.unpack schema <> " expects a parameter of arity " <> show expected <> ", given a lambda of arity " <> show given
     LambdaCapturesVariable ident ->
-      "A lambda refers to " <> T.unpack ident <> ", which is bound outside it; lambdas must be closed (a bounded search 'μ' captures such variables)"
-    LambdaCapturesBinder -> "A lambda may not refer to a variable bound by an enclosing lambda; lambdas must be closed"
+      "A lambda refers to " <> T.unpack ident <> ", which is bound outside it; lambdas must be closed, but for the parameter of a variadic schema, which captures such variables as a bounded search 'μ' does"
+    LambdaCapturesBinder -> "A lambda may not refer to a variable bound by an enclosing lambda; lambdas must be closed, but for the parameter of a variadic schema"
     BinderOutsideLambda -> "Unexpected binder occurrence outside a lambda"
     InvalidBinderIndex position -> "Invalid binder index: " <> show position
     AppliedBinder -> "Cannot apply a lambda-bound variable"

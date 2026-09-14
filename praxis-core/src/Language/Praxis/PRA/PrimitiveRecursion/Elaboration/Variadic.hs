@@ -21,6 +21,12 @@ which do not mention @i@, numerals included, then to the bound and those
 subterms: @mu {λ i y₁ … yₖ. body'} b s₁ … sₖ@.  This makes the lambda
 canonical, the same whatever the captured terms become; a body which is a
 function applied to @i@ alone is that function.
+
+A lambda standing as the parameter of a variadic schema is closed the same
+way when it mentions a variable bound outside it: @count {λ i. i < a} n@ is
+@count {λ i y. i < y} n a@.  So a template may pass its variadic arguments on
+through a lambda, @wrap {P} n $[xs] = count {λ i. P i $[xs]} n@, which is
+closed at each instance over the arguments it has.
 -}
 module Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Variadic (
   ExpandedFamily (..),
@@ -249,20 +255,55 @@ rewrite ctx term = case term of
   QuantET q hint bound body -> desugarQuant ctx q hint bound body
   SplatET xs -> throw (SplatOutsideArgument xs)
 
+{- | An application, its variadic arguments expanded.  A lambda standing as
+the parameter of a variadic schema which mentions variables bound outside it
+is closed over what it captures, as the body of a bounded quantifier is, see
+'captureSlots': @count {λ i. i < a} n@ is @count {λ i y. i < y} n a@, the
+captured terms passed on after the arguments, where the schema passes its
+variadic ones.
+-}
 rewriteApp :: Ctx -> EqTerm T.Text -> M (EqTerm T.Text)
 rewriteApp ctx term = do
   let (hd, rawArgs) = spine term
   arguments <- concat <$> traverse expand rawArgs
+  env <- gets stEnv
+  instances <- gets stInstances
+  let arguments' = case (hd, arguments) of
+        (NameET h, LamET hints body : rest)
+          | variadic env h
+          , outside 0 body ->
+              let (slots, closed) = captureSlots ctx env instances (length hints) body
+               in LamET (hints <> map (const (IrrelevantName "y")) slots) closed : rest <> slots
+        _ -> arguments
   hd' <- case hd of
-    NameET _ -> rewriteHead ctx hd (length arguments)
+    NameET _ -> rewriteHead ctx hd (length arguments')
     _ -> rewrite ctx hd
-  pure (foldl (:@) hd' arguments)
+  pure (foldl (:@) hd' arguments')
   where
     expand (SplatET xs) = case ctxSplat ctx of
       Just (group, vars) | group == xs -> pure (map NameET vars)
       Just (group, _) -> throw (UnknownVariadicGroup xs group)
       Nothing -> throw (SplatOutsideVariadicSchema xs)
     expand t = (: []) <$> rewrite ctx t
+    -- A variadic schema, whose parameter takes the terms a lambda passed as it captures.
+    variadic env h
+      | h `elem` ctxPatternVars ctx = False
+      | otherwise = case Map.lookup h env of
+          Just VariadicDef {} -> True
+          Just ImportedVariadic {} -> True
+          _ -> False
+    -- Whether a body mentions a variable bound outside the lambda it is the body of: a pattern variable, or an enclosing binder.
+    outside :: Int -> EqTerm T.Text -> Bool
+    outside level = \case
+      BoundET d _ -> d > level
+      NameET x -> x `elem` ctxPatternVars ctx
+      f :@ x -> outside level f || outside level x
+      InfixET l _ r -> outside level l || outside level r
+      IfThenElseET c x e -> outside level c || outside level x || outside level e
+      LamET _ b -> outside (level + 1) b
+      MuET _ b x -> outside level b || outside (level + 1) x
+      QuantET _ _ b x -> outside level b || outside (level + 1) x
+      _ -> False
 
 -- | An application of a variadic schema is redirected to its instance.
 rewriteHead :: Ctx -> EqTerm T.Text -> Int -> M (EqTerm T.Text)
@@ -354,7 +395,7 @@ searchWith ctx schema hint bound body = do
   body' <- rewrite ctx {ctxBinders = [hint] : ctxBinders ctx} body
   env <- gets stEnv
   instances <- gets stInstances
-  let (slots, closed) = captureSlots ctx env instances body'
+  let (slots, closed) = captureSlots ctx env instances 1 body'
       param = case closed of
         NameET f :@ BoundET 0 0 | null slots, unary env f -> NameET f
         _ -> LamET (hint : map (const (IrrelevantName "y")) slots) closed
@@ -372,17 +413,18 @@ searchWith ctx schema hint bound body = do
           Just _ -> False
           Nothing -> True
 
-{- | The maximal subterms of a body, under the binder of depth 0, which do not
-mention it, in the order they occur, as they read outside the binder; and the
-body with the @j@-th of them, from 0, replaced by @BoundET 0 (1 + j)@.  Such a
-subterm is a numeral, a variable of the clause, an outer binder, a constant or
-an application; a function standing as the parameter of a schema is none.
+{- | The maximal subterms of a body, under the binder group of depth 0, of the
+width given, which do not mention it, in the order they occur, as they read
+outside the group; and the body with the @j@-th of them, from 0, replaced by
+@BoundET 0 (width + j)@, a binder the group gains.  Such a subterm is a
+numeral, a variable of the clause, an outer binder, a constant or an
+application; a function standing as the parameter of a schema is none.
 -}
-captureSlots :: Ctx -> Env -> Set T.Text -> EqTerm T.Text -> ([EqTerm T.Text], EqTerm T.Text)
-captureSlots ctx env instances = go []
+captureSlots :: Ctx -> Env -> Set T.Text -> Int -> EqTerm T.Text -> ([EqTerm T.Text], EqTerm T.Text)
+captureSlots ctx env instances width = go []
   where
     go acc t
-      | slot t, not (occurs 0 t) = (acc <> [shift 0 t], BoundET 0 (1 + length acc))
+      | slot t, not (occurs 0 t) = (acc <> [shift 0 t], BoundET 0 (width + length acc))
       | otherwise = case t of
           _ :@ _ -> case spine t of
             (h, arguments) ->

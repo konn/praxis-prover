@@ -126,11 +126,39 @@ elaborationTests =
         checkValues defs "u" [([], 4)]
         checkValues defs "v" [([a, b], a + b + 1) | a <- range, b <- range]
         checkValues defs "t" [([x], nested x) | x <- [0 .. 12]]
-    , testCase "lambdas must be closed, non-recursive, and schema parameters of the right arity" $
+    , testCase "a lambda passed to a variadic schema captures pattern variables and enclosing binders" $ do
+        eqs <-
+          expectRight
+            ( parseEquations
+                "w z = mu {λ i. z < triangle (i + 1)} z; v a b = mu {λ i. a + b < i} 10; t x = mu {λ i. x < i + mu {λ j. 2 < j} x} x; s z = mu {λ i y. z < i} z z"
+            )
+        defs <- expectRight (elaborateEquations (signatureEnv PR.builtin) eqs)
+        checkValues defs "w" [([z], search z (\i -> z < triangle (i + 1))) | z <- range]
+        checkValues defs "v" [([a, b], a + b + 1) | a <- range, b <- range]
+        checkValues defs "t" [([x], nested x) | x <- [0 .. 12]]
+        checkValues defs "s" [([z], search z (z <)) | z <- range]
+    , testCase "a template passes its variadic arguments on through a lambda it closes" $ do
+        eqs <-
+          expectRight
+            ( parseEquations
+                ( T.unlines
+                    [ "count {P} 0 $[xs] = 0"
+                    , "count {P} (S n) $[xs] = count {P} n $[xs] + sgn (P n $[xs])"
+                    , "wrap {P} n $[xs] = count {λ i. P i $[xs]} n"
+                    , "use a = wrap {λ i a. i < a} 10 a"
+                    , "none = wrap {λ i. 3 < i} 10"
+                    ]
+                )
+            )
+        fam <- expectRight (elaborateFamilyWith id (signatureEnv PR.builtin) eqs)
+        let defs = familyDefinitions fam
+        checkValues defs "use" [([a], a) | a <- range]
+        checkValues defs "none" [([], 6)]
+    , testCase "lambdas must be closed, but for a variadic schema's parameter, non-recursive, and schema parameters of the right arity" $
         mapM_
           (uncurry rejectProgram)
-          [ ("w z = mu {λ i y. z < i} z z", LambdaCapturesVariable "z")
-          , ("w z = mu {λ i y. mu {λ j x. i < x} y y} z z", LambdaCapturesBinder)
+          [ ("once {P} x = P x; w z = once {λ i. z < i} z", LambdaCapturesVariable "z")
+          , ("once {P} x = P x; w z = mu {λ i y. once {λ j. i < j} y} z z", LambdaCapturesBinder)
           , ("f 0 = 0; f (S n) = mu {λ i. f 0 < i} n", NoRecursionArgument "f" [(0, RecursiveCallInLambda "f")])
           , ("g x = add (λ i. i) x", LambdaOutsideSchemaParameter)
           , ("h x = mu {λ i. i} x x", LambdaArityMismatch "mu@1" 2 1)
