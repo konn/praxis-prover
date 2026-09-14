@@ -51,6 +51,67 @@ by induction t as m
           = cvrec {f} m
           = cvrec {f} j by cong E } }
 
+-- The code of a pair grows with its components: what a function recursing on
+-- several values at once, through the code of their tuple, looks up its
+-- history by.
+theorem leSelf : |- t <= t
+by calc (t <= t) = (t <= t + 0) = 1 by exact leAdd
+
+theorem pairLtL : t < t', u <= u' |- pair t u < pair t' u'
+by have A: (t + u < t' + u) { exact addLtMonoR };
+   have B: (t' + u <= t' + u') { exact addLeMonoL };
+   have C: (t + u < t' + u') { exact ltLeTrans on A B };
+   have D: (S (t + u) <= t' + u') { exact ltSuccLe };
+   have E: (triangle (S (t + u)) <= triangle (t' + u')) { exact triangleMono };
+   have F: (u <= t + u) { exact leAddR };
+   have G: (u < S (t + u)) { exact ltSuccOfLe };
+   have I: (triangle (t + u) + u < triangle (t + u) + S (t + u)) { exact addLtMonoL };
+   have J: (triangle (t + u) + u < triangle (S (t + u)))
+     { calc (triangle (t + u) + u < triangle (S (t + u))) = (triangle (t + u) + u < triangle (t + u) + S (t + u)) = 1 by exact I };
+   have K: (triangle (t + u) + u < triangle (t' + u')) { exact ltLeTrans on J E };
+   have L: (triangle (t' + u') <= triangle (t' + u') + u') { exact leAdd };
+   have M: (triangle (t + u) + u < triangle (t' + u') + u') { exact ltLeTrans on K L };
+   calc (pair t u < pair t' u') = (triangle (t + u) + u < triangle (t' + u') + u') = 1 by exact M
+
+theorem pairLtR : t <= t', u < u' |- pair t u < pair t' u'
+by have A: (t + u <= t' + u) { exact addLeMonoR };
+   have B: (t' + u < t' + u') { exact addLtMonoL };
+   have C: (t + u < t' + u') { exact leLtTrans on A B };
+   have D: (S (t + u) <= t' + u') { exact ltSuccLe };
+   have E: (triangle (S (t + u)) <= triangle (t' + u')) { exact triangleMono };
+   have F: (u <= t + u) { exact leAddR };
+   have G: (u < S (t + u)) { exact ltSuccOfLe };
+   have I: (triangle (t + u) + u < triangle (t + u) + S (t + u)) { exact addLtMonoL };
+   have J: (triangle (t + u) + u < triangle (S (t + u)))
+     { calc (triangle (t + u) + u < triangle (S (t + u))) = (triangle (t + u) + u < triangle (t + u) + S (t + u)) = 1 by exact I };
+   have K: (triangle (t + u) + u < triangle (t' + u')) { exact ltLeTrans on J E };
+   have L: (triangle (t' + u') <= triangle (t' + u') + u') { exact leAdd };
+   have M: (triangle (t + u) + u < triangle (t' + u') + u') { exact ltLeTrans on K L };
+   calc (pair t u < pair t' u') = (triangle (t + u) + u < triangle (t' + u') + u') = 1 by exact M
+
+theorem consLtL : t < t', u <= u' |- cons t u < cons t' u'
+by have A: (pair t u < pair t' u') { exact pairLtL };
+   calc (cons t u < cons t' u')
+      = (sgn (S (pair t' u') - S (pair t u)))
+      = (sgn (pair t' u' - pair t u)) by cong succSubSucc
+      = (pair t u < pair t' u')
+      = 1 by exact A
+
+theorem consLtR : t <= t', u < u' |- cons t u < cons t' u'
+by have A: (pair t u < pair t' u') { exact pairLtR };
+   calc (cons t u < cons t' u')
+      = (sgn (S (pair t' u') - S (pair t u)))
+      = (sgn (pair t' u' - pair t u)) by cong succSubSucc
+      = (pair t u < pair t' u')
+      = 1 by exact A
+
+-- A dispatch on the sign of a value of Nat, at 0 and at a successor,
+-- collapsed at variables: what a generated proof instantiates, the history
+-- and the codes in its branches left as they are.
+theorem collapseSgnZero : |- ifte (eq (sgn 0) 0) a (ifte (eq (sgn 0) 1) b 0) = a by refl
+
+theorem collapseSgnSucc : |- ifte (eq (sgn (S x)) 0) a (ifte (eq (sgn (S x)) 1) b 0) = b by refl
+
 -- An if on a numeral, at variables: what a generated proof instantiates to
 -- collapse a dispatch without normalising its branches.
 theorem collapseT : |- (if 1 then a else b) = a by refl

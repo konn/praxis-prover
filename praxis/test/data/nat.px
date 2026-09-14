@@ -54,3 +54,13 @@ double (S n) = S (S (double n))
 
 double-succ : (n : nat) -> double (S n) ≡ S (S (double n))
 double-succ n = rfl
+
+-- Matching on two values of Nat at once, recursive at both predecessors:
+-- course-of-values recursion on the code of their tuple.
+min-nat : Nat -> Nat -> Nat
+min-nat 0 m = 0
+min-nat (S n) 0 = 0
+min-nat (S n) (S m) = S (min-nat n m)
+
+min-succ : (n m : nat) -> min-nat (S n) (S m) ≡ S (min-nat n m)
+min-succ n m = rfl

@@ -47,7 +47,7 @@ module Language.Praxis.Surface.Compile (
 import Bound (Scope, Var (..), fromScope)
 import Control.Monad (forM, unless, when)
 import Data.List (nub)
-import Data.Maybe (catMaybes, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
@@ -253,7 +253,8 @@ compileFunction env fd = do
                 )
                 (table proofs)
             )
-    _ -> Left "clauses matching on several arguments are not supported yet"
+    cs | all (\c -> fdArgs fd !! c == TNat) cs -> natColumns cs
+    _ -> Left "clauses matching on several arguments, not all of Nat, are not supported yet"
   where
     info = fdInfo fd
     core = funCore info
@@ -365,6 +366,191 @@ compileFunction env fd = do
                 )
                 (table proofs)
             )
+
+    {- Matching on several values of Nat at once, in the columns given: each
+    clause at 0, at S x, or at any value, in each; together the clauses cover
+    each case, 0 or S, of the values once.  Recursion, at the predecessors of
+    some of the values and at the others as they are, is course-of-values
+    recursion on the code of their tuple, cons a₁ (cons a₂ … 0), each value
+    its component.  An unfolding lemma for each case: the tuple taken apart
+    by hdCons and tlCons, the dispatch collapsed by the definitions of sgn
+    and prd, the history looked up by histAt, the tuple of the predecessors
+    below the tuple by consLtL and consLtR. -}
+    natColumns cs = do
+      let kc = length cs
+          colIdx = zip cs [0 :: Int ..]
+          patAt fc c = fcPatterns fc !! c
+          covers combo fc =
+            and
+              [ case patAt fc c of
+                  PNat 0 -> not b
+                  PSucc _ -> b
+                  _ -> True
+              | (c, b) <- zip cs combo
+              ]
+      forM_' clauses \fc -> unless (all (\(i, p) -> i `elem` cs || isVar p) (zip [0 ..] (fcPatterns fc))) (Left "the values not matched on are variables, for now")
+      forM_' clauses \fc -> forM_' cs \c -> case patAt fc c of
+        PSucc sub | not (isVar sub) -> Left "nested patterns are not supported yet"
+        PNat j | j > 0 -> Left "a numeral other than 0 in a pattern: write it S n"
+        _ -> Right ()
+      cases <- forM (sequence (replicate kc [False, True])) \combo -> case filter (covers combo) clauses of
+        [fc] -> Right (combo, fc)
+        _ -> Left "the clauses must cover each case, 0 or S, of the values they match on exactly once (no overlap) for now"
+      let others = [i | i <- [0 .. arity - 1], i `notElem` cs]
+          userOthers = [i | i <- [0 .. userArity - 1], i `notElem` cs]
+          defLemma = functionLemma info "#def"
+          betaLemma = functionLemma info "#beta"
+          defLhs = CSym core (take userArity vargs <> dict)
+          component i t = hdT (iterate tlT t !! i)
+          tupleT = foldr (\x acc -> CSym "cons" [x, acc]) (CNum 0)
+          -- What each variable of a clause is: a value it matches whole (0), the predecessor of one (1), or another argument (2).
+          roles fc =
+            concat
+              [ case p of
+                  PVar _ -> [maybe (2, a) (\ci -> (0, ci)) (lookup a colIdx)]
+                  PSucc (PVar _) -> [(1, fromMaybe 0 (lookup a colIdx))]
+                  _ -> []
+              | (a, p) <- zip [0 ..] (fcPatterns fc)
+              ]
+          roleOf fc v = listToMaybe (drop v (roles fc))
+          roleTerm value other (r, j) = case r :: Int of
+            0 -> value j
+            1 -> CSym "prd" [value j]
+            _ -> other j
+          -- A recursive call, at the code k of the tuple and its history h: the history at the tuple of what it passes.
+          recAt kT value hT fc callArgs = do
+            unless (length callArgs == userArity) $
+              Left ("a recursive call with " <> show (length callArgs) <> " arguments, where the function takes " <> show userArity)
+            comps <- forM colIdx \(c, ci) -> case fst (callArgs !! c) >>= roleOf fc of
+              Just (0, ci') | ci' == ci -> Right (False, value ci)
+              Just (1, ci') | ci' == ci -> Right (True, CSym "prd" [value ci])
+              _ -> Left "a recursive call passes each value the function matches on, or its predecessor"
+            forM_' userOthers \a -> case fst (callArgs !! a) >>= roleOf fc of
+              Just (2, a') | a' == a -> Right ()
+              _ -> Left "a recursive call must pass the other arguments unchanged (primitive recursion)"
+            unless (any fst comps) $ Left "a recursive call must pass the predecessor of a value the function matches on"
+            Right (CSym "at" [hT, kT, tupleT (map snd comps)])
+          -- A clause's body at the code k of the tuple, its values, its history h, the other arguments and the dictionary's values.
+          bodyAt kT value hT other dv fc = body (\v -> maybe (CVar "?") (roleTerm value other) (roleOf fc v)) dv (recAt kT value hT fc) fc
+          tree value leaf = go 0 []
+            where
+              go i combo
+                | i == kc = leaf combo
+                | otherwise = ifChain (CSym "sgn" [value i]) [go (i + 1) (combo <> [False]), go (i + 1) (combo <> [True])]
+          lamParams = ["k", "h"] <> map argName others
+      leavesDef <- forM cases \(combo, fc) -> (combo,) <$> bodyAt (CVar "k") (\ci -> component ci (CVar "k")) (CVar "h") (CVar . argName) inDef fc
+      let lam = runBuilder ("{λ " <> unwordsB (map fromText lamParams) <> ". " <> render (tree (\ci -> component ci (CVar "k")) (\combo -> fromMaybe (CNum 0) (lookup combo leavesDef))) <> "}")
+          cvrec scr rest = CRaw (runBuilder ("cvrec " <> fromText lam <> " " <> unwordsB (map render (scr : rest))))
+          hist scr rest = CRaw (runBuilder ("hist " <> fromText lam <> " " <> unwordsB (map render (scr : rest))))
+          vothers = map (vargs !!) others
+          scrOf vs = tupleT [vs !! c | c <- cs]
+          betaBody scr rest =
+            let other a = rest !! position others a
+             in tree (`component` scr) \combo -> case lookup combo cases of
+                  Just fc -> either (error "internal") id (bodyAt scr (`component` scr) (hist scr rest) other inLemma fc)
+                  Nothing -> CNum 0
+      proofs <- forM cases \(combo, fc) -> do
+        let rs = roles fc
+            predVar ci = case [v | (v, (1, ci')) <- zip [0 ..] rs, ci' == ci] of
+              v : _ -> varOf fc v
+              [] -> CVar ("v__x23_c" <> T.pack (show ci))
+            vals = [if b then CSym "S" [predVar ci] else CNum 0 | (ci, b) <- zip [0 ..] combo]
+            otherArg a
+              | a >= userArity = CVar (valueVar (T.pack (show (a - userArity))))
+              | otherwise = case [v | (v, (2, a')) <- zip [0 ..] rs, a' == a] of
+                  v : _ -> varOf fc v
+                  [] -> CVar ("v__x23_" <> T.pack (show a))
+            rest = map otherArg others
+            scr = tupleT vals
+            h = hist scr rest
+            lhs = CSym core ([maybe (otherArg a) (vals !!) (lookup a colIdx) | a <- [0 .. userArity - 1]] <> dict)
+            start = betaBody scr rest
+            apart = takeApart start
+            afterApart = maybe start fst (listToMaybe (reverse apart))
+            caseTerm (r, j) = case r :: Int of
+              0 -> vals !! j
+              1 -> predVar j
+              _ -> otherArg j
+            -- The case's branch: its values, the predecessor of each S x its x.
+            branch = replaceCT (\case CSym "prd" [CSym "S" [x]] -> Just x; _ -> Nothing) (either (error "internal") id (bodyAt scr (vals !!) h otherArg inLemma fc))
+            lookups = nub [(u, tup) | u@(CSym "at" [h', k', tup]) <- subterms branch, h' == h, k' == scr]
+            -- The tuple a recursive call looks up below the case's, component by component from the last.
+            ltProof j tup =
+              let comps' = untuple tup
+                  nm p i = p <> T.pack (show (j :: Int)) <> "_" <> T.pack (show i)
+                  suffix xs i = tupleT (drop i xs)
+                  go i
+                    | i >= kc = (False, "")
+                    | otherwise =
+                        let (lessTail, tailSteps) = go (i + 1)
+                            c' = comps' !! i
+                            c = vals !! i
+                            tailLe
+                              | lessTail = "have " <> fromText (nm "R" i) <> ": (" <> render (suffix comps' (i + 1)) <> " <= " <> render (suffix vals (i + 1)) <> ") { exact ltLe on " <> fromText (nm "Q" (i + 1)) <> " }; "
+                              | otherwise = "have " <> fromText (nm "R" i) <> ": (" <> render (suffix vals (i + 1)) <> " <= " <> render (suffix vals (i + 1)) <> ") { exact leSelf }; "
+                            fact = "have " <> fromText (nm "Q" i) <> ": (" <> render (suffix comps' i) <> " < " <> render (suffix vals i) <> ")"
+                         in if c' /= c
+                              then (True, tailSteps <> "have " <> fromText (nm "P" i) <> ": (" <> render c' <> " < " <> render c <> ") { exact ltSucc }; " <> tailLe <> fact <> " { exact consLtL on " <> fromText (nm "P" i) <> " " <> fromText (nm "R" i) <> " }; ")
+                              else
+                                if lessTail
+                                  then (True, tailSteps <> "have " <> fromText (nm "P" i) <> ": (" <> render c <> " <= " <> render c <> ") { exact leSelf }; " <> fact <> " { exact consLtR on " <> fromText (nm "P" i) <> " " <> fromText (nm "Q" (i + 1)) <> " }; ")
+                                  else (False, tailSteps)
+               in snd (go 0)
+            callOf tup = CSym core ([maybe (otherArg a) (untuple tup !!) (lookup a colIdx) | a <- [0 .. userArity - 1]] <> dict)
+            haves = mconcat [ltProof j tup <> "have E" <> fromDec j <> ": (" <> render u <> " = " <> render (cvrec tup rest) <> ") { exact histAt }; " | (j, (u, tup)) <- zip [0 ..] lookups]
+            histSteps = drop 1 (scanl (\(t, _) (j, (u, tup)) -> (replaceCT (\x -> if x == u then Just (cvrec tup rest) else Nothing) t, "cong E" <> fromDec j)) (branch, "") (zip [0 :: Int ..] lookups))
+            afterHist = maybe branch fst (listToMaybe (reverse histSteps))
+            defSteps = drop 1 (scanl (\(t, _) (_, tup) -> (replaceCT (\x -> if x == cvrec tup rest then Just (callOf tup) else Nothing) t, "cong " <> fromText defLemma)) (afterHist, "") lookups)
+            steps =
+              [(cvrec scr rest, "exact " <> fromText defLemma), (start, "exact " <> fromText betaLemma)]
+                <> [(t, "cong " <> lem) | (t, lem) <- apart]
+                <> [(t, "cong " <> lem) | (t, lem) <- collapsing afterApart]
+                <> histSteps
+                <> defSteps
+        rhs <- body (\v -> maybe (CVar "?") caseTerm (roleOf fc v)) inLemma (\callArgs -> Right (CSym core (map snd callArgs <> dict))) fc
+        pure (combo, (lhs, rhs, haves <> calc lhs steps))
+      let named = [(functionLemma info ("unfold-" <> T.intercalate "-" [if b then "S" else "0" | b <- combo]), p) | (combo, p) <- proofs]
+      pure
+        ( Compiled
+            [definition (cvrec (scrOf args) (map (args !!) others))]
+            ( (defLemma, lemma defLemma vargs defLhs (cvrec (scrOf vargs) vothers) "refl")
+                -- At a code of its own, so that its history is not computed out.
+                : (betaLemma, lemma betaLemma (CVar "v_k" : vothers) (cvrec (CVar "v_k") vothers) (betaBody (CVar "v_k") vothers) "refl")
+                : [(n, lemma n [l] l r p) | (n, (l, r, p)) <- named]
+            )
+            [(n, l, r) | (n, (l, r, _)) <- named]
+        )
+
+    -- A dispatch collapsed from its root, each node at a sign known by its lemma, then
+    -- the predecessor of each successor: the codes and the history left as they are.
+    collapsing t = case collapseAt t of
+      Just (t', lem) -> (t', lem) : collapsing t'
+      Nothing -> predSteps t
+    collapseAt = \case
+      CSym "ifte" [CSym "eq" [CSym "sgn" [v], CNum 0], a, CSym "ifte" [CSym "eq" [CSym "sgn" [v'], CNum 1], b, CNum 0]]
+        | v == v', CNum 0 <- v -> Just (a, "collapseSgnZero")
+        | v == v', CSym "S" [_] <- v -> Just (b, "collapseSgnSucc")
+      _ -> Nothing
+    predSteps t = case [u | u@(CSym "prd" [CSym "S" [_]]) <- subterms t] of
+      u@(CSym "prd" [CSym "S" [x]]) : _ -> let t' = replaceCT (\y -> if y == u then Just x else Nothing) t in (t', "prd_S") : predSteps t'
+      _ -> []
+
+    -- The code of a tuple taken apart, step by step: tl, and hd, of a cons, with the lemma rewriting it.
+    takeApart t = case redexOf t of
+      Just (u, u', lem) -> let t' = replaceCT (\x -> if x == u then Just u' else Nothing) t in (t', lem) : takeApart t'
+      Nothing -> []
+    redexOf t = case t of
+      CSym "tl" [CSym "cons" [_, b]] -> Just (t, b, "tlCons")
+      CSym "hd" [CSym "cons" [a, _]] -> Just (t, a, "hdCons")
+      CSym _ xs -> listToMaybe (mapMaybe redexOf xs)
+      _ -> Nothing
+    untuple = \case
+      CSym "cons" [x, rest'] -> x : untuple rest'
+      _ -> []
+    subterms t =
+      t : case t of
+        CSym _ xs -> concatMap subterms xs
+        _ -> []
 
     forM_' xs f = mapM_ f xs
     isVar = \case

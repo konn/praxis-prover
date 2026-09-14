@@ -511,7 +511,8 @@ for every constructor and for every function whose result is of a data type.
 Implemented: the whole grammar above; data types, including higher-kinded
 parameters and nested and mutually referring types; functions matching on one
 argument, each constructor once or `0` and `S n`, structurally recursive with unchanged other
-arguments; classes with superclasses, and their instances for data types and
+arguments, or on several values of `Nat` at once, each case of `0` and `S`
+once, recursive at predecessors through the code of their tuple; classes with superclasses, and their instances for data types and
 `Nat`, each use of a method resolved at the type it is used at; functions
 and theorems under constraints, schemas and rules over the methods they use;
 laws of classes, proved by each instance and premises of the theorems under
@@ -532,7 +533,7 @@ arguments, each application's checked as an obligation, and `absurd`;
 type ascriptions; `.px` diagnostics.
 Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
-`if` in terms, nested patterns and matching on several arguments, overlapping first-match clauses, mutual recursion and
+`if` in terms, nested patterns and matching on several arguments not all of `Nat`, overlapping first-match clauses, mutual recursion and
 accumulating parameters, membership checking the fields of nested
 and higher-kinded parameters, and list-literal sugar. For indexed data types:
 the types of variables at indices of dependent types inferred rather than
