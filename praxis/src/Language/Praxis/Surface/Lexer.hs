@@ -196,6 +196,7 @@ keywords =
   , "by"
   , "calc"
   , "Type"
+  , "type"
   , "forall"
   , "exists"
   , "fun"

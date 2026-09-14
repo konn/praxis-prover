@@ -63,7 +63,7 @@ import Data.Bifunctor (first)
 import Data.IntMap.Strict qualified as IM
 import Data.List (elemIndex, find, nub, nubBy)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust, maybeToList)
+import Data.Maybe (isJust, isNothing, maybeToList)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -197,7 +197,7 @@ elabModule fx m = walk envData (R.moduleDecls m) []
     decls = R.moduleDecls m
     dataDecls = [(sp, d) | Located sp (R.DData d) <- decls]
     -- Names and arities first, then the constructors, against all of them.
-    placeholders = foldl (\e (_, d) -> fst (addData e (Ident (unLocated (R.dataName d))) [(unLocated p, KType) | (p, _) <- R.dataParams d] [])) (emptyEnv modQ) dataDecls
+    placeholders = foldl (\e (_, d) -> fst (addData e (Ident (unLocated (R.dataName d))) [(unLocated (R.dataParamName p), KType) | p <- R.dataParams d] [])) (emptyEnv modQ) dataDecls
     (envData, dataItems) = foldl declareData (placeholders, Map.empty) dataDecls
     declareData (e, done) (sp, d) = case elabData fx e d of
       Left err -> (e, Map.insert (unLocated (R.dataName d)) (IFailed err) done)
@@ -216,6 +216,7 @@ elabModule fx m = walk envData (R.moduleDecls m) []
         [] -> walk env rest (IFailed (ElabError osp ("no namespace " <> T.unpack (qnameText q) <> " to open")) : acc)
       R.DData dd -> walk env rest (Map.findWithDefault (IFailed (ElabError sp "internal: a data type not declared")) (unLocated (R.dataName dd)) dataItems : acc)
       R.DFixity {} -> walk env rest acc
+      R.DKindSig (Located ksp _) _ -> walk env rest (IFailed (ElabError ksp "a kind signature: not supported yet") : acc)
       R.DSignature (Located _ name) ty -> case elabDecl fx env sp name ty (clausesOf name) of
         Left err -> walk env rest (IFailed err : acc)
         Right (env', item) -> walk env' rest (item : acc)
@@ -241,7 +242,16 @@ elabModule fx m = walk envData (R.moduleDecls m) []
 -- | The parameters, with their kinds, and the constructors, with the types of their fields.
 elabData :: Fixities -> Env -> R.DataDecl -> Either ElabError ([(Text, Kind)], [(Segment, [Ty])])
 elabData fx env d = do
-  let params = map (unLocated . fst) (R.dataParams d)
+  let params = map (unLocated . R.dataParamName) (R.dataParams d)
+      valueKind = \case
+        R.KValue _ -> True
+        R.KArrow a b -> valueKind a || valueKind b
+        R.KType -> False
+  unless (null (R.dataSignatures d) && isNothing (R.dataKind d)) $
+    Left (ElabError (location (R.dataName d)) "a data type in the GADT style, or with a kind after its parameters: not supported yet")
+  forM_ (R.dataParams d) \(R.DataParam (Located psp p) implicit k) ->
+    when (implicit || maybe False valueKind k) $
+      Left (ElabError psp ("the parameter " <> T.unpack p <> " is implicit or of a value kind: not supported yet"))
   ctors <- forM (R.dataConstructors d) \(Located _ c) -> do
     fields <- forM (R.constructorFields c) \f -> do
       t <- resolved fx f >>= elabType env params
@@ -252,7 +262,7 @@ elabData fx env d = do
       kindOf i = case [n | (j, n) <- arities, j == i] of
         n : _ -> foldr KArrow KType (replicate n KType)
         [] -> KType
-  forM_ (zip [0 :: Int ..] (R.dataParams d)) \(i, (Located psp p, k)) -> case k of
+  forM_ (zip [0 :: Int ..] (R.dataParams d)) \(i, R.DataParam (Located psp p) _ k) -> case k of
     Just kd | kindFrom kd /= kindOf i -> Left (ElabError psp ("the parameter " <> T.unpack p <> " is used at another kind than declared"))
     _ -> pure ()
   pure ([(p, kindOf i) | (i, p) <- zip [0 ..] params], ctors)
@@ -265,6 +275,7 @@ elabData fx env d = do
     kindFrom = \case
       R.KType -> KType
       R.KArrow a b -> KArrow (kindFrom a) (kindFrom b)
+      R.KValue _ -> KType
 
 -- * Classes and instances
 

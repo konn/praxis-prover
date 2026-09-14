@@ -33,6 +33,7 @@ module Language.Praxis.Surface.Syntax.Raw (
   OpenSpec (..),
   Assoc (..),
   DataDecl (..),
+  DataParam (..),
   Constructor (..),
   Kind (..),
   Clause (..),
@@ -122,6 +123,8 @@ data Decl
   = -- | @open T@, @open T using (a, b)@, @open T hiding (a)@
     DOpen !(Located QName) !OpenSpec
   | DData !DataDecl
+  | -- | @type T : kind@: the kind of a data type declared after it
+    DKindSig !(Located Text) !Kind
   | -- | @infixr 4 <>@: associativity, precedence, operators
     DFixity !Assoc !Rational ![Located Text]
   | -- | @name : type@
@@ -172,10 +175,26 @@ data OpenSpec
 data Assoc = AssocLeft | AssocRight | AssocNone
   deriving stock (Show, Eq, Ord)
 
+{- |
+A data type: its name, its parameters, a kind if one follows them, and its
+constructors — after @=@, each a name applied to the types of its fields; or,
+in the GADT style after @where@, each a signature, the type of the
+constructor, whose result is the data type at its parameters and indices.
+-}
 data DataDecl = DataDecl
   { dataName :: !(Located Text)
-  , dataParams :: ![(Located Text, Maybe Kind)]
+  , dataParams :: ![DataParam]
+  , dataKind :: !(Maybe Kind)
   , dataConstructors :: ![Located Constructor]
+  , dataSignatures :: ![(Located Segment, Located Expr)]
+  }
+  deriving stock (Show, Eq)
+
+-- | A parameter of a data type: its name, whether it is implicit, @{n}@, and its kind, if written.
+data DataParam = DataParam
+  { dataParamName :: !(Located Text)
+  , dataParamImplicit :: !Bool
+  , dataParamKind :: !(Maybe Kind)
   }
   deriving stock (Show, Eq)
 
@@ -189,7 +208,8 @@ data Constructor = Constructor
   }
   deriving stock (Show, Eq)
 
-data Kind = KType | KArrow !Kind !Kind
+-- | A kind: @Type@, the kind of types; a value kind, the type of an index, @nat@ or a data type; or an arrow.
+data Kind = KType | KValue !(Located Expr) | KArrow !Kind !Kind
   deriving stock (Show, Eq)
 
 {- |

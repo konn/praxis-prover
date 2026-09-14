@@ -6,7 +6,8 @@ The grammar of the surface language, over the tokens and the layout of
 
 > module   ::= ['module' qname 'where'] {decl}
 > decl     ::= 'open' qname ['using' (names) | 'hiding' (names)]
->            | 'data' Name {param} ['=' ctor {'|' ctor}]
+>            | 'data' Name {param} [':' kind] ['=' ctor {'|' ctor} | 'where' {name ':' expr}]
+>            | 'type' Name ':' kind                     -- the kind of a data type
 >            | 'class' [constraints '=>'] Name name 'where' {name ':' expr}
 >            | 'instance' [name ':'] [constraints '=>'] qname atom 'where' {clause}
 >            | ('infixl' | 'infixr' | 'infix') rational op {op}
@@ -74,7 +75,7 @@ spanned start x = locatedFrom start (pure x)
 -- * Declarations
 
 declP :: Parser (Located Decl)
-declP = located (choice [openP, dataP, classP, instanceP, fixityP, try signatureP, clauseP]) <?> "declaration"
+declP = located (choice [openP, dataP, kindSigP, classP, instanceP, fixityP, try signatureP, clauseP]) <?> "declaration"
 
 openP :: Parser Decl
 openP = do
@@ -95,22 +96,45 @@ nameSegment = do
     QName [] s -> pure (Located sp s)
     _ -> fail "an unqualified name"
 
+{- |
+A data type: @data Name params [: kind]@, then its constructors after @=@, or
+their signatures, laid out or in braces, after @where@, in the GADT style.
+-}
 dataP :: Parser Decl
 dataP = do
   keyword "data"
   n <- identifier
   params <- many paramP
-  ctors <- option [] (symbol "=" *> (ctorP `sepBy1` symbol "|"))
-  pure (DData (DataDecl n params ctors))
+  kind <- optional (symbol ":" *> kindP)
+  (ctors, sigs) <-
+    (keyword "where" *> (([],) <$> block ((,) <$> nameSegment <* symbol ":" <*> exprP)))
+      <|> ((,[]) <$> option [] (symbol "=" *> (ctorP `sepBy1` symbol "|")))
+  pure (DData (DataDecl n params kind ctors sigs))
   where
     paramP =
-      ((,Nothing) <$> identifier)
-        <|> bracketed "(" ")" ((,) <$> identifier <* symbol ":" <*> (Just <$> kindP))
+      ((\x -> DataParam x False Nothing) <$> identifier)
+        <|> bracketed "(" ")" ((\x k -> DataParam x False (Just k)) <$> identifier <* symbol ":" <*> kindP)
+        <|> bracketed "{" "}" ((\x k -> DataParam x True k) <$> identifier <*> optional (symbol ":" *> kindP))
 
+-- | The kind of a data type declared after it: @type Vec : type -> nat -> type@.
+kindSigP :: Parser Decl
+kindSigP = do
+  keyword "type"
+  n <- identifier
+  symbol ":"
+  DKindSig n <$> kindP
+
+{- |
+A kind: @Type@ (also @type@), the kind of types; a value kind, the type of an
+index, @nat@ or a data type applied; or an arrow between kinds.
+-}
 kindP :: Parser Kind
 kindP = foldr1 KArrow <$> (kindAtom `sepBy1` arrowTok)
   where
-    kindAtom = (KType <$ keyword "Type") <|> bracketed "(" ")" kindP
+    kindAtom =
+      (KType <$ (keyword "Type" <|> keyword "type"))
+        <|> bracketed "(" ")" kindP
+        <|> (KValue <$> appP)
 
 {- |
 A constructor: a name applied to the types of its fields, or two types

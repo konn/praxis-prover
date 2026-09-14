@@ -89,6 +89,31 @@ parserTests =
         [map (qnameText . unLocated . fst) (classSupers c) | DClass c <- decls] @?= [[], ["Semigroup"]]
         [(qnameText (unLocated (instanceClass i)), length (instanceClauses i)) | DInstance i <- decls]
           @?= [("Semigroup", 1), ("Monoid", 1), ("Semigroup", 2), ("Monoid", 1)]
+    , testCase "a data type in the GADT style: constructor signatures, and kinds inline or apart" $ do
+        let src =
+              "data Vec a (n : nat) where\n  nil : Vec a 0\n  (:-) : {n: nat} -> a -> Vec a n -> Vec a (S n)\n\
+              \type Vec2 : type -> nat -> type\ndata Vec2 a n where\n  nil2 : Vec2 a 0\n\
+              \data Vec3 : Type -> nat -> Type where\n  nil3 : Vec3 a 0\n\
+              \data SameVec {a} {n} {m} (l : Vec a n) (r : Vec a m) where\n  BothNil : SameVec nil nil\n"
+        m <- either (assertFailure . renderSyntaxError) pure (parseModule "<test>" src)
+        let decls = map unLocated (moduleDecls m)
+        map declKind decls @?= ["data", "kind", "data", "data", "data"]
+        case [k | DKindSig _ k <- decls] of
+          [KArrow KType (KArrow (KValue _) KType)] -> pure ()
+          other -> assertFailure ("the kind signature: " <> show other)
+        case [d | DData d <- decls] of
+          [vec, vec2, vec3, same] -> do
+            map (unLocated . fst) (dataSignatures vec) @?= [Ident "nil", Op ":-"]
+            [unLocated (dataParamName p) | p <- dataParams vec] @?= ["a", "n"]
+            case map dataParamKind (dataParams vec) of
+              [Nothing, Just (KValue (Located _ (EName (QName [] (Ident "nat")))))] -> pure ()
+              other -> assertFailure ("the parameters' kinds: " <> show other)
+            map (unLocated . fst) (dataSignatures vec2) @?= [Ident "nil2"]
+            case dataKind vec3 of
+              Just (KArrow KType (KArrow (KValue _) KType)) -> pure ()
+              other -> assertFailure ("the inline kind: " <> show other)
+            map dataParamImplicit (dataParams same) @?= [True, True, True, False, False]
+          other -> assertFailure ("data declarations: " <> show (length other))
     , testCase "an offside token ends the item" $
         case parseModule "<test>" "f x = x\ng y = y\n" of
           Right m -> length (moduleDecls m) @?= 2
@@ -116,3 +141,4 @@ declKind = \case
   DClause {} -> "clause"
   DClass {} -> "class"
   DInstance {} -> "instance"
+  DKindSig {} -> "kind"
