@@ -54,3 +54,11 @@ length (_ :- xs) = S (length xs)
 
 length-any : (v : Vec a n) -> length v ≡ n
 length-any (x :- xs) = cong (length-any xs)
+
+-- An implicit parameter which no kind after it mentions.
+data Lost {k} (n : nat) where
+  lost : Lost 0
+
+-- An index of a type its kind does not admit.
+bad-kind : Vec a nil -> Nat
+bad-kind v = 0

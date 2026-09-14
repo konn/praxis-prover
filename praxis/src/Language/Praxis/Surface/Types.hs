@@ -127,12 +127,14 @@ the indices they are — a value parameter of the signature, or a variable.
 data TyScope = TyScope
   { tsTypes :: ![Text]
   , tsValues :: ![(Text, Ix)]
+  , tsValueTys :: ![(Text, Ty)]
+  -- ^ the types of the values, by name, where known: what the kinds of indices are checked against
   }
   deriving stock (Show, Eq)
 
 -- | No names.
 emptyScope :: TyScope
-emptyScope = TyScope [] []
+emptyScope = TyScope [] [] []
 
 -- | The parameters a type mentions, by index.
 tyParams :: Ty -> [Int]

@@ -48,6 +48,7 @@ module Language.Praxis.Surface.Env (
   addFunction,
   addTheorem,
   setTheoremIndices,
+  explicitPositions,
   addClass,
   addLaws,
   addInstanceFunction,
@@ -93,6 +94,11 @@ data DataInfo = DataInfo
   -- ^ the types of its indices, in order, for a data type in the GADT style; none otherwise
   , dataIndexFns :: ![QualName]
   -- ^ its index functions, one for each index, @T.#idx@ or @T.#idx-i@
+  , dataImplicits :: ![Bool]
+  {- ^ whether each of its parameters, its type parameters then its indices,
+  is implicit: not written where the type is used, but found from the types
+  of the indices written, by their kinds
+  -}
   }
   deriving stock (Show)
 
@@ -344,14 +350,14 @@ coreOf = mangleGlobal . map segmentText'
 
 -- | Add a data type and its constructors; the type opens a namespace holding them.
 addData :: Env -> Segment -> [(Text, Kind)] -> [(Segment, [Ty])] -> (Env, DataInfo)
-addData env name params ctors = addGadtData env name params [] [] [(c, fs, Nothing) | (c, fs) <- ctors]
+addData env name params ctors = addGadtData env name params [] (map (const False) params) [] [(c, fs, Nothing) | (c, fs) <- ctors]
 
--- | Add a data type whose constructors may be in the GADT style, with the types of its indices and its index functions.
-addGadtData :: Env -> Segment -> [(Text, Kind)] -> [Ty] -> [QualName] -> [(Segment, [Ty], Maybe GadtCtor)] -> (Env, DataInfo)
-addGadtData env name params indices indexFns ctors = (env', info)
+-- | Add a data type whose constructors may be in the GADT style, with the types of its indices, which of its parameters are implicit, and its index functions.
+addGadtData :: Env -> Segment -> [(Text, Kind)] -> [Ty] -> [Bool] -> [QualName] -> [(Segment, [Ty], Maybe GadtCtor)] -> (Env, DataInfo)
+addGadtData env name params indices implicits indexFns ctors = (env', info)
   where
     q = qualify env [name]
-    info = DataInfo q params [CtorInfo (q <> [c]) q i fs (coreOf (q <> [c])) g | (i, (c, fs, g)) <- zip [0 ..] ctors] (coreOf (q <> [Ident "is"])) indices indexFns
+    info = DataInfo q params [CtorInfo (q <> [c]) q i fs (coreOf (q <> [c])) g | (i, (c, fs, g)) <- zip [0 ..] ctors] (coreOf (q <> [Ident "is"])) indices indexFns implicits
     members = Map.fromList [(c, q <> [c]) | (c, _, _) <- ctors]
     env' =
       env
@@ -360,6 +366,13 @@ addGadtData env name params indices indexFns ctors = (env', info)
         , envNamespaces = Map.insertWith Map.union q members (envNamespaces env)
         , envDisplay = Map.union (Map.fromList ((dataIs info, renderQualName (q <> [Ident "is"])) : [(ctorCore c, segmentText (last (ctorQual c))) | c <- dataCtors info])) (envDisplay env)
         }
+
+-- | The positions of a data type's explicit parameters, which a use of it writes: its type parameters', then its indices'.
+explicitPositions :: DataInfo -> ([Int], [Int])
+explicitPositions dd = ([i | i <- [0 .. np - 1], not (implicitAt i)], [j | j <- [0 .. length (dataIndices dd) - 1], not (implicitAt (np + j))])
+  where
+    np = length (dataParams dd)
+    implicitAt i = or (take 1 (drop i (dataImplicits dd)))
 
 -- | Add a function, with its dictionary; it opens a namespace for its lemmas.
 addFunction :: Env -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)

@@ -1788,7 +1788,7 @@ byClauses k info g td pcs = do
       Nothing -> either (\_ -> Left (EngineError (tdSpan td) ("no clause for the constructor " <> T.unpack (renderQualName (ctorQual ctor))))) (Right . closed) (refute k cg)
       Just pc -> do
         let names = [n | (n, _) <- pcVars pc]
-            fieldNames = [n | PCon _ subs <- [pcPatterns pc !! c], PVar (Hint n) <- subs]
+            fieldNames = [fieldName j p | PCon _ subs <- [pcPatterns pc !! c], (j, p) <- zip [0 :: Int ..] subs]
             others = [n | (j, PVar (Hint n)) <- zip [0 ..] (pcPatterns pc), j /= c]
             cg' = introduce fieldNames cg
             cg'' = rename (zip [n | (n, _) <- tdBinders td, n /= binder] others) cg'
@@ -1800,6 +1800,10 @@ byClauses k info g td pcs = do
     matches ctor c pc = case pcPatterns pc !! c of
       PCon (Ref _ r) _ -> r == ctorCore ctor
       _ -> False
+    -- The name a pattern gives the field of the code at a position, or the field's own: by position, since a stored implicit argument has no pattern.
+    fieldName j = \case
+      PVar (Hint n) -> n
+      _ -> "#" <> T.pack (show j)
     dataCtorsOf binder = case lookup binder (tdBinders td) of
       Just (TData dn _ _) -> maybe [] dataCtors (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
       _ -> []

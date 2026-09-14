@@ -167,6 +167,15 @@ value has exactly one index, a primitive recursive function of its code —
 which keeps induction on a value of an indexed type the core's induction on
 one variable, whatever the indices of the value's fields.
 
+The head is a telescope: the type of an index may mention the type
+parameters and the indices before it, `(l : Vec a n)`. An implicit parameter
+of the head, `{n}`, is a type parameter or an index like any other, in the
+types and in the codes; only a use of the type does not write it, and it is
+found by matching the kind of each index written against the index's type,
+one-sided, as an application's implicit arguments are. An index function's
+result is of its index's type erased, `SameVec.#idx-2 : SameVec a → Vec a`,
+the indices of that type being other index functions' results.
+
 ## Functions
 
 `Compile` turns clauses into one prf definition. Functions are type-erased
@@ -309,7 +318,9 @@ connective (`CoreText.propText`):
 
 and terms by `CoreText.termCT`: a variable, a numeral, a constructor or a
 function applied to its arguments, and `S`, `+`, `-`, `*`, `^` as the
-builtins `S`, `add`, `sub`, `mul`, `pow`.
+builtins `S`, `add`, `sub`, `mul`, `pow`. The sides of `≡` and `≠` are of one
+type up to its indices, which the encoding erases: codes are compared, and
+(I) is of the erased type.
 
 A binder of an indexed type, `x : T τ̄ ī`, has besides its membership the
 equation of each index, `T.#idx x = i` (`T.#idx-j x = iⱼ` for several), the

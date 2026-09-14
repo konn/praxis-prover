@@ -297,7 +297,8 @@ tail (_ :- tl) = tl
 
 A parameter of the head is a type parameter or an index, as its kind says:
 `Type` (also `type`), or an arrow of such kinds, for a type; a value kind for
-an index, `nat` or a data type at types of no variable. The kind is given
+an index, `nat` or a data type, which may mention the type parameters and the
+indices before it. The kind is given
 with the parameter, `data Vec a (n : nat) where`; after the parameters,
 `data Vec : type -> nat -> type where`; or in a kind signature before the
 declaration, `type Vec : type -> nat -> type`. Without one, a parameter is an
@@ -305,6 +306,24 @@ index where a constructor's result has a numeral, a successor, arithmetic,
 or a variable of a value type there, and a type parameter otherwise. Type
 parameters come first, and are the same distinct variables in every
 constructor's result: a type is no index.
+
+An implicit parameter of the head, `{n}`, is not written where the type is
+used: the kind of a parameter after it mentions it, and the index written
+there determines it. Its kind is written with it, `{n : nat}`, or found where
+the kinds after it mention it — a type where they have a type, the type of
+the index they have it at otherwise.
+
+```
+data SameVec {a} {n} {m} (l : Vec a n) (r : Vec a m) where
+  BothNil : SameVec nil nil
+  BothCons : {x : a} -> {xs : Vec a n} -> {ys : Vec a m} -> SameVec xs ys -> SameVec (x :- xs) (x :- ys)
+```
+
+`SameVec xs ys` is at the type of the elements of `xs` and at the lengths of
+both, found from their types. A constructor's signature has the head's
+implicit type parameters by their names. A variable standing at an index
+whose type mentions the head's parameters has its type written, `{xs : Vec a
+n}`, in a constructor's signature as in a function's or a theorem's.
 
 A constructor's implicit arguments, `{n : nat}`, come before its fields, and
 a variable its indices mention which nothing binds is one too. The indices
@@ -356,6 +375,15 @@ length-index (x :- xs) = cong (length-index xs)
 
 head-tail : (v : Vec a (S n)) -> v ≡ head v :- tail v
 head-tail (x :- xs) = rfl
+```
+
+Equality compares codes, so its sides may be of one type at different
+indices:
+
+```
+same-eq : {xs : Vec a n} -> {ys : Vec a m} -> (p : SameVec xs ys) -> xs ≡ ys
+same-eq BothNil = rfl
+same-eq (BothCons q) = cong (same-eq q)
 ```
 
 ## Propositions
@@ -449,6 +477,8 @@ functions; implicit value parameters of signatures; matching which refines
 indices, and clauses omitted where their constructor is impossible, justified
 by certified index and closure lemmas; theorems over their values, the
 indices of their binders as hypotheses and the cases these exclude refuted;
+implicit parameters of data types, found from the indices written, and
+indices whose types mention the parameters and the indices before them;
 type ascriptions; `.px` diagnostics.
 Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and
@@ -456,6 +486,6 @@ remaining tactic translations, Σ₁ statements with witness terms, `case` and
 and recursion on `Nat`, overlapping first-match clauses, mutual recursion and
 accumulating parameters, membership checking the fields of nested
 and higher-kinded parameters, and list-literal sugar. For indexed data types:
-implicit parameters of data types, whose kinds depend on others, `data SameVec {a}
-{n} {m} (l : Vec a n) (r : Vec a m)`; explicit implicit arguments, `C {n}`;
-and explicit value binders in the signatures of functions.
+the types of variables at indices of dependent types inferred rather than
+written; explicit implicit arguments, `C {n}`; and explicit value binders in
+the signatures of functions.

@@ -53,3 +53,15 @@ head-tail (x :- xs) = rfl
 -- The index head-tail needs of its argument, found.
 head-tail-two : (w : Vec a (S (S m))) -> w ≡ head w :- tail w
 head-tail-two w = head-tail w
+
+-- Implicit parameters of the head, whose kinds the indices' kinds give: two
+-- lists equal element by element. The type of an index may mention the type
+-- parameters and the indices before it.
+data SameVec {a} {n} {m} (l : Vec a n) (r : Vec a m) where
+  BothNil : SameVec nil nil
+  BothCons : {x : a} -> {xs : Vec a n} -> {ys : Vec a m} -> SameVec xs ys -> SameVec (x :- xs) (x :- ys)
+
+-- Codes are compared: xs and ys are lists of lengths not known to be one.
+same-eq : {xs : Vec a n} -> {ys : Vec a m} -> (p : SameVec xs ys) -> xs ≡ ys
+same-eq BothNil = rfl
+same-eq (BothCons q) = cong (same-eq q)
