@@ -650,11 +650,15 @@ preconditionsAt k g sigma props = fmap mconcat . forM props $ \(l0, r0) -> do
       rewritten = case reverse rewrites of
         (t, _) : _ -> t
         [] -> l
+      -- A hypothesis it is once both are unfolded, as S n < S m is n < m: tried before an
+      -- obligation, whose conclusion may match where its own hypotheses do not.
+      bridged = listToMaybe [b | (h, HProp _) <- goalHyps g, Just b <- [hypothesisBridge k g {goalConcl = Rel RelEq (fromCT l) (fromCT r)} h]]
   if hasEquation g l r
     then Right ""
-    else case (find (concludes l) (knowObligations k), find (concludes rewritten) (knowObligations k)) of
-      (Just (o, _, _, _), _) -> Right ("have " <> equationText l r <> " { exact " <> fromText o <> " }; ")
-      (_, Just (o, _, _, _)) ->
+    else case (bridged, find (concludes l) (knowObligations k), find (concludes rewritten) (knowObligations k)) of
+      (Just b, _, _) -> Right ("have " <> equationText l r <> " { " <> b <> " }; ")
+      (_, Just (o, _, _, _), _) -> Right ("have " <> equationText l r <> " { exact " <> fromText o <> " }; ")
+      (_, _, Just (o, _, _, _)) ->
         Right ("have " <> equationText l r <> " { calc " <> render l <> mconcat [" = " <> render t <> " by cong " <> fromText h | (t, h) <- rewrites] <> " = " <> render r <> " by exact " <> fromText o <> " }; ")
       _ -> Left ("the precondition " <> T.unpack (runBuilder (equationText l r)) <> " is not established here: no hypothesis states it, and no proof the clauses give concludes it")
 

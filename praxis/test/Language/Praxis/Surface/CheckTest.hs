@@ -165,6 +165,8 @@ checkTests =
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero", "NatTheorems.length-replicate", "NatTheorems.double-succ", "NatTheorems.min-succ", "NatTheorems.lt-of-plt", "NatTheorems.plt-not-zero", "NatTheorems.lt-of-succ-lt", "NatTheorems.pos-pred", "NatTheorems.cons-pos"]
         -- An absurd pattern: no constructor can match, and the closure refutes each case.
         assertBool "the closure of absurd-plt" (any (\l -> "absurd" `T.isInfixOf` l && "_x23_closed " `T.isInfixOf` l) (checkedCore c))
+        -- Recursion on three values of Nat under two preconditions, each of the recursive call's a hypothesis once unfolded.
+        assertBool "the indices of plt-trans" ("NatTheorems.plt-trans.#index" `elem` checkedTheorems c)
         -- A function matching on a value of Nat: its closure, by induction on the value.
         assertBool "the closure of replicate" (any ("rule u_NatTheorems_sreplicate_s_x23_closed " `T.isPrefixOf`) (checkedCore c))
         -- Matching on two values of Nat at once: the recursive call's precondition, and m = 0 excluded, each an

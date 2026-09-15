@@ -102,3 +102,16 @@ pos-pred (S k) h = rfl
 cons-pos : (xs : List a) -> 0 < length xs -> 0 < S (length xs)
 cons-pos Nil h = rfl
 cons-pos (Cons x xs) h = rfl
+
+-- The evidence of n < k, from n < m and m < k: recursion on three values of
+-- Nat at once, m given in braces, which the result does not determine. Each
+-- precondition of the recursive call is a hypothesis once unfolded.
+plt-trans : {n m k : nat} -> (n < m) -> (m < k) -> PLt n k
+plt-trans {0} {0} {0} h g = absurd h
+plt-trans {0} {0} {S k} h g = absurd h
+plt-trans {0} {S m} {0} h g = absurd g
+plt-trans {0} {S m} {S k} h g = ZeroSucc
+plt-trans {S n} {0} {0} h g = absurd h
+plt-trans {S n} {0} {S k} h g = absurd h
+plt-trans {S n} {S m} {0} h g = absurd g
+plt-trans {S n} {S m} {S k} h g = SuccSucc (plt-trans {n} {m} {k} h g)
