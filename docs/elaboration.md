@@ -288,10 +288,13 @@ certify what the elaborator concluded.
 ## The definitional-equality discipline
 
 Measured while designing this: `refl` on `app (C x xs) m = <its unfolding>`
-does not finish in minutes. Normalising a term in which a symbolic
+did not finish in minutes. Normalising a term in which a symbolic
 constructor code sits under a projection or a history unrolls the μ-searches
-of `lft`/`rgt` and the history once per successor layer, and the kernel
-compares the exponentially shared residuals as trees. Hence two invariants:
+of `lft`/`rgt` and the history once per successor layer, and the kernel then
+compared the exponentially shared residuals as trees. It now interns them,
+at a cost linear in the DAGs, which took the lemmas of a function matching on
+two values of `Nat` from seconds to milliseconds; the unrolling itself
+remains. Hence two invariants:
 
 1. **Projections are the prelude's `hd`/`tl`**, never the core's `lft`/`rgt`:
    `hd` is a case on its argument, so on a non-successor it is stuck at once

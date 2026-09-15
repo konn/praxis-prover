@@ -43,9 +43,10 @@ rejects every call cycle, so a named definition is primitive recursive by
 construction.
 
 **Invariant (canonical numerals).** A numeral has exactly one spelling:
-`canonicalise` turns `Succ (Lit n)` into `Lit (n+1)` and `Zero` at any arity
-into `Lit 0`, and `Eq`/`Hashable` on terms compare canonical forms. This is
-*not* evaluation: `plus 2 3` is not `5` until definitional equality says so.
+building an application spells `Zero` at any arity as `Lit 0` and the
+successor of `Lit n` as `Lit (n+1)`, so `Succ` survives only in front of a
+term which is not a numeral, and `Eq`/`Hashable` on terms are structural. This
+is *not* evaluation: `plus 2 3` is not `5` until definitional equality says so.
 
 ## Formulas and sequents
 
@@ -104,11 +105,14 @@ reduction proves `x + 1 = 1 + x`; that needs induction. **Budget.** Evaluation
 is metered by `Fuel` (`defaultFuel` = 100 000 steps); running out can only make
 the check fail, never succeed.
 
-A caveat for code generators: fuel bounds steps, not term size. Residuals
-share structure in memory but are compared as trees, so normalising a term
-whose evaluation unrolls μ-searches or histories over a symbolic successor
-can take unbounded time within the budget. The surface language therefore
-never asks for `Defeq` on such terms (see [elaboration.md](elaboration.md)).
+A caveat for code generators: fuel bounds steps, not term size. A residual
+shares a subterm at every level it unrolled, so its tree can be exponentially
+larger than the DAG stored. Equality on terms compares cached hashes first and
+interns both sides when a structural walk exceeds its budget, so comparing two
+residuals costs time linear in the DAGs; but normalising a term whose
+evaluation unrolls μ-searches or histories over a symbolic successor still
+does the unrolling within the budget. The surface language therefore states
+`Defeq` at variables (see [elaboration.md](elaboration.md)).
 
 ## Checking
 
@@ -129,13 +133,15 @@ proof, instantiated and weakened.
 ## The trusted base
 
 Trusted: `Rule/G3i.hs` and the generated checker; the evaluator of
-`PRFCode`/`Program` and `Equality`; `extendKernelEnv`'s closure, arity and
-acyclicity checks; `Proof.Transform`. Everything that *produces* proofs —
-tactics, quasiquoters, the language server, the surface language — is
-untrusted: its output is checked. The surface language produces statements
-too, and the kernel certifies the core statement it is given; that this
-statement means what the surface one says is argued in
-[elaboration.md](elaboration.md), § Statements and their adequacy.
+`PRFCode`/`Program`, `Equality`, and the equality of terms in `Syntax`, which
+interns two terms to compare them when their trees are large;
+`extendKernelEnv`'s closure, arity and acyclicity checks; `Proof.Transform`.
+Everything that *produces* proofs — tactics, quasiquoters, the language
+server, the surface language — is untrusted: its output is checked. The
+surface language produces statements too, and the kernel certifies the core
+statement it is given; that this statement means what the surface one says
+is argued in [elaboration.md](elaboration.md), § Statements and their
+adequacy.
 
 One point of the trust model deserves stating plainly. When a declaration is
 certified by `checkDecl` (see [pra-and-prf.md](pra-and-prf.md)), an appeal to
