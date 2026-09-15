@@ -62,6 +62,7 @@ module Language.Praxis.Surface.Env (
   resolve,
   constructorsNamed,
   dataOfCtor,
+  indexFunctionCores,
   displayName,
 ) where
 
@@ -548,6 +549,16 @@ dataOfCtor :: Env -> CtorInfo -> Maybe DataInfo
 dataOfCtor env c = case Map.lookup (ctorData c) (envGlobals env) of
   Just (GData d) -> Just d
   _ -> Nothing
+
+-- | The core names of a data type's index functions, in order, by its qualified name: none for a type with no indices; Nothing for no data type, or one whose index functions are not all declared.
+indexFunctionCores :: Env -> Text -> Maybe [Text]
+indexFunctionCores env dn = case [d | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn] of
+  d : _ -> traverse core (dataIndexFns d)
+  [] -> Nothing
+  where
+    core q = case Map.lookup q (envGlobals env) of
+      Just (GFun f) -> Just (funCore f)
+      _ -> Nothing
 
 -- | The surface name a core name stands for, when it stands for one.
 displayName :: Env -> Text -> Maybe Text

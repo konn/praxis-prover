@@ -65,7 +65,7 @@ import Language.Praxis.Surface.CoreText (CT (..), isParameter)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
-import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), TheoremInfo (..), renderQualName)
+import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), TheoremInfo (..), indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
 import Language.Praxis.Surface.Mangle (demangle, mangleVariable)
@@ -127,6 +127,8 @@ data Loaded = Loaded
   -- ^ the data types, by the core names of their membership predicates
   , ldMembership :: !(Map Text (Text, [Int]))
   -- ^ the membership predicates, by the qualified names of the data types, with the parameters whose predicates they take
+  , ldIndexEqs :: !(Map Text [(CT, CT)])
+  -- ^ the equations of indices each constructor's branch of its type's membership checks, by its core name, over the positions of its code
   , ldUnfoldings :: !(Map Text [(CT, CT)])
   -- ^ the sides of the unfolding lemmas of each function, by its core name
   , ldBuiltin :: Text -> [Natural] -> Natural
@@ -141,8 +143,16 @@ load path = do
   m <- either (assertFailure . renderSyntaxError) pure (parseModule path src)
   fx <- either (assertFailure . snd . renderFixityError) pure (moduleFixities m)
   let (env, items) = elabModule fx m
-      datas = [d | IData d _ <- items]
-      funs = [fd | IFun fd <- items]
+      datas = [d | IData d _ _ <- items]
+      -- A data type's index functions come with it.
+      funs = concat [fds | IData _ _ fds <- items] <> [fd | IFun fd <- items]
+      -- Each data type encoded after those before it, as the checker encodes them: with the index functions of those, and its own.
+      encodeIn (known, done) d =
+        let self = renderQualName (dataQual d)
+            indexFns dn = if dn == self || Map.member dn known then indexFunctionCores env dn else Nothing
+            e = encodeData (`Map.lookup` known) (const False) indexFns d
+         in (Map.insert self (dataIs d, encodedParams e) known, done <> [e])
+      (membership, encodings) = foldl encodeIn (Map.empty, []) datas
   case [msg | IFailed (ElabError _ msg) <- items] of
     [] -> pure ()
     errs -> assertFailure (unlines errs)
@@ -155,7 +165,8 @@ load path = do
       , ldOrder = map (renderQualName . dataQual) datas
       , ldCtors = Set.fromList [ctorCore c | d <- datas, c <- dataCtors d]
       , ldPredicates = Map.fromList [(dataIs d, d) | d <- datas]
-      , ldMembership = foldl (\acc d -> Map.insert (renderQualName (dataQual d)) (dataIs d, encodedParams (encodeData (`Map.lookup` acc) (const False) d)) acc) Map.empty datas
+      , ldMembership = membership
+      , ldIndexEqs = Map.fromList (concatMap encodedIndexEquations encodings)
       , ldUnfoldings = Map.fromList unfoldings
       , ldBuiltin = builtin
       }
@@ -516,14 +527,19 @@ matchCodes ps vs
 
 {- |
 Shape membership, as the declaration of a data type states it: a
-constructor of the type, and every field of the type itself, or of a data
-type encoded before it, a member in turn.
+constructor of the type, every field of the type itself, or of a data type
+encoded before it, a member in turn, and the equations of indices of the
+constructor's entries holding at the fields of the code.
 -}
 member :: Loaded -> DataInfo -> Code -> Bool
 member ld d = \case
-  CK c fs | Just ci <- find ((== c) . ctorCore) (dataCtors d) -> and (zipWith ok (ctorFields ci) fs)
+  CK c fs | Just ci <- find ((== c) . ctorCore) (dataCtors d) -> and (zipWith ok (ctorFields ci) fs) && all (indexed fs) (Map.findWithDefault [] c (ldIndexEqs ld))
   _ -> False
   where
+    -- An equation of indices, at the fields of a code by their positions.
+    indexed fs (l, r) =
+      let at = Map.fromList [("#" <> T.pack (show p), f) | (p, f) <- zip [0 :: Int ..] fs]
+       in evalCore ld at l == evalCore ld at r
     self = renderQualName (dataQual d)
     earlier = takeWhile (/= self) (ldOrder ld)
     ok t f = case t of

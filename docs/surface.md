@@ -440,6 +440,27 @@ arguments; and a function omitting a constructor has its closure lemma,
 `f.#closed`, under the indices of its arguments, which is how the omission is
 justified.
 
+A constructor makes a value of its type only of entries at the indices its
+signature gives them, and a statement over the type means those values: a
+derivation below is one, not any code whose last step claims what it proves.
+
+```
+data Pf (c : Fm) where
+  Ax : Pf Top
+  Weak : {b : Fm} -> Pf b -> Pf (Imp Top b)
+  Detach : {b : Fm} -> Pf (Imp Top b) -> Pf b
+
+sound : (p : Pf c) -> holds c ≡ T
+sound Ax = rfl
+sound (Weak p) = sound p
+sound (Detach p) = sound p
+```
+
+In the case of `Detach`, that `p` proves `Imp Top b` is a hypothesis of the
+case, and the induction hypothesis at `p` proves the goal once rewritten by
+it and unfolded. Where a constructor is applied, the indices of its entries
+are proved as those of an application's arguments are.
+
 A theorem over values of an indexed type states the indices of its binders:
 `(v : Vec a (S n)) -> v ≡ head v :- tail v` is of the lists whose length is a
 successor, `n` its implicit value parameter, as in a function's signature,
@@ -576,7 +597,8 @@ listed, a lemma applying at any arguments through the closure lemmas of
 functions; instances under contexts; membership predicates taking those of
 a type's parameters; data types in the GADT style indexed by values of `Nat`
 and of data types, their kinds given or inferred, with their index
-functions; implicit value parameters of signatures; matching which refines
+functions, their membership checking the indices of their constructors'
+entries; implicit value parameters of signatures; matching which refines
 indices, and clauses omitted where their constructor is impossible, justified
 by certified index and closure lemmas; theorems over their values, the
 indices of their binders as hypotheses and the cases these exclude refuted;

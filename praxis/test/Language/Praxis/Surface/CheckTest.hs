@@ -149,6 +149,16 @@ checkTests =
         assertBool "the clash of never names n" (any ("S n is a successor, and 0 is not" `T.isInfixOf`) [m | Report _ SevError m <- checkedReports c])
         assertBool "fine is certified" ("GadtBad.fine.#index" `elem` checkedTheorems c)
         assertBool "nothing refused is certified" (not (any (`elem` checkedTheorems c) ["GadtBad.impossible.#index", "GadtBad.tail-zero.#index", "GadtBad.nil-any.#index", "GadtBad.length-any"]))
+    , testCase "an indexed type's membership checks the indices its constructors give their entries: a premise at a computed index" $ do
+        c <- checkFile "test/data/gadt-premises.px"
+        errors c @?= []
+        -- True of derivations only: the case of Detach uses the index of its premise, which the membership gives.
+        assertBool "sound is certified" ("GadtPremises.sound" `elem` checkedTheorems c)
+        -- The predicate checks the index of Detach's premise by Pf's index function, defined before it.
+        assertBool "Pf's predicate checks indices" (any (\l -> "u_GadtPremises_sPf_sis " `T.isPrefixOf` l && "u_GadtPremises_sPf_s_x23_idx" `T.isInfixOf` l) (checkedCore c))
+        -- Building values: each introduction takes the indices of the premises, found from the function's own.
+        let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_GadtPremises_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["detach", "step"]
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
         c <- checkFile "test/data/nat.px"
         errors c @?= []

@@ -83,7 +83,8 @@ import Language.Praxis.Surface.Types
 
 -- | A declaration, elaborated: what the driver encodes, compiles or proves, in order.
 data Item
-  = IData !DataInfo !Span
+  = -- | a data type, with its index functions when it is in the GADT style
+    IData !DataInfo !Span ![FunDef]
   | IFun !FunDef
   | ITheorem !TheoremDef
   | -- | a declaration which did not elaborate; the rest go on without it
@@ -261,9 +262,11 @@ elabModule fx m = walk envData (R.moduleDecls m) []
 -- * Data types
 
 {- |
-A data type: its declaration's item, and, for one in the GADT style — its
-constructors given by their signatures, or its parameters' kinds given — the
-items of its index functions after it, one for each of its indices.
+A data type: its declaration's item, with, for one in the GADT style — its
+constructors given by their signatures, or its parameters' kinds given — its
+index functions, one for each of its indices.  The checker defines them
+before its membership predicate, which checks the indices of its
+constructors' entries by them.
 -}
 elabDataDecl :: Fixities -> Env -> Maybe (Span, R.Kind) -> Span -> R.DataDecl -> Either ElabError (Env, [Item])
 elabDataDecl fx env sig sp d
@@ -281,11 +284,11 @@ elabDataDecl fx env sig sp d
           declare (e, fs) (p, n) = let (e', f) = addInstanceFunction e q (Ident n) (Scheme params [] (TArrow self (erase (indices !! p)))) 1 [] in (e', fs <> [f])
           (env2, fns) = foldl declare (env1, []) (zip [0 ..] fnNames)
       defs <- forM (zip [0 ..] fns) \(p, f) -> indexFunction env2 info fns p f sp
-      pure (foldl (\e fd -> registerUnfoldings (fdInfo fd) (fdClauses fd) e) env2 defs, IData info sp : map IFun defs)
+      pure (foldl (\e fd -> registerUnfoldings (fdInfo fd) (fdClauses fd) e) env2 defs, [IData info sp defs])
   | otherwise = do
       (params, ctors) <- elabData fx env d
       let (env', info) = addData env (Ident (unLocated (R.dataName d))) params ctors
-      pure (env', [IData info sp])
+      pure (env', [IData info sp []])
   where
     gadtStyle =
       not (null (R.dataSignatures d))

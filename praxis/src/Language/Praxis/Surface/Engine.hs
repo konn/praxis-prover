@@ -81,7 +81,7 @@ import Data.Void (absurd)
 import Language.Praxis.Surface.Compile (functionLemma, ownDictionary, ruleBinders)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
-import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), ctorLemma, dataLemma)
+import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), atPositions, ctorLemma, dataLemma)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
@@ -194,6 +194,11 @@ data Knowledge = Knowledge
   {- ^ for each constructor, by its core name, the fields its type's
   membership checks, with their predicates: the conjuncts of its branch of
   the inversion
+  -}
+  , knowIndexEqs :: !(Map Text [(CT, CT)])
+  {- ^ for each constructor, by its core name, the equations of indices its
+  type's membership checks after those, over the positions of its code: the
+  conjuncts of its branch of the inversion after the memberships
   -}
   , knowUnfoldings :: ![Unfolding]
   , knowClosures :: !(Map Text Closure)
@@ -1374,14 +1379,22 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
         | (name, argPs) : _ <- [(gpName gp, ps) | gp <- goalPremises g, Just (place, ps, result) <- [gpClosure gp], place == f, result == p] ->
             Just (afterMemberships [(a, q) | (a, Just q) <- zip (operands t) argPs] [] (const ("exact " <> fromText name)))
       _ -> Nothing
-    -- A constructor applied: its introduction, after the memberships of the fields its type checks.
+    -- A constructor applied: its introduction, after the memberships of the fields its type checks, and the equations of indices of its entries.
     introduced f = \case
       OMember (Pred q ps) (CSym _ args)
         | Just c <- ctorByCore env f
         , Just (isCore, used) <- Map.lookup (renderQualName (ctorData c)) (knowMembership k)
         , q == isCore ->
-            Just (afterMemberships [(args !! j, fieldPredicate used ps fp) | (j, fp) <- Map.findWithDefault [] f (knowMembers k), j < length args] [] (const ("exact " <> fromText (ctorLemma c "intro"))))
+            let at = atPositions (\p -> fromMaybe (CVar "?") (listToMaybe (drop p args)))
+                equations = [(at l, at r) | (l, r) <- Map.findWithDefault [] f (knowIndexEqs k)]
+             in Just case traverse (uncurry indexPremise) equations of
+                  Left why -> Refuse why
+                  Right haves -> afterMemberships [(args !! j, fieldPredicate used ps fp) | (j, fp) <- Map.findWithDefault [] f (knowMembers k), j < length args] [] (const (mconcat haves <> "exact " <> fromText (ctorLemma c "intro")))
       _ -> Nothing
+    -- An equation of indices an introduction takes: at hand, or proved and stated.
+    indexPremise l r
+      | hasEquation g l r = Right ""
+      | otherwise = (\proof -> "have " <> equationText l r <> " { " <> proof <> " }; ") <$> indexEquation k g (goalEquations g) l r
     -- A function applied: its closure lemma, after the memberships of its arguments.
     closedBy f = \case
       OMember p (CSym _ args)
@@ -1608,8 +1621,36 @@ reductionChain k = take 64 . go
       Nothing -> []
 
 {- |
+'reductionChain', and where no unfolding lemma applies, a rewriting by an
+equation among the goal's hypotheses whose left side is an index function
+applied, by the tactic @cong@ with it: the indices a case knows of the
+entries of its constructor, and a statement of its binders.  An equation
+whose right side mentions its left is no rewriting, and the chain is as
+bounded as the other.
+-}
+bridgeChain :: Knowledge -> Goal -> CT -> [(Builder, CT)]
+bridgeChain k g = take 64 . go
+  where
+    fns = indexFunctions k
+    rules = [(h, l, r) | (h, l@(CSym f [_]), r) <- goalEquations g, f `elem` fns, not (occurs l r)]
+    go t = case reductionChain k t of
+      [] -> case [(h, replaceCT (\u -> if u == l then Just r else Nothing) t) | (h, l, r) <- rules, occurs l t] of
+        (h, t') : _ -> ("cong " <> fromText h, t') : go t'
+        [] -> []
+      steps -> steps <> go (snd (last steps))
+    occurs a t =
+      a == t || case t of
+        CSym _ as -> any (occurs a) as
+        _ -> False
+
+-- | The core names of the index functions of the data types known.
+indexFunctions :: Knowledge -> [Text]
+indexFunctions k = [funCore f | GData dd <- Map.elems (envGlobals (knowEnv k)), q <- dataIndexFns dd, Just (GFun f) <- [Map.lookup q (envGlobals (knowEnv k))]]
+
+{- |
 A hypothesis proving the goal once both are unfolded, each the equation the
-core states it as: a calculation from the goal's left side down to what the
+core states it as, and rewritten by the indices the goal's hypotheses state
+('bridgeChain'): a calculation from the goal's left side down to what the
 hypothesis's unfolds to, up to the hypothesis's left side, by it to its right
 side, and on to the goal's.  Nothing when they are the same as they are, or
 differ still once unfolded.
@@ -1621,7 +1662,7 @@ hypothesisBridge k g h = do
   Rel RelEq ha hb <- Just (stripLocations (asEquation p))
   [l, r, a, b] <- either (const Nothing) Just (traverse (termCT CVar) [ga, gb, ha, hb])
   guard (not (l == a && r == b))
-  let chain = reductionChain k
+  let chain = bridgeChain k g
       end t = maybe t snd (listToMaybe (reverse (chain t)))
       down t = [(u, tac) | (tac, u) <- chain t]
       up t = reverse [(u, tac) | ((tac, _), u) <- zip (chain t) (t : map snd (chain t))]
@@ -2055,11 +2096,15 @@ dataInduction k info _ g sp v _ = do
             fieldVar j = fst (fields !! j)
             recursive = [fieldVar j | (j, TData dn _ _) <- zip [0 ..] (ctorFields c), dn == self]
             members = [HMember (fieldPred fp) (fieldVar j) | (j, fp) <- Map.findWithDefault [] (ctorCore c) (knowMembers k)]
+            -- The equations of indices of its entries, which its membership gives after the memberships.
+            atFields = atPositions (CVar . fieldVar)
+            indexEqs = [HProp (Rel RelEq (fromCT (atFields l)) (fromCT (atFields r))) | (l, r) <- Map.findWithDefault [] (ctorCore c) (knowIndexEqs k)]
             ihs = [HProp (at (Var fv)) | fv <- recursive]
-            hyps = members <> ihs <> map snd kept
-            ihCore i = hname (length members + i)
+            hyps = members <> indexEqs <> ihs <> map snd kept
+            before = length members + length indexEqs
+            ihCore i = hname (before + i)
             ihNames = [(if length recursive == 1 then "IH" else "IH" <> T.pack (show i), ihCore i) | i <- [1 .. length recursive]]
-            keptNames = [(s, hname (length members + length ihs + i)) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
+            keptNames = [(s, hname (before + length ihs + i)) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
             vars = [("#" <> T.pack (show j), f) | (j, f) <- zip [0 :: Int ..] fields] <> [(nm, x) | (nm, x) <- goalVars g, fst x /= core]
             concl = at (apps (Global (Ref RefConstructor (ctorCore c))) [Var fv | (fv, _) <- fields])
          in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames) (zip recursive (map ihCore [1 ..])) (goalDict g) (goalPremises g)
@@ -2101,7 +2146,7 @@ dataInduction k info _ g sp v _ = do
       Rel RelEq l _ | (Global (Ref _ f), [_]) <- spine l -> f `elem` indexFns
       _ -> False
 
-    indexFns = [funCore f | GData dd <- Map.elems (envGlobals (knowEnv k)), q <- dataIndexFns dd, Just (GFun f) <- [Map.lookup q (envGlobals (knowEnv k))]]
+    indexFns = indexFunctions k
 
 -- | The parameters of a data type's field types replaced by the type's arguments.
 substTy :: [Ty] -> Ty -> Ty
@@ -2149,10 +2194,12 @@ mkScript k appeal dat isAt fieldPred t memberHyp m motive reverted = do
     m' = CVar m
     ctorApplied c = CSym (ctorCore c) [fieldT j m' | j <- [0 .. length (ctorFields c) - 1]]
     membersOf c = Map.findWithDefault [] (ctorCore c) (knowMembers k)
+    -- The equations of indices of a constructor's entries, at the fields of m.
+    equationsOf c = [(atPositions (`fieldT` m') l, atPositions (`fieldT` m') r) | (l, r) <- Map.findWithDefault [] (ctorCore c) (knowIndexEqs k)]
     disjunct c = do
       let eqT = "(" <> fromText m <> " = " <> render (ctorApplied c) <> ")"
           mems = [membershipText (fieldPred p) (fieldT j m') | (j, p) <- membersOf c]
-      pure (conjunction (eqT : mems))
+      pure (conjunction (eqT : mems <> [equationText l r | (l, r) <- equationsOf c]))
     conjunction = \case
       [x] -> x
       x : xs -> "(" <> x <> " /\\ " <> conjunction xs <> ")"
@@ -2227,9 +2274,11 @@ mkScript k appeal dat isAt fieldPred t memberHyp m motive reverted = do
               <> (if ownCode then "" else "reflect IHd" <> fromDec j <> " as IHr" <> fromDec j <> "; ")
           )
       caseFormula <- formula (motiveAt (fromCT applied))
-      let splitConj h = case mems of
-            [] -> "have Km: (" <> fromText m <> " = " <> render applied <> ") { exact " <> h <> " }; "
-            _ -> "ConjL on " <> h <> " as Km " <> conjNames (length mems) <> "; "
+      -- The equation of the code, then the memberships and the equations of indices, K1 … in order.
+      let conjuncts = length mems + length (equationsOf c)
+          splitConj h = case conjuncts of
+            0 -> "have Km: (" <> fromText m <> " = " <> render applied <> ") { exact " <> h <> " }; "
+            _ -> "ConjL on " <> h <> " as Km " <> conjNames conjuncts <> "; "
           conjNames nm = case nm of
             1 -> "K1"
             _ -> "Kr1; " <> mconcat ["ConjL on Kr" <> fromDec q <> " as K" <> fromDec q <> (if q + 1 == nm then " K" <> fromDec (q + 1) else " Kr" <> fromDec (q + 1)) <> "; " | q <- [1 .. nm - 1]] <> "skip"

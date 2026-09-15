@@ -1,0 +1,40 @@
+module GadtPremises where
+
+-- Truth values, and formulas with their truth.
+data B = T | F
+
+imp : B -> B -> B
+imp T b = b
+imp F b = T
+
+data Fm = Top | Imp Fm Fm
+
+holds : Fm -> B
+holds Top = T
+holds (Imp a b) = imp (holds a) (holds b)
+
+-- Derivations indexed by what they prove.  Detach's premise is at an index
+-- its signature computes, Imp Top b: the membership of Pf checks it, so that
+-- a derivation of b is one, and not any code whose last step claims b.
+data Pf (c : Fm) where
+  Ax : Pf Top
+  Weak : {b : Fm} -> Pf b -> Pf (Imp Top b)
+  Detach : {b : Fm} -> Pf (Imp Top b) -> Pf b
+
+-- True of derivations only: the case of Detach needs the index of its premise.
+sound : (p : Pf c) -> holds c ≡ T
+sound Ax = rfl
+sound (Weak p) = sound p
+sound (Detach p) = sound p
+
+-- Building a derivation: Detach's introduction takes the index of its premise.
+detach : {b : Fm} -> Pf (Imp Top b) -> Pf b
+detach {b} p = Detach p
+
+-- Two premises of two indexed types: the second's index mentions the first's.
+data Chain (c : Fm) where
+  Start : Chain Top
+  Step : {a b : Fm} -> Chain a -> Pf (Imp a b) -> Chain b
+
+step : {a b : Fm} -> Chain a -> Pf (Imp a b) -> Chain b
+step {a} {b} x p = Step x p

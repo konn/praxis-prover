@@ -10,7 +10,9 @@ signature, and every lemma generated for them, and every theorem, is handed
 to the core as a declaration of its concrete syntax and certified by
 'checkDecl' against the lemmas certified before it.  A declaration which
 fails is reported and never becomes a lemma: what comes after it is checked
-without it.
+without it.  A data type in the GADT style has its index functions defined
+between the codes of its constructors and its membership predicate, which
+checks the indices of its constructors' entries by them.
 
 The core is the only judge.  The driver never builds a proof term of its
 own; it reads the core's verdict on the text it generated, which it keeps,
@@ -54,7 +56,7 @@ import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData)
 import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
-import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), renderQualName)
+import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
@@ -156,6 +158,8 @@ data Run = Run
   , runText :: ![Text]
   , runCertified :: ![Text]
   , runMembers :: !(Map Text [(Int, FieldPred)])
+  , runIndexEqs :: !(Map Text [(CT, CT)])
+  -- ^ the equations of indices the branch of each constructor checks, by its core name
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
   , runIndexSpecs :: !(Map Text IndexSpec)
@@ -164,39 +168,86 @@ data Run = Run
   }
 
 runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Core -> [Unfolding] -> [Item] -> Checked
-runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 [] [] [] Map.empty unfoldings0 Map.empty Map.empty []) items)
+runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items)
   where
+    start =
+      Run
+        { runCore = core0
+        , runReports = []
+        , runText = []
+        , runCertified = []
+        , runMembers = Map.empty
+        , runIndexEqs = Map.empty
+        , runUnfoldings = unfoldings0
+        , runClosures = Map.empty
+        , runIndexSpecs = Map.empty
+        , runObligations = []
+        }
     finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r))
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}
     emit t r = r {runText = t : runText r}
 
     step r = \case
       IFailed (ElabError sp msg) -> report sp SevError msg r
-      IData info sp ->
-        let Encoded eqns lemmas members params variadic = encodeData (`Map.lookup` coreMembership (runCore r)) (`Set.member` coreVariadic (runCore r)) info
-            r1 = foldl (flip emit) r eqns
-         in case addDefinitions eqns (runCore r1) of
-              Left err -> report sp SevError ("the encoding of " <> T.unpack (renderQualName (dataQual info)) <> " was rejected: " <> err) r1
-              Right core' ->
-                let core'' =
-                      core'
-                        { coreMembership = Map.insert (renderQualName (dataQual info)) (dataIs info, params) (coreMembership core')
-                        , coreVariadic = (if variadic then Set.insert (dataIs info) else id) (coreVariadic core')
-                        }
-                 in certifyAll sp (r1 {runCore = core'', runMembers = Map.union (Map.fromList members) (runMembers r1)}) lemmas
-      IFun fd -> case compileFunction env fd of
-        Left err -> report (fdSpan fd) SevError (T.unpack (renderQualName (funQual (fdInfo fd))) <> ": " <> err) r
-        Right (Compiled eqns lemmas unfolds) ->
-          let r1 = foldl (flip emit) r eqns
-           in case addDefinitions eqns (runCore r1) of
-                Left err -> report (fdSpan fd) SevError ("the definition of " <> T.unpack (renderQualName (funQual (fdInfo fd))) <> " was rejected: " <> err) r1
-                Right core' ->
-                  let r2 = certifyAll (fdSpan fd) (r1 {runCore = core'}) lemmas
-                      certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
-                   in -- Then what the proofs its clauses give must prove.
-                      let r3 = foldl proveAndCertify (r2 {runUnfoldings = runUnfoldings r2 <> certified}) (fdObligations fd)
-                       in (specify fd (indexed fd (closure fd (r3 {runObligations = obligationFacts r3 fd})))) {runObligations = []}
+      IData info sp fns -> encode info sp fns r
+      IFun fd -> either id (finishFunction fd) (defineFunction fd r)
       ITheorem td -> proveAndCertify r td
+
+    {- A data type: the codes of its constructors; its index functions, by
+    which its membership predicate checks the indices of its constructors'
+    entries; the predicate; and then what the index functions' own lemmas
+    need of the predicate. -}
+    encode info sp fns r =
+      let self = renderQualName (dataQual info)
+          encoded = coreMembership (runCore r)
+          -- The index functions of the data types encoded before, and of this one, defined before its predicate.
+          indexFns dn = if dn == self || Map.member dn encoded then indexFunctionCores env dn else Nothing
+          enc = encodeData (`Map.lookup` encoded) (`Set.member` coreVariadic (runCore r)) indexFns info
+          rejected (r', err) = report sp SevError ("the encoding of " <> T.unpack self <> " was rejected: " <> err) r'
+       in case define (encodedCodes enc) r of
+            Left failure -> rejected failure
+            Right r1 ->
+              let r2 = certifyAll sp r1 (encodedCodeLemmas enc)
+                  (r3, defined) = foldl (\(acc, done) fd -> either (,done) (,done <> [fd]) (defineFunction fd acc)) (r2, []) fns
+               in case define (encodedPredicate enc) r3 of
+                    Left failure -> rejected failure
+                    Right r4 ->
+                      let core = runCore r4
+                          core' =
+                            core
+                              { coreMembership = Map.insert self (dataIs info, encodedParams enc) (coreMembership core)
+                              , coreVariadic = (if encodedVariadic enc then Set.insert (dataIs info) else id) (coreVariadic core)
+                              }
+                          r5 =
+                            r4
+                              { runCore = core'
+                              , runMembers = Map.union (Map.fromList (encodedMembers enc)) (runMembers r4)
+                              , runIndexEqs = Map.union (Map.fromList (encodedIndexEquations enc)) (runIndexEqs r4)
+                              }
+                       in foldl (flip finishFunction) (certifyAll sp r5 (encodedLemmas enc)) defined
+
+    -- Definitions extending the core, emitted first; when the core rejects them, what was emitted and why.
+    define eqns r
+      | null eqns = Right r
+      | otherwise =
+          let r1 = foldl (flip emit) r eqns
+           in either (\err -> Left (r1, err)) (\core -> Right r1 {runCore = core}) (addDefinitions eqns (runCore r1))
+
+    -- A function compiled and defined, its unfolding lemmas certified and its clauses' obligations proved; Left when refused, reported.
+    defineFunction fd r = case compileFunction env fd of
+      Left err -> Left (report (fdSpan fd) SevError (funName fd <> ": " <> err) r)
+      Right (Compiled eqns lemmas unfolds) -> case define eqns r of
+        Left (r1, err) -> Left (report (fdSpan fd) SevError ("the definition of " <> funName fd <> " was rejected: " <> err) r1)
+        Right r1 ->
+          let r2 = certifyAll (fdSpan fd) r1 lemmas
+              certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
+           in -- Then what the proofs its clauses give must prove.
+              Right (foldl proveAndCertify (r2 {runUnfoldings = runUnfoldings r2 <> certified}) (fdObligations fd))
+
+    -- A function's lemmas about its results: its closure, their indices, and the specifications asked of it.
+    finishFunction fd r = (specify fd (indexed fd (closure fd (r {runObligations = obligationFacts r fd})))) {runObligations = []}
+
+    funName fd = T.unpack (renderQualName (funQual (fdInfo fd)))
 
     -- The obligations of a function certified: each lemma's name, its variables, and the equation it concludes.
     obligationFacts r fd =
@@ -216,13 +267,13 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 
             Left (EngineError sp msg) -> report sp SevError msg r
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
-    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r)
+    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r)
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of
-      Left (EngineError sp msg) -> report sp SevError ("internal: the closure of " <> T.unpack (renderQualName (funQual (fdInfo fd))) <> ": " <> msg) r
+      Left (EngineError sp msg) -> report sp SevError ("internal: the closure of " <> funName fd <> ": " <> msg) r
       Right Nothing
-        | not (null (fdImpossible fd)) -> report (fdSpan fd) SevError (T.unpack (renderQualName (funQual (fdInfo fd))) <> ": the membership of its results, under the indices of its arguments, could not be proved") r
+        | not (null (fdImpossible fd)) -> report (fdSpan fd) SevError (funName fd <> ": the membership of its results, under the indices of its arguments, could not be proved") r
         | otherwise -> r
       Right (Just (cl, decls)) -> certifyClosure fd cl r decls
     certifyClosure fd cl r = \case
@@ -239,7 +290,7 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 
       Just s
         | null (ixsPost s) -> r {runIndexSpecs = Map.insert (funCore (fdInfo fd)) s (runIndexSpecs r)}
         | otherwise ->
-            let name = T.unpack (renderQualName (funQual (fdInfo fd)))
+            let name = funName fd
              in case proveSpec (knowledge r) fd (indexSpec s) of
                   Left (EngineError sp msg) -> report sp SevError (name <> ": " <> msg) r
                   Right (Left why) -> report (fdSpan fd) SevError (name <> ": the indices of its result: " <> why) r
@@ -250,7 +301,7 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step (Run core0 
     -- The specifications asked of a function, each proved and certified as a theorem is; a failure is reported.
     specify fd r0 = foldl (specified fd) r0 (specsOf env fd)
     specified fd r s =
-      let name = T.unpack (renderQualName (funQual (fdInfo fd))) <> "." <> T.unpack (specName s)
+      let name = funName fd <> "." <> T.unpack (specName s)
        in case proveSpec (knowledge r) fd s of
             Left (EngineError sp msg) -> report sp SevError (name <> ": " <> msg) r
             Right (Left why) -> report (fdSpan fd) SevError (name <> ": " <> why) r

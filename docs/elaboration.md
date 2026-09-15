@@ -111,29 +111,36 @@ library of praxis-core.
   - a field of a parameter satisfies the parameter's predicate, `pᵢ field`;
   - a field of `T` itself is a member, through the history, `at h k field`;
   - a field of a data type encoded before is a member of it at the
-    predicates of its arguments, `U.is {λ y. V.is {p} y} field`.
+    predicates of its arguments, `U.is {λ y. V.is {p} y} field`;
+  - in a data type in the GADT style, each index of an entry of an indexed
+    type is the one the constructor's signature gives it,
+    `eq (U.#idx-j entry) index` (see Indexed data types below).
 
   Fields of `Nat`, of a higher-kinded parameter, of a later type, or of `T` at
   other arguments are unconstrained. When the predicate takes parameters,
   the lemmas below are rules over them.
 - **`T.#is-def`, `T.#is-beta`** unfold the predicate at a variable, and
   `T.#collapse-i` collapses a dispatch at tag `i` over variables.
-- **Introduction** `C.#intro : 0 < U₁.is x_{j₁}, … |- 0 < T.is (C x̄)`, a
-  hypothesis for each field whose membership the branch of `C` checks: the
-  predicate unfolds at the code (`#is-def`, `#is-beta`), the tag selects the
-  branch (`C.#tag`, `T.#collapse-i`), the shape conjunct is `eqRefl` once the
-  fields are rewritten to the variables (`C.#field-j`), the conjunct of a
-  field of `T` itself is its hypothesis through the history (`histAt` with
-  `C.#lt-j`), and `conjIntro` joins them. By induction on a value, the code of
+- **Introduction** `C.#intro : 0 < U₁.is x_{j₁}, …, U.#idx-j e = i, … |- 0 < T.is (C x̄)`,
+  a hypothesis for each field whose membership the branch of `C` checks and
+  one for each equation of indices it checks: the predicate unfolds at the
+  code (`#is-def`, `#is-beta`), the tag selects the branch (`C.#tag`,
+  `T.#collapse-i`), the shape conjunct is `eqRefl` once the fields are
+  rewritten to the variables (`C.#field-j`), the conjunct of a field of `T`
+  itself is its hypothesis through the history (`histAt` with `C.#lt-j`), an
+  equation's conjunct is its hypothesis by `eqIntro` once the fields are
+  rewritten, and `conjIntro` joins them. By induction on a value, the code of
   every value of `T` is a member — premise (M) of § Adequacy.
 - **Inversion** `T.#inversion : 0 < T.is t |- ⋁ᵢ (t = Cᵢ (fields t) ∧
-  memberships)`, proved by case analysis on the tag with `eqBool`,
-  `collapseT/F`, `conjElim1/2`, `eqElim`, and `histAt` with `C.#lt-j` for the
-  recursive fields. Induction rests on it.
+  memberships ∧ equations of indices)`, proved by case analysis on the tag
+  with `eqBool`, `collapseT/F`, `conjElim1/2`, `eqElim`, and `histAt` with
+  `C.#lt-j` for the recursive fields. Induction rests on it.
 
 Which fields contribute a membership conjunct, and by which predicate, is
-recorded (`encodedMembers`, a `FieldPred` over the type's parameters). It is
-the single source both the inversion and the proof engine read: they cannot
+recorded (`encodedMembers`, a `FieldPred` over the type's parameters), and
+so are the equations of indices each constructor's branch checks
+(`encodedIndexEquations`, over the positions of its code). They are the
+single source both the inversion and the proof engine read: they cannot
 disagree.
 
 **Predicates capturing terms.** A membership predicate of one parameter is a
@@ -154,18 +161,42 @@ one parameter.
 
 **Indexed data types.** A data type in the GADT style is encoded as the data
 type its indices erased: its constructors' codes store their fields and the
-implicit arguments no field determines, and its membership predicate is the
-erased type's, as above. An implicit argument which is an index of a field's
-type — `n` of `(:-) : {n : nat} -> a -> Vec a n -> Vec a (S n)`, the index of
-its tail — is not stored. For each index the declaration generates an index
-function, `Vec.#idx` (`T.#idx-j` for several), a function by clauses as any
-other: at each constructor the index of its result, its fields and its stored
-arguments as they are, the arguments not stored recovered by the index
-functions of the fields' types: `Vec.#idx (x :- xs) = S (Vec.#idx xs)`. So
-`Vec a n` stands for the codes of `Vec a` whose `Vec.#idx` is `n`, and each
-value has exactly one index, a primitive recursive function of its code —
-which keeps induction on a value of an indexed type the core's induction on
-one variable, whatever the indices of the value's fields.
+implicit arguments no field determines. An implicit argument which is an
+index of a field's type — `n` of `(:-) : {n : nat} -> a -> Vec a n -> Vec a (S n)`,
+the index of its tail — is not stored. For each index the declaration
+generates an index function, `Vec.#idx` (`T.#idx-j` for several), a function
+by clauses as any other: at each constructor the index of its result, its
+fields and its stored arguments as they are, the arguments not stored
+recovered by the index functions of the fields' types:
+`Vec.#idx (x :- xs) = S (Vec.#idx xs)`. So each value has exactly one index,
+a primitive recursive function of its code — which keeps induction on a
+value of an indexed type the core's induction on one variable, whatever the
+indices of the value's fields.
+
+Its membership predicate is the erased type's, and it checks indices too
+(`Encode.ctorIndexEquations`): a constructor makes a value of its type only of
+entries at the indices its signature gives them. For each entry of the
+constructor's telescope of an indexed type `U`, and each index of `U`, the
+branch of the constructor has the conjunct `eq (U.#idx-j e) i`: `e` the entry
+— the field at its position, or an implicit argument not stored, the index it
+is recovered by — and `i` the index the entry's type states, over the entries
+likewise. An equation which recovery makes so is left out: `Vec` checks none,
+its tail's index being the `n` recovered from it, but
+`Detach : {b : Fm} -> Pf (Imp Top b) -> Pf b` checks `Pf.#idx p = Imp Top b`
+of its premise `p`. So `Pf c` stands for the codes of the derivations of `c`,
+not of every code whose last step claims `c`. Since the predicate calls the
+index functions, these are defined after the codes of the constructors,
+whose lemmas their unfolding lemmas need, and before the predicate; their
+closure lemmas, which need the predicate, come after it (`Check`). An index of
+a type encoded later is not checked, as a field of such a type is no member.
+
+The inversion gives the equations as hypotheses of each case of an induction,
+which the engine uses as it does the indices a theorem states of its binders:
+to prove the indices an appeal needs, and to rewrite by where a hypothesis or
+the induction hypothesis proves the goal once unfolded
+(`Engine.bridgeChain`). Where a constructor is introduced, the engine proves
+the equations its introduction takes as it proves the indices of an
+application's arguments (`Engine.indexEquation`).
 
 The head is a telescope: the type of an index may mention the type
 parameters and the indices before it, `(l : Vec a n)`. An implicit parameter
@@ -420,9 +451,13 @@ The proof is three inductions over finite objects.
    conclusion.
 
 For a binder of an indexed type, (M) says more: the code of every value of
-`T τ̄ ī` has the indices `ī` by the index functions, by induction on the
-value, since these satisfy their clauses (U), each the index of a
-constructor's result at the indices its fields have. So the equations of
+`T τ̄ ī` has the indices `ī` by the index functions, since these satisfy
+their clauses (U), each the index of a constructor's result at the indices
+its entries have. This and membership are proved together, by one induction
+on the value: the entries of a value `C v̄` are of the types the signature of
+`C` gives them, so by the induction hypothesis they have the indices those
+types state — the equations of indices `C.#intro` takes — and the code of
+`C v̄` is a member, with the indices of the result of `C`. So the equations of
 indices hold at `e∘ρ`. A value parameter replaced by the index of its binder
 quantifies over nothing less: every value has exactly one index, so a
 statement for all values and all the indices they have is one for each value
@@ -438,12 +473,13 @@ nothing would be gained: a formal proof would rest on a semantics written
 down by hand, as this one does.
 
 Membership checks the fields of a type parameter by the parameter's
-predicate. It does not check those of a higher-kinded parameter, of `Nat`,
-of a later type, or of the type itself at other arguments, so it may be
-wider than the codes of a type. It appears only as a hypothesis on a
-theorem's values, where a wider predicate gives the core statement more
-instances, not fewer: sound, and incomplete where a statement needs the
-finer typing.
+predicate, and, at an indexed type, the indices of the constructors'
+entries. It does not check the fields of a higher-kinded parameter, of
+`Nat`, of a later type, or of the type itself at other arguments, nor the
+indices of a later type, so it may be wider than the codes of a type. It
+appears only as a hypothesis on a theorem's values, where a wider predicate
+gives the core statement more instances, not fewer: sound, and incomplete
+where a statement needs the finer typing.
 
 ### Testing the translation
 
@@ -454,8 +490,9 @@ syntax: trees, functions run by their clauses, no codes. The other evaluates
 the core text generated — the statement `Engine.theoremStatement` produces,
 and the sides of the unfolding lemmas — as the certified lemmas describe its
 symbols: constructors as free symbols (I), functions by their unfolding
-lemmas (U), membership by a code's constructor and fields (M and the
-inversion), and the builtins by the kernel's own evaluator. It checks lemma 1
+lemmas (U), membership by a code's constructor, its fields and the equations
+of indices of its entries (M and the inversion), and the builtins by the
+kernel's own evaluator. It checks lemma 1
 for every function, and lemma 2 and the membership hypotheses for every
 statement of `test/data/adequacy.px` — statements true and false, over every
 relation, connective and bounded quantifier — and of `list.px`, `gadt.px`
@@ -672,10 +709,13 @@ asked of members.
 4. The code of every value of a data type is a member at the predicates of
    its type's arguments (`C.#intro`), and membership hypotheses stand only on
    a theorem's values, where a wider predicate only strengthens the
-   statement.
+   statement. At an indexed type membership checks the indices of the
+   constructors' entries, so the index functions are defined before the
+   predicate.
 5. Unfolding lemmas hold for all codes.
 6. The inversion lemma and the engine read the same record of which fields
-   carry memberships.
+   carry memberships, and of which equations of indices each constructor's
+   branch checks.
 7. Declarations are certified in order; a failure is never a lemma; a theorem
    is not in scope in its own proof.
 8. The engine builds text, never proof terms: the core certifies it.
