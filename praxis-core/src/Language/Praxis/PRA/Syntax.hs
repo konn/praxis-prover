@@ -34,10 +34,14 @@ module Language.Praxis.PRA.Syntax (
   compileTerm,
 ) where
 
+import Control.Exception (evaluate)
 import Control.Lens (prism', review)
 import Data.Foldable qualified as Foldable
 import Data.Generics.Labels ()
-import Data.Hashable (Hashable (..))
+import Data.HashMap.Strict qualified as HM
+import Data.Hashable (Hashable (..), hash)
+import Data.IORef
+import Data.IntMap.Strict qualified as IM
 import Data.List qualified as L
 import Data.Multiset (Multiset)
 import Data.Proxy (Proxy (..))
@@ -53,6 +57,8 @@ import Language.Praxis.PRA.PrimitiveRecursion.Code hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Function (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Numeric.Natural
+import System.IO.Unsafe (unsafePerformIO)
+import System.Mem.StableName (StableName, makeStableName)
 
 data Term a where
   Var :: !a -> Term a
@@ -115,33 +121,165 @@ canonicalise (App f xs) = App f (fmap canonicalise xs)
 Equality identifies the spellings 'canonicalise' conflates, so a rule which
 builds @'Lit' 4@ meets a context which spells it @'Succ' ':$' ['Lit' 3]@.  It
 does not reduce: see 'canonicalise'.
+
+Nothing is copied: the spellings are identified on the fly.  A term is stored
+as a DAG — a residual of partial evaluation shares a subterm at every level it
+unrolled — and its tree can be exponentially larger, so a comparison which
+visits more than 'equalityBudget' nodes is settled instead by interning both
+terms ('eqInterned'), at a cost linear in the size of the DAGs.
 -}
 instance (Eq a) => Eq (Term a) where
-  t1 == t2 = eqCanonical (canonicalise t1) (canonicalise t2)
+  s == t = case eqBounded equalityBudget s t of
+    Just equal -> equal
+    Nothing -> eqInterned s t
 
--- | Structural equality, on terms already in canonical form.
-eqCanonical :: (Eq a) => Term a -> Term a -> Bool
-eqCanonical (Var x1) (Var x2) = x1 == x2
-eqCanonical Var {} _ = False
-eqCanonical (Lit n1) (Lit n2) = n1 == n2
-eqCanonical Lit {} _ = False
-eqCanonical (App (f1 :: Function m) xs1) (App (f2 :: Function m') xs2) =
-  case testEquality (sNat @m) (sNat @m') of
-    Nothing -> False
-    Just Refl -> f1 == f2 && V.and (V.zipWith eqCanonical (unsized xs1) (unsized xs2))
-eqCanonical App {} _ = False
+-- | The numeral a term spells, if it is one: a 'Lit', 'Zero' applied, or the successor of a numeral.
+numeralOf :: Term a -> Maybe Natural
+numeralOf = \case
+  Lit n -> Just n
+  Zero :$ _ -> Just 0
+  Succ :$ xs -> (+ 1) <$> numeralOf (sIndex [od|0|] xs)
+  _ -> Nothing
+
+-- | How many nodes a structural comparison visits before it is handed to 'eqInterned'.
+equalityBudget :: Int
+equalityBudget = 50_000
+
+{- |
+Structural equality up to the spelling of numerals, visiting at most the given
+number of nodes; 'Nothing' when they did not suffice.
+-}
+eqBounded :: (Eq a) => Int -> Term a -> Term a -> Maybe Bool
+eqBounded budget s0 t0 = fst <$> go budget s0 t0
+  where
+    go n s t
+      | n <= 0 = Nothing
+      | otherwise = case (s, t) of
+          (Var x, Var y) -> Just (x == y, n - 1)
+          (Lit a, _) -> Just (numeralOf t == Just a, n - 1)
+          (_, Lit b) -> Just (numeralOf s == Just b, n - 1)
+          (Zero :$ _, _) -> Just (numeralOf t == Just 0, n - 1)
+          (_, Zero :$ _) -> Just (numeralOf s == Just 0, n - 1)
+          (App (f :: Function m) xs, App (g :: Function m') ys) -> case testEquality (sNat @m) (sNat @m') of
+            Just Refl | f == g -> args (n - 1) (Foldable.toList xs) (Foldable.toList ys)
+            _ -> Just (False, n - 1)
+          _ -> Just (False, n - 1)
+    args n (x : xs) (y : ys) = do
+      (equal, n') <- go n x y
+      if equal then args n' xs ys else Just (False, n')
+    args n _ _ = Just (True, n)
+
+{- |
+Equality by interning: both terms are entered into one table, structurally
+equal subterms — up to the spelling of numerals — receiving one identity, and a
+subterm reached again through the sharing of the DAG recognised by its stable
+name rather than walked twice.  The cost is linear in the size of the DAGs,
+whatever the size of the trees.  The table is local to the call, which is
+therefore pure.
+-}
+eqInterned :: (Eq a) => Term a -> Term a -> Bool
+eqInterned s t = unsafePerformIO do
+  table <- newTable
+  i <- intern table s
+  j <- intern table t
+  pure (i == j)
+{-# NOINLINE eqInterned #-}
+
+-- | The structure of a term one level deep, over the identities of its subterms.
+data Key
+  = KVar !Int
+  | KLit !Natural
+  | KApp !Int !F.SomeFunction ![Int]
+  deriving (Eq)
+
+instance Hashable Key where
+  hashWithSalt salt = \case
+    KVar i -> hashWithSalt salt (0 :: Int, i)
+    KLit n -> hashWithSalt salt (1 :: Int, n)
+    KApp h _ is -> hashWithSalt salt (2 :: Int, h, is)
+
+data Table a = Table
+  { tableVariables :: !(IORef [(a, Int)])
+  -- ^ the variables met, numbered
+  , tableSeen :: !(IORef (HM.HashMap (StableName (Term a)) Int))
+  -- ^ the identity of every node walked, by its stable name
+  , tableIdentities :: !(IORef (HM.HashMap Key Int))
+  , tableKeys :: !(IORef (IM.IntMap Key))
+  -- ^ the key of each identity
+  }
+
+newTable :: IO (Table a)
+newTable = Table <$> newIORef [] <*> newIORef HM.empty <*> newIORef HM.empty <*> newIORef IM.empty
+
+intern :: (Eq a) => Table a -> Term a -> IO Int
+intern table t0 = do
+  t <- evaluate t0
+  name <- makeStableName t
+  walked <- readIORef (tableSeen table)
+  case HM.lookup name walked of
+    Just i -> pure i
+    Nothing -> do
+      key <- case t of
+        Var x -> KVar <$> variable table x
+        Lit n -> pure (KLit n)
+        Zero :$ _ -> pure (KLit 0)
+        App f xs -> do
+          is <- mapM (intern table) (Foldable.toList xs)
+          spelled <- readIORef (tableKeys table)
+          pure case (f, is) of
+            (Primitive Succ, [i]) | Just (KLit n) <- IM.lookup i spelled -> KLit (n + 1)
+            _ -> KApp (hash f) (F.SomeFunction f) is
+      i <- identity table key
+      modifyIORef' (tableSeen table) (HM.insert name i)
+      pure i
+
+variable :: (Eq a) => Table a -> a -> IO Int
+variable table x = do
+  vs <- readIORef (tableVariables table)
+  case L.lookup x vs of
+    Just i -> pure i
+    Nothing -> do
+      let i = L.length vs
+      writeIORef (tableVariables table) ((x, i) : vs)
+      pure i
+
+identity :: Table a -> Key -> IO Int
+identity table key = do
+  known <- readIORef (tableIdentities table)
+  case HM.lookup key known of
+    Just i -> pure i
+    Nothing -> do
+      let i = HM.size known
+      writeIORef (tableIdentities table) (HM.insert key i known)
+      modifyIORef' (tableKeys table) (IM.insert i key)
+      pure i
 
 infix 6 :$
 
--- | Agrees with '(==)': both work on the canonical form.
+-- | Agrees with '(==)': both work on the canonical form, which neither builds.
 instance (Hashable a) => Hashable (Term a) where
-  hashWithSalt salt = hashCanonical salt . canonicalise
+  hashWithSalt = hashTerm
 
-hashCanonical :: (Hashable a) => Int -> Term a -> Int
-hashCanonical salt (Var x) = hashWithSalt salt (0 :: Int, x)
-hashCanonical salt (Lit n) = hashWithSalt salt (1 :: Int, n)
-hashCanonical salt (App f xs) =
-  V.foldl' hashCanonical (hashWithSalt salt (2 :: Int, f)) (unsized xs)
+hashTerm :: (Hashable a) => Int -> Term a -> Int
+hashTerm salt t = case t of
+  Var x -> hashWithSalt salt (0 :: Int, x)
+  Lit n -> hashWithSalt salt (1 :: Int, n)
+  Zero :$ _ -> hashWithSalt salt (1 :: Int, 0 :: Natural)
+  Succ :$ _ ->
+    -- The layers of successors at once, so that a chain of them is walked once.
+    let (layers, base) = peel 0 t
+     in case numeralOf base of
+          Just n -> hashWithSalt salt (1 :: Int, n + layers)
+          Nothing -> hashTerm (successors layers salt) base
+  App f xs -> V.foldl' hashTerm (hashWithSalt salt (2 :: Int, f)) (unsized xs)
+  where
+    peel :: Natural -> Term a -> (Natural, Term a)
+    peel k = \case
+      Succ :$ xs -> peel (k + 1) (sIndex [od|0|] xs)
+      u -> (k, u)
+    successors :: Natural -> Int -> Int
+    successors 0 acc = acc
+    successors k acc = successors (k - 1) (hashWithSalt acc (2 :: Int, Primitive Succ :: Function 1))
 
 {- | Terms are the syntactic model of the primitive-recursive numerals: an
 application which cannot be reduced is kept as a
