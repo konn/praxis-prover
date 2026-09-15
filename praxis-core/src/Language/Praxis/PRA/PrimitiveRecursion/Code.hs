@@ -1,13 +1,17 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveLift #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.Presburger #-}
 
 module Language.Praxis.PRA.PrimitiveRecursion.Code (
-  PRFCode (..),
+  PRFCode (Zero, Succ, Proj, Comp, Rec),
+  codeHash,
   V,
   evalPRFCode,
   evalPRFCodeM,
@@ -26,7 +30,8 @@ import Data.Type.Equality
 import Data.Type.Natural hiding (Succ, Zero)
 import Data.Type.Ordinal
 import Data.Vector qualified as V
-import Language.Haskell.TH.Syntax (Lift)
+import GHC.Exts (isTrue#, reallyUnsafePtrEquality#)
+import Language.Haskell.TH.Syntax (Lift (..), unTypeCode)
 import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal ()
 import Numeric.Natural
 
@@ -39,39 +44,80 @@ data PRFCode m where
   Zero :: PRFCode k
   Succ :: PRFCode 1
   Proj :: !(Ordinal n) -> PRFCode n
-  Comp :: (KnownNat m) => !(PRFCode m) -> !(V m (PRFCode n)) -> PRFCode n
-  Rec ::
-    -- | Base case: the recursion parameter is zero, given with the fixed arguments.
-    !(PRFCode k) ->
-    -- | Successor step: the recursion parameter first, the result of the previous step second, then the fixed arguments.
-    !(PRFCode (k + 2)) ->
-    PRFCode (k + 1)
+  -- | A composition, with its hash: built only by 'Comp'.
+  CompC :: (KnownNat m) => !Int -> !(PRFCode m) -> !(V m (PRFCode n)) -> PRFCode n
+  -- | A primitive recursion, with its hash: built only by 'Rec'.
+  RecC :: !Int -> !(PRFCode k) -> !(PRFCode (k + 2)) -> PRFCode (k + 1)
 
-deriving instance (KnownNat n) => Show (PRFCode n)
+-- | Composition: @f@ applied to the results of the @gs@, each applied to the arguments.
+pattern Comp :: () => (KnownNat m) => PRFCode m -> V m (PRFCode n) -> PRFCode n
+pattern Comp f gs <- CompC _ f gs
+  where
+    Comp f gs = CompC (V.foldl' (\h g -> hashWithSalt h (codeHash g)) (hashWithSalt (3 :: Int) (codeHash f)) (unsized gs)) f gs
 
-deriving stock instance (KnownNat n) => Lift (PRFCode n)
+{- |
+Primitive recursion on the first argument: the base case is given the fixed
+arguments, and the successor step the recursion parameter, the result of the
+previous step, and then the fixed arguments.
+-}
+pattern Rec :: forall n. () => forall k. (n ~ (k + 1)) => PRFCode k -> PRFCode (k + 2) -> PRFCode n
+pattern Rec g h <- RecC _ g h
+  where
+    Rec g h = RecC (hashWithSalt (hashWithSalt (4 :: Int) (codeHash g)) (codeHash h)) g h
 
+{-# COMPLETE Zero, Succ, Proj, Comp, Rec #-}
+
+{- |
+The hash of a code, cached by the compositions and recursions, so that hashing
+a code costs constant time.
+-}
+codeHash :: PRFCode n -> Int
+codeHash = \case
+  Zero -> 0
+  Succ -> 1
+  Proj i -> hashWithSalt (2 :: Int) (ordToNatural i)
+  CompC h _ _ -> h
+  RecC h _ _ -> h
+
+-- | Whether two codes are one object in memory, and so equal.
+sameCode :: PRFCode n -> PRFCode n -> Bool
+sameCode f g = isTrue# (reallyUnsafePtrEquality# f g)
+
+instance (KnownNat n) => Show (PRFCode n) where
+  showsPrec d = \case
+    Zero -> showString "Zero"
+    Succ -> showString "Succ"
+    Proj i -> showParen (d > 10) (showString "Proj " . showsPrec 11 i)
+    Comp f gs -> showParen (d > 10) (showString "Comp " . showsPrec 11 f . showChar ' ' . showsPrec 11 gs)
+    Rec g h -> showParen (d > 10) (showString "Rec " . showsPrec 11 g . showChar ' ' . showsPrec 11 h)
+
+-- | Lifted through 'Comp' and 'Rec', so that the hashes are computed again where the code is spliced.
+instance (KnownNat n) => Lift (PRFCode n) where
+  lift = unTypeCode . liftTyped
+  liftTyped = \case
+    Zero -> [||Zero||]
+    Succ -> [||Succ||]
+    Proj i -> [||Proj $$(liftTyped i)||]
+    Comp f gs -> [||Comp $$(liftTyped f) $$(liftTyped gs)||]
+    Rec g h -> [||Rec $$(liftTyped g) $$(liftTyped h)||]
+
+-- | Agrees with '(==)': the cached hash.
 instance (KnownNat n) => Hashable (PRFCode n) where
-  hashWithSalt salt Zero = hashWithSalt salt (0 :: Int)
-  hashWithSalt salt Succ = hashWithSalt salt (1 :: Int)
-  hashWithSalt salt (Proj i) = hashWithSalt salt (2 :: Int, ordToNatural i)
-  hashWithSalt salt (Comp f gs) = hashWithSalt salt (3 :: Int, f, V.toList $ unsized gs)
-  hashWithSalt salt (Rec g h) = hashWithSalt salt (4 :: Int, g, h)
+  hashWithSalt salt code = hashWithSalt salt (codeHash code)
 
 instance (KnownNat n) => Eq (PRFCode n) where
-  Zero == Zero = True
-  Zero == _ = False
-  Succ == Succ = True
-  Succ == _ = False
-  Proj i1 == Proj i2 = i1 == i2
-  Proj {} == _ = False
-  Comp (f1 :: PRFCode m) gs1 == Comp (f2 :: PRFCode m') gs2 =
-    case testEquality (sNat @m) (sNat @m') of
-      Nothing -> False
-      Just Refl -> f1 == f2 && gs1 == gs2
-  Comp {} == _ = False
-  Rec g1 h1 == Rec g2 h2 = g1 == g2 && h1 == h2
-  Rec {} == _ = False
+  f == g
+    | sameCode f g = True
+    | otherwise = case (f, g) of
+        (Zero, Zero) -> True
+        (Succ, Succ) -> True
+        (Proj i1, Proj i2) -> i1 == i2
+        (CompC h1 (f1 :: PRFCode m) gs1, CompC h2 (f2 :: PRFCode m') gs2) ->
+          h1 == h2 && case testEquality (sNat @m) (sNat @m') of
+            Nothing -> False
+            Just Refl -> f1 == f2 && gs1 == gs2
+        (RecC h1 g1 s1, RecC h2 g2 s2) -> h1 == h2 && g1 == g2 && s1 == s2
+        _ -> False
 
 {- | A domain in which a 'PRFCode' can be run.
 

@@ -1,6 +1,9 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveLift #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.KnownNat.Solver #-}
 {-# OPTIONS_GHC -fplugin GHC.TypeLits.Presburger #-}
 
@@ -10,7 +13,8 @@ constructed only after checking closure, arities and acyclicity.
 module Language.Praxis.PRA.PrimitiveRecursion.Function (
   DefId (..),
   Function (..),
-  Program (..),
+  Program (Base, Call, Comp, Rec, Opaque),
+  programHash,
   SomeFunction (..),
   Definition (..),
   KernelEnv,
@@ -32,7 +36,7 @@ import Control.Exception (Exception (..))
 import Control.Lens ((^?))
 import Control.Lens.Extras (is)
 import Control.Monad (foldM, unless)
-import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Class qualified as Trans
 import Control.Monad.Trans.Except (ExceptT (..), runExceptT)
 import Data.Functor.Identity (runIdentity)
 import Data.Graph (SCC (..), stronglyConnComp)
@@ -46,9 +50,10 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Type.Equality (testEquality, (:~:) (Refl))
 import Data.Type.Natural (sNat)
+import GHC.Exts (isTrue#, reallyUnsafePtrEquality#)
 import GHC.Generics (Generic)
 import GHC.TypeNats (KnownNat, Nat, natVal, type (+))
-import Language.Haskell.TH.Syntax (Lift)
+import Language.Haskell.TH.Syntax (Lift (..), unTypeCode)
 import Language.Praxis.PRA.PrimitiveRecursion.Code (Evalable (..), PRFCode, V)
 import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
 import Numeric.Natural (Natural)
@@ -75,28 +80,75 @@ data Function n
 data Program n where
   Base :: !(PRFCode n) -> Program n
   Call :: !(DefId n) -> Program n
-  Comp :: (KnownNat m) => !(Program m) -> !(V m (Program n)) -> Program n
-  Rec :: !(Program k) -> !(Program (k + 2)) -> Program (k + 1)
+  -- | A composition, with its hash: built only by 'Comp'.
+  CompC :: (KnownNat m) => !Int -> !(Program m) -> !(V m (Program n)) -> Program n
+  -- | A primitive recursion, with its hash: built only by 'Rec'.
+  RecC :: !Int -> !(Program k) -> !(Program (k + 2)) -> Program (k + 1)
   -- | A call of an 'Abstract' function, which is left as it is.
   Opaque :: !(DefId n) -> Program n
 
-deriving instance (KnownNat n) => Show (Program n)
+-- | Composition: the first program applied to the results of the others, each applied to the arguments.
+pattern Comp :: () => (KnownNat m) => Program m -> V m (Program n) -> Program n
+pattern Comp f xs <- CompC _ f xs
+  where
+    Comp f xs = CompC (foldl' (\h x -> hashWithSalt h (programHash x)) (hashWithSalt (2 :: Int) (programHash f)) (SV.toList xs)) f xs
+
+-- | Primitive recursion on the first argument, as 'PR.Rec': the base case, and the step.
+pattern Rec :: forall n. () => forall k. (n ~ (k + 1)) => Program k -> Program (k + 2) -> Program n
+pattern Rec b s <- RecC _ b s
+  where
+    Rec b s = RecC (hashWithSalt (hashWithSalt (3 :: Int) (programHash b)) (programHash s)) b s
+
+{-# COMPLETE Base, Call, Comp, Rec, Opaque #-}
+
+-- | The hash of a program, cached by the compositions and recursions, so that hashing one costs constant time.
+programHash :: Program n -> Int
+programHash = \case
+  Base code -> hashWithSalt (0 :: Int) (PR.codeHash code)
+  Call ident -> hashWithSalt (1 :: Int) ident
+  CompC h _ _ -> h
+  RecC h _ _ -> h
+  Opaque ident -> hashWithSalt (4 :: Int) ident
+
+-- | Whether two programs are one object in memory, and so equal.
+sameProgram :: Program n -> Program n -> Bool
+sameProgram f g = isTrue# (reallyUnsafePtrEquality# f g)
+
+instance (KnownNat n) => Show (Program n) where
+  showsPrec d = \case
+    Base code -> showParen (d > 10) (showString "Base " . showsPrec 11 code)
+    Call ident -> showParen (d > 10) (showString "Call " . showsPrec 11 ident)
+    Comp f xs -> showParen (d > 10) (showString "Comp " . showsPrec 11 f . showChar ' ' . showsPrec 11 xs)
+    Rec b s -> showParen (d > 10) (showString "Rec " . showsPrec 11 b . showChar ' ' . showsPrec 11 s)
+    Opaque ident -> showParen (d > 10) (showString "Opaque " . showsPrec 11 ident)
 
 deriving instance (KnownNat n) => Show (Function n)
 
-deriving stock instance (KnownNat n) => Lift (Program n)
+-- | Lifted through 'Comp' and 'Rec', so that the hashes are computed again where the program is spliced.
+instance (KnownNat n) => Lift (Program n) where
+  lift = unTypeCode . liftTyped
+  liftTyped = \case
+    Base code -> [||Base $$(liftTyped code)||]
+    Call ident -> [||Call $$(liftTyped ident)||]
+    Comp f xs -> [||Comp $$(liftTyped f) $$(liftTyped xs)||]
+    Rec b s -> [||Rec $$(liftTyped b) $$(liftTyped s)||]
+    Opaque ident -> [||Opaque $$(liftTyped ident)||]
 
 deriving stock instance (KnownNat n) => Lift (Function n)
 
 instance (KnownNat n) => Eq (Program n) where
-  Base x == Base y = x == y
-  Call x == Call y = x == y
-  Comp (f :: Program m) xs == Comp (g :: Program k) ys = case testEquality (sNat @m) (sNat @k) of
-    Just Refl -> f == g && xs == ys
-    Nothing -> False
-  Rec b s == Rec c t = b == c && s == t
-  Opaque x == Opaque y = x == y
-  _ == _ = False
+  f == g
+    | sameProgram f g = True
+    | otherwise = case (f, g) of
+        (Base x, Base y) -> x == y
+        (Call x, Call y) -> x == y
+        (CompC h (f1 :: Program m) xs, CompC h' (g1 :: Program k) ys) ->
+          h == h' && case testEquality (sNat @m) (sNat @k) of
+            Just Refl -> f1 == g1 && xs == ys
+            Nothing -> False
+        (RecC h b s, RecC h' c t) -> h == h' && b == c && s == t
+        (Opaque x, Opaque y) -> x == y
+        _ -> False
 
 instance (KnownNat n) => Eq (Function n) where
   Primitive x == Primitive y = x == y
@@ -105,13 +157,9 @@ instance (KnownNat n) => Eq (Function n) where
   Abstract x == Abstract y = x == y
   _ == _ = False
 
+-- | Agrees with '(==)': the cached hash.
 instance (KnownNat n) => Hashable (Program n) where
-  hashWithSalt salt = \case
-    Base code -> hashWithSalt salt (0 :: Int, code)
-    Call ident -> hashWithSalt salt (1 :: Int, ident)
-    Comp f xs -> hashWithSalt salt (2 :: Int, f, SV.toList xs)
-    Rec b s -> hashWithSalt salt (3 :: Int, b, s)
-    Opaque ident -> hashWithSalt salt (4 :: Int, ident)
+  hashWithSalt salt program = hashWithSalt salt (programHash program)
 
 instance (KnownNat n) => Hashable (Function n) where
   hashWithSalt salt = \case
@@ -261,10 +309,10 @@ evalFunctionM :: forall m n a. (Monad m, KnownNat n, Evalable a) => m Bool -> (f
 evalFunctionM step stuckFunction env fun args = runExceptT (go (functionProgram fun) args)
   where
     go :: (KnownNat k) => Program k -> V k a -> ExceptT KernelError m a
-    go (Base code) xs = lift (PR.evalPRFCodeM step code xs)
+    go (Base code) xs = Trans.lift (PR.evalPRFCodeM step code xs)
     go (Opaque ident) xs = pure (stuckFunction (Abstract ident) xs)
     go code xs =
-      lift step >>= \case
+      Trans.lift step >>= \case
         False -> pure (stuckFunction (programFunction code) xs)
         True -> case code of
           Call ident -> ExceptT (pure (lookupDefinition env ident)) >>= (`go` xs)
@@ -274,7 +322,7 @@ evalFunctionM step stuckFunction env fun args = runExceptT (go (functionProgram 
     recurse b s y xs
       | is _Zero y = go b xs
       | Just y' <- y ^? _Succ =
-          lift step >>= \case
+          Trans.lift step >>= \case
             False -> pure stuck
             True -> do
               z <- recurse b s y' xs
