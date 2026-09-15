@@ -239,6 +239,8 @@ data TheoremInfo = TheoremInfo
   -- ^ the indices of its binders' types: a binder's position, an index function by its core name, and the index over its value parameters
   , thmValues :: ![Text]
   -- ^ its value parameters, by name, which its binders' indices mention
+  , thmProp :: !(Maybe (Scope Int Expr Void))
+  -- ^ its proposition, over its value parameters then its binders, when it has value parameters
   }
   deriving stock (Show)
 
@@ -414,10 +416,10 @@ setFunRuntime runtime (env, info) = (env {envGlobals = Map.insert (funQual info)
     info' = info {funRuntime = runtime}
 
 -- | A theorem's binders' indices and its value parameters, recorded in its information and in the environment.
-setTheoremIndices :: [(Int, Text, Ix)] -> [Text] -> (Env, TheoremInfo) -> (Env, TheoremInfo)
-setTheoremIndices hyps values (env, info) = (env {envGlobals = Map.insert (thmQual info) (GTheorem info') (envGlobals env)}, info')
+setTheoremIndices :: [(Int, Text, Ix)] -> [Text] -> Maybe (Scope Int Expr Void) -> (Env, TheoremInfo) -> (Env, TheoremInfo)
+setTheoremIndices hyps values prop (env, info) = (env {envGlobals = Map.insert (thmQual info) (GTheorem info') (envGlobals env)}, info')
   where
-    info' = info {thmIndexHyps = hyps, thmValues = values}
+    info' = info {thmIndexHyps = hyps, thmValues = values, thmProp = prop}
 
 {- |
 Add a theorem, at the qualified name given, whose core name is derived from
@@ -427,7 +429,7 @@ a top-level one is also a top-level name.
 addTheorem :: Env -> QualName -> [Text] -> [Ty] -> [Slot] -> [Premise] -> Maybe (Scope Int Expr Void) -> (Env, TheoremInfo)
 addTheorem env q binders membered slots premises statement = (env', info)
   where
-    info = TheoremInfo q (coreOf q) binders membered slots premises statement [] []
+    info = TheoremInfo q (coreOf q) binders membered slots premises statement [] [] Nothing
     top = case drop (length (envModule env)) q of
       [n] | take (length (envModule env)) q == envModule env -> Map.insert n q
       _ -> id

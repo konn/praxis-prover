@@ -571,6 +571,17 @@ lt-of-plt ZeroSucc = rfl
 lt-of-plt (SuccSucc p) = lt-of-plt p
 ```
 
+A lemma of the library praxis-core certifies, or of the prelude, is cited by
+its name, applied to hypotheses, which it takes in order: `ltTrans nltm mltk`
+proves `n < k` from `nltm : n < m` and `mltk : m < k`. A name of the module
+comes first.
+
+Where a lemma's conclusion, at its arguments, is the goal once the indices it
+gives their terms are rewritten, the indices each function's lemma states of
+its result rewrite it: `lt-of-plt (plt-trans {n} {m} {k} nltm mltk)` concludes
+the indices of `plt-trans n m k` in order, which are `n` and `k`, so it proves
+`n < k`.
+
 A lemma applies at any arguments of its types: `app-nil (rev xs)` proves
 `app (rev xs) Nil ≡ rev xs`. A value of a data type the lemma quantifies over
 must be a member of that type. For an argument built from constructors and

@@ -162,7 +162,7 @@ checkTests =
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
         c <- checkFile "test/data/nat.px"
         errors c @?= []
-        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero", "NatTheorems.length-replicate", "NatTheorems.double-succ", "NatTheorems.min-succ", "NatTheorems.lt-of-plt", "NatTheorems.plt-not-zero", "NatTheorems.lt-of-succ-lt", "NatTheorems.pos-pred", "NatTheorems.cons-pos"]
+        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero", "NatTheorems.length-replicate", "NatTheorems.double-succ", "NatTheorems.min-succ", "NatTheorems.lt-of-plt", "NatTheorems.plt-not-zero", "NatTheorems.lt-of-succ-lt", "NatTheorems.pos-pred", "NatTheorems.cons-pos", "NatTheorems.lt-trans", "NatTheorems.lt-trans-lib"]
         -- An absurd pattern: no constructor can match, and the closure refutes each case.
         assertBool "the closure of absurd-plt" (any (\l -> "absurd" `T.isInfixOf` l && "_x23_closed " `T.isInfixOf` l) (checkedCore c))
         -- Recursion on three values of Nat under two preconditions, each of the recursive call's a hypothesis once unfolded.

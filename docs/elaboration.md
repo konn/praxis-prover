@@ -556,6 +556,17 @@ engine rewrites by two equations of the library, from left to right:
 (`Prelude.preludeUnfoldings`), which is what the arithmetic of a comparison
 needs, `lt (S n) (S m)` being `lt n m`.
 
+A name no declaration of the module has, which names a lemma the core has
+certified — of the library or of the prelude, whose names are not mangled —
+is cited as it is, `exact ltTrans on H1 H2`, the hypotheses it is applied to
+given in order (`Knowledge.knowLibrary`). A lemma whose conclusion at its
+arguments mentions the index an index function gives a function's result is
+appealed to as a hypothesis, `IxH`, when rewriting those indices by the
+function's index specification (`indexOf`, a conjunct of it for a type of
+several indices) makes it the goal; a calculation takes the goal's sides to
+its (`Engine.indexedAppeal`). The conclusion is the theorem's proposition at
+its arguments and at the value parameters they give (`TheoremInfo.thmProp`).
+
 A lemma applied to arguments, `app-nil (rev xs)`, is appealed to the same
 way, and the core finds its instance. Before the appeal, the engine proves
 each membership the lemma's statement needs at those arguments that no

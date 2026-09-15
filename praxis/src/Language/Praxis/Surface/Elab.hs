@@ -1194,7 +1194,7 @@ elabDecl fx env sp name ty0 clauses = do
           (env0, info0) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (if null values then Just (toScope (fmap B prop)) else Nothing)
           -- The indices of its binders' types, which its statement states of them.
           indexHyps = [(k, fn, x) | (k, (_, TData dn _ xs@(_ : _))) <- zip [0 ..] binderTys, (fn, x) <- zip (indexFnsOf env dn) xs]
-          (env', info) = setTheoremIndices indexHyps (map fst values) (env0, info0)
+          (env', info) = setTheoremIndices indexHyps (map fst values) (if null values then Nothing else Just (toScope (fmap B prop))) (env0, info0)
       -- The implicit parameters a clause may name in braces, in the order the signature has them:
       -- each a value, by its position, or a type, whose name does not matter.
       let declared = map fst implicits
@@ -1608,7 +1608,7 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       obligation (prop, raw) =
         let (l, col) = R.spanStart (location raw)
             q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col))]
-            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map (const TNat) vars) [] [] Nothing [] []
+            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map (const TNat) vars) [] [] Nothing [] [] Nothing
             pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] []
          in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] [(n, TNat) | (n, _) <- vars] (toScope (fmap B (foldr (Arrow . snd) prop own))) [pc] (location raw) [] [] [] (map fst own) []
   pure (FunClause pats vars (toScope (fmap B body)) (R.spanning (location lhs) rsp), map obligation (proofArgs body))

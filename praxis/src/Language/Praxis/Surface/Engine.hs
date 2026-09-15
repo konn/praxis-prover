@@ -73,6 +73,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -214,6 +215,8 @@ data Knowledge = Knowledge
   certified: each lemma's core name, its variables, and the equation it
   concludes, by which the precondition of a call in its clauses holds
   -}
+  , knowLibrary :: !(Set Text)
+  -- ^ the lemmas of the library and the prelude, certified, which a proof may cite by their names
   }
 
 data EngineError = EngineError !Span !String
@@ -449,7 +452,7 @@ proveSpec k fd spec = do
     dict = lemmaDictionary fd
     predicate = lemmaPredicate k dict
     argIs = map predicate (fdArgs fd)
-    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] []
+    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] [] Nothing
     columns = nub [i | fc <- fdClauses fd, (i, p) <- zip [0 ..] (fcPatterns fc), matchedOn p]
     -- An absurd pattern is matched on too: every case there is refuted.
     matchedOn = \case
@@ -850,7 +853,17 @@ indexOf k g eqs t0 = case t0 of
         (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) byArg
         props <- preconditionsAt k g (Map.fromList byArg <> sigma) (ixsProps s)
         mems <- argMemberships k g h args
-        Right (substCT (Map.fromList byArg <> sigma) post, mems <> haves <> props <> "exact " <> fromText (ixsLemma s))
+        let at = substCT (Map.fromList byArg <> sigma)
+            appeal = mems <> haves <> props <> "exact " <> fromText (ixsLemma s)
+            posts = ixsPost s
+            -- A lemma of several indices concludes their conjunction: the one wanted is taken from it.
+            proof = case posts of
+              [_] -> appeal
+              _ ->
+                let conj = foldr1 (\x acc -> "(" <> x <> " /\\ " <> acc <> ")") [equationText (CSym f [t]) (at x) | (f, x) <- posts]
+                    (split, c) = conjunct "IxC" (length posts) (length (takeWhile ((/= fn) . fst) posts))
+                 in "have IxC: " <> conj <> " { " <> appeal <> " }; " <> split <> "exact " <> c
+        Right (at post, proof)
   _ -> Left ("no index is known of " <> T.unpack (runBuilder (render t0)))
 
 {- |
@@ -902,9 +915,14 @@ termPred k g = \case
 
 -- | Whether a hypothesis of the goal states the equation, as the core writes it.
 hasEquation :: Goal -> CT -> CT -> Bool
-hasEquation g l r = any (either (const False) ((== wanted) . runBuilder) . formula) [p | (_, HProp p) <- goalHyps g]
+hasEquation g l r = any same [p | (_, HProp p) <- goalHyps g]
   where
     wanted = runBuilder (equationText l r)
+    -- As the core writes it, or as the equation it is: a comparison n < m states lt n m = 1.
+    same p =
+      either (const False) ((== wanted) . runBuilder) (formula p) || case stripLocations (asEquation p) of
+        Rel RelEq a b -> (termCT CVar a, termCT CVar b) == (Right l, Right r)
+        _ -> False
 
 -- | A core term with variables replaced by the terms given.
 substCT :: Map Text CT -> CT -> CT
@@ -1064,8 +1082,9 @@ termProof k info n g le@(Located sp e) = case e of
     _ -> do
       ev <- evidence k info g le
       -- A hypothesis as it is, an induction hypothesis a recursive call names among them: taken to the goal once both are unfolded, where they differ.
+      -- A lemma at its arguments: taken to the goal once the indices its conclusion gives terms are rewritten, where they differ.
       let bare = T.null (runBuilder (evBefore ev)) && T.null (runBuilder (evAfter ev))
-      pure (closed (fromMaybe (evBefore ev <> exactAppeal ev) (if bare then hypothesisBridge k g (evName ev) else Nothing)))
+      pure (closed (fromMaybe (evBefore ev <> exactAppeal ev) (if bare then hypothesisBridge k g (evName ev) else indexedAppeal k g ev)))
 
 {- |
 What a proof term refers to in the core — a hypothesis, an induction
@@ -1079,10 +1098,65 @@ data Evidence = Evidence
   , evBefore :: !Builder
   , evAfter :: !Builder
   , evEquation :: !(Maybe Builder)
+  , evConclusion :: !(Maybe (Expr Text))
+  -- ^ what a lemma concludes at its arguments, where its value parameters are known there
   }
 
 named :: Text -> Evidence
-named n = Evidence n "" "" Nothing
+named n = Evidence n "" "" Nothing Nothing
+
+{- |
+A lemma's appeal where its conclusion at its arguments is the goal once the
+indices it gives terms are rewritten, by the index specifications of the
+functions applied there: @lt-of-plt (plt-trans …)@ concludes
+@PLt.#idx-0 (plt-trans n m k) < PLt.#idx-1 (plt-trans n m k)@, the goal
+@n < k@.  The appeal stands as a hypothesis, each index is proved, and a
+calculation goes from the goal's side to the conclusion's and on.  Nothing
+where no index is rewritten, or the conclusion is not the goal after all.
+-}
+indexedAppeal :: Knowledge -> Goal -> Evidence -> Maybe Builder
+indexedAppeal k g ev = do
+  c <- evConclusion ev
+  Rel RelEq ca cb <- Just (stripLocations (asEquation c))
+  Rel RelEq ga gb <- Just (stripLocations (asEquation (goalConcl g)))
+  [a, b, l, r] <- either (const Nothing) Just (traverse (termCT CVar) [ca, cb, ga, gb])
+  let found = [(s, e, p) | s <- nub (subtermsOf a <> subtermsOf b), specified s, Right (e, p) <- [indexOf k g (goalEquations g) s], e /= s]
+      names = ["IxA" <> fromDec i | i <- [1 .. length found]]
+      -- A side rewritten an index at a time: each stage that changes, with the equation doing it.
+      stages t = [(u', n) | ((u, u'), n) <- zip (zip (t : map fst (rewrites t)) (map fst (rewrites t))) names, u /= u']
+      rewrites t = drop 1 (scanl (\(u, _) (s, e, _) -> (replaceCT (\x -> if x == s then Just e else Nothing) u, ())) (t, ()) found)
+      end t = foldl (\u (s, e, _) -> replaceCT (\x -> if x == s then Just e else Nothing) u) t found
+      -- From the goal's side back to the conclusion's: the stages of the latter, reversed.
+      backTo t = reverse [(u, n) | (u, (_, n)) <- zip (t : map fst (stages t)) (stages t)]
+  guard (not (null found) && canonical (end a) == canonical l && canonical (end b) == canonical r)
+  cf <- either (const Nothing) Just (formula c)
+  pure
+    ( mconcat ["have " <> n <> ": " <> equationText s e <> " { " <> p <> " }; " | (n, (s, e, p)) <- zip names found]
+        <> ("have IxH: " <> cf <> " { " <> evBefore ev <> exactAppeal ev <> " }; ")
+        <> ("calc " <> render l <> mconcat [" = " <> render u <> " by cong " <> n | (u, n) <- backTo a])
+        <> (" = " <> render b <> " by exact IxH")
+        <> mconcat [" = " <> render u <> " by cong " <> n | (u, n) <- stages b]
+    )
+  where
+    specified = \case
+      CSym fn [CSym h _] | Just s <- Map.lookup h (knowIndexSpecs k) -> isJust (lookup fn (ixsPost s))
+      _ -> False
+
+-- | The conjunct at a position of a hypothesis, a conjunction of so many, nested to the right: the tactic taking it apart, and the conjunct's name.
+conjunct :: Builder -> Int -> Int -> (Builder, Builder)
+conjunct h n j
+  | n <= 1 = ("", h)
+  | j == 0 = (split, h <> "l")
+  | otherwise = let (t, c) = conjunct (h <> "r") (n - 1) (j - 1) in (split <> t, c)
+  where
+    split = "ConjL on " <> h <> " as " <> h <> "l " <> h <> "r; "
+
+-- | A core term and every term in it.
+subtermsOf :: CT -> [CT]
+subtermsOf t =
+  t : case t of
+    CSym _ xs -> concatMap subtermsOf xs
+    _ -> []
 
 -- | The appeal by @exact@, after 'evBefore'.
 exactAppeal :: Evidence -> Builder
@@ -1157,7 +1231,7 @@ evidence k info g le = case spineOf le of
             -- The law's methods, the goal's places for them at j.
             let table = Map.fromList <$> traverse (\(s, r) -> (r,) <$> goalPlace s {slotParam = j}) (zip (lawSlots l) (placeRefs (lawSlots l)))
             eq <- equationOf sp (lawProp l) table typed (length (lawBinders l))
-            Right (Evidence name pre "" eq)
+            Right (Evidence name pre "" eq Nothing)
           Just ty
             | Just h <- headOf ty -> do
                 inst <- maybe (Left (EngineError sp ("no instance of " <> T.unpack (renderQualName (lawClass l)) <> " for " <> T.unpack h))) Right (Map.lookup (lawClass l, h) (envInstances (knowEnv k)))
@@ -1166,17 +1240,37 @@ evidence k info g le = case spineOf le of
           _ -> case [gpName p | p <- goalPremises g, PLaw lq _ <- [gpPremise p], lq == lawQual l] of
             [name] | null args -> Right (named name)
             _ -> Left (EngineError sp ("the law " <> T.unpack (renderQualName (lawQual l)) <> " applies to arguments, whose type gives the instance it is at"))
+      -- A lemma of the library, by its name: applied to hypotheses, which the appeal takes in order.
+      _
+        | QName [] (Ident w) <- q
+        , Set.member w (knowLibrary k) -> do
+            hs <- forM args \case
+              Located _ (R.EName (QName [] (Ident h))) | Just c <- lookup h (goalNames g) -> Right c
+              Located asp _ -> Left (EngineError asp "a lemma of the library is applied to hypotheses, by their names")
+            Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing Nothing)
       _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (R.qnameText q)))
   (Located sp _, _) -> Left (EngineError sp "a proof term: a hypothesis or a lemma, applied")
   where
-    -- The indices a theorem's binders must have, at the arguments given: found, and stated where no hypothesis does.
+    -- The indices a theorem's binders must have, at the arguments given: found, and stated where no hypothesis does; with the value parameters they give.
     indexPremises sp t typed
-      | null (thmIndexHyps t) = Right ""
-      | otherwise = either (Left . EngineError sp) (Right . snd) do
+      | null (thmIndexHyps t) = Right (Map.empty, "")
+      | otherwise = either (Left . EngineError sp) Right do
           args <- traverse (termCT CVar . fst) typed
           let values = map mangleVariable (thmValues t)
               (defined, pre) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
           premisesAt k g (goalEquations g) pre [v | (i, v) <- zip [0 ..] values, i `notElem` map fst defined] (zip (thmBinders t) args)
+    -- What a theorem with value parameters concludes at its arguments: each value parameter the index of an argument, or found from one.
+    conclusionAt t typed sigma = do
+      sc <- thmProp t
+      guard (length typed == length (thmBinders t))
+      args <- either (const Nothing) Just (traverse (termCT CVar . fst) typed)
+      let values = map mangleVariable (thmValues t)
+          (defined, _) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
+          byBinder = Map.fromList (zip (thmBinders t) args)
+          valueTerm i = maybe (Map.lookup (values !! i) sigma) (Just . substCT byBinder) (lookup i defined)
+          nv = length values
+      known <- traverse valueTerm [0 .. nv - 1]
+      pure (snd (implications (instantiate (\i -> if i < nv then fromCT (known !! i) else fst (typed !! (i - nv))) (fmap absurd sc))))
     theorem sp t args
       | thmQual t == thmQual info = named <$> recursive sp args
       | otherwise = do
@@ -1187,13 +1281,13 @@ evidence k info g le = case spineOf le of
                 TParam i [] -> membershipSlot i `elem` thmSlots t
                 _ -> False
           pre <- memberships k g [(arg, e, typePredicate k g ty) | ((arg, (e, ty)), bty) <- zip (zip args typed) (thmMembered t), membered bty]
-          idx <- indexPremises sp t typed
+          (sigma, idx) <- indexPremises sp t typed
           post <- premiseBlocks k g sp t assign
           -- Under a class with laws, the instance is the one the arguments give, stated.
           eq <- case thmStatement t of
             Just sc | any isMembershipSlot (thmSlots t) -> equationOf sp sc (placesAt t assign) typed (length (thmMembered t))
             _ -> Right Nothing
-          Right (Evidence (thmCore t) (pre <> idx) post eq)
+          Right (Evidence (thmCore t) (pre <> idx) post eq (conclusionAt t typed sigma))
     -- The place of the goal's dictionary for a method at one of its type parameters.
     goalPlace s = lookup s (zip (goalDict g) (placeRefs (goalDict g)))
     -- The places of a theorem's dictionary at the instances its arguments give: the goal's at its type parameters, the instances' functions at known types.

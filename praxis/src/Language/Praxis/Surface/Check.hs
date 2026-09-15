@@ -267,7 +267,8 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items
             Left (EngineError sp msg) -> report sp SevError msg r
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
-    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r)
+    -- The lemmas of the library a proof may cite by name: those certified, but the module's own, which are mangled.
+    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"])
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of

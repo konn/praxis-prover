@@ -115,3 +115,12 @@ plt-trans {S n} {0} {0} h g = absurd h
 plt-trans {S n} {0} {S k} h g = absurd h
 plt-trans {S n} {S m} {0} h g = absurd g
 plt-trans {S n} {S m} {S k} h g = SuccSucc (plt-trans {n} {m} {k} h g)
+
+-- n < k from n < m and m < k: lt-of-plt at the evidence plt-trans builds,
+-- its conclusion rewritten by the indices plt-trans's lemma gives its result.
+lt-trans : {n m k : nat} -> n < m -> m < k -> n < k
+lt-trans {n} {m} {k} nltm mltk = lt-of-plt (plt-trans {n} {m} {k} nltm mltk)
+
+-- The same, by the lemma of the library, applied to the hypotheses.
+lt-trans-lib : {n m k : nat} -> n < m -> m < k -> n < k
+lt-trans-lib {n} {m} {k} nltm mltk = ltTrans nltm mltk
