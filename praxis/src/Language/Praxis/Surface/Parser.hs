@@ -187,12 +187,11 @@ signatureP = do
 clauseP :: Parser Decl
 clauseP = DClause <$> clauseBodyP
 
--- | A clause, @lhs = rhs@.
+-- | A clause, @lhs = rhs@; or @lhs@ alone, where a pattern of it is absurd and nothing matches it.
 clauseBodyP :: Parser Clause
 clauseBodyP = do
   lhs <- withStops ["="] [] opsP
-  symbol "="
-  Clause lhs <$> located rhsP
+  Clause lhs <$> located (option RAbsurd (symbol "=" *> rhsP))
 
 -- | Constraints on type variables: @C a@, or @(C a, D b)@.
 constraintsP :: Parser [TyConstraint]
@@ -365,6 +364,7 @@ atomP =
     , located (EName (unqualified (Op "⊥")) <$ symbol "⊥")
     , located (ETuple <$> bracketed "⟨" "⟩" (exprP `sepBy` symbol ","))
     , fmap EName <$> qualifiedName
+    , located (EAbsurd <$ try (symbol "(" *> symbol ")"))
     , located (EParen <$> bracketed "(" ")" exprP)
     ]
     <?> "atom"

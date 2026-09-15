@@ -223,11 +223,13 @@ data Clause = Clause
   }
   deriving stock (Show, Eq)
 
--- | A right side: a tactic proof, a calculation, or an expression, which is a term or a proof term.
+-- | A right side: a tactic proof, a calculation, or an expression, which is a term or a proof term; or none, where a pattern is absurd.
 data Rhs
   = RBy ![Located Tactic]
   | RCalc !Calc
   | RExpr !(Located Expr)
+  | -- | no right side: a clause with an absurd pattern, which nothing matches
+    RAbsurd
   deriving stock (Show, Eq)
 
 -- * Expressions
@@ -237,6 +239,8 @@ data Expr
   | ENat !Natural
   | -- | @_@
     EWildcard
+  | -- | @()@, the absurd pattern: an argument none of whose type's constructors can match
+    EAbsurd
   | -- | @Type@
     EType
   | -- | an application to an explicit argument

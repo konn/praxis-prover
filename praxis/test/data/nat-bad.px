@@ -8,3 +8,23 @@ one-lt m = rfl
 -- A proof matched on as a value: a proposition has no constructors.
 prop-arg : {n m : nat} -> (n < m) -> Nat
 prop-arg (S k) = 0
+
+data PLt (n : nat) (m : nat) where
+  ZeroSucc : {m : nat} -> PLt 0 (S m)
+  SuccSucc : {n m : nat} -> PLt n m -> PLt (S n) (S m)
+
+-- An absurd pattern where a constructor can match: ZeroSucc, at PLt 0 1.
+not-absurd : {n : nat} -> PLt n 1 -> Nat
+not-absurd ()
+
+-- An absurd pattern with a right side.
+absurd-rhs : {n : nat} -> PLt n 0 -> Nat
+absurd-rhs () = 0
+
+-- A clause without a right side, and no absurd pattern.
+no-rhs : Nat -> Nat
+no-rhs n
+
+-- The absurd pattern as a term.
+unit-term : Nat
+unit-term = ()

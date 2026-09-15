@@ -278,8 +278,12 @@ parameters and the constructor's implicit arguments the variables to solve
 (`Index.unifyIx`): a clash refuses the clause, and so does an index a function
 computes, which unification cannot see into. A constructor the clauses omit
 must clash there; `FunDef.fdImpossible` records it, and `Compile` gives its
-branch of the dispatch `0`, and it no unfolding lemma. None of this is
-trusted: the closure and index lemmas certify what the elaborator concluded.
+branch of the dispatch `0`, and it no unfolding lemma. An absurd pattern,
+`()`, is checked alike: every constructor must clash there. Its clause has
+no right side and is the only one, so the function compiles to the constant
+`0`, never reached, while its lemmas, and a theorem, split on that argument
+and refute every case. None of this is trusted: the closure and index lemmas
+certify what the elaborator concluded.
 
 ## The definitional-equality discipline
 

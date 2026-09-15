@@ -36,7 +36,9 @@ function's value parameters then its arguments, a constructor's implicit
 arguments then its fields — so that a function which omits a constructor
 impossible at its indices is only applied where it is defined, and each
 equation of indices a statement has holds of the codes of its values, as
-its memberships do.
+its memberships do.  A telescope whose types have no values at the indices
+they ask — a statement over none, as one over @PLt n 0@ — is vacuous: taken
+as passing, and labelled so, when fifty tries find no values.
 -}
 module Language.Praxis.Surface.AdequacyTest (adequacyTests) where
 
@@ -63,7 +65,7 @@ import Language.Praxis.Surface.CoreText (CT (..), isParameter)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
-import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), renderQualName)
+import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), TheoremInfo (..), renderQualName)
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
 import Language.Praxis.Surface.Mangle (demangle, mangleVariable)
@@ -72,7 +74,7 @@ import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), normIx)
 import Numeric.Natural (Natural)
-import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, elements, forAll, ioProperty, scale, sized, (===))
+import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, elements, forAll, ioProperty, label, scale, sized, (===))
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
 import Test.Tasty.QuickCheck (testProperty)
@@ -340,6 +342,7 @@ matchAll ps vs = concat <$> sequence (zipWith match ps vs)
     match p v = case (p, v) of
       (PVar _, _) -> Just [v]
       (PWild, _) -> Just []
+      (PAbsurd, _) -> Just []
       (PCon (Ref _ c) qs, VCon c' ws) | c == c' -> matchAll qs ws
       (PNat n, VNat m) | n == m -> Just []
       (PSucc q, VNat m) | m > 0 -> match q (VNat (m - 1))
@@ -561,8 +564,8 @@ its value parameters first: those it takes at runtime lead its arguments.
 -}
 propFunction :: Loaded -> FunDef -> Property
 propFunction ld fd =
-  forAll (tries 20 (genTele ld Map.empty (valueTys <> explicitTys))) \case
-    Nothing -> counterexample (T.unpack core <> ": no well-typed arguments found") False
+  forAll (tries 50 (genTele ld Map.empty (valueTys <> explicitTys))) \case
+    Nothing -> label ("vacuous, no arguments: " <> T.unpack core) True
     Just entries ->
       let values = [entries Map.! i | i <- [0 .. length valueTys - 1]]
           vs = [values !! i | i <- funRuntime info] <> [entries Map.! (length valueTys + j) | j <- [0 .. length explicitTys - 1]]
@@ -593,8 +596,8 @@ propStatement ld td = case theoremStatement (ldMembership ld) td of
           (memberships, rest) = partition (isMembership ld) hyps
           (indexEqs, props) = partition isIndexEquation rest
           entries = tdValues td <> tdBinders td
-       in forAll (tries 20 (genTele ld Map.empty (map snd entries))) \case
-            Nothing -> counterexample (T.unpack text <> ": no well-typed values found") False
+       in forAll (tries 50 (genTele ld Map.empty (map snd entries))) \case
+            Nothing -> label ("vacuous, no values: " <> T.unpack (renderQualName (thmQual (tdInfo td)))) True
             Just values ->
               let vs = Map.elems values
                   (as, c) = implications (instantiate (Var . (vs !!)) (fmap absurd (tdProp td)))

@@ -79,3 +79,11 @@ plt-of-lt {n} {0} h = absurd h
 lt-of-plt : {n m : nat} -> PLt n m -> (n < m)
 lt-of-plt ZeroSucc = rfl
 lt-of-plt (SuccSucc p) = lt-of-plt p
+
+-- No evidence has 0 as its right index: the absurd pattern, (), is the only
+-- clause, no constructor able to match there, and each case is refuted.
+plt-not-zero : {n : nat} -> PLt n 0 -> ⊥
+plt-not-zero ()
+
+absurd-plt : {n : nat} -> PLt n 0 -> a
+absurd-plt ()

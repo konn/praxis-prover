@@ -119,6 +119,8 @@ places = fmap concat . traverse one . zip [0 ..]
       -- 0 binds nothing; the successor its predecessor, the one field of a value of Nat.
       PNat 0 -> Right []
       PSucc sub -> field (0, sub)
+      -- An absurd pattern binds nothing: the clause is never reached.
+      PAbsurd -> Right []
       _ -> Left "a numeral other than 0 in a pattern: write it S n"
     field (j, p) = case p of
       PVar _ -> Right [Field j]
@@ -556,6 +558,7 @@ compileFunction env fd = do
     isVar = \case
       PVar _ -> True
       PWild -> True
+      PAbsurd -> True
       _ -> False
     position xs i = length (takeWhile (/= i) xs)
     lastOf d = \case

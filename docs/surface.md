@@ -97,7 +97,7 @@ line is a block whose first item is the first term. A step is
 | data type | `data Term r f v = FVar v \| BVar nat \| App (f (Formula r f v) (Term r f v))` |
 | fixity | `infixr 4 <>`, `infixl 6.5 +++`, `infix 9/2 ~~` |
 | signature | `name : type` |
-| clause | `lhs = rhs` |
+| clause | `lhs = rhs`, or `lhs` alone where a pattern is absurd, `()` |
 | class | `class Semigroup a => Monoid a where`, and the signatures of its methods |
 | instance | `instance Monoid Nat where`, and the clauses of its methods |
 
@@ -412,6 +412,22 @@ Matching a constructor refines what a clause knows: `(_ :- tl)` against
 indices clash with those of the argument's type — `nil`, of length 0, at
 `S n` — can never match there: its clause may be omitted, and a clause for it
 is refused. Every other constructor must have its clause.
+
+Where no constructor can match an argument, the absurd pattern `()` stands
+for it, and its clause has no right side, since nothing matches it:
+
+```
+plt-not-zero : {n : nat} -> PLt n 0 -> ⊥
+plt-not-zero ()
+
+absurd-plt : {n : nat} -> PLt n 0 -> a
+absurd-plt ()
+```
+
+Each constructor's result must clash with the indices there; one which may
+match makes the pattern not absurd. An absurd clause is its function's or
+theorem's only clause, for now, and stands for a whole argument, not a field
+of one. The function's lemmas, and the theorem, refute each case.
 
 A type may be ascribed to a term, `(e : T)`, `T` a type in the scope of the
 enclosing signature; a variable at an index of it which nothing binds stands

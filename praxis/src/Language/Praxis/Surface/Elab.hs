@@ -1189,6 +1189,9 @@ elabDecl fx env sp name ty0 clauses = do
           indexHyps = [(k, fn, x) | (k, (_, TData dn _ xs@(_ : _))) <- zip [0 ..] binderTys, (fn, x) <- zip (indexFnsOf env dn) xs]
           (env', info) = setTheoremIndices indexHyps (map fst values) (env0, info0)
       pcs <- forM clauses \c -> runTC (elabProofClause fx env (map snd binderTys) c)
+      case [psp | length pcs > 1, ProofClause ps _ _ psp <- pcs, PAbsurd `elem` ps] of
+        asp : _ -> Left (ElabError asp "an absurd clause is its theorem's only clause, for now")
+        [] -> pure ()
       pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises values [] indexHyps))
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
@@ -1222,6 +1225,9 @@ elabDecl fx env sp name ty0 clauses = do
           obligations = concatMap snd clauseResults
           (used, fcs) = pruneDictionary info1 fcs1
           (env2, info) = setFunProofs proofs (setFunRuntime runtime (addFunction env name scheme (length args) used))
+      case [fcSpan fc | length fcs > 1, fc <- fcs, PAbsurd `elem` fcPatterns fc] of
+        asp : _ -> Left (ElabError asp "an absurd clause is its function's only clause, for now")
+        [] -> pure ()
       impossible <- coverage (runtimeTys <> args) fcs
       pure (registerUnfoldings info fcs env2, IFun (FunDef info (runtimeTys <> args) result fcs sp impossible obligations))
   where
@@ -1231,7 +1237,7 @@ elabDecl fx env sp name ty0 clauses = do
     {- The constructors no clause matches, where the clauses match on a value
     of a data type in the GADT style: each must be impossible at the indices
     of the argument's type, its result's indices clashing with them. -}
-    coverage args fcs = case nub [i | fc <- fcs, (i, PCon {}) <- zip [0 ..] (fcPatterns fc)] of
+    coverage args fcs = case nub [i | fc <- fcs, (i, p) <- zip [0 ..] (fcPatterns fc), splits p] of
       [c]
         | TData dn _ idxs@(_ : _) <- args !! c
         , dd : _ <- [dd | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn] -> do
@@ -1242,6 +1248,11 @@ elabDecl fx env sp name ty0 clauses = do
                 _ -> Left (ElabError sp ("the clauses of " <> T.unpack (segmentText name) <> " miss the constructor " <> T.unpack (segmentText (last (ctorQual ci))) <> ", which can match there"))
               Nothing -> pure Nothing
       _ -> pure []
+    -- A pattern splitting its argument: a constructor, or the absurd pattern, which no constructor matches.
+    splits = \case
+      PCon {} -> True
+      PAbsurd -> True
+      _ -> False
 
 -- | Constraints in front of a type, @C a => …@: the constraints, and the type under them.
 constraintsOf :: Located R.Expr -> ([R.TyConstraint], Located R.Expr)
@@ -1426,6 +1437,7 @@ unfoldingNames env rows = [if length (filter (== n) names) > 1 then n <> "-" <> 
     variable = \case
       PVar _ -> True
       PWild -> True
+      PAbsurd -> True
       _ -> False
     shape = \case
       PCon (Ref _ core) _ -> maybe core (\c -> case last (ctorQual c) of Ident t -> t; Op t -> t) (ctorByCore env core)
@@ -1559,7 +1571,13 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
   -- What matching concluded of the signature's value parameters holds in the body.
   let scope = envScope env
       envBody = env {envScope = scope {tsValues = [(v, applyIx refined x) | (v, x) <- tsValues scope]}}
+  -- A clause with an absurd pattern has no right side, and is never reached: its code is 0.
+  when (any nestedAbsurd pats) $ failAt (location lhs) "an absurd pattern, (), stands for a whole argument, for now"
   body <- case rhs of
+    R.RAbsurd
+      | PAbsurd `elem` pats -> pure (Nat 0)
+      | otherwise -> failAt (location lhs) "a clause needs a right side, = …, unless one of its patterns is absurd, ()"
+    _ | PAbsurd `elem` pats -> failAt rsp "a clause with an absurd pattern, (), has no right side: nothing matches it"
     R.RExpr e -> do
       e' <- liftE (resolved fx e)
       checkTerm envBody (funSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' (applyTy refined result)
@@ -1598,7 +1616,21 @@ elabProofClause fx env binderTys (R.Clause lhs0 rhs) = do
   unless (length explicit == length binderTys) $
     failAt (location lhs) ("the theorem quantifies over " <> show (length binderTys) <> " values")
   (pats, vars, _) <- patterns env (zip binderTys explicit)
+  -- A clause with an absurd pattern has no right side: no case of it is to be proved.
+  when (any nestedAbsurd pats) $ failAt (location lhs) "an absurd pattern, (), stands for a whole argument, for now"
+  let Located _ r = rhs
+  case (PAbsurd `elem` pats, r) of
+    (False, R.RAbsurd) -> failAt (location lhs) "a clause needs a right side, = …, unless one of its patterns is absurd, ()"
+    (True, _) | r /= R.RAbsurd -> failAt (location rhs) "a clause with an absurd pattern, (), has no right side: nothing matches it"
+    _ -> pure ()
   pure (ProofClause pats vars rhs (R.spanning (location lhs) (location rhs)))
+
+-- | An absurd pattern under a constructor or a successor: it stands for a whole argument, for now.
+nestedAbsurd :: Pattern -> Bool
+nestedAbsurd = \case
+  PCon _ ps -> any (\p -> p == PAbsurd || nestedAbsurd p) ps
+  PSucc p -> p == PAbsurd || nestedAbsurd p
+  _ -> False
 
 {- |
 Patterns against the types of the arguments, and the variables they bind,
@@ -1640,6 +1672,21 @@ elabPattern :: Env -> Subst -> Ty -> Located R.Expr -> TC (Pattern, [(Text, Ty)]
 elabPattern env s expected le@(Located sp e) = case e of
   R.EParen x -> elabPattern env s expected x
   R.EWildcard -> pure (PWild, [], s)
+  -- The absurd pattern: a value of a data type none of whose constructors can match here, the indices of each's result clashing with those expected.
+  R.EAbsurd -> case expected of
+    TData dn _ idxs
+      | dd : _ <- [dd | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn] -> do
+          let (line, col) = R.spanStart sp
+              ghost en = IxVar ("#" <> teName en <> "@" <> T.pack (show line) <> ":" <> T.pack (show col))
+              possible ci = case ctorGadt ci of
+                Just g | not (null idxs) -> case unifyAll flexibleKey (zip idxs (map (instValues (map ghost (gcTele g))) (gcResult g))) s of
+                  Clash _ -> False
+                  _ -> True
+                _ -> True
+          case filter possible (dataCtors dd) of
+            ci : _ -> failAt sp ("not absurd: the constructor " <> T.unpack (segmentText (last (ctorQual ci))) <> " may match here")
+            [] -> pure (PAbsurd, [], s)
+    _ -> failAt sp "an absurd pattern, (), is of a data type none of whose constructors can match there"
   R.ENat n -> do
     _ <- agree env sp expected TNat
     pure (PNat n, [], s)
@@ -1809,6 +1856,7 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
   R.EIf {} -> failAt sp "if is not supported yet"
   R.ECase {} -> failAt sp "case is not supported yet"
   R.ELam {} -> failAt sp "a λ: functions are not values here"
+  R.EAbsurd -> failAt sp "(), the absurd pattern, is no term: it stands for an argument no constructor can match"
   _ -> do
     let (hd, args0) = rawArgs le
         (imps, args, late) = splitImplicits args0

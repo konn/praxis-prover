@@ -134,6 +134,8 @@ data Pattern
   | PCon !Ref ![Pattern]
   | PNat !Natural
   | PSucc !Pattern
+  | -- | @()@: a value none of whose type's constructors can match, at the indices there
+    PAbsurd
   deriving stock (Show, Eq)
 
 {- |
@@ -360,6 +362,7 @@ patternHints = \case
   PCon _ ps -> concatMap patternHints ps
   PNat _ -> []
   PSucc p -> patternHints p
+  PAbsurd -> []
 
 -- * Binding
 

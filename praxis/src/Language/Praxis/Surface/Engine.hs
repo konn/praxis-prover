@@ -443,10 +443,12 @@ proveSpec k fd spec = do
     argIs = map predicate (fdArgs fd)
     thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] []
     columns = nub [i | fc <- fdClauses fd, (i, p) <- zip [0 ..] (fcPatterns fc), matchedOn p]
+    -- An absurd pattern is matched on too: every case there is refuted.
     matchedOn = \case
       PCon {} -> True
       PNat _ -> True
       PSucc _ -> True
+      PAbsurd -> True
       _ -> False
     pds = specPremises spec (knowEnv k) dict
     caseProof g =
@@ -995,6 +997,8 @@ proveRhs k info n g (Located sp rhs) = case rhs of
   R.RBy tacs -> runTactics k info n g sp tacs
   R.RCalc c -> calcProof k info n g sp c
   R.RExpr e -> termProof k info n g e
+  -- A clause with an absurd pattern: no case of it is proved, each refuted instead.
+  R.RAbsurd -> Left (EngineError sp "internal: a clause with an absurd pattern has no right side to prove")
 
 -- | A proof term as a proof of the goal: a hypothesis, the induction hypothesis a recursive call names, a lemma; or a proof.
 termProof :: Knowledge -> TheoremInfo -> Counter -> Goal -> Located R.Expr -> Either EngineError Out
@@ -2312,11 +2316,12 @@ byClauses k info g td pcs = do
   out <- finish outs
   pure (outTactic out, outAux out)
   where
-    -- A pattern cases are told apart by: a constructor, 0, or a successor.
+    -- A pattern cases are told apart by: a constructor, 0, or a successor; or an absurd one, which no case fits, each refuted.
     matchesOn = \case
       PCon {} -> True
       PNat _ -> True
       PSucc _ -> True
+      PAbsurd -> True
       _ -> False
     -- The name a pattern gives the field of the code at a position, or the field's own: by position, since a stored implicit argument has no pattern.
     fieldName j = \case
