@@ -152,6 +152,10 @@ data ProofClause = ProofClause
   , pcVars :: ![(Text, Ty)]
   , pcRhs :: !(Located R.Rhs)
   , pcSpan :: !Span
+  , pcValueNames :: ![Maybe Text]
+  -- ^ the names it gives the theorem's implicit values, in braces, in order; none for @_@
+  , pcHypNames :: ![Maybe Text]
+  -- ^ the names it gives the leading hypotheses of the theorem's proposition, after the patterns of its values; none for @_@
   }
 
 -- * Errors
@@ -806,7 +810,7 @@ elabInstance fx env sp idl = do
           q = iq <> [lawSeg]
           (e1, info) = addTheorem e q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (Just (toScope (fmap B prop)))
           e2 = addNamespaceMember iq lawSeg q e1
-      pcs <- forM mine \c -> runTC (elabProofClause fx e2 (map snd binderTys) c)
+      pcs <- forM mine \c -> runTC (elabProofClause fx e2 Nothing (map snd binderTys) (antecedentCount prop) c)
       pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys (toScope (fmap B prop)) pcs sp kept premises [] [] [])], Map.insert (lawQual l) info proved)
 
 {- |
@@ -1191,8 +1195,16 @@ elabDecl fx env sp name ty0 clauses = do
           -- The indices of its binders' types, which its statement states of them.
           indexHyps = [(k, fn, x) | (k, (_, TData dn _ xs@(_ : _))) <- zip [0 ..] binderTys, (fn, x) <- zip (indexFnsOf env dn) xs]
           (env', info) = setTheoremIndices indexHyps (map fst values) (env0, info0)
-      pcs <- forM clauses \c -> runTC (elabProofClause fx env (map snd binderTys) c)
-      case [psp | length pcs > 1, ProofClause ps _ _ psp <- pcs, PAbsurd `elem` ps] of
+      -- The implicit parameters a clause may name in braces, in the order the signature has them:
+      -- each a value, by its position, or a type, whose name does not matter.
+      let declared = map fst implicits
+          valueIndex n = lookup n (zip (map fst values) [0 ..])
+          implicitSlots =
+            map valueIndex declared
+              <> [Nothing | (n, _) <- params, n `notElem` declared]
+              <> [valueIndex n | n <- map fst values, n `notElem` declared]
+      pcs <- forM clauses \c -> runTC (elabProofClause fx env (Just implicitSlots) (map snd binderTys) (antecedentCount prop) c)
+      case [pcSpan pc | length pcs > 1, pc <- pcs, PAbsurd `elem` pcPatterns pc] of
         asp : _ -> Left (ElabError asp "an absurd clause is its theorem's only clause, for now")
         [] -> pure ()
       pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises values [] indexHyps))
@@ -1597,7 +1609,7 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
         let (l, col) = R.spanStart (location raw)
             q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col))]
             thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map (const TNat) vars) [] [] Nothing [] []
-            pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw)
+            pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] []
          in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] [(n, TNat) | (n, _) <- vars] (toScope (fmap B (foldr (Arrow . snd) prop own))) [pc] (location raw) [] [] [] (map fst own) []
   pure (FunClause pats vars (toScope (fmap B body)) (R.spanning (location lhs) rsp), map obligation (proofArgs body))
 
@@ -1610,15 +1622,36 @@ patternIx = \case
   PCon (Ref _ c) subs -> IxCon c <$> traverse patternIx subs
   _ -> Nothing
 
-elabProofClause :: Fixities -> Env -> [Ty] -> R.Clause -> TC ProofClause
-elabProofClause fx env binderTys (R.Clause lhs0 rhs) = do
+{- |
+A clause of a proof: in braces, names for the theorem's implicit values, in
+order; a pattern for each value it quantifies over; then names for the
+leading hypotheses of its proposition, as a function's clause names its
+proofs.  A name is a variable or @_@: an implicit value is not matched on,
+and a proposition has no constructors.
+-}
+elabProofClause :: Fixities -> Env -> Maybe [Maybe Int] -> [Ty] -> Int -> R.Clause -> TC ProofClause
+elabProofClause fx env slots binderTys hypotheses (R.Clause lhs0 rhs) = do
   lhs <- liftE (resolved fx lhs0)
-  explicit <- case lhsParts lhs of
-    Just (_, parts) -> pure [p | Right p <- parts]
+  (implicit, explicit) <- case lhsParts lhs of
+    Just (_, parts) -> pure ([p | Left p <- parts], [p | Right p <- parts])
     Nothing -> failAt (location lhs) "a clause: the theorem's name applied to patterns"
-  unless (length explicit == length binderTys) $
-    failAt (location lhs) ("the theorem quantifies over " <> show (length binderTys) <> " values")
-  (pats, vars, _) <- patterns env (zip binderTys explicit)
+  let nb = length binderTys
+  unless (length explicit >= nb && length explicit <= nb + hypotheses) $
+    failAt (location lhs) ("the theorem quantifies over " <> show nb <> " values" <> (if hypotheses > 0 then ", then has " <> show hypotheses <> " hypotheses a clause may name" else "") <> "; the clause has " <> show (length explicit) <> " patterns")
+  -- The names in braces, each at its parameter: a value's kept by its position, a type's dropped; a law's braces are not read.
+  valueNamesGiven <- case slots of
+    Nothing -> pure []
+    Just ss -> do
+      unless (length implicit <= length ss) $
+        failAt (location lhs) ("the theorem has " <> show (length ss) <> " implicit parameters, and the clause names " <> show (length implicit))
+      names <- forM implicit (named "an implicit parameter of a theorem is named by a variable or _: matching on it is not supported yet")
+      let byValue = [(i, n) | (Just i, Just n) <- zip ss names]
+      pure [lookup i byValue | i <- [0 .. length [() | Just _ <- ss] - 1]]
+  hypNamesGiven <- forM (drop nb explicit) (named "a hypothesis is named by a variable or _: a proposition has no constructors")
+  (pats, vars, _) <- patterns env (zip binderTys (take nb explicit))
+  case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- catMaybes valueNamesGiven <> map fst vars <> catMaybes hypNamesGiven]), k > 1] of
+    n : _ -> failAt (location lhs) ("the name " <> T.unpack n <> " is bound twice")
+    [] -> pure ()
   -- A clause with an absurd pattern has no right side: no case of it is to be proved.
   when (any nestedAbsurd pats) $ failAt (location lhs) "an absurd pattern, (), stands for a whole argument, for now"
   let Located _ r = rhs
@@ -1626,7 +1659,19 @@ elabProofClause fx env binderTys (R.Clause lhs0 rhs) = do
     (False, R.RAbsurd) -> failAt (location lhs) "a clause needs a right side, = …, unless one of its patterns is absurd, ()"
     (True, _) | r /= R.RAbsurd -> failAt (location rhs) "a clause with an absurd pattern, (), has no right side: nothing matches it"
     _ -> pure ()
-  pure (ProofClause pats vars rhs (R.spanning (location lhs) (location rhs)))
+  pure (ProofClause pats vars rhs (R.spanning (location lhs) (location rhs)) valueNamesGiven hypNamesGiven)
+  where
+    named why p = case stripParen p of
+      Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
+      Located _ R.EWildcard -> pure Nothing
+      Located psp _ -> failAt psp why
+
+-- | The number of the leading hypotheses of a proposition: its top-level implications.
+antecedentCount :: Expr a -> Int
+antecedentCount = \case
+  At _ e -> antecedentCount e
+  Arrow _ b -> 1 + antecedentCount b
+  _ -> 0
 
 -- | An absurd pattern under a constructor or a successor: it stands for a whole argument, for now.
 nestedAbsurd :: Pattern -> Bool

@@ -322,13 +322,16 @@ proveTheorem :: Knowledge -> TheoremDef -> Either EngineError [(Text, Text)]
 proveTheorem k td = do
   let info = tdInfo td
   goal0 <- either (Left . EngineError (tdSpan td) . ("the statement: " <>)) Right (statementGoal (knowMembership k) td)
+  -- Its leading hypotheses, marked, for a clause to name wherever a goal of its proof has them.
+  let leading = drop (length (goalHyps goal0) - hypothesisCount td) (goalHyps goal0)
+      marked = goal0 {goalNames = goalNames goal0 <> [(hypMark j, h) | (j, (h, _)) <- zip [1 ..] leading]}
   (tactic, aux) <- case tdClauses td of
     [pc]
       | all isVariable (pcPatterns pc) -> do
-          let renamed = rename (zip (map fst (tdBinders td)) (map fst (pcVars pc))) goal0
-          out <- proveRhs k info (counter 0) renamed (pcRhs pc)
-          pure (outTactic out, outAux out)
-    pcs -> byClauses k info goal0 td pcs
+          let (intro, named) = nameByClause td pc (rename [(b, n) | ((b, _), PVar (Hint n)) <- zip (tdBinders td) (pcPatterns pc)] marked)
+          out <- proveRhs k info (counter 0) named (pcRhs pc)
+          pure (intro <> outTactic out, outAux out)
+    pcs -> byClauses k info marked td pcs
   decl <- either (Left . EngineError (tdSpan td) . ("the statement: " <>)) Right (declaration (thmCore info) goal0 tactic)
   pure (aux <> [(thmCore info, runBuilder decl)])
   where
@@ -971,6 +974,38 @@ sequentVars g = nub (concatMap (hypVars . snd) (goalHyps g) <> exprVars (goalCon
 
 hname :: Int -> Text
 hname i = "H" <> T.pack (show i)
+
+-- | The number of a theorem's leading hypotheses: the implications of its proposition.
+hypothesisCount :: TheoremDef -> Int
+hypothesisCount td = length (fst (implications (instantiate (const Hole) (tdProp td))))
+
+-- | The mark of a theorem's leading hypothesis, by its position, among the names of a goal of its proof: what a clause's name for it replaces.
+hypMark :: Int -> Text
+hypMark j = "#hyp-" <> T.pack (show j)
+
+{- |
+The names a theorem's clause gives, in a goal of its proof: to the theorem's
+implicit values, and to its leading hypotheses — each where the goal has it,
+by its mark, or, where an induction reverted it into the conclusion,
+introduced first, in order, when the clause names any.  The marks are then
+dropped.  The tactic introducing them, and the goal after.
+-}
+nameByClause :: TheoremDef -> ProofClause -> Goal -> (Builder, Goal)
+nameByClause td pc g0 = (intro, g2 {goalNames = [(s, h) | (s, h) <- goalNames g2, not ("#hyp-" `T.isPrefixOf` s)] <> given})
+  where
+    g1 = rename [(v, n) | ((v, _), Just n) <- zip (tdValues td) (pcValueNames pc)] g0
+    count = hypothesisCount td
+    nameOf j = case drop (j - 1) (pcHypNames pc) of
+      m : _ -> m
+      [] -> Nothing
+    reverted = [j | j <- [1 .. count], hypMark j `notElem` map fst (goalNames g1)]
+    (intro, g2, introduced)
+      | any isJust (pcHypNames pc)
+      , not (null reverted) =
+          let (t, g') = introduceImplications g1
+           in (t, g', zip reverted [hname (length (goalHyps g1) + i) | i <- [1 ..]])
+      | otherwise = ("", g1, [])
+    given = [(n, h) | j <- [1 .. count], Just n <- [nameOf j], h <- take 1 ([h' | (s, h') <- goalNames g1, s == hypMark j] <> [h' | (j', h') <- introduced, j' == j])]
 
 -- | A proposition's implications, as hypotheses and a conclusion.
 implications :: Expr a -> ([Expr a], Expr a)
@@ -1775,15 +1810,17 @@ natInduction info g sp core = pure ([base, step], finish)
     successor = App (Global (Ref RefBuiltin "S")) (Var eigen)
     others = [(nm, x) | (nm, x) <- goalVars g, fst x /= core]
     keptNames = [(s, hname i) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
+    -- The hypotheses mentioning the value, again at its instance, after those kept (and the induction hypothesis): by their names.
+    dependentNames offset = [(s, hname (length kept + offset + i)) | (i, (h, _)) <- zip [1 ..] dependent, (s, h') <- goalNames g, h' == h]
     ihName = hname (length kept + 1)
     numbered = zip (map hname [1 ..])
-    base = Goal (numbered (map snd kept <> [HProp (at (Nat 0) p) | (_, p) <- dependent])) (at (Nat 0) (goalConcl g)) others keptNames [] (goalDict g) (goalPremises g)
+    base = Goal (numbered (map snd kept <> [HProp (at (Nat 0) p) | (_, p) <- dependent])) (at (Nat 0) (goalConcl g)) others (keptNames <> dependentNames 0) [] (goalDict g) (goalPremises g)
     step =
       Goal
         (numbered (map snd kept <> [HProp (at (Var eigen) motive)] <> [HProp (at successor p) | (_, p) <- dependent]))
         (at successor (goalConcl g))
         (("#0", (eigen, TNat)) : others)
-        (("IH", ihName) : keptNames)
+        (("IH", ihName) : keptNames <> dependentNames 1)
         [(eigen, ihName)]
         (goalDict g)
         (goalPremises g)
@@ -2358,10 +2395,11 @@ byClauses k info g td pcs = do
       -- A case the binder's indices exclude needs no clause: it is refuted.
       Nothing -> either (\_ -> Left (EngineError (tdSpan td) ("no clause for " <> what))) (Right . closed) (refute k cg)
       Just pc -> do
-        let others = [n | (j, PVar (Hint n)) <- zip [0 :: Int ..] (pcPatterns pc), j /= c]
-            cg' = introduce (fieldsOf (pcPatterns pc !! c)) cg
-            cg'' = rename (zip [n | (n, _) <- tdBinders td, n /= binder] others) cg'
-        proveRhs k info 0 cg'' (pcRhs pc)
+        let cg' = introduce (fieldsOf (pcPatterns pc !! c)) cg
+            cg'' = rename [(b, n) | (j, ((b, _), PVar (Hint n))) <- zip [0 :: Int ..] (zip (tdBinders td) (pcPatterns pc)), j /= c] cg'
+            (intro, cg''') = nameByClause td pc cg''
+        out <- proveRhs k info 0 cg''' (pcRhs pc)
+        pure out {outTactic = intro <> outTactic out}
   out <- finish outs
   pure (outTactic out, outAux out)
   where

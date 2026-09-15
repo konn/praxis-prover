@@ -526,7 +526,12 @@ constructor is the induction hypothesis there. Clauses matching on a value of
 recursive call at `n` the hypothesis; a numeral other than `0` is written as
 the successor. A value the statement quantifies over need not be named: in
 `PLt n m -> n < m` the type before the arrow to a proposition is that of a
-value, which a clause matches on as on any other. A right side is a proof term
+value, which a clause matches on as on any other. A clause may name, in
+braces, the theorem's implicit values, and, after the patterns of its values,
+its hypotheses, each by a variable or `_`: `lt-of-succ-lt {n} {m} h = h`
+names the hypothesis `S n < S m` `h`. A hypothesis mentioning the value
+matched on, which the induction reverts, is introduced by that name in each
+case. A right side is a proof term
 — a lemma or a hypothesis, `cong e`, `rfl` — a `calc`, or `by` tactics.
 Where the heads of the sides of an equation differ, `cong e` first unfolds
 them, outermost first, until their heads agree, so that the congruence is

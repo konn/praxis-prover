@@ -28,3 +28,11 @@ no-rhs n
 -- The absurd pattern as a term.
 unit-term : Nat
 unit-term = ()
+
+-- A theorem's implicit value matched on, rather than named.
+match-implicit : {n : nat} -> 0 < S n
+match-implicit {0} = rfl
+
+-- More patterns than the values and the hypotheses of the theorem.
+too-many : {n : nat} -> 0 < n -> 0 < S n
+too-many h g = rfl

@@ -87,3 +87,18 @@ plt-not-zero ()
 
 absurd-plt : {n : nat} -> PLt n 0 -> a
 absurd-plt ()
+
+-- A theorem's clause names its implicit values, in braces, and its
+-- hypotheses, after the patterns of its values: h proves S n < S m, which is
+-- n < m once unfolded.
+lt-of-succ-lt : {n m : nat} -> S n < S m -> n < m
+lt-of-succ-lt {n} {m} h = h
+
+-- A hypothesis mentioning the value matched on, named in each clause: the
+-- case for 0, which no clause has, refuted by it.
+pos-pred : (n : nat) -> 0 < n -> S (n - 1) ≡ n
+pos-pred (S k) h = rfl
+
+cons-pos : (xs : List a) -> 0 < length xs -> 0 < S (length xs)
+cons-pos Nil h = rfl
+cons-pos (Cons x xs) h = rfl

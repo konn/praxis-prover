@@ -162,7 +162,7 @@ checkTests =
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
         c <- checkFile "test/data/nat.px"
         errors c @?= []
-        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero", "NatTheorems.length-replicate", "NatTheorems.double-succ", "NatTheorems.min-succ", "NatTheorems.lt-of-plt", "NatTheorems.plt-not-zero"]
+        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["NatTheorems.zero-add", "NatTheorems.zero-add-by", "NatTheorems.zero-lt-succ", "NatTheorems.zero-lt-succ-by-cases", "NatTheorems.plt-zero", "NatTheorems.length-replicate", "NatTheorems.double-succ", "NatTheorems.min-succ", "NatTheorems.lt-of-plt", "NatTheorems.plt-not-zero", "NatTheorems.lt-of-succ-lt", "NatTheorems.pos-pred", "NatTheorems.cons-pos"]
         -- An absurd pattern: no constructor can match, and the closure refutes each case.
         assertBool "the closure of absurd-plt" (any (\l -> "absurd" `T.isInfixOf` l && "_x23_closed " `T.isInfixOf` l) (checkedCore c))
         -- A function matching on a value of Nat: its closure, by induction on the value.
@@ -175,7 +175,7 @@ checkTests =
     , testCase "a clause on a numeral other than 0, and a proof matched on as a value, are refused" $ do
         c <- checkFile "test/data/nat-bad.px"
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
-        mapM_ (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls)) [("one-lt", [4, 5, 6]), ("prop-arg", [9, 10]), ("not-absurd", [17, 18]), ("absurd-rhs", [21, 22]), ("no-rhs", [25, 26]), ("unit-term", [29, 30])]
+        mapM_ (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls)) [("one-lt", [4, 5, 6]), ("prop-arg", [9, 10]), ("not-absurd", [17, 18]), ("absurd-rhs", [21, 22]), ("no-rhs", [25, 26]), ("unit-term", [29, 30]), ("match-implicit", [33, 34]), ("too-many", [37, 38])]
     , testCase "a function's specifications are proved by the skeleton of its lemmas, each case by the specification's prover" $ do
         p <- either assertFailure pure prelude
         src <- TIO.readFile "test/data/specs.px"
