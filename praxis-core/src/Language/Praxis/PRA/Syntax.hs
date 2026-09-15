@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE MagicHash #-}
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE QuasiQuotes #-}
@@ -52,6 +53,7 @@ import Data.Type.Equality
 import Data.Type.Natural hiding (Succ, Zero)
 import Data.Type.Ordinal
 import Data.Vector qualified as V
+import GHC.Exts (isTrue#, reallyUnsafePtrEquality#)
 import GHC.Generics
 import Language.Praxis.PRA.PrimitiveRecursion.Code hiding (suc)
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Function (..))
@@ -63,7 +65,39 @@ import System.Mem.StableName (StableName, makeStableName)
 data Term a where
   Var :: !a -> Term a
   Lit :: !Natural -> Term a
-  App :: (KnownNat n) => !(Function n) -> !(V n (Term a)) -> Term a
+  -- | An application, with the hash of its shape: built only by 'App', which keeps terms canonical.
+  AppC :: (KnownNat n) => Int -> !(Function n) -> !(V n (Term a)) -> Term a
+
+{- |
+A function applied to arguments.  Building one spells a numeral canonically —
+'Zero' applied is @'Lit' 0@ and the successor of a numeral the next numeral —
+and caches the hash of the term's shape ('shapeHash'); matching one sees the
+function and its arguments, whatever the spelling.
+-}
+pattern App :: () => (KnownNat n) => Function n -> V n (Term a) -> Term a
+pattern App f xs <- AppC _ f xs
+  where
+    App f xs = mkApp f xs
+
+{-# COMPLETE Var, Lit, App #-}
+
+mkApp :: (KnownNat n) => Function n -> V n (Term a) -> Term a
+mkApp f xs = case f of
+  Primitive Zero -> Lit 0
+  Primitive Succ | Lit n <- sIndex [od|0|] xs -> Lit (n + 1)
+  _ -> AppC (V.foldl' (\h t -> hashWithSalt h (shapeHash t)) (hashWithSalt (2 :: Int) f) (unsized xs)) f xs
+
+{- |
+The hash of a term's shape: its numerals, its functions and its structure, but
+not the names of its variables, so that renaming keeps it — 'fmap' does — and
+building a term needs no 'Hashable' instance for them.  An application caches
+it, so it costs constant time.
+-}
+shapeHash :: Term a -> Int
+shapeHash = \case
+  Var _ -> 0
+  Lit n -> hashWithSalt 1 n
+  AppC h _ _ -> h
 
 -- | Compatibility constructor for applications of bare PRA code.
 pattern (:$) :: () => (KnownNat n) => PRFCode n -> V n (Term a) -> Term a
@@ -99,39 +133,43 @@ deriving instance Foldable Term
 deriving instance Traversable Term
 
 {- |
-Quotient out the redundancy in 'Term''s representation: a successor of a
-numeral is the next numeral, and an application of 'Zero' is @'Lit' 0@ at every
-arity.  These are the two ways the same numeral can be spelled, and this is
-the invariant the 'Evalable' instance below describes.
+The canonical form of a term, which every term now has by construction: 'App'
+spells 'Zero' applied as @'Lit' 0@ at every arity and the successor of a
+numeral as the next numeral, the two ways a numeral could be spelled otherwise.
+This is the identity, kept for the callers which asked for the canonical form
+before it was built in.
 
-This is deliberately /not/ evaluation.  @plus ':$' ['Lit' 2, 'Lit' 3]@ is left
-alone; deciding that it denotes @'Lit' 5@ is the job of
+Canonical spelling is deliberately /not/ evaluation.  @plus ':$' ['Lit' 2, 'Lit' 3]@
+is left alone; deciding that it denotes @'Lit' 5@ is the job of
 'Language.Praxis.PRA.Equality.defEq', and of the @Defeq@ rule which appeals to
 it.  Were canonicalisation to reduce, a proof could discharge an equation the
 calculus requires @Defeq@ to justify.
 -}
 canonicalise :: Term a -> Term a
-canonicalise t@Var {} = t
-canonicalise t@Lit {} = t
-canonicalise (Zero :$ _) = Lit 0
-canonicalise (Succ :$ xs) = suc (canonicalise (sIndex [od|0|] xs))
-canonicalise (App f xs) = App f (fmap canonicalise xs)
+canonicalise = id
 
 {- |
-Equality identifies the spellings 'canonicalise' conflates, so a rule which
-builds @'Lit' 4@ meets a context which spells it @'Succ' ':$' ['Lit' 3]@.  It
-does not reduce: see 'canonicalise'.
+Equality is structural: terms are canonical by construction (see 'App'), so
+@'Lit' 4@ is the only spelling of @4@.  It does not reduce.
 
-Nothing is copied: the spellings are identified on the fly.  A term is stored
-as a DAG — a residual of partial evaluation shares a subterm at every level it
-unrolled — and its tree can be exponentially larger, so a comparison which
-visits more than 'equalityBudget' nodes is settled instead by interning both
-terms ('eqInterned'), at a cost linear in the size of the DAGs.
+Two terms which are one object are equal at once, and two whose shapes hash
+differently are unequal at once.  Otherwise the terms are walked; a term is
+stored as a DAG — a residual of partial evaluation shares a subterm at every
+level it unrolled — and its tree can be exponentially larger, so a comparison
+which visits more than 'equalityBudget' nodes is settled instead by interning
+both terms ('eqInterned'), at a cost linear in the size of the DAGs.
 -}
 instance (Eq a) => Eq (Term a) where
-  s == t = case eqBounded equalityBudget s t of
-    Just equal -> equal
-    Nothing -> eqInterned s t
+  s == t
+    | same s t = True
+    | shapeHash s /= shapeHash t = False
+    | otherwise = case eqBounded equalityBudget s t of
+        Just equal -> equal
+        Nothing -> eqInterned s t
+
+-- | Whether two terms are one object in memory, and so equal whatever they are.
+same :: Term a -> Term a -> Bool
+same s t = isTrue# (reallyUnsafePtrEquality# s t)
 
 -- | The numeral a term spells, if it is one: a 'Lit', 'Zero' applied, or the successor of a numeral.
 numeralOf :: Term a -> Maybe Natural
@@ -154,6 +192,8 @@ eqBounded budget s0 t0 = fst <$> go budget s0 t0
   where
     go n s t
       | n <= 0 = Nothing
+      | same s t = Just (True, n - 1)
+      | shapeHash s /= shapeHash t = Just (False, n - 1)
       | otherwise = case (s, t) of
           (Var x, Var y) -> Just (x == y, n - 1)
           (Lit a, _) -> Just (numeralOf t == Just a, n - 1)
@@ -256,30 +296,14 @@ identity table key = do
 
 infix 6 :$
 
--- | Agrees with '(==)': both work on the canonical form, which neither builds.
+{- |
+Agrees with '(==)'.  A variable hashes by its name, and any other term by the
+hash of its shape, which an application caches: constant time.
+-}
 instance (Hashable a) => Hashable (Term a) where
-  hashWithSalt = hashTerm
-
-hashTerm :: (Hashable a) => Int -> Term a -> Int
-hashTerm salt t = case t of
-  Var x -> hashWithSalt salt (0 :: Int, x)
-  Lit n -> hashWithSalt salt (1 :: Int, n)
-  Zero :$ _ -> hashWithSalt salt (1 :: Int, 0 :: Natural)
-  Succ :$ _ ->
-    -- The layers of successors at once, so that a chain of them is walked once.
-    let (layers, base) = peel 0 t
-     in case numeralOf base of
-          Just n -> hashWithSalt salt (1 :: Int, n + layers)
-          Nothing -> hashTerm (successors layers salt) base
-  App f xs -> V.foldl' hashTerm (hashWithSalt salt (2 :: Int, f)) (unsized xs)
-  where
-    peel :: Natural -> Term a -> (Natural, Term a)
-    peel k = \case
-      Succ :$ xs -> peel (k + 1) (sIndex [od|0|] xs)
-      u -> (k, u)
-    successors :: Natural -> Int -> Int
-    successors 0 acc = acc
-    successors k acc = successors (k - 1) (hashWithSalt acc (2 :: Int, Primitive Succ :: Function 1))
+  hashWithSalt salt = \case
+    Var x -> hashWithSalt salt (0 :: Int, x)
+    t -> hashWithSalt salt (shapeHash t)
 
 {- | Terms are the syntactic model of the primitive-recursive numerals: an
 application which cannot be reduced is kept as a
