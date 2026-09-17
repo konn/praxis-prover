@@ -4,8 +4,12 @@
 The grammar of the surface language, over the tokens and the layout of
 "Language.Praxis.Surface.Lexer".
 
-> module   ::= ['module' qname 'where'] {decl}
-> decl     ::= 'open' qname ['using' (names) | 'hiding' (names)]
+> file     ::= ['module' qname 'where'] {decl}
+> decl     ::= 'open' qname {directive} ['public']
+>            | 'import' ['"' library '"'] qname ['as' qname] {directive}
+>            | 'open' 'import' ['"' library '"'] qname ['as' qname] {directive} ['public']
+>            | 'module' Name 'where' {decl}             -- a module within the module
+>            | 'private' {decl}                         -- declarations the module does not export
 >            | 'data' Name {param} [':' kind] ['=' ctor {'|' ctor} | 'where' {name ':' expr}]
 >            | 'type' Name ':' kind                     -- the kind of a data type
 >            | 'class' [constraints '=>'] Name name 'where' {name ':' expr}
@@ -13,6 +17,7 @@ The grammar of the surface language, over the tokens and the layout of
 >            | ('infixl' | 'infixr' | 'infix') rational op {op}
 >            | name ':' expr                          -- a signature
 >            | expr '=' rhs                           -- a clause
+> directive ::= 'using' (names) | 'hiding' (names) | 'renaming' (name 'to' name {';' name 'to' name})
 > ctor     ::= Con {atom} | atom {atom} conop atom {atom}   -- conop starts with ':'
 > rhs      ::= 'by' tactics | 'calc' calc | expr
 > expr     ::= binders ('->' | '→') expr              -- {a : Type} -> …, (x : T) -> …
@@ -51,6 +56,7 @@ module Language.Praxis.Surface.Parser (
   calcP,
 ) where
 
+import Control.Monad (foldM)
 import Data.Functor (($>))
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -65,7 +71,7 @@ parseModule = runSurfaceParser moduleP
 
 moduleP :: Parser Module
 moduleP = do
-  name <- option (Located noSpan (unqualified (Ident "Main"))) (keyword "module" *> qualifiedName <* keyword "where")
+  name <- optional (keyword "module" *> qualifiedName <* keyword "where")
   Module name <$> block declP
 
 -- | A node spanning from a position to the end of the last token read.
@@ -75,18 +81,73 @@ spanned start x = locatedFrom start (pure x)
 -- * Declarations
 
 declP :: Parser (Located Decl)
-declP = located (choice [openP, dataP, kindSigP, classP, instanceP, fixityP, try signatureP, clauseP]) <?> "declaration"
+declP = located (choice [openP, importP, nestedModuleP, privateP, dataP, kindSigP, classP, instanceP, fixityP, try signatureP, clauseP]) <?> "declaration"
 
+{- |
+@open N directives [public]@: a namespace opened; or @open import M …
+[public]@, the module imported and opened.
+-}
 openP :: Parser Decl
 openP = do
   keyword "open"
-  n <- qualifiedName
-  spec <-
-    option OpenAll $
-      (keyword "using" *> (OpenUsing <$> names)) <|> (keyword "hiding" *> (OpenHiding <$> names))
-  pure (DOpen n spec)
+  optional (keyword "import" *> importBodyP) >>= \case
+    Just imp -> DOpenImport imp <$> publicP
+    Nothing -> DOpen <$> qualifiedName <*> directivesP <*> publicP
   where
+    publicP = option False (True <$ keyword "public")
+
+-- | @import ["lib"] M [as N] directives@.
+importP :: Parser Decl
+importP = keyword "import" *> (DImport <$> importBodyP)
+
+importBodyP :: Parser Import
+importBodyP = do
+  lib <- optional stringLiteral
+  m <- qualifiedName
+  alias <- optional (keyword "as" *> qualifiedName)
+  Import lib m alias <$> directivesP
+
+{- |
+The directives of an import or an opening, in any order, each at most once:
+@using (a, b)@, @hiding (a)@, which exclude one another, and
+@renaming (a to b; c to d)@.
+-}
+directivesP :: Parser Directives
+directivesP = many directiveP >>= foldM add noDirectives
+  where
+    directiveP =
+      choice
+        [ Using <$> (keyword "using" *> names)
+        , Hiding <$> (keyword "hiding" *> names)
+        , Renaming <$> (keyword "renaming" *> bracketed "(" ")" (((,) <$> nameSegment <* keyword "to" <*> nameSegment) `sepBy` symbol ";"))
+        ]
     names = bracketed "(" ")" (nameSegment `sepBy` symbol ",")
+    add d = \case
+      Using ns
+        | Just _ <- dirUsing d -> fail "a second using"
+        | not (null (dirHiding d)) -> fail "using and hiding together: one or the other"
+        | otherwise -> pure d {dirUsing = Just ns}
+      Hiding ns
+        | Just _ <- dirUsing d -> fail "using and hiding together: one or the other"
+        | not (null (dirHiding d)) -> fail "a second hiding"
+        | otherwise -> pure d {dirHiding = ns}
+      Renaming rs
+        | not (null (dirRenaming d)) -> fail "a second renaming"
+        | otherwise -> pure d {dirRenaming = rs}
+
+data Directive = Using [Located Segment] | Hiding [Located Segment] | Renaming [(Located Segment, Located Segment)]
+
+-- | @module N where@ and its declarations, laid out deeper than the enclosing ones or in braces.
+nestedModuleP :: Parser Decl
+nestedModuleP = do
+  keyword "module"
+  n <- identifier
+  keyword "where"
+  DModule n <$> block declP
+
+-- | @private@ and its declarations, laid out or in braces.
+privateP :: Parser Decl
+privateP = keyword "private" *> (DPrivate <$> block declP)
 
 -- | An unqualified name: an identifier, or an operator in parentheses.
 nameSegment :: Parser (Located Segment)

@@ -1,0 +1,17 @@
+module Main where
+
+-- Two modules of one name, from two libraries, told apart by the library named before each.
+import "lists" Data.List as L
+import "other" Data.List as O
+import Data.List.Extra
+
+two-sizes : (xs : L.List Nat) -> (ys : O.List Nat) -> O.size (O.List.More 1 ys) ≡ S (O.size ys)
+two-sizes xs ys = rfl
+
+-- A theorem of a dependency, applied; its constructors through its data type's namespace.
+app-nil : (xs : L.List Nat) -> L.(<>) xs L.List.Nil ≡ xs
+app-nil xs = L.append-nil xs
+
+-- A theorem of the sublibrary, which states the same of Data.List.(<>) under another name.
+nil-app : (xs : L.List Nat) -> L.(<>) xs L.List.Nil ≡ xs
+nil-app xs = Data.List.Extra.nil-append xs

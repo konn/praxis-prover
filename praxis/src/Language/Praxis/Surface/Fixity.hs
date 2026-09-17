@@ -26,6 +26,8 @@ module Language.Praxis.Surface.Fixity (
   Fixities,
   builtinFixities,
   moduleFixities,
+  moduleFixitiesWith,
+  exportedFixities,
   fixityOf,
   isRelation,
   isConnective,
@@ -42,6 +44,7 @@ module Language.Praxis.Surface.Fixity (
 import Control.Monad (foldM, when)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.Surface.Syntax.Raw
@@ -107,15 +110,23 @@ fixityOf fx op
   | Just f <- Map.lookup name connectives = f
   | otherwise = Map.findWithDefault (Fixity AssocLeft (termTier 9)) name fx
   where
-    name = case operatorName op of
-      QName _ (Op t) -> t
-      QName _ (Ident t) -> t
+    name = segmentRaw (qnameBase (operatorName op))
 
 -- | The fixities a module declares, over the built-in ones; relations and connectives cannot be redeclared.
 moduleFixities :: Module -> Either FixityError Fixities
-moduleFixities m = foldM declare builtinFixities [d | Located _ d <- moduleDecls m]
+moduleFixities = moduleFixitiesWith Map.empty
+
+{- |
+The fixities a module declares, in its nested modules and private blocks
+too, over those of the modules it imports and the built-in ones.  A fixity
+declared here overrides an imported one; relations and connectives cannot
+be redeclared.
+-}
+moduleFixitiesWith :: Fixities -> Module -> Either FixityError Fixities
+moduleFixitiesWith imported m = foldM declare (Map.union imported builtinFixities) decls
   where
-    declared = Map.fromListWith (<>) [(unLocated o, [o]) | DFixity _ _ os <- map unLocated (moduleDecls m), o <- os]
+    decls = allDecls (moduleDecls m)
+    declared = Map.fromListWith (<>) [(unLocated o, [o]) | DFixity _ _ os <- decls, o <- os]
     declare fx = \case
       DFixity assoc prec ops -> foldM (one assoc prec) fx ops
       _ -> pure fx
@@ -125,6 +136,17 @@ moduleFixities m = foldM declare builtinFixities [d | Located _ d <- moduleDecls
         Just (_ : second : _) -> Left (DuplicateFixity second)
         _ -> pure ()
       pure (Map.insert o (Fixity assoc (termTier prec)) fx)
+
+-- | The declarations of a module at every depth: those of its nested modules and its private blocks flattened, in order.
+allDecls :: [Located Decl] -> [Decl]
+allDecls = concatMap \(Located _ d) -> case d of
+  DModule _ ds -> allDecls ds
+  DPrivate ds -> allDecls ds
+  _ -> [d]
+
+-- | The fixities of the operators among the names given, which a module exports with them.
+exportedFixities :: Fixities -> [Text] -> Fixities
+exportedFixities fx names = Map.restrictKeys fx (Set.fromList names)
 
 -- * Association
 

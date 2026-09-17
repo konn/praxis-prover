@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Data.Map.Strict qualified as Map
+import Language.Praxis.Package.PackageTest (packageTests)
 import Language.Praxis.Surface.AdequacyTest (adequacyTests)
 import Language.Praxis.Surface.CheckTest (checkTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
@@ -21,4 +22,5 @@ main =
       , resolveTests
       , checkTests
       , adequacyTests
+      , packageTests
       ]

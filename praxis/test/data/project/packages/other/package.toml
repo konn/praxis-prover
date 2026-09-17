@@ -1,0 +1,6 @@
+[package]
+name = "other"
+version = "1.0"
+
+[[lib]]
+source-dir = "src"

@@ -1,0 +1,13 @@
+module Data.List.Extra where
+
+import Data.List
+open Data.List using (List) renaming ((<>) to (++))
+open Data.List.Length
+
+-- An operator renamed on opening: (++) is Data.List.(<>), whose lemmas keep their names.
+nil-append : {a : Type} -> (xs : List a) -> xs ++ Nil ≡ xs
+nil-append {a} xs = Data.List.append-nil xs
+
+-- A module nested in the one imported, opened: length is Data.List.Length.length.
+length-of-nil-append : {a : Type} -> (xs : List a) -> length (Nil ++ xs) ≡ length xs
+length-of-nil-append {a} xs = length-nil-append xs

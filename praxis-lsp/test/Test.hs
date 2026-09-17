@@ -2,6 +2,7 @@ module Main (main) where
 
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
 import Language.LSP.Protocol.Types (DiagnosticSeverity (..))
 import Language.Praxis.LSP
 import Test.Tasty
@@ -43,6 +44,12 @@ tests =
     , testCase "a module of the surface language is checked, a failed proof reported" $ do
         analyse Px surface @?= []
         map reportSeverity (analyse Px (surface <> "\nwrong : {a : Type} -> (xs : List a) -> xs <> Nil ≡ Nil\nwrong {a} xs = by sorry\n")) @?= [DiagnosticSeverity_Error]
+    , testCase "a module of a package is checked with the modules it imports; on its own, its imports fail" $ do
+        text <- TIO.readFile "test/data/pkg/src/B.px"
+        analyseIn Px "test/data/pkg/src/B.px" text >>= (@?= [])
+        case analyse Px text of
+          Report _ _ DiagnosticSeverity_Error message _ : _ -> assertBool (T.unpack message) ("checked on its own" `T.isInfixOf` message)
+          other -> assertFailure ("no error for the import: " <> show other)
     , testCase "a file of definitions is checked" $ do
         analyse Prf "double 0 = 0\ndouble (S n) = S (S (double n))\n" @?= []
         map reportSeverity (analyse Prf "double 0 = 0\ndouble (S n) = S (S (doubled n))\n") @?= [DiagnosticSeverity_Error]

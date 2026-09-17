@@ -1,0 +1,7 @@
+module Data.List where
+
+data List a = Nil | a : List a
+
+private
+  hidden : Nat
+  hidden = 0

@@ -13,10 +13,11 @@ import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, predicateOver, predicateParam)
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, membershipProof, theoremStatement)
-import Language.Praxis.Surface.Env (CtorInfo (..), Env, FunInfo (..), Global (..), constructorsNamed, resolve)
+import Language.Praxis.Surface.Env (CtorInfo (..), Env, FunInfo (..), Global (..), constructorsNamed, emptyEnv, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude, prelude)
+import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..), RelOp (..))
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..), segmentText)
 import Test.Tasty
@@ -93,7 +94,7 @@ checkTests =
         length messages @?= 3
         assertBool "the duplicate binder is diagnosed" (any ("the variable x is bound twice" `T.isInfixOf`) messages)
         assertBool "distinct binders do not prove the false equation" (any ("DuplicateBinders.distinct" `T.isInfixOf`) messages)
-        assertBool "a rejected theorem is unavailable" (any ("not a hypothesis or a lemma: bad" `T.isInfixOf`) messages)
+        assertBool "a rejected theorem is unavailable" (any ("not a hypothesis or a lemma: DuplicateBinders.bad" `T.isInfixOf`) messages)
     , testCase "grouped and forall theorem binders must also be distinct" $ do
         p <- either assertFailure pure prelude
         mapM_
@@ -110,7 +111,8 @@ checkTests =
         src <- TIO.readFile "test/data/duplicate-binders.px"
         m <- either (assertFailure . show) pure (parseModule "duplicate-binders.px" src)
         fx <- either (assertFailure . show) pure (moduleFixities m)
-        let (_, items) = elabModule fx m
+        let (renamed, _) = renameModule fx emptyEnv Map.empty (headerName m) m
+            (_, items) = elabModule fx emptyEnv renamed
         case reverse [td | ITheorem td <- items] of
           td : _ -> do
             let colliding = td {tdBinders = [("x", ty) | (_, ty) <- tdBinders td]}
@@ -195,7 +197,7 @@ checkTests =
         cons <- case constructorsNamed env (Op ":") of
           c : _ -> pure (ctorCore c)
           [] -> assertFailure "no constructor (:)"
-        copy <- case [f | GFun f <- resolve env (QName [] (Ident "copy"))] of
+        copy <- case [f | GFun f <- resolve env (QName [Ident "Specs"] (Ident "copy"))] of
           f : _ -> pure (funCore f)
           [] -> assertFailure "no function copy"
         -- The elements below b, a closure capturing b; and the lists of them.

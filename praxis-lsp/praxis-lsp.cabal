@@ -14,6 +14,10 @@ build-type: Simple
 tested-with:
   ghc ==9.12.4
 
+extra-source-files:
+  test/data/pkg/package.toml
+  test/data/pkg/src/*.px
+
 extra-doc-files:
   CHANGELOG.md
   README.md

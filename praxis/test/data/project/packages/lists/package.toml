@@ -1,0 +1,14 @@
+[package]
+name = "lists"
+version = "0.1.2.0"
+synopsis = "lists, their append, and its lemmas"
+
+# The main library, lists: unnamed, referred to as lists, or lists:lib:lists.
+[[lib]]
+source-dir = "src"
+
+# A sublibrary, lists:lib:extra: "lists:extra" in an import or a dependency.
+[[lib]]
+name = "extra"
+source-dir = "src-extra"
+dependencies = ["lists"]

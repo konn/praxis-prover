@@ -57,6 +57,14 @@ character). Nothing in praxis-core or the prelude starts with `u_` or `v_`, so
 a surface variable called `at` or `add` is never taken for a symbol.
 `demangle` turns core messages back into surface names.
 
+A global's qualified name starts with the library its module belongs to,
+when it belongs to one, `lists/Data.List.foo` as the tables render it, so
+that two libraries exposing modules of one name are two families of globals,
+`u_lists_sData_sList_sfoo` and `u_other_sData_sList_sfoo` in the core. The
+renamer ("Rename", [packages.md](packages.md) § Names) writes every
+reference in that canonical form before elaboration, which looks names up
+in one table without any scope.
+
 The value binders of a theorem must have distinct names. Elaboration rejects
 duplicates, and statement translation checks this invariant again: merging
 two values into one core variable would conjoin their membership predicates

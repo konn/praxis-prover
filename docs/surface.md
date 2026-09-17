@@ -40,7 +40,8 @@ append-nil-tactically {a} xs = by
 
 ```
 source ──Lexer/Parser──▶ raw syntax (named, operators unassociated)
-       ──Fixity─────────▶ operators associated by the module's fixities
+       ──Fixity─────────▶ operators associated by the module's fixities, and the imports'
+       ──Rename─────────▶ scope resolved: imports, openings, nested modules, privacy; every global by its canonical name
        ──Elab───────────▶ resolved syntax (bound scopes), types checked, items
        ──Encode/Compile─▶ prf equations + generated lemmas (core text)
        ──Engine─────────▶ theorem proofs as pra declarations (core text)
@@ -48,7 +49,7 @@ source ──Lexer/Parser──▶ raw syntax (named, operators unassociated)
 ```
 
 Each stage is a module of `Language.Praxis.Surface`: `Lexer`, `Parser` and
-`Syntax.Raw`; `Fixity`; `Syntax`, `Types`, `Env` and `Elab`; `Encode`,
+`Syntax.Raw`; `Fixity`; `Rename`, the scope checker; `Syntax`, `Types`, `Env` and `Elab`; `Encode`,
 `Compile`, `CoreText` and `Mangle`; `Engine`; `Check`, the driver, with
 `Prelude`, the definitions and lemmas every module is compiled against.
 
@@ -66,9 +67,9 @@ Each stage is a module of `Language.Praxis.Surface`: `Lexer`, `Parser` and
   grammar reserves `->`, `→`, `|`, `\`, `=>`, `<-`, `←`, `.`, `<;>`, `¬`, `⊤`,
   `⊥`; `=`, `:` and `:=` are ordinary operators the grammar reads specially
   where it needs them, so `:` and `:=` can still name constructors.
-- **Keywords** are `module where open using hiding data class instance
+- **Keywords** are `module where open import private public using hiding renaming data class instance
   infixl infixr infix case of if then else let in by calc Type forall exists
-  fun with`. Tactic
+  fun with`; `as` and `to` are words only in imports and renamings. Tactic
   names are words only in tactic position.
 
 ## Layout
@@ -92,8 +93,11 @@ line is a block whose first item is the first term. A step is
 
 | declaration | example |
 |---|---|
-| module header | `module Logic.FOL where` |
-| namespace opening | `open List` (the `using (…)` and `hiding (…)` forms parse, and are not enforced yet) |
+| module header | `module Logic.FOL where`, optional: a file is the module its path names |
+| nested module | `module Length where` and its declarations, laid out deeper or in braces |
+| import | `import Data.List`, `import "pkg" Data.List as L using (a) hiding (b) renaming (c to d)` |
+| namespace opening | `open List`, `open Data.List using (…) public`, `open import Data.List` |
+| private block | `private` and its declarations, which the module does not export |
 | data type | `data Term r f v = FVar v \| BVar nat \| App (f (Formula r f v) (Term r f v))` |
 | fixity | `infixr 4 <>`, `infixl 6.5 +++`, `infix 9/2 ~~` |
 | signature | `name : type` |
@@ -109,18 +113,32 @@ A signature whose type ends in a proposition declares a **theorem**; any other
 declares a **function**. The clauses following it define it; a clause's left
 side may be prefix, `(<>) Nil ys`, or infix, `Nil <> ys`.
 
-## Namespaces and names
+## Modules, namespaces and names
+
+A file is one top-level module, named by its path within its library;
+modules nest, `module N where`, each a namespace of what it exports, which
+is what it declares outside `private` and what it opens `public`. `import
+M` brings the exports of `M` into scope qualified, `open N` brings the
+members of a namespace into unqualified scope, both with `using`, `hiding`
+and `renaming`, as in Agda. Modules are grouped into libraries, packages and
+projects, with dependencies and versions: [packages.md](packages.md) has the
+whole of it, and the manifests.
 
 Namespaces follow Rust: `data T` opens the namespace `T`, holding its
 constructors; a function `f` opens the namespace `f`, holding the lemmas
-generated for it, `f.unfold-C` and Lean's `f.eq_i`. `open T` brings a
-namespace's members into unqualified scope, as in Agda.
+generated for it, `f.unfold-C` and Lean's `f.eq_i`; a class holds its
+methods and laws, an instance its functions.
 
-An unqualified name resolves, in order, as a local variable, a top-level name
-of the module, a member of an opened namespace, and then a constructor — of
-the type expected there, which is how `Nil` means `List.Nil` in the example
-without any `open`, or the only constructor of that name. Anything else is an
-ambiguity error listing the candidates.
+Names are resolved by the renamer, before elaboration, into canonical
+names. An unqualified name resolves, in order, as a local variable, a name
+declared by the module or by one enclosing it, a member of an opened
+namespace, and then a constructor — of the type expected there, which is
+how `Nil` means `List.Nil` in the example without any `open`, or the only
+constructor of that name among the modules in scope. Anything else is an
+ambiguity error listing the candidates, or, once typed, not in scope. A
+qualified name is resolved through its first segments — a namespace in
+scope, an imported module, the module's own name — the rest navigating
+namespaces.
 
 ## Classes and instances
 
@@ -614,10 +632,13 @@ for every constructor and for every function whose result is of a data type.
 
 ## Tooling
 
-- `praxis check [--dump-core] FILE.px…` checks modules and prints every
+- `praxis check [--dump-core] [--alone] [TARGET…]` checks a project, a
+  package, a directory holding one, or `.px` files — each as a module of the
+  package enclosing it, its imports first, or on its own — and prints every
   report; `--dump-core` prints the core text generated — the definitions,
   and every declaration handed to the kernel — for inspection.
-- `praxis-lsp` serves `.px` documents with the driver's diagnostics.
+- `praxis-lsp` serves `.px` documents with the driver's diagnostics, each as a
+  module of the package enclosing it.
 - `editors/vscode` highlights `.px` and starts the server.
 
 ## Scope of the current implementation
@@ -646,7 +667,9 @@ implicit parameters of data types, found from the indices written, and
 indices whose types mention the parameters and the indices before them;
 implicit values a function's clauses bind, taken at runtime; proofs as
 arguments, each application's checked as an obligation, and `absurd`;
-implicit arguments given in braces, `C {n}`; type ascriptions; `.px`
+implicit arguments given in braces, `C {n}`; type ascriptions; modules,
+imports, openings, nested modules and privacy, resolved by the renamer, and
+libraries, packages and projects ([packages.md](packages.md)); `.px`
 diagnostics.
 Planned, in order: goal display in hover, the
 remaining tactic translations, Σ₁ statements with witness terms, `case` and

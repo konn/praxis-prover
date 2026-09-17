@@ -1,0 +1,6 @@
+module Cycle2 where
+
+import Cycle1
+
+five : Nat
+five = 5

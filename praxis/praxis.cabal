@@ -20,6 +20,8 @@ extra-doc-files:
 extra-source-files:
   src-pra/*.pra
   src-pra/*.prf
+  test/data/**/*.px
+  test/data/**/*.toml
   test/data/*.px
 
 source-repository head
@@ -54,6 +56,9 @@ library
   hs-source-dirs: src
   -- cabal-gild: discover src --exclude=src/**/Internal.hs --exclude=src/**/Internal/**/*.hs
   exposed-modules:
+    Language.Praxis.Package.Build
+    Language.Praxis.Package.Manifest
+    Language.Praxis.Package.Version
     Language.Praxis.Surface.Check
     Language.Praxis.Surface.Compile
     Language.Praxis.Surface.CoreText
@@ -67,7 +72,9 @@ library
     Language.Praxis.Surface.Mangle
     Language.Praxis.Surface.Parser
     Language.Praxis.Surface.Prelude
+    Language.Praxis.Surface.Rename
     Language.Praxis.Surface.Resolve
+    Language.Praxis.Surface.Shape
     Language.Praxis.Surface.Syntax
     Language.Praxis.Surface.Syntax.Raw
     Language.Praxis.Surface.Types
@@ -77,12 +84,15 @@ library
   build-depends:
     bound,
     containers,
+    directory,
+    filepath,
     megaparsec,
     mtl,
     praxis-core,
     template-haskell,
     text,
     text-builder-linear,
+    toml-reader,
 
 executable praxis
   import: defaults
@@ -96,6 +106,8 @@ executable praxis
     -with-rtsopts=-N
 
   build-depends:
+    directory,
+    filepath,
     optparse-applicative,
     praxis,
     text,
@@ -107,6 +119,7 @@ test-suite praxis-test
   hs-source-dirs: test
   -- cabal-gild: discover test --exclude=test/Test.hs
   other-modules:
+    Language.Praxis.Package.PackageTest
     Language.Praxis.Surface.AdequacyTest
     Language.Praxis.Surface.CheckTest
     Language.Praxis.Surface.ParserTest
@@ -130,3 +143,4 @@ test-suite praxis-test
     tasty-quickcheck,
     text,
     text-builder-linear,
+    toml-reader,

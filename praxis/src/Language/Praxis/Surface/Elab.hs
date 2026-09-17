@@ -58,7 +58,7 @@ module Language.Praxis.Surface.Elab (
 ) where
 
 import Bound (Scope, Var (..), fromScope, instantiate, toScope)
-import Control.Monad (foldM, forM, forM_, join, unless, when, zipWithM)
+import Control.Monad (foldM, forM, forM_, join, unless, when)
 import Data.Bifunctor (first)
 import Data.Foldable (toList)
 import Data.IntMap.Strict qualified as IM
@@ -70,12 +70,14 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void, absurd, vacuous)
 import Language.Praxis.Surface.Env
-import Language.Praxis.Surface.Fixity (Fixities, isConnective, isRelation, renderFixityError, resolveExpr)
+import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Index
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
+import Language.Praxis.Surface.Rename (RDecl (..), Renamed (..))
 import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
+import Language.Praxis.Surface.Shape
 import Language.Praxis.Surface.Syntax
-import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, qnameText, segmentText)
+import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types
 import Text.Read (readMaybe)
@@ -206,65 +208,71 @@ liftE = first Refused
 -- * Modules
 
 {- |
-Elaborate a module: its data types first, so that they may refer to one
-another, then every declaration in order, each in scope for those after it.
-A theorem is not in scope in its own proof.
+Elaborate a module the renamer resolved: its data types first, so that they
+may refer to one another, then every declaration in order, each in scope
+for those after it, and each in the module it belongs to, the file's or one
+nested in it.  A theorem is not in scope in its own proof.  The nested
+modules become globals, namespaces of what they export, so that the modules
+importing this one navigate them.
 -}
-elabModule :: Fixities -> R.Module -> (Env, [Item])
-elabModule fx m = walk envData (R.moduleDecls m) []
+elabModule :: Fixities -> Env -> Renamed -> (Env, [Item])
+elabModule fx env0 rn = withModules (walk envData decls [])
   where
-    modQ = case unLocated (R.moduleName m) of QName qs b -> qs <> [b]
-    decls = R.moduleDecls m
-    dataDecls = [(sp, d) | Located sp (R.DData d) <- decls]
-    dataNames = [unLocated (R.dataName d) | (_, d) <- dataDecls]
-    kindSigs = Map.fromList [(unLocated n, (location n, k)) | Located _ (R.DKindSig n k) <- decls]
+    env1 = moduleEnv (rnModule rn) (rnVisible rn) env0
+    decls = rnDecls rn
+    at owner e = e {envModule = owner}
+    dataDecls = [(owner, sp, d) | RDecl owner (Located sp (R.DData d)) <- decls]
+    dataNames = [(owner, unLocated (R.dataName d)) | (owner, _, d) <- dataDecls]
+    kindSigs = Map.fromList [((owner, unLocated n), (location n, k)) | RDecl owner (Located _ (R.DKindSig n k)) <- decls]
     -- Names, and which parameters are types and which indices, first; then the constructors, against all of them.
-    placeholders = foldl placeholder (emptyEnv modQ) dataDecls
-    placeholder e (_, d) =
-      let name = unLocated (R.dataName d)
-       in case dataLayout fx e (Map.lookup name kindSigs) d of
+    placeholders = foldl placeholder env1 dataDecls
+    placeholder e0 (owner, _, d) =
+      let e = at owner e0
+          name = unLocated (R.dataName d)
+       in case dataLayout fx e (Map.lookup (owner, name) kindSigs) d of
             Right (params, indices, implicits) -> fst (addGadtData e (Ident name) params indices implicits [] [])
             Left _ -> fst (addData e (Ident name) [(unLocated (R.dataParamName p), KType) | p <- R.dataParams d] [])
     (envData, dataItems) = foldl declareData (placeholders, Map.empty) dataDecls
-    declareData (e, done) (sp, d) =
-      let name = unLocated (R.dataName d)
-       in case elabDataDecl fx e (Map.lookup name kindSigs) sp d of
-            Left err -> (e, Map.insert name [IFailed err] done)
-            Right (e', items) -> (e', Map.insert name items done)
+    declareData (e0, done) (owner, sp, d) =
+      let e = at owner e0
+          name = unLocated (R.dataName d)
+       in case elabDataDecl fx e (Map.lookup (owner, name) kindSigs) sp d of
+            Left err -> (e, Map.insert (owner, name) [IFailed err] done)
+            Right (e', items) -> (e', Map.insert (owner, name) items done)
 
     headOf c = either (const Nothing) Just (resolveExpr fx (R.clauseLhs c)) >>= fmap fst . lhsParts
-    clausesOf name = [c | Located _ (R.DClause c) <- decls, headOf c == Just name]
-    signed = [n | Located _ (R.DSignature (Located _ n) _) <- decls]
+    clausesOf owner name = [c | RDecl o (Located _ (R.DClause c)) <- decls, o == owner, headOf c == Just name]
+    signed owner = [n | RDecl o (Located _ (R.DSignature (Located _ n) _)) <- decls, o == owner]
 
     walk env [] acc = (env, reverse acc)
-    walk env (Located sp d : rest) acc = case d of
-      R.DOpen (Located osp q) _ -> case [globalQualName g | g <- resolve env q, isNamespace g] of
-        o : _ -> walk (openNamespace o env) rest acc
-        [] -> walk env rest (IFailed (ElabError osp ("no namespace " <> T.unpack (qnameText q) <> " to open")) : acc)
-      R.DData dd -> walk env rest (reverse (Map.findWithDefault [IFailed (ElabError sp "internal: a data type not declared")] (unLocated (R.dataName dd)) dataItems) <> acc)
-      R.DFixity {} -> walk env rest acc
-      R.DKindSig (Located ksp n) _
-        | n `elem` dataNames -> walk env rest acc
-        | otherwise -> walk env rest (IFailed (ElabError ksp ("a kind signature for no data type of this module: " <> T.unpack n)) : acc)
-      R.DSignature (Located _ name) ty -> case elabDecl fx env sp name ty (clausesOf name) of
-        Left err -> walk env rest (IFailed err : acc)
-        Right (env', item) -> walk env' rest (item : acc)
-      R.DClause c -> case headOf c of
-        Just name | name `elem` signed -> walk env rest acc
-        _ -> walk env rest (IFailed (ElabError sp "a clause with no signature for its name") : acc)
-      R.DClass cd -> case elabClass fx env cd of
-        Left err -> walk env rest (IFailed err : acc)
-        Right env' -> walk env' rest acc
-      R.DInstance idl -> case elabInstance fx env sp idl of
-        Left err -> walk env rest (IFailed err : acc)
-        Right (env', items) -> walk env' rest (reverse items <> acc)
+    walk env0' (RDecl owner (Located sp d) : rest) acc =
+      let env = at owner env0'
+       in case d of
+            -- Resolved by the renamer, which leaves none of these.
+            R.DOpen {} -> walk env rest acc
+            R.DImport {} -> walk env rest acc
+            R.DOpenImport {} -> walk env rest acc
+            R.DModule {} -> walk env rest acc
+            R.DPrivate {} -> walk env rest acc
+            R.DData dd -> walk env rest (reverse (Map.findWithDefault [IFailed (ElabError sp "internal: a data type not declared")] (owner, unLocated (R.dataName dd)) dataItems) <> acc)
+            R.DFixity {} -> walk env rest acc
+            R.DKindSig (Located ksp n) _
+              | (owner, n) `elem` dataNames -> walk env rest acc
+              | otherwise -> walk env rest (IFailed (ElabError ksp ("a kind signature for no data type of this module: " <> T.unpack n)) : acc)
+            R.DSignature (Located _ name) ty -> case elabDecl fx env sp name ty (clausesOf owner name) of
+              Left err -> walk env rest (IFailed err : acc)
+              Right (env', item) -> walk env' rest (item : acc)
+            R.DClause c -> case headOf c of
+              Just name | name `elem` signed owner -> walk env rest acc
+              _ -> walk env rest (IFailed (ElabError sp "a clause with no signature for its name") : acc)
+            R.DClass cd -> case elabClass fx env cd of
+              Left err -> walk env rest (IFailed err : acc)
+              Right env' -> walk env' rest acc
+            R.DInstance idl -> case elabInstance fx env sp idl of
+              Left err -> walk env rest (IFailed err : acc)
+              Right (env', items) -> walk env' rest (reverse items <> acc)
 
-    isNamespace = \case
-      GData _ -> True
-      GFun _ -> True
-      GClass _ -> True
-      GInstance _ -> True
-      _ -> False
+    withModules (env, items) = (foldl (\e (q, members) -> addModule q members e) env (rnModules rn), items)
 
 -- * Data types
 
@@ -468,11 +476,6 @@ isTypeExpr (Located _ e) = case e of
   R.EType -> True
   R.EParen x -> isTypeExpr x
   _ -> False
-
-stripParen :: Located R.Expr -> Located R.Expr
-stripParen = \case
-  Located _ (R.EParen x) -> stripParen x
-  e -> e
 
 {- |
 A constructor in the GADT style: its name, the types of the fields its code
@@ -723,7 +726,7 @@ elabClass fx env cd = do
     unless (v == a) $ Left (ElabError vsp ("a superclass constrains the class's own parameter, " <> T.unpack a))
     case [c | GClass c <- resolve env q] of
       c : _ -> pure (classQual c)
-      [] -> Left (ElabError qsp ("not a class: " <> T.unpack (qnameText q)))
+      [] -> Left (ElabError qsp ("not a class: " <> T.unpack (displayQName q)))
   members <- forM (R.classMembers cd) \(Located msp m, ty0) -> (msp,m,) <$> resolved fx ty0
   methods <- forM [x | x@(_, _, ty) <- members, not (isProp ty)] \(msp, m, ty) -> do
     let params = a : filter (/= a) (nub (typeVariables env ty))
@@ -769,7 +772,7 @@ elabInstance fx env sp idl = do
   let Located csp cq = R.instanceClass idl
   cls <- case [c | GClass c <- resolve env cq] of
     c : _ -> pure c
-    [] -> Left (ElabError csp ("not a class: " <> T.unpack (qnameText cq)))
+    [] -> Left (ElabError csp ("not a class: " <> T.unpack (displayQName cq)))
   ty0 <- resolved fx (R.instanceType idl)
   let vars = nub (typeVariables env ty0)
       className' = segmentText (last (classQual cls))
@@ -1023,7 +1026,7 @@ elabTypeIn env sc le@(Located sp e) = case e of
     (Located hsp (R.EName q), args0) -> do
       let (imps, args, late) = splitImplicits args0
           noImplicits = \case
-            x : _ -> Left (ElabError (location x) (T.unpack (qnameText q) <> " takes no implicit arguments"))
+            x : _ -> Left (ElabError (location x) (T.unpack (displayQName q) <> " takes no implicit arguments"))
             [] -> Right ()
       forM_ (take 1 late) \x -> Left (ElabError (location x) "an implicit argument, in braces, comes before the explicit ones")
       case q of
@@ -1035,7 +1038,7 @@ elabTypeIn env sc le@(Located sp e) = case e of
             let np = length (dataParams dd)
                 ni = length (dataIndices dd)
                 (ets, eis) = explicitPositions dd
-                dname = T.unpack (qnameText q)
+                dname = T.unpack (displayQName q)
                 -- Its implicit parameters, types then indices, which the arguments in braces give in order.
                 slots = [Left i | i <- [0 .. np - 1], i `notElem` ets] <> [Right j | j <- [0 .. ni - 1], j `notElem` eis]
             unless (length args == length ets + length eis) $
@@ -1060,7 +1063,7 @@ elabTypeIn env sc le@(Located sp e) = case e of
             ts <- forM [0 .. np - 1] \i -> maybe (Left (unfound ("type parameter " <> T.unpack (fst (dataParams dd !! i))))) Right (IM.lookup i (asTypes found))
             xs <- forM [0 .. ni - 1] \j -> maybe (Left (unfound ("index " <> show j))) Right (IM.lookup j (asValues found))
             pure (TData (renderQualName (dataQual dd)) ts (map normIx xs))
-          [] -> Left (ElabError hsp ("not a type: " <> T.unpack (qnameText q)))
+          [] -> Left (ElabError hsp ("not a type: " <> T.unpack (displayQName q)))
     _
       | isProp le -> Left (ElabError sp "a proposition where a type is expected: the arguments and the result of a function are types")
       | otherwise -> Left (ElabError sp "a type")
@@ -1089,15 +1092,15 @@ elabIx env vals le@(Located sp e) = case e of
       GCtor c : _ -> do
         let explicitArity = maybe (length (ctorFields c)) (\g -> length [() | TeleEntry _ _ (Explicit _) <- gcTele g]) (ctorGadt c)
             storing = maybe False (\g -> or [True | TeleEntry _ _ (Stored _) <- gcTele g]) (ctorGadt c)
-        unless (length args == explicitArity) $ Left (ElabError hsp (T.unpack (qnameText q) <> " takes " <> show explicitArity <> " fields"))
-        when storing $ Left (ElabError hsp ("a constructor storing implicit arguments, " <> T.unpack (qnameText q) <> ", in an index: not supported yet"))
+        unless (length args == explicitArity) $ Left (ElabError hsp (T.unpack (displayQName q) <> " takes " <> show explicitArity <> " fields"))
+        when storing $ Left (ElabError hsp ("a constructor storing implicit arguments, " <> T.unpack (displayQName q) <> ", in an index: not supported yet"))
         IxCon (ctorCore c) <$> traverse (elabIx env vals) args
       GFun f : _ -> do
-        unless (length args == funArity f) $ Left (ElabError hsp (T.unpack (qnameText q) <> " takes " <> show (funArity f) <> " arguments"))
+        unless (length args == funArity f) $ Left (ElabError hsp (T.unpack (displayQName q) <> " takes " <> show (funArity f) <> " arguments"))
         unless (null (funSlots f)) $ Left (ElabError hsp "a function under constraints, in an index: not supported")
         unless (null (funRuntime f)) $ Left (ElabError hsp "a function taking implicit values at runtime, in an index: not supported yet")
         IxFun (funCore f) <$> traverse (elabIx env vals) args
-      _ -> Left (ElabError hsp ("not a value in scope here: " <> T.unpack (qnameText q)))
+      _ -> Left (ElabError hsp ("not a value in scope here: " <> T.unpack (displayQName q)))
     isValueHead = \case
       GCtor _ -> True
       GFun _ -> True
@@ -1136,37 +1139,11 @@ ixType env sc = go
                   given = emptyAssignment {asValues = IM.fromList [(e, x) | ((e, _), x) <- zip explicits xs]}
                in maybe THole (\s -> substScheme (np, length tele) s (self (gcResult g))) (foldM (\s ((_, t), x) -> matchTy (np, length tele) t (go x) s) given (zip explicits xs))
 
--- | An application as its head and explicit arguments; implicit arguments are dropped.
-rawSpine :: Located R.Expr -> (Located R.Expr, [Located R.Expr])
-rawSpine = go []
-  where
-    go acc = \case
-      Located _ (R.EApp f x) -> go (x : acc) f
-      Located _ (R.EImplicitApp f _) -> go acc f
-      Located _ (R.EParen x) | null acc -> go acc x
-      h -> (h, acc)
-
 -- | The names of the enclosing signature's value parameters, by their positions: how its messages render indices.
 valueNamesOf :: Env -> [Text]
 valueNamesOf env =
   let vs = tsValues (envScope env)
    in [fromMaybe ("#" <> T.pack (show i)) (listToMaybe [v | (v, IxParam j) <- vs, j == i]) | i <- [0 .. length vs - 1]]
-
--- | An application as its head and its arguments in order, those in braces, implicit, on the left.
-rawArgs :: Located R.Expr -> (Located R.Expr, [Either (Located R.Expr) (Located R.Expr)])
-rawArgs = go []
-  where
-    go acc = \case
-      Located _ (R.EApp f x) -> go (Right x : acc) f
-      Located _ (R.EImplicitApp f x) -> go (Left x : acc) f
-      Located _ (R.EParen x) | null acc -> go acc x
-      h -> (h, acc)
-
--- | The implicit arguments written before the explicit ones, the explicit ones, and any implicit one after them.
-splitImplicits :: [Either a a] -> ([a], [a], [a])
-splitImplicits args =
-  let (imps, rest) = span (either (const True) (const False)) args
-   in ([x | Left x <- imps], [x | Right x <- rest], [x | Left x <- rest])
 
 -- | The index functions of a data type, by their core names, one for each index.
 indexFnsOf :: Env -> Text -> [Text]
@@ -1322,7 +1299,7 @@ constraintClasses :: Env -> [Text] -> [R.TyConstraint] -> Either ElabError [(Cla
 constraintClasses env params cs = forM cs \(Located qsp q, Located vsp v) -> do
   cls <- case [c | GClass c <- resolve env q] of
     c : _ -> pure c
-    [] -> Left (ElabError qsp ("not a class: " <> T.unpack (qnameText q)))
+    [] -> Left (ElabError qsp ("not a class: " <> T.unpack (displayQName q)))
   i <- maybe (Left (ElabError vsp ("a constraint on " <> T.unpack v <> ", which is no type variable of the signature"))) Right (elemIndex v params)
   pure (cls, i)
 
@@ -1484,7 +1461,7 @@ unfoldingNames env rows = [if length (filter (== n) names) > 1 then n <> "-" <> 
       PAbsurd -> True
       _ -> False
     shape = \case
-      PCon (Ref _ core) _ -> maybe core (\c -> case last (ctorQual c) of Ident t -> t; Op t -> t) (ctorByCore env core)
+      PCon (Ref _ core) _ -> maybe core (segmentRaw . last . ctorQual) (ctorByCore env core)
       PNat n -> T.pack (show n)
       PSucc _ -> "S"
       _ -> "_"
@@ -1531,24 +1508,6 @@ rawArrows = \case
   Located _ (R.EArrow a b) -> let (ds, r) = rawArrows b in (a : ds, r)
   e -> ([], e)
 
--- | Whether an expression is a proposition rather than a type, by its form.
-isProp :: Located R.Expr -> Bool
-isProp (Located _ e) = case e of
-  R.EParen x -> isProp x
-  R.EInfix op _ _ -> let n = opText op in isRelation n || isConnective n
-  R.ENot _ -> True
-  R.EName (QName [] (Op o)) -> o `elem` ["⊤", "⊥"]
-  R.EQuant {} -> True
-  R.EArrow _ b -> isProp b
-  R.EPi _ b -> isProp b
-  R.EConstrained _ b -> isProp b
-  _ -> False
-
-opText :: Located R.Operator -> Text
-opText (Located _ op) = case R.qnameBase (R.operatorName op) of
-  Op t -> t
-  Ident t -> t
-
 -- | The type variables of a type expression: names which are neither data types nor @Nat@, the indices of a data type's aside.
 typeVariables :: Env -> Located R.Expr -> [Text]
 typeVariables env le@(Located _ e) = case e of
@@ -1560,18 +1519,6 @@ typeVariables env le@(Located _ e) = case e of
     (Located _ (R.EName (QName [] (Ident n))), args)
       | null (resolve env (QName [] (Ident n))) && n `notElem` ["Nat", "nat"] -> n : concatMap (typeVariables env) args
     (_, args) -> concatMap (typeVariables env) args
-
--- | The head name of a clause, and its arguments: implicit on the left, explicit on the right.
-lhsParts :: Located R.Expr -> Maybe (Segment, [Either (Located R.Expr) (Located R.Expr)])
-lhsParts = go []
-  where
-    go acc = \case
-      Located _ (R.EApp f x) -> go (Right x : acc) f
-      Located _ (R.EImplicitApp f x) -> go (Left x : acc) f
-      Located _ (R.EName (QName [] s)) -> Just (s, acc)
-      Located _ (R.EInfix (Located _ op) l r) | null acc, QName [] s <- R.operatorName op -> Just (s, [Right l, Right r])
-      Located _ (R.EParen x) -> go acc x
-      _ -> Nothing
 
 -- * Clauses
 
@@ -1585,7 +1532,7 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       explicitTerms = [p | (i, p) <- zip [0 :: Int ..] explicit, i `notElem` proofPositions]
       proofPats = [p | (i, p) <- zip [0 :: Int ..] explicit, i `elem` proofPositions]
   unless (length explicit == length args + length proofPositions) $
-    failAt (location lhs) (T.unpack (renderQualName (funQual info)) <> " takes " <> show (length args + length proofPositions) <> " arguments")
+    failAt (location lhs) (T.unpack (displayQualName (funQual info)) <> " takes " <> show (length args + length proofPositions) <> " arguments")
   -- A proof's pattern names it, a hypothesis of the clause's obligations: it binds no value.
   proofNames <- forM proofPats \p -> case stripParen p of
     Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
@@ -1821,7 +1768,7 @@ elabPattern env s expected le@(Located sp e) = case e of
     constructor csp q args =
       ctorFor csp q >>= \case
         Just ci -> constructorWith csp ci args
-        Nothing -> failAt csp ("not a constructor: " <> T.unpack (qnameText q))
+        Nothing -> failAt csp ("not a constructor: " <> T.unpack (displayQName q))
     constructorWith csp ci args = do
       dat <- maybe (failAt csp "internal: a constructor of no data type") pure (dataOfCtor env ci)
       -- The type expected is known, an argument's or a field's: its arguments are the constructor's type's.
@@ -1834,7 +1781,7 @@ elabPattern env s expected le@(Located sp e) = case e of
         Nothing -> do
           let fields = map (substParams typeArgs) (ctorFields ci)
           unless (length args == length fields) $
-            failAt csp (T.unpack (renderQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields")
+            failAt csp (T.unpack (displayQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields")
           (subs, s') <- subpatterns s fields args
           pure (PCon (Ref RefConstructor (ctorCore ci)) (map fst subs), concatMap snd subs, [], s')
         Just g -> do
@@ -1861,7 +1808,7 @@ elabPattern env s expected le@(Located sp e) = case e of
               valueArgs = [a | (i, a) <- zip [0 :: Int ..] args, i `notElem` proofPositions]
               proofExprs = [a | (i, a) <- zip [0 :: Int ..] args, i `elem` proofPositions]
           unless (length args == length fields + length proofPositions) $
-            failAt csp (T.unpack (renderQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields" <> (if null proofPositions then "" else " and " <> show (length proofPositions) <> " proofs"))
+            failAt csp (T.unpack (displayQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields" <> (if null proofPositions then "" else " and " <> show (length proofPositions) <> " proofs"))
           proofNames <- forM proofExprs \a -> case stripParen a of
             Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
             Located _ R.EWildcard -> pure Nothing
@@ -1903,7 +1850,7 @@ elabPattern env s expected le@(Located sp e) = case e of
         (c : _, _) -> pure (Just c)
         ([], [c]) -> pure (Just c)
         ([], []) -> pure Nothing
-        ([], cs) -> failAt csp ("ambiguous constructor " <> T.unpack (qnameText q) <> ": " <> unwords (map (T.unpack . renderQualName . ctorQual) cs))
+        ([], cs) -> failAt csp ("ambiguous constructor " <> T.unpack (displayQName q) <> ": " <> unwords (map (T.unpack . displayQualName . ctorQual) cs))
     unqualifiedCtors = \case
       QName [] s -> constructorsNamed env s
       _ -> []
@@ -2114,9 +2061,9 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
         case (byType, candidates) of
           (g : _, _) -> typed hsp g
           ([], [g]) -> typed hsp g
-          ([], []) -> failAt hsp ("not in scope: " <> T.unpack (qnameText q))
+          ([], []) -> failAt hsp ("not in scope: " <> T.unpack (displayQName q))
           ([], g : _)
-            | all isCtor candidates -> undetermined hsp ("ambiguous constructor " <> T.unpack (qnameText q))
+            | all isCtor candidates -> undetermined hsp ("ambiguous constructor " <> T.unpack (displayQName q))
             | otherwise -> typed hsp g
     typed hsp = \case
       GFun f -> do
@@ -2126,14 +2073,14 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
             -- The implicit values it takes at runtime, as found: terms of what is in scope.
             passed s = forM (funRuntime f) \i -> case valueAt s i of
               Just x -> pure x
-              Nothing -> failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (renderQualName (funQual f)) <> " is not determined here, as a value")
+              Nothing -> failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> " is not determined here, as a value")
             -- Its preconditions at the parameters found: the propositions its proofs are of.
             proofAt =
               [ ( pos
                 , \s -> do
                     forM_ [i | B i <- toList (fromScope prop)] \i ->
                       when (isNothing (valueAt s i)) $
-                        failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (renderQualName (funQual f)) <> ", which its precondition mentions, is not determined here")
+                        failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> ", which its precondition mentions, is not determined here")
                     pure (instantiate (fromMaybe Hole . valueAt s) (fmap absurd prop))
                 )
               | (pos, prop) <- funProofs f
@@ -2195,11 +2142,12 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
               AtInstance f dict -> \as -> apps (Global (Ref RefFunction (funCore f))) (as <> map vacuous dict)
           )
             <$> resolution (methodAt env givens m (substScheme n s (TParam 0 [])))
-      GTheorem t -> failAt sp (T.unpack (renderQualName (thmQual t)) <> " is a theorem, not a term")
-      GLaw l -> failAt sp (T.unpack (renderQualName (lawQual l)) <> " is a law, not a term")
-      GData d -> failAt sp (T.unpack (renderQualName (dataQual d)) <> " is a type, not a term")
-      GClass c -> failAt sp (T.unpack (renderQualName (classQual c)) <> " is a class, not a term")
-      GInstance i -> failAt sp (T.unpack (renderQualName (instQual i)) <> " is an instance, not a term")
+      GTheorem t -> failAt sp (T.unpack (displayQualName (thmQual t)) <> " is a theorem, not a term")
+      GLaw l -> failAt sp (T.unpack (displayQualName (lawQual l)) <> " is a law, not a term")
+      GData d -> failAt sp (T.unpack (displayQualName (dataQual d)) <> " is a type, not a term")
+      GClass c -> failAt sp (T.unpack (displayQualName (classQual c)) <> " is a class, not a term")
+      GInstance i -> failAt sp (T.unpack (displayQualName (instQual i)) <> " is an instance, not a term")
+      GModule m -> failAt sp (T.unpack (displayQualName (modQual m)) <> " is a module, not a term")
     -- A method not resolved: undetermined while its type is not known, else refused.
     resolution :: Either Unresolved r -> TC r
     resolution = either (\case Pending why -> undetermined sp why; Refusal why -> failAt sp why) pure

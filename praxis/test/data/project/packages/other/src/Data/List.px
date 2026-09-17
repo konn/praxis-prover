@@ -1,0 +1,8 @@
+module Data.List where
+
+-- Another List, in another package, in a module of the same name as lists' Data.List.
+data List a = Empty | More a (List a)
+
+size : List a -> Nat
+size Empty = 0
+size (More _ xs) = S (size xs)

@@ -24,6 +24,7 @@ module Language.Praxis.LSP (
   languageOf,
   Report (..),
   analyse,
+  analyseIn,
   hoverAt,
 ) where
 
@@ -49,6 +50,7 @@ import Language.Praxis.PRA.Syntax.Parser (syntaxErrorPosition)
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
+import Language.Praxis.Package.Build (ModuleResult (..), checkFile, componentId, locate)
 import Language.Praxis.Surface.Check qualified as Surface
 import Language.Praxis.Surface.Prelude (Prelude, prelude)
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
@@ -114,9 +116,11 @@ handlers =
 publish :: NormalizedUri -> LspM () ()
 publish uri = do
   file <- getVirtualFile uri
-  case (file, languageOf =<< uriToFilePath (fromNormalizedUri uri)) of
-    (Just f, Just lang) ->
-      publishDiagnostics 100 uri (Just (virtualFileVersion f)) (partitionBySource (map (diagnostic (virtualFileText f)) (analyse lang (virtualFileText f))))
+  let path = uriToFilePath (fromNormalizedUri uri)
+  case (file, languageOf =<< path) of
+    (Just f, Just lang) -> do
+      reports <- liftIO (analyseIn lang (fromMaybe "<document>" path) (virtualFileText f))
+      publishDiagnostics 100 uri (Just (virtualFileVersion f)) (partitionBySource (map (diagnostic (virtualFileText f)) reports))
     _ -> pure ()
 
 -- | A report as a diagnostic, spanning from its position to its end, or else to the end of the line.
@@ -162,12 +166,22 @@ data Report = Report
   }
   deriving (Show, Eq)
 
--- | Everything to report about a document.
+-- | Everything to report about a document on its own: a @.px@ document outside any package.
 analyse :: Language -> Text -> [Report]
 analyse = \case
   Pra -> analysePra
   Prf -> analysePrf
   Px -> analysePx
+
+{- |
+Everything to report about a document at a path: a @.px@ document as a
+module of the package enclosing the path, when one does, its imports
+resolved and the modules it imports checked before it; else on its own.
+-}
+analyseIn :: Language -> FilePath -> Text -> IO [Report]
+analyseIn lang path text = case lang of
+  Px -> analysePxIn path text
+  _ -> pure (analyse lang text)
 
 analysePrf :: Text -> [Report]
 analysePrf text = case checkQuote mempty Map.empty Set.empty id "" text of
@@ -327,3 +341,28 @@ analysePx text = case surfacePrelude of
 -- | The prelude of the surface language, certified once for the server's lifetime.
 surfacePrelude :: Either String Prelude
 surfacePrelude = prelude
+
+{- |
+A module of the surface language at a path: checked as a module of the
+package enclosing it, with what it imports, the reports being the
+document's own; or on its own, when no package encloses it.
+-}
+analysePxIn :: FilePath -> Text -> IO [Report]
+analysePxIn path text = case surfacePrelude of
+  Left err -> pure [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err)) Nothing]
+  Right p -> do
+    inPackage <- checkFile p path text
+    case inPackage of
+      Nothing -> pure (analysePx text)
+      Just (Left err) -> pure [Report 1 1 DiagnosticSeverity_Error (T.pack err) Nothing]
+      Just (Right results) -> do
+        located <- locate path
+        let mine = case located of
+              Just (_, c, name) -> [r | r <- results, mrModule r == name, componentId (mrComponent r) == componentId c]
+              Nothing -> take 1 (reverse results)
+        pure (concatMap (map report . Surface.checkedReports . mrChecked) mine)
+  where
+    report (Surface.Report (Span (l, c) (l', c')) sev msg) = Report (max 1 l) (max 1 c) (severity sev) msg (Just (max 1 l', max 1 c'))
+    severity = \case
+      Surface.SevError -> DiagnosticSeverity_Error
+      Surface.SevInfo -> DiagnosticSeverity_Information

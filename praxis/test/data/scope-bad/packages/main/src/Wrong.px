@@ -1,0 +1,4 @@
+module Right where
+
+three : Nat
+three = 3

@@ -58,7 +58,7 @@ import Language.Praxis.Surface.Encode (collapseLemma, ctorLemma)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Syntax
-import Language.Praxis.Surface.Syntax.Raw (Segment (..))
+import Language.Praxis.Surface.Syntax.Raw (segmentRaw)
 import Language.Praxis.Surface.Types (Ty (TNat))
 import Text.Read (readMaybe)
 
@@ -70,14 +70,9 @@ data Compiled = Compiled
   -- ^ each unfolding lemma, with its sides
   }
 
-raw :: Segment -> Text
-raw = \case
-  Ident t -> t
-  Op t -> t
-
 -- | The core name of a lemma of a function: @f.#def@, @f.unfold-Nil@, …
 functionLemma :: FunInfo -> Text -> Text
-functionLemma f n = mangleGlobal (map raw (funQual f) <> [n])
+functionLemma f n = mangleGlobal (map segmentRaw (funQual f) <> [n])
 
 {- |
 A dictionary as a call in a lemma passes it on: the parameters of the

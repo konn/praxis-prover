@@ -88,7 +88,7 @@ import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
 import Language.Praxis.Surface.Syntax
-import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span)
+import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), firstOrder, mergeTy, normIx, renderTy)
 
@@ -1345,12 +1345,12 @@ evidence k info g le = case spineOf le of
             Right (Evidence name pre "" eq Nothing)
           Just ty
             | Just h <- headOf ty -> do
-                inst <- maybe (Left (EngineError sp ("no instance of " <> T.unpack (renderQualName (lawClass l)) <> " for " <> T.unpack h))) Right (Map.lookup (lawClass l, h) (envInstances (knowEnv k)))
-                t <- maybe (Left (EngineError sp ("internal: the instance does not prove " <> T.unpack (renderQualName (lawQual l))))) Right (Map.lookup (lawQual l) (instLaws inst))
+                inst <- maybe (Left (EngineError sp ("no instance of " <> T.unpack (displayQualName (lawClass l)) <> " for " <> T.unpack h))) Right (Map.lookup (lawClass l, h) (envInstances (knowEnv k)))
+                t <- maybe (Left (EngineError sp ("internal: the instance does not prove " <> T.unpack (displayQualName (lawQual l))))) Right (Map.lookup (lawQual l) (instLaws inst))
                 theorem sp t args
           _ -> case [gpName p | p <- goalPremises g, PLaw lq _ <- [gpPremise p], lq == lawQual l] of
             [name] | null args -> Right (named name)
-            _ -> Left (EngineError sp ("the law " <> T.unpack (renderQualName (lawQual l)) <> " applies to arguments, whose type gives the instance it is at"))
+            _ -> Left (EngineError sp ("the law " <> T.unpack (displayQualName (lawQual l)) <> " applies to arguments, whose type gives the instance it is at"))
       -- A lemma of the library, by its name: applied to hypotheses, which the appeal takes in order.
       _
         | QName [] (Ident w) <- q
@@ -1359,7 +1359,7 @@ evidence k info g le = case spineOf le of
               Located _ (R.EName (QName [] (Ident h))) | Just c <- lookup h (goalNames g) -> Right c
               Located asp _ -> Left (EngineError asp "a lemma of the library is applied to hypotheses, by their names")
             Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing Nothing)
-      _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (R.qnameText q)))
+      _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (displayQName q)))
   (Located sp _, _) -> Left (EngineError sp "a proof term: a hypothesis or a lemma, applied")
   where
     -- The indices a theorem's binders must have, at the arguments given: found, and stated where no hypothesis does; with the value parameters they give.
@@ -1540,7 +1540,7 @@ premiseObligations k g assign t = forM (thmPremises t) \case
   PLaw lq i -> OLaw lq <$> at i
   PClosure mq i -> OClosure mq . siteOfType k g <$> at i
   where
-    at i = maybe (Left (T.unpack (renderQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances")) Right (Map.lookup i assign)
+    at i = maybe (Left (T.unpack (displayQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances")) Right (Map.lookup i assign)
 
 -- | Whether a hypothesis of the goal states the membership of the term by the predicate, as the core writes it.
 hasMembership :: Goal -> Pred -> CT -> Bool
@@ -1658,7 +1658,7 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
                     Right props -> afterMemberships [(a, q) | (a, Just q) <- zip args argPs] subs (\rs -> haves <> props <> appeal rs)
       _ -> Nothing
     lawPremise = \case
-      OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (renderQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
+      OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (displayQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
       _ -> Nothing
     -- The theorem proving the law at the instance for the head of the type; under a context, its premises at the type's arguments.
     lawInstance = \case
@@ -1671,14 +1671,14 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
       OClosure _ SiteAny -> Just (Reduce [] (const "exact anyIsMember"))
       _ -> Nothing
     closurePremise = \case
-      OClosure mq (SiteParam j) -> Just (premiseNamed (PClosure mq j) ("no premise states the closure of " <> T.unpack (renderQualName mq) <> " here"))
+      OClosure mq (SiteParam j) -> Just (premiseNamed (PClosure mq j) ("no premise states the closure of " <> T.unpack (displayQualName mq) <> " here"))
       _ -> Nothing
     -- The closure lemma of the instance's function; the instance's type parameters are its type's, in order.
     closureInstance = \case
       OClosure mq (SiteData dn preds) -> Just case instanceFunction mq dn of
-        Nothing -> Refuse ("no instance's function for " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn)
+        Nothing -> Refuse ("no instance's function for " <> T.unpack (displayQualName mq) <> " at " <> T.unpack dn)
         Just f -> case Map.lookup (funCore f) (knowClosures k) of
-          Nothing -> Refuse ("the function of " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn <> " has no closure lemma: its results are not known to be members")
+          Nothing -> Refuse ("the function of " <> T.unpack (displayQualName mq) <> " at " <> T.unpack dn <> " has no closure lemma: its results are not known to be members")
           Just cl -> either Refuse (uncurry Reduce) (closureAppeal cl (Map.fromList [(u, q) | (u, Just q) <- zip [0 ..] preds]))
       _ -> Nothing
     -- The appeal to a closure lemma: its premises, the closures of its dictionary's methods, at the predicates its type parameters are at.
@@ -1711,9 +1711,9 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
     lawTheorem lq h = do
       cls <- case Map.lookup lq (envGlobals env) of
         Just (GLaw l) -> Right (lawClass l)
-        _ -> Left ("internal: " <> T.unpack (renderQualName lq) <> " is no law")
-      inst <- maybe (Left ("no instance of " <> T.unpack (renderQualName cls) <> " for " <> T.unpack h)) Right (Map.lookup (cls, h) (envInstances env))
-      maybe (Left ("internal: the instance does not prove " <> T.unpack (renderQualName lq))) Right (Map.lookup lq (instLaws inst))
+        _ -> Left ("internal: " <> T.unpack (displayQualName lq) <> " is no law")
+      inst <- maybe (Left ("no instance of " <> T.unpack (displayQualName cls) <> " for " <> T.unpack h)) Right (Map.lookup (cls, h) (envInstances env))
+      maybe (Left ("internal: the instance does not prove " <> T.unpack (displayQualName lq))) Right (Map.lookup lq (instLaws inst))
     instanceFunction mq dn = do
       GMethod m <- Map.lookup mq (envGlobals env)
       inst <- Map.lookup (methodClass m, dn) (envInstances env)
@@ -1727,8 +1727,8 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
       _ -> []
     none = \case
       OMember p t -> "the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function"
-      OLaw lq ty -> "the law " <> T.unpack (renderQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
-      OClosure mq _ -> "the closure of " <> T.unpack (renderQualName mq) <> " is not known there"
+      OLaw lq ty -> "the law " <> T.unpack (displayQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
+      OClosure mq _ -> "the closure of " <> T.unpack (displayQualName mq) <> " is not known there"
     deep _ = "resolution went deeper than " <> show obligationDepth <> " steps"
 
 -- | The site of a closure at a type: a type parameter, every code for @Nat@, a data type at the predicates of its arguments.
@@ -2064,10 +2064,7 @@ natInduction info g sp core = pure ([base, step], finish)
         (goalDict g)
         (goalPremises g)
     tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
-    segment = \case
-      Ident t -> t
-      Op t -> t
-    auxName i = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
+    auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
     finish outs = do
       decls <- forM (zip3 [0 ..] [base, step] outs) \(i, cg, o) -> do
         decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
@@ -2141,13 +2138,10 @@ tupleInduction k info g sp applied cols positions = do
         CSym _ xs -> concatMap subtermsCT xs
         _ -> []
     tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
-    segment = \case
-      Ident t -> t
-      Op t -> t
-    auxName i = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
+    auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
     blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
     appealTo name params = "exact " <> fromText name <> staticArgs params <> blocks
-    helperName s = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> s])
+    helperName s = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> s])
     belowName = helperName "below"
     atName = helperName "at"
     svars = [fresh ("s_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
@@ -2392,7 +2386,7 @@ dataInduction k info _ g sp v _ = do
       opened = map openIndices cases
       goals = map snd opened
       tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
-      auxName i = mangleGlobal (map raw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show i)])
+      auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show i)])
       eigen = head [name | i <- [0 :: Int ..], let name = "e_" <> T.pack (show i), name `notElem` map (fst . snd) (goalVars g)]
       finish outs = do
         auxDecls <- forM (zip3 [0 :: Int ..] (zip cases (map fst opened)) outs) \(i, (cg, intro), o) -> do
@@ -2407,9 +2401,6 @@ dataInduction k info _ g sp v _ = do
         pure (Out script (concat auxDecls))
   pure (goals, finish)
   where
-    raw = \case
-      Ident t -> t
-      Op t -> t
     -- The leading implications of a case's conclusion whose antecedents are equations of indices, introduced: the tactic, and the goal after.
     openIndices cg =
       let (ants, concl) = indexImplications (goalConcl cg)
@@ -2637,7 +2628,7 @@ byClauses k info g td pcs = do
             | otherwise -> ("S n", \case PSucc _ -> True; _ -> False, \case PSucc p -> [fieldName (0 :: Int) p]; _ -> [])
           _ ->
             let ctor = dataCtorsOf binder !! i
-             in ( "the constructor " <> T.unpack (renderQualName (ctorQual ctor))
+             in ( "the constructor " <> T.unpack (displayQualName (ctorQual ctor))
                 , \case PCon (Ref _ r) _ -> r == ctorCore ctor; _ -> False
                 , \case PCon _ subs -> [fieldName j p | (j, p) <- zip [0 :: Int ..] subs]; _ -> []
                 )
