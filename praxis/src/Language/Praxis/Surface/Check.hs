@@ -76,7 +76,7 @@ import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
-import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), ScopeError (..), moduleExports, renameModule)
+import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), Renamed, ScopeError (..), moduleExports, renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), RelOp (..), stripLocations)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span (..))
 import Language.Praxis.Surface.Syntax.Raw qualified as R
@@ -96,14 +96,17 @@ data Report = Report
 
 {- |
 The findings, the core text generated, in order, and the theorems certified,
-by their surface names; and, once the module elaborated, what the engine and
-the core know after it.
+by their surface names; once the module elaborated, what the engine and
+the core know after it; and, once it parsed and its fixities resolved, the
+module as the renamer left it, every global by its canonical name, for the
+tools which follow names to their declarations.
 -}
 data Checked = Checked
   { checkedReports :: ![Report]
   , checkedCore :: ![Text]
   , checkedTheorems :: ![Text]
   , checkedFinal :: !(Maybe (Knowledge, Core))
+  , checkedRenamed :: !(Maybe Renamed)
   }
 
 -- * The core state
@@ -202,18 +205,19 @@ checkModule :: (Env -> FunDef -> [Spec]) -> Build -> Imports -> Maybe QualName -
 checkModule specsOf build imports name file src = case parseModule file src of
   Left err ->
     let (l, c) = syntaxErrorPosition err
-     in (Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing, build)
+     in (Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing Nothing, build)
   Right m ->
     let modQ = fromMaybe (headerName m) name
         imported = Map.unions [meFixities e | Right e <- Map.elems imports]
      in case moduleFixitiesWith imported m of
           Left ferr ->
             let (sp, msg) = renderFixityError ferr
-             in (Checked [Report sp SevError (T.pack msg)] [] [] Nothing, build)
+             in (Checked [Report sp SevError (T.pack msg)] [] [] Nothing Nothing, build)
           Right fx ->
             let (renamed, scopeErrors) = renameModule fx (buildEnv build) imports modQ m
                 (env, items) = elabModule fx (buildEnv build) renamed
-             in runItems specsOf fx env build (moduleExports fx renamed) [Report sp SevError (T.pack msg) | ScopeError sp msg <- scopeErrors] items
+                (checked, build') = runItems specsOf fx env build (moduleExports fx renamed) [Report sp SevError (T.pack msg) | ScopeError sp msg <- scopeErrors] items
+             in (checked {checkedRenamed = Just renamed}, build')
 
 data Run = Run
   { runCore :: !Core
@@ -250,7 +254,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
         , runObligations = []
         }
     finish r =
-      ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r))
+      ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r)) Nothing
       , Build
           { buildCore = runCore r
           , buildEnv = env

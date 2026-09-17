@@ -101,13 +101,29 @@ toQName q = QName (init q) (last q)
 
 -- * The result
 
--- | A module renamed: its name, its declarations with the modules they belong to, its nested modules with their exports, its own exports, and the modules whose constructors an unqualified name may be found among.
+{- |
+A module renamed: its name, its declarations with the modules they belong
+to, its nested modules with their exports, its own exports, the modules
+whose constructors an unqualified name may be found among; and, for the
+tools which follow names to their declarations, what the names of its
+imports and openings resolved to, and where its header and those of its
+nested modules are.
+-}
 data Renamed = Renamed
   { rnModule :: !QualName
   , rnDecls :: ![RDecl]
   , rnModules :: ![(QualName, Map Segment QualName)]
   , rnExports :: !(Map Segment QualName)
   , rnVisible :: ![QualName]
+  , rnResolved :: ![(Span, QualName)]
+  {- ^ every name an import, an opening or a directive writes, in order:
+  where it is, and the module, namespace or member it resolved to
+  -}
+  , rnHeaders :: ![(Span, QualName)]
+  {- ^ the header of the module, when it has one, and of each module nested
+  in it, in order: where the name is written, and the module's canonical
+  name
+  -}
   }
 
 -- | A declaration renamed, with the module it belongs to: the file's, or one nested in it.
@@ -144,6 +160,8 @@ data Scope = Scope
   , scPrivate :: !Bool
   , scOpened :: ![(QualName, Map Segment QualName)]
   , scImports :: !(Map QualName (Map Segment QualName))
+  , scImported :: !(Map QualName QualName)
+  -- ^ the canonical name of each module imported, by the name it is in scope by
   , scNamespaces :: !(Map QualName (Map Segment QualName))
   -- ^ the namespaces the file declares whose members are known: data types, classes, instances, nested modules
   , scModules :: ![(QualName, Map Segment QualName)]
@@ -153,6 +171,10 @@ data Scope = Scope
   , scCtorQuals :: !(Set QualName)
   , scErrors :: ![ScopeError]
   -- ^ latest first
+  , scResolved :: ![(Span, QualName)]
+  -- ^ what the names of imports, openings and directives resolved to, latest first
+  , scHeaders :: ![(Span, QualName)]
+  -- ^ the headers of the nested modules entered, latest first
   }
 
 type Locals = Set Text
@@ -169,12 +191,28 @@ renameModule fx env imports modQ m =
   let imported = [meName e | Right e <- Map.elems imports]
       visible = modQ : imported
       cx = Ctx fx env imports (Set.fromList [last (ctorQual c) | GCtor c <- Map.elems (envGlobals env), any (`isPrefixOf` ctorData c) imported])
-      sc0 = Scope modQ Map.empty Map.empty False [] Map.empty Map.empty [] Set.empty Set.empty []
+      sc0 = Scope modQ Map.empty Map.empty False [] Map.empty Map.empty Map.empty [] Set.empty Set.empty [] [] []
       (sc, decls) = renameLevel cx sc0 (moduleDecls m)
-   in (Renamed modQ decls (reverse (scModules sc)) (scExports sc) visible, reverse (scErrors sc))
+      header = [(sp, modQ) | Just (Located sp _) <- [moduleName m]]
+   in (Renamed modQ decls (reverse (scModules sc)) (scExports sc) visible (reverse (scResolved sc)) (header <> reverse (scHeaders sc)), reverse (scErrors sc))
 
 failed :: ScopeError -> Scope -> Scope
 failed err sc = sc {scErrors = err : scErrors sc}
+
+-- | Names written in an import, an opening or a directive, each with what it resolved to.
+resolvedTo :: [(Span, QualName)] -> Scope -> Scope
+resolvedTo names sc = sc {scResolved = reverse names <> scResolved sc}
+
+{- |
+The members the directives of an import or an opening name, each where it
+is written, with the global it names among the members given: those after
+@using@ and @hiding@, and both names of a renaming, the new one naming what
+the old one did.
+-}
+directiveNames :: Directives -> Map Segment QualName -> [(Span, QualName)]
+directiveNames (Directives using hiding renaming) members =
+  [(sp, q) | Located sp s <- fromMaybe [] using <> hiding <> map fst renaming, Just q <- [Map.lookup s members]]
+    <> [(sp, q) | (Located _ from, Located sp _) <- renaming, Just q <- [Map.lookup from members]]
 
 -- | A name declared by the module: in unqualified scope, and exported unless under @private@.
 declare :: Segment -> QualName -> Scope -> Scope
@@ -515,15 +553,15 @@ renameLevel cx sc0 decls0 = let (sc1, out) = foldl step (predeclared, []) flat i
               Left err -> (failed err sc', out)
               Right (own, members) -> case applyDirectives dirs members of
                 Left err -> (failed err sc', out)
-                Right view -> (openView own view public sc', out)
-            DImport imp -> either (\err -> (failed err sc', out)) (,out) (importInto cx sc' imp)
+                Right view -> (openView own view public (resolvedTo ((location lq, own) : directiveNames dirs members) sc'), out)
+            DImport imp -> either (\err -> (failed err sc', out)) ((,out) . fst) (importInto cx sc' imp)
             DOpenImport imp public -> case importInto cx sc' imp of
               Left err -> (failed err sc', out)
-              Right sc'' -> case Map.lookup (importedAs imp) (scImports sc'') of
+              Right (sc'', _) -> case Map.lookup (importedAs imp) (scImports sc'') of
                 Just view -> (openView (importedAs imp) view public sc'', out)
                 Nothing -> (failed (ScopeError sp "internal: the module imported is not in scope") sc'', out)
-            DModule (Located _ name) inner ->
-              let entered = sc' {scModule = scModule sc' <> [Ident name], scExports = Map.empty, scPrivate = False}
+            DModule (Located nsp name) inner ->
+              let entered = sc' {scModule = scModule sc' <> [Ident name], scExports = Map.empty, scPrivate = False, scHeaders = (nsp, scModule sc' <> [Ident name]) : scHeaders sc'}
                   (scInner, ds) = renameLevel cx entered inner
                   q = scModule entered
                   left =
@@ -588,7 +626,9 @@ renameClass cx sc cd = do
 {- |
 An instance: its class and its context resolved, its type, and its clauses;
 it declares its name, @C-T@ unless given, and is a namespace of the
-functions of its methods and the theorems of its laws.
+functions of its methods and the theorems of its laws.  The name it is
+given is written into the declaration, at the class's position, so that
+what follows reads it there.
 -}
 renameInstance :: Ctx -> Scope -> InstanceDecl -> RM (InstanceDecl, Scope)
 renameInstance cx sc idl = do
@@ -601,12 +641,13 @@ renameInstance cx sc idl = do
           | b `elem` [Ident "Nat", Ident "nat"] -> "Nat"
           | otherwise -> segmentText b
         _ -> "?"
-      name = Ident (maybe (segmentText (qnameBase cls) <> "-" <> shortHead) unLocated (instanceName idl))
+      named = fromMaybe (Located csp (segmentText (qnameBase cls) <> "-" <> shortHead)) (instanceName idl)
+      name = Ident (unLocated named)
       iq = scModule sc <> [name]
       classMembers' = fromMaybe Map.empty (namespaceMembers cx sc (qnameSegments cls))
       sc' = namespace iq (Map.fromList [(m, iq <> [m]) | m <- Map.keys classMembers']) (declare name iq sc)
   clauses <- forM (instanceClauses idl) \(Located clsp c) -> Located clsp <$> renameClause cx sc' c
-  pure (idl {instanceClass = Located csp cls, instanceContext = context, instanceType = ty, instanceClauses = clauses}, sc')
+  pure (idl {instanceName = Just named, instanceClass = Located csp cls, instanceContext = context, instanceType = ty, instanceClauses = clauses}, sc')
 
 -- * Imports and openings
 
@@ -614,15 +655,21 @@ renameInstance cx sc idl = do
 importedAs :: Import -> QualName
 importedAs imp = qnameSegments (unLocated (fromMaybe (importModule imp) (importAs imp)))
 
--- | An import: the module's exports, as the build resolved them, taken by its directives, in scope by its name or its alias.
-importInto :: Ctx -> Scope -> Import -> RM Scope
-importInto cx sc imp@(Import lib (Located msp mq) _ dirs) =
+{- |
+An import: the module's exports, as the build resolved them, taken by its
+directives, in scope by its name or its alias; and the exports themselves.
+The module's name, its alias and the members its directives name are
+recorded as resolved.
+-}
+importInto :: Ctx -> Scope -> Import -> RM (Scope, ModuleExports)
+importInto cx sc imp@(Import lib (Located msp mq) alias dirs) =
   case Map.lookup (unLocated <$> lib, qnameSegments mq) (cxImports cx) of
     Nothing -> Left (ScopeError msp ("no module " <> T.unpack (qnameText mq) <> " to import: the file is checked on its own, outside a package"))
     Just (Left why) -> Left (ScopeError msp why)
     Just (Right exports) -> do
       view <- applyDirectives dirs (meMembers exports)
-      pure sc {scImports = Map.insert (importedAs imp) view (scImports sc)}
+      let names = (msp, meName exports) : [(asp, meName exports) | Just (Located asp _) <- [alias]] <> directiveNames dirs (meMembers exports)
+      pure (resolvedTo names sc {scImports = Map.insert (importedAs imp) view (scImports sc), scImported = Map.insert (importedAs imp) (meName exports) (scImported sc)}, exports)
 
 -- | Open a view of a namespace: its members in unqualified scope, and exported when public.
 openView :: QualName -> Map Segment QualName -> Bool -> Scope -> Scope
@@ -639,7 +686,7 @@ a module, a data type, a class, an instance.
 -}
 namespaceOf :: Ctx -> Scope -> Located QName -> RM (QualName, Map Segment QualName)
 namespaceOf cx sc (Located sp q) = case Map.lookup (qnameSegments q) (scImports sc) of
-  Just view -> pure (qnameSegments q, view)
+  Just view -> pure (Map.findWithDefault (qnameSegments q) (qnameSegments q) (scImported sc), view)
   Nothing ->
     resolveName cx sc Set.empty sp q >>= \case
       Canonical q' -> case namespaceMembers cx sc (qnameSegments q') of

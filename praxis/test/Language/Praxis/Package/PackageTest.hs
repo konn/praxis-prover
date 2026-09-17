@@ -17,7 +17,9 @@ import Language.Praxis.Package.Version
 import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..))
 import Language.Praxis.Surface.Env (QualName)
 import Language.Praxis.Surface.Prelude (prelude)
-import Language.Praxis.Surface.Syntax.Raw (Span (..), segmentText)
+import Language.Praxis.Surface.Rename (Renamed (..))
+import Language.Praxis.Surface.Syntax.Raw (Segment (Ident, Op), Span (..), segmentText)
+import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -154,6 +156,28 @@ buildTests =
         -- A file outside any package is nobody's.
         alone <- checkFile p "test/data/list.px" "module Data.List where"
         assertBool "no package encloses test/data" (maybe True (const False) alone)
+    , testCase "the renamer records the module headers, and what the names of imports, openings and directives resolve to" $ do
+        p <- either assertFailure pure prelude
+        results <- either assertFailure pure =<< checkProject p "test/data/project"
+        let renamedOf component name = [rn | r <- results, componentId (mrComponent r) == component, renderName (mrModule r) == name, Just rn <- [checkedRenamed (mrChecked r)]]
+            lists segs = R.Component "lists" : map Ident segs
+            onLine l rn = [q | (Span (l', _) _, q) <- rnResolved rn, l' == l]
+        case renamedOf "app" "Main" of
+          [rn] -> do
+            rnHeaders rn @?= [(Span (1, 8) (1, 12), [R.Component "app", Ident "Main"])]
+            -- import "lists" Data.List as L: the module, and its alias.
+            onLine 4 rn @?= replicate 2 (lists ["Data", "List"])
+            onLine 5 rn @?= replicate 2 [R.Component "other", Ident "Data", Ident "List"]
+          other -> assertFailure ("Main renamed " <> show (length other) <> " times")
+        case renamedOf "lists:extra" "Data.List.Extra" of
+          [rn] -> do
+            -- open Data.List using (List) renaming ((<>) to (++)): the namespace, the member, and both names of the renaming.
+            onLine 4 rn @?= [lists ["Data", "List"], lists ["Data", "List", "List"], lists ["Data", "List"] <> [Op "<>"], lists ["Data", "List"] <> [Op "<>"]]
+            -- open Data.List.Length: a module nested in the one imported.
+            onLine 5 rn @?= [lists ["Data", "List", "Length"]]
+          other -> assertFailure ("Data.List.Extra renamed " <> show (length other) <> " times")
+        -- The nested module's header, after the file's.
+        map rnHeaders (renamedOf "lists" "Data.List") @?= [[(Span (1, 8) (1, 17), lists ["Data", "List"]), (Span (22, 8) (22, 14), lists ["Data", "List", "Length"])]]
     , testCase "scope errors: an ambiguous import, no such library, no such module, a missing member, a private name, a header naming another module, and modules importing one another" $ do
         p <- either assertFailure pure prelude
         results <- either assertFailure pure =<< checkProject p "test/data/scope-bad"
