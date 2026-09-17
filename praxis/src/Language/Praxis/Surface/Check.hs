@@ -55,7 +55,7 @@ import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData)
-import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
+import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), Hyp (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
 import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
@@ -159,11 +159,13 @@ data Run = Run
   , runCertified :: ![Text]
   , runMembers :: !(Map Text [(Int, FieldPred)])
   , runIndexEqs :: !(Map Text [(CT, CT)])
-  -- ^ the equations of indices the branch of each constructor checks, by its core name
+  -- ^ the equations of indices the branch of each constructor checks, by its core name, then its preconditions
+  , runProps :: !(Map Text [(CT, CT)])
+  -- ^ the preconditions of each constructor, the last of its equations, by its core name
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
   , runIndexSpecs :: !(Map Text IndexSpec)
-  , runObligations :: ![(Text, [Text], CT, CT)]
+  , runObligations :: ![(Text, [Text], CT, CT, [(CT, CT)])]
   -- ^ the certified obligations of the function whose lemmas are being proved
   }
 
@@ -178,6 +180,7 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items
         , runCertified = []
         , runMembers = Map.empty
         , runIndexEqs = Map.empty
+        , runProps = Map.empty
         , runUnfoldings = unfoldings0
         , runClosures = Map.empty
         , runIndexSpecs = Map.empty
@@ -223,6 +226,7 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items
                               { runCore = core'
                               , runMembers = Map.union (Map.fromList (encodedMembers enc)) (runMembers r4)
                               , runIndexEqs = Map.union (Map.fromList (encodedIndexEquations enc)) (runIndexEqs r4)
+                              , runProps = Map.union (Map.fromList (encodedProps enc)) (runProps r4)
                               }
                        in foldl (flip finishFunction) (certifyAll sp r5 (encodedLemmas enc)) defined
 
@@ -249,15 +253,16 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items
 
     funName fd = T.unpack (renderQualName (funQual (fdInfo fd)))
 
-    -- The obligations of a function certified: each lemma's name, its variables, and the equation it concludes.
+    -- The obligations of a function certified: each lemma's name, its variables, the equation it concludes, and its hypotheses, the clause's preconditions, as equations.
     obligationFacts r fd =
-      [ (thmCore (tdInfo td), thmBinders (tdInfo td), l, rhs)
+      [ (thmCore (tdInfo td), thmBinders (tdInfo td), l, rhs, hyps)
       | td <- fdObligations fd
       , Map.member (T.unpack (thmCore (tdInfo td))) (coreLemmas (runCore r))
       , Right gl <- [statementGoal (coreMembership (runCore r)) td]
       , Rel RelEq a b <- [stripLocations (asEquation (goalConcl gl))]
       , Right l <- [termCT CVar a]
       , Right rhs <- [termCT CVar b]
+      , let hyps = [(hl, hr) | (_, HProp p) <- goalHyps gl, Rel RelEq a' b' <- [stripLocations (asEquation p)], Right hl <- [termCT CVar a'], Right hr <- [termCT CVar b']]
       ]
 
     -- A theorem, or the obligation a proof in a function's clause is: proved, and certified.
@@ -268,7 +273,7 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
     -- The lemmas of the library a proof may cite by name: those certified, but the module's own, which are mangled.
-    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"])
+    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"])
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of

@@ -125,6 +125,11 @@ its result over the telescope, @IxParam i@ for its @i@-th entry.
 data GadtCtor = GadtCtor
   { gcTele :: ![TeleEntry]
   , gcResult :: ![Ix]
+  , gcProofs :: ![(Int, Scope Int Expr Void)]
+  {- ^ its proof arguments, preconditions its code does not store: each by
+  its position among the explicit arguments, fields and proofs in order,
+  and the proposition, over the entries of the telescope
+  -}
   }
   deriving stock (Show)
 

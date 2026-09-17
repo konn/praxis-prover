@@ -123,3 +123,26 @@ lt-of-plt2 (Succ p) = lt-of-plt2 p
 plt2-zero : {n m : nat} -> PLt2 n m -> 0 < m
 plt2-zero (Zero k) = rfl
 plt2-zero (Succ p) = rfl
+
+-- A constructor taking a proof, a precondition its code does not store, which
+-- the membership of its code checks as it checks an equation of indices: the
+-- existential form of the strict ordering.
+data ELt (n : nat) (m : nat) where
+  Exists : (k : nat) -> n + S k = m -> ELt n m
+
+witness : ELt n m -> Nat
+witness (Exists k _) = k
+
+-- The proof named in the pattern is a hypothesis of the case: the goal, once
+-- the index functions and witness are unfolded.
+elt-witness : {n m : nat} -> (p : ELt n m) -> n + S (witness p) ≡ m
+elt-witness (Exists k h) = h
+
+-- Building with a proof: the precondition is an obligation, proved by the
+-- proof term given, under the precondition the pattern names; n and m, which
+-- the code stores, are taken at runtime.
+elt-succ : {n m : nat} -> ELt n m -> ELt n (S m)
+elt-succ {n} {m} (Exists k h) = Exists (S k) (cong h)
+
+elt-two : ELt 0 2
+elt-two = Exists 1 rfl

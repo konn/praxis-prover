@@ -501,8 +501,9 @@ named fields their indices mention, value parameters, implicit values taken
 at runtime, proofs as arguments, and functions matching on values of `Nat`. A value of an indexed type is generated well typed at its
 indices, entry by entry of a telescope — a statement's value parameters then
 its values, a function's value parameters then its arguments, a
-constructor's implicit arguments then its fields — and an entry which is,
-bare, an index of a later one's type is taken from that one. So a function
+constructor's implicit arguments then its fields, at entries its
+preconditions hold of — and an entry which is, bare, an index of a later
+one's type is taken from that one. So a function
 omitting a constructor impossible at its indices is applied only where it is
 defined, and each equation of indices of a statement is checked to hold of
 the codes of its values, as its memberships are: (M) for indices. The core side

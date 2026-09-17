@@ -45,7 +45,7 @@ module Language.Praxis.Surface.AdequacyTest (adequacyTests) where
 import Bound (instantiate, instantiate1)
 import Control.Applicative ((<|>))
 import Control.Exception (displayException)
-import Control.Monad (foldM)
+import Control.Monad (foldM, guard)
 import Data.List (find, partition)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -252,6 +252,8 @@ genData ld d args asked = sized \s ->
         r <- genTele ld fixed [substParams args (teType en) | en <- tele]
         pure do
           env <- r
+          -- Its preconditions hold of the entries, or no value is built of them.
+          guard (all (\(_, p) -> truth ld (instantiate (\i -> Var (env Map.! i)) (fmap absurd p))) (gcProofs g))
           fields <- traverse (\k -> at k >>= (`Map.lookup` env)) [0 .. length (ctorFields c) - 1]
           is <- traverse (ixValue ld (`Map.lookup` env)) (gcResult g)
           pure (VCon (ctorCore c) fields, is)
@@ -319,7 +321,8 @@ evalRef ld = go
     go e = case spine e of
       (Var v, []) -> v
       (Nat n, []) -> VNat n
-      (Global (Ref RefConstructor c), as) -> VCon c (map go as)
+      -- A constructor's proofs, its preconditions, are no fields of the value.
+      (Global (Ref RefConstructor c), as) -> VCon c (map go (dropProofs as))
       (Global (Ref RefBuiltin b), as) -> arithmetic b (map (nat . go) as)
       (Global (Ref RefFunction f), as) -> call f (map go (dropProofs as))
       -- A proof standing as a value, as absurd's does: 0, as the code has it.

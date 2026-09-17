@@ -66,12 +66,12 @@ module Language.Praxis.Surface.Engine (
 ) where
 
 import Bound (instantiate)
-import Control.Monad (foldM, forM, forM_, guard, unless)
+import Control.Monad (foldM, forM, forM_, guard, unless, zipWithM)
 import Data.Char (isAlphaNum)
 import Data.List (elemIndex, find, nub, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.String (fromString)
@@ -155,7 +155,7 @@ renderGoal :: Env -> Goal -> Text
 renderGoal _ g = runBuilder (foldMap (<> "\n") (map var (goalVars g) <> map hyp (goalHyps g) <> ["⊢ " <> either fromString id (formula (surfaceNames g (goalConcl g)))]))
   where
     var (n, (_, _)) = fromText n
-    hyp (core, h) = fromText (maybe core fst (find ((== core) . snd) (goalNames g))) <> " : " <> either fromString id (hypText (surfaceHyp h))
+    hyp (core, h) = fromText (maybe core fst (find (\(s, h') -> h' == core && not ("#" `T.isPrefixOf` s)) (goalNames g))) <> " : " <> either fromString id (hypText (surfaceHyp h))
     surfaceHyp = \case
       HProp p -> HProp (surfaceNames g p)
       HMember p v -> HMember p (surfaceName g v)
@@ -241,6 +241,11 @@ data Knowledge = Knowledge
   type's membership checks after those, over the positions of its code: the
   conjuncts of its branch of the inversion after the memberships
   -}
+  , knowProps :: !(Map Text [(CT, CT)])
+  {- ^ for each constructor, by its core name, its preconditions, the last of
+  its equations: the propositions of its proofs, which a clause's pattern
+  names
+  -}
   , knowUnfoldings :: ![Unfolding]
   , knowClosures :: !(Map Text Closure)
   -- ^ the closure lemma of each function which has one, by the function's core name
@@ -250,7 +255,7 @@ data Knowledge = Knowledge
   -}
   , knowIndexSpecs :: !(Map Text IndexSpec)
   -- ^ what each function over indexed types says of indices, by its core name
-  , knowObligations :: ![(Text, [Text], CT, CT)]
+  , knowObligations :: ![(Text, [Text], CT, CT, [(CT, CT)])]
   {- ^ the obligations of the function whose lemmas are being proved,
   certified: each lemma's core name, its variables, and the equation it
   concludes, by which the precondition of a call in its clauses holds
@@ -675,7 +680,16 @@ preconditionsAt :: Knowledge -> Goal -> Map Text CT -> [(CT, CT)] -> Either Stri
 preconditionsAt k g sigma props = fmap mconcat . forM props $ \(l0, r0) -> do
   let l = substCT sigma l0
       r = substCT sigma r0
-      concludes t (_, vs, ol, or') = isJust (matchCT vs ol t Map.empty >>= matchCT vs or' r)
+      concludes t (_, vs, ol, or', _) = matchCT vs ol t Map.empty >>= matchCT vs or' r
+      found t = listToMaybe [(o, sub) | o <- knowObligations k, Just sub <- [concludes t o]]
+      -- The obligation's own hypotheses, the clause's preconditions, at what the match gives its
+      -- variables: each at hand, or from a hypothesis by the equations between variables.
+      hypotheses (o, _, _, _, hs) sub = fmap mconcat . forM hs $ \(hl0, hr0) -> do
+        let hl = substCT sub hl0
+            hr = substCT sub hr0
+        if hasEquation g hl hr
+          then Right ""
+          else maybe (Left ("the precondition " <> T.unpack (runBuilder (equationText hl hr)) <> " of the obligation " <> T.unpack o <> " is not established here")) Right (equationFromHyps k g hl hr)
       -- The left side rewritten by the equations of indices at hand, as the obligation
       -- states it at them: each step, with the hypothesis doing it.
       rewrites = rewriting l (goalEquations g)
@@ -698,12 +712,55 @@ preconditionsAt k g sigma props = fmap mconcat . forM props $ \(l0, r0) -> do
       bridged = listToMaybe [b | (h, HProp _) <- goalHyps g, Just b <- [hypothesisBridge k g {goalConcl = Rel RelEq (fromCT l) (fromCT r)} h]]
   if hasEquation g l r
     then Right ""
-    else case (bridged, find (concludes l) (knowObligations k), find (concludes rewritten) (knowObligations k)) of
+    else case (bridged, found l, found rewritten) of
       (Just b, _, _) -> Right ("have " <> equationText l r <> " { " <> b <> " }; ")
-      (_, Just (o, _, _, _), _) -> Right ("have " <> equationText l r <> " { exact " <> fromText o <> " }; ")
-      (_, _, Just (o, _, _, _)) ->
-        Right ("have " <> equationText l r <> " { calc " <> render l <> mconcat [" = " <> render t <> " by cong " <> fromText h | (t, h) <- rewrites] <> " = " <> render r <> " by exact " <> fromText o <> " }; ")
+      (_, Just (o@(name, _, _, _, _), sub), _) -> (\hs -> hs <> "have " <> equationText l r <> " { exact " <> fromText name <> " }; ") <$> hypotheses o sub
+      (_, _, Just (o@(name, _, _, _, _), sub)) ->
+        (\hs -> hs <> "have " <> equationText l r <> " { calc " <> render l <> mconcat [" = " <> render t <> " by cong " <> fromText h | (t, h) <- rewrites] <> " = " <> render r <> " by exact " <> fromText name <> " }; ") <$> hypotheses o sub
       _ -> Left ("the precondition " <> T.unpack (runBuilder (equationText l r)) <> " is not established here: no hypothesis states it, and no proof the clauses give concludes it")
+
+{- |
+An equation established from a hypothesis stating it up to variables: where
+two variables are equal by an equation at hand, once the index functions are
+unfolded — a field of the value matched on and the parameter it is — the
+hypothesis with the one replaced by the other.  The tactic stating the
+equations unfolded, then the equation, by a calculation through the
+hypothesis, a step for each variable replaced.
+-}
+equationFromHyps :: Knowledge -> Goal -> CT -> CT -> Maybe Builder
+equationFromHyps k g l r = listToMaybe (mapMaybe viaHyp eqs)
+  where
+    (prep, eqs) = digestWith "Ob" k g
+    equalVars = [(v, w, h) | (h, CVar v, CVar w) <- eqs, v /= w]
+    justified (v, w) = listToMaybe [h | (v', w', h) <- equalVars, (v', w') == (v, w) || (v', w') == (w, v)]
+    viaHyp (h, a, b) = do
+      forth <- nub <$> differing a l
+      back <- nub <$> differing b r
+      forthBy <- traverse justified forth
+      backBy <- traverse justified back
+      -- l rewritten variable by variable to a; b to r: each step by the equation between the variables.
+      let toA = drop 1 (scanl (\t (v, w) -> substCT (Map.singleton w (CVar v)) t) l forth)
+          toR = drop 1 (scanl (\t (v, w) -> substCT (Map.singleton v (CVar w)) t) b back)
+      guard (last (l : toA) == a && last (b : toR) == r)
+      pure
+        ( prep
+            <> "have "
+            <> equationText l r
+            <> " { calc "
+            <> render l
+            <> mconcat [" = " <> render t <> " by cong " <> fromText hv | (t, hv) <- zip toA forthBy]
+            <> " = "
+            <> render b
+            <> " by exact "
+            <> fromText h
+            <> mconcat [" = " <> render t <> " by cong " <> fromText hv | (t, hv) <- zip toR backBy]
+            <> " }; "
+        )
+    -- The pairs of variables at which two terms differ, the first's and the second's, where they agree otherwise.
+    differing p q = case (p, q) of
+      (CVar v, CVar w) | v /= w -> Just [(v, w)]
+      (CSym f xs, CSym f' ys) | f == f', length xs == length ys -> concat <$> zipWithM differing xs ys
+      _ -> if p == q then Just [] else Nothing
 
 preExprs :: [(Text, Int, CT)] -> [Text] -> [Expr Text]
 preExprs pre cores = [Rel RelEq (fromCT (CSym fn [CVar (cores !! a)])) (fromCT x) | (fn, a, x) <- pre, a < length cores]
@@ -767,10 +824,14 @@ changes it; a successor against a successor taken apart by injectivity, again
 and again.  The tactic stating them, and every equation at hand, by name.
 -}
 digest :: Knowledge -> Goal -> (Builder, [(Text, CT, CT)])
-digest k g = foldl one ("", []) (zip [1 :: Int ..] (goalEquations g))
+digest = digestWith "Ix"
+
+-- | 'digest', the hypotheses it states named by the prefix given, apart from another digest's in the same proof.
+digestWith :: Text -> Knowledge -> Goal -> (Builder, [(Text, CT, CT)])
+digestWith prefix k g = foldl one ("", []) (zip [1 :: Int ..] (goalEquations g))
   where
     one (tac, acc) (i, (h, l, r)) =
-      let name = "Ix" <> T.pack (show i)
+      let name = prefix <> T.pack (show i)
           (tac1, h1, l1, r1) = case restate k h l r name of
             Just (t, l', r') -> (t, name, l', r')
             Nothing -> ("", h, l, r)
@@ -1075,6 +1136,16 @@ implications = \case
   At _ e -> implications e
   Arrow a b -> let (hs, c) = implications b in (a : hs, c)
   e -> ([], e)
+
+-- | The mark of a precondition of the constructor a case is for, by its position, among the names of the case's goal: what a clause's pattern's name for the proof replaces.
+propMark :: Int -> Text
+propMark j = "#prop-" <> T.pack (show j)
+
+-- | The names a clause's pattern gives the preconditions of the constructor matched, at their marks; the marks are then dropped.
+nameProofs :: [Maybe Text] -> Goal -> Goal
+nameProofs names g = g {goalNames = [(fromMaybe s (lookup s given), h) | (s, h) <- goalNames g, not ("#prop-" `T.isPrefixOf` s) || isJust (lookup s given)]}
+  where
+    given = [(propMark j, n) | (j, Just n) <- zip [1 ..] names]
 
 -- | The surface names of variables replaced, by position, with the names a clause gives them.
 rename :: [(Text, Text)] -> Goal -> Goal
@@ -1566,10 +1637,13 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
                   Left why -> Refuse why
                   Right haves -> afterMemberships [(args !! j, fieldPredicate used ps fp) | (j, fp) <- Map.findWithDefault [] f (knowMembers k), j < length args] [] (const (mconcat haves <> "exact " <> fromText (ctorLemma c "intro")))
       _ -> Nothing
-    -- An equation of indices an introduction takes: at hand, or proved and stated.
+    -- An equation an introduction takes: at hand, or proved and stated — an equation of indices by the
+    -- index functions, a precondition as a function's, by a hypothesis once unfolded or by an obligation.
     indexPremise l r
       | hasEquation g l r = Right ""
-      | otherwise = (\proof -> "have " <> equationText l r <> " { " <> proof <> " }; ") <$> indexEquation k g (goalEquations g) l r
+      | otherwise = case indexEquation k g (goalEquations g) l r of
+          Right proof -> Right ("have " <> equationText l r <> " { " <> proof <> " }; ")
+          Left why -> either (const (Left why)) Right (preconditionsAt k g Map.empty [(l, r)])
     -- A function applied: its closure lemma, after the memberships of its arguments.
     closedBy f = \case
       OMember p (CSym _ args)
@@ -2304,12 +2378,15 @@ dataInduction k info _ g sp v _ = do
             ihs = [HProp (at (Var fv)) | fv <- recursive]
             hyps = members <> indexEqs <> ihs <> map snd kept
             before = length members + length indexEqs
+            -- Its preconditions, the last of the equations: marked, for a clause's pattern to name.
+            propCount = length (Map.findWithDefault [] (ctorCore c) (knowProps k))
+            propNames = [(propMark j, hname (before - propCount + j)) | j <- [1 .. propCount]]
             ihCore i = hname (before + i)
             ihNames = [(if length recursive == 1 then "IH" else "IH" <> T.pack (show i), ihCore i) | i <- [1 .. length recursive]]
             keptNames = [(s, hname (before + length ihs + i)) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
             vars = [("#" <> T.pack (show j), f) | (j, f) <- zip [0 :: Int ..] fields] <> [(nm, x) | (nm, x) <- goalVars g, fst x /= core]
             concl = at (apps (Global (Ref RefConstructor (ctorCore c))) [Var fv | (fv, _) <- fields])
-         in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames) (zip recursive (map ihCore [1 ..])) (goalDict g) (goalPremises g)
+         in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames <> propNames) (zip recursive (map ihCore [1 ..])) (goalDict g) (goalPremises g)
       cases = map caseGoal (dataCtors dat)
       -- The hypotheses about indices a case has, the statement's: introduced, since the user cannot name them.
       opened = map openIndices cases
@@ -2568,7 +2645,7 @@ byClauses k info g td pcs = do
       -- A case the binder's indices exclude needs no clause: it is refuted.
       Nothing -> either (\_ -> Left (EngineError (tdSpan td) ("no clause for " <> what))) (Right . closed) (refute k cg)
       Just pc -> do
-        let cg' = introduce (fieldsOf (patternsOf pc !! c)) cg
+        let cg' = nameProofs (fromMaybe [] (listToMaybe (drop c (pcProofNames pc)))) (introduce (fieldsOf (patternsOf pc !! c)) cg)
             cg'' = rename [(b, n) | (j, ((b, _), PVar (Hint n))) <- zip [0 :: Int ..] (zip quantified (patternsOf pc)), j /= c] cg'
             (intro, cg''') = nameByClause td pc cg''
         out <- proveRhs k info 0 cg''' (pcRhs pc)

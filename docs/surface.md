@@ -333,10 +333,17 @@ m)` takes `m` as an argument its type depends on, where an implicit one,
 `{m : nat} -> PLt 0 (S m)`, is found from the type expected. Such an argument
 is an index — a variable, a numeral, `S`, a constructor or a function applied
 — and matching `Zero k` learns the index from `k`, or `k` from an index which
-is a variable; against a numeral, `k` is refused, as nothing solves it. The
-indices of its result are patterns — variables, numerals, `S` and
-constructors — so that matching on the constructor can solve them; indices
-elsewhere may apply functions and the arithmetic of `Nat`.
+is a variable; against a numeral, `k` is refused, as nothing solves it. A
+proposition among a constructor's arguments, `Exists : (k : nat) -> n + S k =
+m -> ELt n m`, is a precondition: a proof its code does not store, over the
+implicit arguments and the named fields, an equation or a comparison for now.
+Building with the constructor gives a proof of it, checked as an obligation
+as a function's precondition is; the membership of a code checks it as it
+checks an equation of indices, so a pattern names it, `Exists k h`, and `h`
+is a hypothesis of the case, `n + S k = m` at the fields. The indices of its
+result are patterns — variables, numerals, `S` and constructors — so that
+matching on the constructor can solve them; indices elsewhere may apply
+functions and the arithmetic of `Nat`.
 
 A signature's free variables at indices are its implicit value parameters,
 as its free type variables are its type parameters: `n : Nat` in `tail`, and

@@ -89,3 +89,7 @@ kind-implicit = fzero {nil}
 -- A field named as an implicit argument is.
 data Dup (n : nat) where
   MkDup : {m : nat} -> (m : nat) -> Dup m
+
+-- A precondition of a constructor which is no equation or comparison.
+data Both (n : nat) where
+  MkBoth : (k : nat) -> (k < n ∧ 0 < k) -> Both n

@@ -42,6 +42,8 @@ module Language.Praxis.Surface.Encode (
 
   -- * Equations of indices
   ctorIndexEquations,
+  ctorPropositions,
+  position,
   positionVar,
   atPositions,
 
@@ -53,14 +55,17 @@ module Language.Praxis.Surface.Encode (
   membershipLambda,
 ) where
 
+import Bound (Var (..), fromScope)
 import Data.List (nub, sort)
-import Data.Maybe (catMaybes, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
+import Data.Void (absurd)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Mangle (mangleGlobal)
+import Language.Praxis.Surface.Syntax qualified as S
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Language.Praxis.Surface.Types (Ix (..), Kind (..), Ty (..), normIx)
 import Text.Read (readMaybe)
@@ -78,7 +83,9 @@ data Encoded = Encoded
   , encodedMembers :: ![(Text, [(Int, FieldPred)])]
   -- ^ for each constructor, by its core name, the fields whose membership its branch of the predicate checks, with their predicates
   , encodedIndexEquations :: ![(Text, [(CT, CT)])]
-  -- ^ for each constructor, by its core name, the equations of indices its branch checks after those, over the positions of its code
+  -- ^ for each constructor, by its core name, the equations of indices its branch checks after those, over the positions of its code, then its preconditions
+  , encodedProps :: ![(Text, [(CT, CT)])]
+  -- ^ for each constructor, by its core name, its preconditions, the last of its equations: the propositions of its proofs, as equations over the positions of its code
   , encodedParams :: ![Int]
   -- ^ the parameters of the type whose predicates its own takes, those its fields' memberships use
   , encodedVariadic :: !Bool
@@ -202,14 +209,7 @@ ctorIndexEquations indexFns c = case ctorGadt c of
   Nothing -> []
   Just g ->
     let tele = gcTele g
-        -- The term an entry is, over the code.
-        entry e = case teRole <$> listToMaybe (drop e tele) of
-          Just (Explicit p) -> Just (positionVar p)
-          Just (Stored p) -> Just (positionVar p)
-          Just (Recovered p j) -> case drop p (ctorFields c) of
-            TData dn _ _ : _ -> (\fn -> CSym fn [positionVar p]) <$> (indexFns dn >>= listToMaybe . drop j)
-            _ -> Nothing
-          Nothing -> Nothing
+        entry = entryTerm indexFns c
         index = \case
           IxParam i -> entry i
           IxNat n -> Just (CNum n)
@@ -228,6 +228,41 @@ ctorIndexEquations indexFns c = case ctorGadt c of
         , let l = CSym fn [at]
         , l /= r
         ]
+
+-- | The term an entry of a constructor's telescope is, over the positions of its code: a field or a stored implicit argument its position, a recovered one the index of a field.
+entryTerm :: (Text -> Maybe [Text]) -> CtorInfo -> Int -> Maybe CT
+entryTerm indexFns c e = case ctorGadt c >>= \g -> teRole <$> listToMaybe (drop e (gcTele g)) of
+  Just (Explicit p) -> Just (positionVar p)
+  Just (Stored p) -> Just (positionVar p)
+  Just (Recovered p j) -> case drop p (ctorFields c) of
+    TData dn _ _ : _ -> (\fn -> CSym fn [positionVar p]) <$> (indexFns dn >>= listToMaybe . drop j)
+    _ -> Nothing
+  Nothing -> Nothing
+
+{- |
+The preconditions of a constructor, the propositions of its proofs, as the
+equations the core states them by, over the positions of its code: the
+membership predicate checks them as it checks the equations of indices,
+after those, the introduction takes them as hypotheses, and the inversion
+gives them.  A comparison is the equation of its truth, @lt s t = 1@.  One
+mentioning an entry the code does not determine is left out.
+-}
+ctorPropositions :: (Text -> Maybe [Text]) -> CtorInfo -> [(CT, CT)]
+ctorPropositions indexFns c = case ctorGadt c of
+  Nothing -> []
+  Just g ->
+    let term = termCT \case
+          B e -> fromMaybe (CVar "?") (entryTerm indexFns c e)
+          F v -> absurd v
+        holds f a b = (\x y -> (CSym f [x, y], CNum 1)) <$> term a <*> term b
+        equation p = case S.stripLocations (fromScope p) of
+          S.Rel S.RelEq a b -> (,) <$> term a <*> term b
+          S.Rel S.RelLt a b -> holds "lt" a b
+          S.Rel S.RelLe a b -> holds "le" a b
+          S.Rel S.RelGt a b -> holds "lt" b a
+          S.Rel S.RelGe a b -> holds "le" b a
+          _ -> Left "a precondition which is no equation or comparison"
+     in [(l, r) | (_, p) <- gcProofs g, Right (l, r) <- [equation p], "?" `notElem` varsCT (CSym "eq" [l, r])]
 
 -- | The equations of indices a constructor's branch checks, at a code: each as the code of its truth, @s == t@.
 indexEquationCodes :: (CtorInfo -> [(CT, CT)]) -> CtorInfo -> CT -> [CT]
@@ -315,13 +350,15 @@ predicates it passes it to.  With none it is the plain predicate, so its
 lemmas, stated there as rules over the parameter, hold at every closure.
 -}
 encodeData :: (Text -> Maybe (Text, [Int])) -> (Text -> Bool) -> (Text -> Maybe [Text]) -> DataInfo -> Encoded
-encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate predicateLemmas members indexEquations params variadic
+encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate predicateLemmas members indexEquations propositions params variadic
   where
     ctors = dataCtors d
     isCore = dataIs d
     params = predicateParams known d
     fieldsOf = [fieldPreds known d params c | c <- ctors]
-    eqsOf = ctorIndexEquations indexFns
+    -- The equations a constructor's branch checks: of its entries' indices, then its preconditions, alike.
+    eqsOf c = ctorIndexEquations indexFns c <> ctorPropositions indexFns c
+    propositions = [(ctorCore c, ctorPropositions indexFns c) | c <- ctors]
     variadic = case params of
       [i] -> any (any ((== FieldParam i) . snd)) fieldsOf && all (all (passes i . snd)) fieldsOf
       _ -> False

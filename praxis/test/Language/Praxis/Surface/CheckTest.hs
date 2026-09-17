@@ -126,7 +126,7 @@ checkTests =
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.tail.#index", "Gadt.tail-two.#index", "Gadt.zero-of.#index"]
         -- Theorems over its values: the index a bare value, a case its indices exclude, an appeal needing an index;
         -- and over a data type whose head has implicit parameters, its indices lists.
-        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.length-index", "Gadt.head-tail", "Gadt.head-tail-two", "Gadt.same-eq", "Gadt.lt-of-plt2", "Gadt.plt2-zero", "Gadt.plt2-of-lt.#index"]
+        mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.length-index", "Gadt.head-tail", "Gadt.head-tail-two", "Gadt.same-eq", "Gadt.lt-of-plt2", "Gadt.plt2-zero", "Gadt.plt2-of-lt.#index", "Gadt.elt-witness", "Gadt.elt-succ.#index", "Gadt.elt-two.#index"]
         -- Implicit values its clauses bind, taken at runtime: matched on, found and passed.
         mapM_ (\n -> assertBool ("certified: " <> T.unpack n) (n `elem` checkedTheorems c)) ["Gadt.replicate-vec.#index", "Gadt.len-replicate"]
         -- Implicit arguments in braces: a function's value passed as given, a constructor's, a data type's in a type.
@@ -144,7 +144,7 @@ checkTests =
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
         mapM_
           (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls))
-          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64]), ("bad-proof", [71, 72]), ("bad-implicit", [78, 79]), ("extra-implicit", [82, 83]), ("kind-implicit", [86, 87]), ("Dup", [90, 91])]
+          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64]), ("bad-proof", [71, 72]), ("bad-implicit", [78, 79]), ("extra-implicit", [82, 83]), ("kind-implicit", [86, 87]), ("Dup", [90, 91]), ("Both", [94, 95])]
         -- A clash names the signature's value, not its position.
         assertBool "the clash of never names n" (any ("S n is a successor, and 0 is not" `T.isInfixOf`) [m | Report _ SevError m <- checkedReports c])
         assertBool "fine is certified" ("GadtBad.fine.#index" `elem` checkedTheorems c)
