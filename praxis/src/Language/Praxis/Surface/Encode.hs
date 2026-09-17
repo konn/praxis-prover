@@ -61,7 +61,7 @@ import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Mangle (mangleGlobal)
-import Language.Praxis.Surface.Syntax.Raw (Segment (..))
+import Language.Praxis.Surface.Syntax.Raw (segmentRaw)
 import Language.Praxis.Surface.Types (Ix (..), Kind (..), Ty (..), normIx)
 import Text.Read (readMaybe)
 
@@ -233,18 +233,13 @@ ctorIndexEquations indexFns c = case ctorGadt c of
 indexEquationCodes :: (CtorInfo -> [(CT, CT)]) -> CtorInfo -> CT -> [CT]
 indexEquationCodes eqsOf c k = [CSym "eq" [atPositions (`fieldT` k) l, atPositions (`fieldT` k) r] | (l, r) <- eqsOf c]
 
-raw :: Segment -> Text
-raw = \case
-  Ident t -> t
-  Op t -> t
-
 -- | The core name of a lemma about a constructor: @C.#tag@, @C.#field-1@, …
 ctorLemma :: CtorInfo -> Text -> Text
-ctorLemma c suffix = mangleGlobal (map raw (ctorQual c) <> ["#" <> suffix])
+ctorLemma c suffix = mangleGlobal (map segmentRaw (ctorQual c) <> ["#" <> suffix])
 
 -- | The core name of a lemma about a data type: @T.#inversion@, @T.#is-def@, …
 dataLemma :: DataInfo -> Text -> Text
-dataLemma d suffix = mangleGlobal (map raw (dataQual d) <> ["#" <> suffix])
+dataLemma d suffix = mangleGlobal (map segmentRaw (dataQual d) <> ["#" <> suffix])
 
 -- | The lemma collapsing the dispatch of a data type at the tag given.
 collapseLemma :: DataInfo -> Int -> Text

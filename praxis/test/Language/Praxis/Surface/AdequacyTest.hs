@@ -59,18 +59,19 @@ import Data.Void (Void, absurd)
 import Language.Praxis.PRA.Equality (evalTermIn)
 import Language.Praxis.PRA.Signature (Signature, signatureKernelEnv)
 import Language.Praxis.PRA.Syntax.Parser (parseTerm, plainScope)
-import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..), checkSource)
+import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..), checkSource, headerName)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.CoreText (CT (..), isParameter)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
-import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), TheoremInfo (..), indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), TheoremInfo (..), emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
 import Language.Praxis.Surface.Mangle (demangle, mangleVariable)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
+import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), normIx)
 import Numeric.Natural (Natural)
@@ -142,7 +143,8 @@ load path = do
   src <- TIO.readFile path
   m <- either (assertFailure . renderSyntaxError) pure (parseModule path src)
   fx <- either (assertFailure . snd . renderFixityError) pure (moduleFixities m)
-  let (env, items) = elabModule fx m
+  let (renamed, _) = renameModule fx emptyEnv Map.empty (headerName m) m
+      (env, items) = elabModule fx emptyEnv renamed
       datas = [d | IData d _ _ <- items]
       -- A data type's index functions come with it.
       funs = concat [fds | IData _ _ fds <- items] <> [fd | IFun fd <- items]

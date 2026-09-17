@@ -1,0 +1,3 @@
+module Data.List where
+
+data List a = Empty | More a (List a)

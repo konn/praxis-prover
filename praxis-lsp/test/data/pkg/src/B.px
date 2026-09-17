@@ -1,0 +1,6 @@
+module B where
+
+open import A
+
+nil-append : {a : Type} -> (xs : List a) -> Nil <> xs ≡ xs
+nil-append {a} xs = rfl

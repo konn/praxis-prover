@@ -1,17 +1,25 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
-The global environment of a module: its data types, constructors, functions
-and theorems, the namespaces they open, and the resolution of names.
+The global environment: the data types, constructors, functions and
+theorems of the modules checked so far, the namespaces they own, and the
+lookup of canonical names.
 
 Namespaces follow Rust: a data type @T@ opens the namespace @T@ holding its
 constructors, @T.C@; a function @f@ opens the namespace @f@ holding the
-lemmas generated for it, @f.unfold-Nil@; @open T@, as in Agda, brings the
-members of @T@ into unqualified scope.  An unqualified name is resolved, in
-order, as a variable of the local context (by the caller), a top-level name
-of the module, a member of an opened namespace, and then a constructor: of
-the expected type when one is known, or the only constructor of that name.
-Every global has a core name, "Language.Praxis.Surface.Mangle".
+lemmas generated for it, @f.unfold-Nil@; a module is a namespace holding
+what it exports.  Scope is the renamer's, "Language.Praxis.Surface.Rename",
+which writes every reference to a global as its canonical name — its
+library, its module, the namespaces, then the name — before anything here
+is asked.  A qualified name is looked up as it is, or navigated from the
+longest owner known through the namespaces; an unqualified one is no global
+here, but a constructor may be found by its bare name among the modules in
+scope, of the type expected where it stands.  Every global has a core name,
+"Language.Praxis.Surface.Mangle".
+
+The globals of every module a build has checked share one table, keyed by
+qualified names which start with the library the module belongs to, so that
+two libraries may expose modules of one name.
 -}
 module Language.Praxis.Surface.Env (
   -- * Globals
@@ -27,6 +35,7 @@ module Language.Praxis.Surface.Env (
   MethodInfo (..),
   LawInfo (..),
   InstanceInfo (..),
+  ModuleInfo (..),
   Slot (..),
   staticSlots,
   valueSlots,
@@ -38,10 +47,15 @@ module Language.Praxis.Surface.Env (
   globalQualName,
   globalCore,
   renderQualName,
+  displayQualName,
+  displayQName,
+  componentOf,
+  isComponent,
 
   -- * Environments
   Env (..),
   emptyEnv,
+  moduleEnv,
   qualify,
   addData,
   addGadtData,
@@ -56,7 +70,7 @@ module Language.Praxis.Surface.Env (
   addInstanceFunction,
   addInstance,
   addNamespaceMember,
-  openNamespace,
+  addModule,
 
   -- * Resolution
   resolve,
@@ -67,6 +81,7 @@ module Language.Praxis.Surface.Env (
 ) where
 
 import Bound (Scope)
+import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
@@ -75,17 +90,46 @@ import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Syntax (Expr)
-import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentText)
+import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ix, Kind, Scheme, Ty, TyScope, emptyScope)
 
 -- * Globals
 
--- | A qualified name as its segments: the module's, the namespaces', then the name itself.
+{- |
+A qualified name as its segments: the library the module belongs to, when
+it belongs to one; the module's; the namespaces'; then the name itself.
+-}
 type QualName = [Segment]
 
+{- |
+A qualified name rendered so that distinct globals render distinctly: the
+library first, @lib/Data.List.foo@, when the name has one.  What keys a
+table by name uses this; a message uses 'displayQualName'.
+-}
 renderQualName :: QualName -> Text
-renderQualName = T.intercalate "." . map segmentText
+renderQualName = \case
+  Component c : rest -> c <> "/" <> renderQualName rest
+  segs -> T.intercalate "." (map segmentText segs)
+
+-- | A qualified name as the user writes it: without the library, which no name written has.
+displayQualName :: QualName -> Text
+displayQualName = renderQualName . dropWhile isComponent
+
+-- | A name as the user writes it, canonical or not.
+displayQName :: QName -> Text
+displayQName (QName qs b) = displayQualName (qs <> [b])
+
+isComponent :: Segment -> Bool
+isComponent = \case
+  Component _ -> True
+  _ -> False
+
+-- | The library a qualified name belongs to, when it starts with one.
+componentOf :: QualName -> Maybe Text
+componentOf = \case
+  Component c : _ -> Just c
+  _ -> Nothing
 
 data DataInfo = DataInfo
   { dataQual :: !QualName
@@ -299,6 +343,12 @@ data InstanceInfo = InstanceInfo
   }
   deriving stock (Show)
 
+-- | A module: a namespace holding what it exports.
+newtype ModuleInfo = ModuleInfo
+  { modQual :: QualName
+  }
+  deriving stock (Show)
+
 data Global
   = GData !DataInfo
   | GCtor !CtorInfo
@@ -308,6 +358,7 @@ data Global
   | GMethod !MethodInfo
   | GLaw !LawInfo
   | GInstance !InstanceInfo
+  | GModule !ModuleInfo
   deriving stock (Show)
 
 globalQualName :: Global -> QualName
@@ -320,8 +371,9 @@ globalQualName = \case
   GMethod m -> methodQual m
   GLaw l -> lawQual l
   GInstance i -> instQual i
+  GModule m -> modQual m
 
--- | The core name of a global: its symbol, or its lemma; a class, a method and an instance have none of their own.
+-- | The core name of a global: its symbol, or its lemma; a class, a method, an instance and a module have none of their own.
 globalCore :: Global -> Text
 globalCore = \case
   GData d -> dataIs d
@@ -334,12 +386,12 @@ globalCore = \case
 
 data Env = Env
   { envModule :: !QualName
+  -- ^ the module the declaration being elaborated belongs to: its library first, when it has one
   , envGlobals :: !(Map QualName Global)
-  , envTop :: !(Map Segment QualName)
-  -- ^ the top-level names of the module, unqualified
   , envNamespaces :: !(Map QualName (Map Segment QualName))
   -- ^ each namespace by its owner, with its members
-  , envOpened :: ![QualName]
+  , envVisible :: ![QualName]
+  -- ^ the modules a bare constructor may be found in: the file's, and those it imports
   , envDisplay :: !(Map Text Text)
   -- ^ every core name, with the surface name it stands for
   , envInstances :: !(Map (QualName, Text) InstanceInfo)
@@ -348,8 +400,18 @@ data Env = Env
   -- ^ what the names of a type written in a term stand for: the enclosing signature's parameters
   }
 
-emptyEnv :: QualName -> Env
-emptyEnv m = Env m Map.empty Map.empty Map.empty [] Map.empty Map.empty emptyScope
+-- | No module, and nothing known: what a build starts from.
+emptyEnv :: Env
+emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty emptyScope
+
+{- |
+The environment a module of the name given is elaborated in, with the
+modules whose constructors its bare names may mean: the tables of the
+environment given — the globals, namespaces, instances and display names of
+the modules before it.
+-}
+moduleEnv :: QualName -> [QualName] -> Env -> Env
+moduleEnv q visible env = env {envModule = q, envVisible = visible, envScope = emptyScope}
 
 -- | A name of the module, qualified.
 qualify :: Env -> [Segment] -> QualName
@@ -357,11 +419,7 @@ qualify env segs = envModule env <> segs
 
 -- | The core name of a qualified name.
 coreOf :: QualName -> Text
-coreOf = mangleGlobal . map segmentText'
-  where
-    segmentText' = \case
-      Ident t -> t
-      Op t -> t
+coreOf = mangleGlobal . map segmentRaw
 
 -- | Add a data type and its constructors; the type opens a namespace holding them.
 addData :: Env -> Segment -> [(Text, Kind)] -> [(Segment, [Ty])] -> (Env, DataInfo)
@@ -377,9 +435,8 @@ addGadtData env name params indices implicits indexFns ctors = (env', info)
     env' =
       env
         { envGlobals = Map.insert q (GData info) (foldr (\c -> Map.insert (ctorQual c) (GCtor c)) (envGlobals env) (dataCtors info))
-        , envTop = Map.insert name q (envTop env)
         , envNamespaces = Map.insertWith Map.union q members (envNamespaces env)
-        , envDisplay = Map.union (Map.fromList ((dataIs info, renderQualName (q <> [Ident "is"])) : [(ctorCore c, segmentText (last (ctorQual c))) | c <- dataCtors info])) (envDisplay env)
+        , envDisplay = Map.union (Map.fromList ((dataIs info, displayQualName (q <> [Ident "is"])) : [(ctorCore c, segmentText (last (ctorQual c))) | c <- dataCtors info])) (envDisplay env)
         }
 
 -- | The positions of a data type's explicit parameters, which a use of it writes: its type parameters', then its indices'.
@@ -398,7 +455,6 @@ addFunction env name sch arity slots = (env', info)
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)
-        , envTop = Map.insert name q (envTop env)
         , envNamespaces = Map.insertWith Map.union q Map.empty (envNamespaces env)
         , envDisplay = Map.insert (funCore info) (segmentText name) (envDisplay env)
         }
@@ -423,27 +479,19 @@ setTheoremIndices hyps values prop (env, info) = (env {envGlobals = Map.insert (
 
 {- |
 Add a theorem, at the qualified name given, whose core name is derived from
-it, with the types of its values when its statement gives them memberships;
-a top-level one is also a top-level name.
+it, with the types of its values when its statement gives them memberships.
 -}
 addTheorem :: Env -> QualName -> [Text] -> [Ty] -> [Slot] -> [Premise] -> Maybe (Scope Int Expr Void) -> (Env, TheoremInfo)
 addTheorem env q binders membered slots premises statement = (env', info)
   where
     info = TheoremInfo q (coreOf q) binders membered slots premises statement [] [] Nothing
-    top = case drop (length (envModule env)) q of
-      [n] | take (length (envModule env)) q == envModule env -> Map.insert n q
-      _ -> id
     env' =
       env
         { envGlobals = Map.insert q (GTheorem info) (envGlobals env)
-        , envTop = top (envTop env)
         , envDisplay = Map.insert (thmCore info) (renderQualName (drop (length (envModule env)) q)) (envDisplay env)
         }
 
-{- |
-Add a class and its methods.  The class opens a namespace holding its
-methods, and each method, as in Haskell, is also a top-level name.
--}
+-- | Add a class and its methods.  The class opens a namespace holding its methods.
 addClass :: Env -> Segment -> [QualName] -> [(Segment, Scheme, Int)] -> (Env, ClassInfo)
 addClass env name supers methods = (env', info)
   where
@@ -452,16 +500,14 @@ addClass env name supers methods = (env', info)
     env' =
       env
         { envGlobals = foldr (\m -> Map.insert (methodQual m) (GMethod m)) (Map.insert q (GClass info) (envGlobals env)) (classMethods info)
-        , envTop = foldr (\(m, _, _) -> Map.insert m (q <> [m])) (Map.insert name q (envTop env)) methods
         , envNamespaces = Map.insertWith Map.union q (Map.fromList [(m, q <> [m]) | (m, _, _) <- methods]) (envNamespaces env)
         }
 
--- | Add the laws of a class: each, as a method is, a top-level name and a member of the class's namespace.
+-- | Add the laws of a class: each, as a method is, a member of the class's namespace.
 addLaws :: QualName -> [LawInfo] -> Env -> Env
 addLaws cq laws env =
   env
     { envGlobals = foldr (\l -> Map.insert (lawQual l) (GLaw l)) (Map.adjust withLaws cq (envGlobals env)) laws
-    , envTop = foldr (\l -> Map.insert (last (lawQual l)) (lawQual l)) (envTop env) laws
     , envNamespaces = Map.insertWith Map.union cq (Map.fromList [(last (lawQual l), lawQual l) | l <- laws]) (envNamespaces env)
     }
   where
@@ -486,12 +532,11 @@ addInstanceFunction env instance' method sch arity slots = (env', info)
         , envDisplay = Map.insert (funCore info) (renderQualName (drop (length (envModule env)) q)) (envDisplay env)
         }
 
--- | Add an instance: a top-level name, whose namespace holds the functions of its methods.
+-- | Add an instance, whose namespace holds the functions of its methods.
 addInstance :: Env -> InstanceInfo -> Env
 addInstance env inst =
   env
     { envGlobals = Map.insert (instQual inst) (GInstance inst) (envGlobals env)
-    , envTop = Map.insert (last (instQual inst)) (instQual inst) (envTop env)
     , envInstances = Map.insert (instClass inst, instHead inst) inst (envInstances env)
     }
 
@@ -500,50 +545,47 @@ addNamespaceMember :: QualName -> Segment -> QualName -> Env -> Env
 addNamespaceMember owner member q env =
   env {envNamespaces = Map.insertWith Map.union owner (Map.singleton member q) (envNamespaces env)}
 
--- | Open a namespace, as @open T@ does.
-openNamespace :: QualName -> Env -> Env
-openNamespace q env = env {envOpened = envOpened env <> [q]}
+-- | Add a module, a namespace holding the members given: what it exports.
+addModule :: QualName -> Map Segment QualName -> Env -> Env
+addModule q members env =
+  env
+    { envGlobals = Map.insert q (GModule (ModuleInfo q)) (envGlobals env)
+    , envNamespaces = Map.insertWith Map.union q members (envNamespaces env)
+    }
 
 -- * Resolution
 
 {- |
-The globals a name may refer to, in the order of preference: a qualified
-name through its namespaces (or from the module's own name); an unqualified
-one as a top-level name, then as a member of an opened namespace.
-Constructors by expected type are the caller's to try, 'constructorsNamed'.
+The global a canonical name refers to: looked up as it is; or, for a member
+of a namespace the renamer appended as written, navigated from the longest
+owner known through the namespaces.  An unqualified name is no global:
+constructors by their bare names are the caller's to try,
+'constructorsNamed'.
 -}
 resolve :: Env -> QName -> [Global]
-resolve env (QName quals base) = case quals of
-  [] ->
-    firstNonEmpty
-      [ maybe [] (lookupQ . pure) (Map.lookup base (envTop env))
-      , concat [lookupQ (Map.lookup base =<< Map.lookup o (envNamespaces env)) | o <- envOpened env]
-      ]
-  q : qs ->
-    firstNonEmpty
-      [ viaNamespace (Map.lookup q (envTop env)) qs
-      , lookupQ (Just (quals <> [base]))
-      , lookupQ (Just (envModule env <> quals <> [base]))
-      ]
+resolve env (QName quals base)
+  | null quals = []
+  | otherwise = case Map.lookup full (envGlobals env) of
+      Just g -> [g]
+      Nothing -> firstNonEmpty [navigate (take k full) (drop k full) | k <- [length full - 1, length full - 2 .. 1]]
   where
-    lookupQ = \case
-      Just q -> maybe [] pure (Map.lookup q (envGlobals env))
-      Nothing -> []
-    viaNamespace owner rest = case owner of
-      Nothing -> []
-      Just o -> case rest of
-        [] -> lookupQ (Map.lookup base =<< Map.lookup o (envNamespaces env))
-        r : rs -> viaNamespace (Map.lookup r =<< Map.lookup o (envNamespaces env)) rs
+    full = quals <> [base]
+    navigate owner rest
+      | Map.member owner (envGlobals env) = go owner rest
+      | otherwise = []
+    go o = \case
+      [] -> maybe [] pure (Map.lookup o (envGlobals env))
+      r : rs -> maybe [] (`go` rs) (Map.lookup r =<< Map.lookup o (envNamespaces env))
     firstNonEmpty = \case
       [] -> []
       xs : rest -> if null xs then firstNonEmpty rest else xs
 
--- | Every constructor of that unqualified name, of whichever type.
+-- | Every constructor of that unqualified name, of whichever type, among the modules in scope: the file's, and those imported.
 constructorsNamed :: Env -> Segment -> [CtorInfo]
 constructorsNamed env s = mapMaybe ctor (Map.elems (envGlobals env))
   where
     ctor = \case
-      GCtor c | last (ctorQual c) == s -> Just c
+      GCtor c | last (ctorQual c) == s, any (`isPrefixOf` ctorData c) (envVisible env) -> Just c
       _ -> Nothing
 
 -- | The data type of a constructor.

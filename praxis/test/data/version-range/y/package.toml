@@ -1,0 +1,7 @@
+[package]
+name = "y"
+version = "1.0"
+
+[[lib]]
+source-dir = "src"
+dependencies = ["x >= 2"]

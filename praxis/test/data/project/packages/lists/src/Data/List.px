@@ -1,0 +1,28 @@
+module Data.List where
+
+data List a = Nil | a : List a
+
+(<>) : List a -> List a -> List a
+(<>) Nil      ys = ys
+(<>) (x : xs) ys = x : (xs <> ys)
+
+infixr 4 <>
+
+-- Not exported: a module importing this one cannot name it, even qualified.
+private
+  append-nil-aux : {a : Type} -> (xs : List a) -> xs <> Nil ≡ xs
+  append-nil-aux {a} Nil = (<>).unfold-Nil
+  append-nil-aux {a} (x : xs) = cong (append-nil-aux xs)
+
+append-nil : {a : Type} -> (xs : List a) -> xs <> Nil ≡ xs
+append-nil {a} xs = append-nil-aux xs
+
+-- A module within the module: Data.List.Length, a namespace of what it
+-- declares, in the scope of the declarations before it.
+module Length where
+  length : List a -> Nat
+  length Nil = 0
+  length (_ : xs) = S (length xs)
+
+  length-nil-append : {a : Type} -> (xs : List a) -> length (Nil <> xs) ≡ length xs
+  length-nil-append {a} xs = rfl

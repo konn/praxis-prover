@@ -1,0 +1,20 @@
+module Main where
+
+import Data.List
+import "a" Data.List as A
+import "nowhere" Data.List
+import A.Missing
+open A using (nothing)
+open A renaming (List to Seq)
+
+-- Of a private name of a module imported, even qualified.
+zero : Nat
+zero = A.hidden
+
+-- Of a member the data type lacks.
+one : Nat
+one = A.List.Cons 1 A.List.Nil
+
+-- Of a qualifier nothing in scope starts.
+two : Nat
+two = Nowhere.two

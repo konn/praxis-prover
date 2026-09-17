@@ -17,7 +17,7 @@ parserTests =
     "parser"
     [ testCase "the List example: declarations in order" $ do
         m <- parseFile "test/data/list.px"
-        unLocated (moduleName m) @?= QName [Ident "Data"] (Ident "List")
+        fmap unLocated (moduleName m) @?= Just (QName [Ident "Data"] (Ident "List"))
         map (declKind . unLocated) (moduleDecls m)
           @?= ["data", "signature", "clause", "clause", "fixity", "signature", "clause", "clause", "signature", "clause"]
     , testCase "an infix constructor, and the fixity with a rational precedence" $ do
@@ -135,6 +135,10 @@ expr src = case parseModule "<test>" ("x = " <> src) of
 declKind :: Decl -> String
 declKind = \case
   DOpen {} -> "open"
+  DImport {} -> "import"
+  DOpenImport {} -> "open import"
+  DModule {} -> "module"
+  DPrivate {} -> "private"
   DData {} -> "data"
   DFixity {} -> "fixity"
   DSignature {} -> "signature"

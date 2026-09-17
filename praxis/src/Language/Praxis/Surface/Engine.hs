@@ -88,7 +88,7 @@ import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
 import Language.Praxis.Surface.Syntax
-import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span)
+import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), firstOrder, mergeTy, normIx, renderTy)
 
@@ -330,7 +330,7 @@ proveTheorem k td = do
       marked = goal0 {goalNames = goalNames goal0 <> [(hypMark j, h) | (j, (h, _)) <- zip [1 ..] leading]}
   (tactic, aux) <- case tdClauses td of
     [pc]
-      | all isVariable (pcPatterns pc) -> do
+      | all isVariable (pcValuePats pc <> pcPatterns pc) -> do
           let (intro, named) = nameByClause td pc (rename [(b, n) | ((b, _), PVar (Hint n)) <- zip (tdBinders td) (pcPatterns pc)] marked)
           out <- proveRhs k info (counter 0) named (pcRhs pc)
           pure (intro <> outTactic out, outAux out)
@@ -1015,7 +1015,7 @@ dropped.  The tactic introducing them, and the goal after.
 nameByClause :: TheoremDef -> ProofClause -> Goal -> (Builder, Goal)
 nameByClause td pc g0 = (intro, g2 {goalNames = [(s, h) | (s, h) <- goalNames g2, not ("#hyp-" `T.isPrefixOf` s)] <> given})
   where
-    g1 = rename [(v, n) | ((v, _), Just n) <- zip (tdValues td) (pcValueNames pc)] g0
+    g1 = rename [(v, n) | ((v, _), PVar (Hint n)) <- zip (tdValues td) (pcValuePats pc)] g0
     count = hypothesisCount td
     nameOf j = case drop (j - 1) (pcHypNames pc) of
       m : _ -> m
@@ -1234,12 +1234,12 @@ evidence k info g le = case spineOf le of
             Right (Evidence name pre "" eq Nothing)
           Just ty
             | Just h <- headOf ty -> do
-                inst <- maybe (Left (EngineError sp ("no instance of " <> T.unpack (renderQualName (lawClass l)) <> " for " <> T.unpack h))) Right (Map.lookup (lawClass l, h) (envInstances (knowEnv k)))
-                t <- maybe (Left (EngineError sp ("internal: the instance does not prove " <> T.unpack (renderQualName (lawQual l))))) Right (Map.lookup (lawQual l) (instLaws inst))
+                inst <- maybe (Left (EngineError sp ("no instance of " <> T.unpack (displayQualName (lawClass l)) <> " for " <> T.unpack h))) Right (Map.lookup (lawClass l, h) (envInstances (knowEnv k)))
+                t <- maybe (Left (EngineError sp ("internal: the instance does not prove " <> T.unpack (displayQualName (lawQual l))))) Right (Map.lookup (lawQual l) (instLaws inst))
                 theorem sp t args
           _ -> case [gpName p | p <- goalPremises g, PLaw lq _ <- [gpPremise p], lq == lawQual l] of
             [name] | null args -> Right (named name)
-            _ -> Left (EngineError sp ("the law " <> T.unpack (renderQualName (lawQual l)) <> " applies to arguments, whose type gives the instance it is at"))
+            _ -> Left (EngineError sp ("the law " <> T.unpack (displayQualName (lawQual l)) <> " applies to arguments, whose type gives the instance it is at"))
       -- A lemma of the library, by its name: applied to hypotheses, which the appeal takes in order.
       _
         | QName [] (Ident w) <- q
@@ -1248,7 +1248,7 @@ evidence k info g le = case spineOf le of
               Located _ (R.EName (QName [] (Ident h))) | Just c <- lookup h (goalNames g) -> Right c
               Located asp _ -> Left (EngineError asp "a lemma of the library is applied to hypotheses, by their names")
             Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing Nothing)
-      _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (R.qnameText q)))
+      _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (displayQName q)))
   (Located sp _, _) -> Left (EngineError sp "a proof term: a hypothesis or a lemma, applied")
   where
     -- The indices a theorem's binders must have, at the arguments given: found, and stated where no hypothesis does; with the value parameters they give.
@@ -1427,7 +1427,7 @@ premiseObligations k g assign t = forM (thmPremises t) \case
   PLaw lq i -> OLaw lq <$> at i
   PClosure mq i -> OClosure mq . siteOfType k g <$> at i
   where
-    at i = maybe (Left (T.unpack (renderQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances")) Right (Map.lookup i assign)
+    at i = maybe (Left (T.unpack (displayQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances")) Right (Map.lookup i assign)
 
 -- | Whether a hypothesis of the goal states the membership of the term by the predicate, as the core writes it.
 hasMembership :: Goal -> Pred -> CT -> Bool
@@ -1542,7 +1542,7 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
                     Right props -> afterMemberships [(a, q) | (a, Just q) <- zip args argPs] subs (\rs -> haves <> props <> appeal rs)
       _ -> Nothing
     lawPremise = \case
-      OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (renderQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
+      OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (displayQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
       _ -> Nothing
     -- The theorem proving the law at the instance for the head of the type; under a context, its premises at the type's arguments.
     lawInstance = \case
@@ -1555,14 +1555,14 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
       OClosure _ SiteAny -> Just (Reduce [] (const "exact anyIsMember"))
       _ -> Nothing
     closurePremise = \case
-      OClosure mq (SiteParam j) -> Just (premiseNamed (PClosure mq j) ("no premise states the closure of " <> T.unpack (renderQualName mq) <> " here"))
+      OClosure mq (SiteParam j) -> Just (premiseNamed (PClosure mq j) ("no premise states the closure of " <> T.unpack (displayQualName mq) <> " here"))
       _ -> Nothing
     -- The closure lemma of the instance's function; the instance's type parameters are its type's, in order.
     closureInstance = \case
       OClosure mq (SiteData dn preds) -> Just case instanceFunction mq dn of
-        Nothing -> Refuse ("no instance's function for " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn)
+        Nothing -> Refuse ("no instance's function for " <> T.unpack (displayQualName mq) <> " at " <> T.unpack dn)
         Just f -> case Map.lookup (funCore f) (knowClosures k) of
-          Nothing -> Refuse ("the function of " <> T.unpack (renderQualName mq) <> " at " <> T.unpack dn <> " has no closure lemma: its results are not known to be members")
+          Nothing -> Refuse ("the function of " <> T.unpack (displayQualName mq) <> " at " <> T.unpack dn <> " has no closure lemma: its results are not known to be members")
           Just cl -> either Refuse (uncurry Reduce) (closureAppeal cl (Map.fromList [(u, q) | (u, Just q) <- zip [0 ..] preds]))
       _ -> Nothing
     -- The appeal to a closure lemma: its premises, the closures of its dictionary's methods, at the predicates its type parameters are at.
@@ -1595,9 +1595,9 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
     lawTheorem lq h = do
       cls <- case Map.lookup lq (envGlobals env) of
         Just (GLaw l) -> Right (lawClass l)
-        _ -> Left ("internal: " <> T.unpack (renderQualName lq) <> " is no law")
-      inst <- maybe (Left ("no instance of " <> T.unpack (renderQualName cls) <> " for " <> T.unpack h)) Right (Map.lookup (cls, h) (envInstances env))
-      maybe (Left ("internal: the instance does not prove " <> T.unpack (renderQualName lq))) Right (Map.lookup lq (instLaws inst))
+        _ -> Left ("internal: " <> T.unpack (displayQualName lq) <> " is no law")
+      inst <- maybe (Left ("no instance of " <> T.unpack (displayQualName cls) <> " for " <> T.unpack h)) Right (Map.lookup (cls, h) (envInstances env))
+      maybe (Left ("internal: the instance does not prove " <> T.unpack (displayQualName lq))) Right (Map.lookup lq (instLaws inst))
     instanceFunction mq dn = do
       GMethod m <- Map.lookup mq (envGlobals env)
       inst <- Map.lookup (methodClass m, dn) (envInstances env)
@@ -1611,8 +1611,8 @@ obligations k g = Database obligationHead byHead [assumed, anyMember] none deep
       _ -> []
     none = \case
       OMember p t -> "the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function"
-      OLaw lq ty -> "the law " <> T.unpack (renderQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
-      OClosure mq _ -> "the closure of " <> T.unpack (renderQualName mq) <> " is not known there"
+      OLaw lq ty -> "the law " <> T.unpack (displayQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
+      OClosure mq _ -> "the closure of " <> T.unpack (displayQualName mq) <> " is not known there"
     deep _ = "resolution went deeper than " <> show obligationDepth <> " steps"
 
 -- | The site of a closure at a type: a type parameter, every code for @Nat@, a data type at the predicates of its arguments.
@@ -1923,10 +1923,7 @@ natInduction info g sp core = pure ([base, step], finish)
         (goalDict g)
         (goalPremises g)
     tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
-    segment = \case
-      Ident t -> t
-      Op t -> t
-    auxName i = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
+    auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
     finish outs = do
       decls <- forM (zip3 [0 ..] [base, step] outs) \(i, cg, o) -> do
         decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
@@ -2000,13 +1997,10 @@ tupleInduction k info g sp applied cols positions = do
         CSym _ xs -> concatMap subtermsCT xs
         _ -> []
     tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
-    segment = \case
-      Ident t -> t
-      Op t -> t
-    auxName i = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
+    auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
     blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
     appealTo name params = "exact " <> fromText name <> staticArgs params <> blocks
-    helperName s = mangleGlobal (map segment (thmQual info) <> ["#case-" <> tag <> "-" <> s])
+    helperName s = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> s])
     belowName = helperName "below"
     atName = helperName "at"
     svars = [fresh ("s_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
@@ -2248,7 +2242,7 @@ dataInduction k info _ g sp v _ = do
       opened = map openIndices cases
       goals = map snd opened
       tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
-      auxName i = mangleGlobal (map raw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show i)])
+      auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show i)])
       eigen = head [name | i <- [0 :: Int ..], let name = "e_" <> T.pack (show i), name `notElem` map (fst . snd) (goalVars g)]
       finish outs = do
         auxDecls <- forM (zip3 [0 :: Int ..] (zip cases (map fst opened)) outs) \(i, (cg, intro), o) -> do
@@ -2263,9 +2257,6 @@ dataInduction k info _ g sp v _ = do
         pure (Out script (concat auxDecls))
   pure (goals, finish)
   where
-    raw = \case
-      Ident t -> t
-      Op t -> t
     -- The leading implications of a case's conclusion whose antecedents are equations of indices, introduced: the tactic, and the goal after.
     openIndices cg =
       let (ants, concl) = indexImplications (goalConcl cg)
@@ -2465,16 +2456,24 @@ fromCT = \case
 
 -- * By clauses
 
--- | A proof by clauses matching on one value: induction on it, each clause a case, its recursive calls the induction hypotheses.
+{- |
+A proof by clauses matching on one value: induction on it, each clause a
+case, its recursive calls the induction hypotheses.  A clause matches on the
+theorem's implicit values, in braces, and on the values it quantifies over,
+which its statement has in that order: the columns are of both.
+-}
 byClauses :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Builder, [(Text, Text)])
 byClauses k info g td pcs = do
-  let columns = nub [i | pc <- pcs, (i, p) <- zip [0 ..] (pcPatterns pc), matchesOn p]
+  let columns = nub [i | pc <- pcs, (i, p) <- zip [0 ..] (patternsOf pc), matchesOn p]
   c <- case columns of
     [c] -> Right c
     [] -> Left (EngineError (tdSpan td) "several clauses, none matching on a constructor, 0 or S")
     _ -> Left (EngineError (tdSpan td) "clauses matching on several values are not supported yet")
-  let (binder, bty) = tdBinders td !! c
-  unless (null [() | pc <- pcs, PNat j <- [pcPatterns pc !! c], j > 0]) $
+  let (binder, bty) = quantified !! c
+  -- An implicit value which is, bare, an index of a binder is that index, and no variable of the statement: its binder is matched on instead.
+  unless (isJust (lookup binder (goalVars g))) $
+    Left (EngineError (tdSpan td) ("the implicit value " <> T.unpack binder <> " is an index of a value the theorem quantifies over, and no variable of its statement: match on that value"))
+  unless (null [() | pc <- pcs, PNat j <- [patternsOf pc !! c], j > 0]) $
     Left (EngineError (tdSpan td) "a clause on a numeral other than 0: write it S n, matching on the successor")
   (cases, finish) <- induction k info 0 g (tdSpan td) binder []
   outs <- forM (zip [0 :: Int ..] cases) \(i, cg) -> do
@@ -2485,22 +2484,25 @@ byClauses k info g td pcs = do
             | otherwise -> ("S n", \case PSucc _ -> True; _ -> False, \case PSucc p -> [fieldName (0 :: Int) p]; _ -> [])
           _ ->
             let ctor = dataCtorsOf binder !! i
-             in ( "the constructor " <> T.unpack (renderQualName (ctorQual ctor))
+             in ( "the constructor " <> T.unpack (displayQualName (ctorQual ctor))
                 , \case PCon (Ref _ r) _ -> r == ctorCore ctor; _ -> False
                 , \case PCon _ subs -> [fieldName j p | (j, p) <- zip [0 :: Int ..] subs]; _ -> []
                 )
-    case find (fits . (!! c) . pcPatterns) pcs of
+    case find (fits . (!! c) . patternsOf) pcs of
       -- A case the binder's indices exclude needs no clause: it is refuted.
       Nothing -> either (\_ -> Left (EngineError (tdSpan td) ("no clause for " <> what))) (Right . closed) (refute k cg)
       Just pc -> do
-        let cg' = introduce (fieldsOf (pcPatterns pc !! c)) cg
-            cg'' = rename [(b, n) | (j, ((b, _), PVar (Hint n))) <- zip [0 :: Int ..] (zip (tdBinders td) (pcPatterns pc)), j /= c] cg'
+        let cg' = introduce (fieldsOf (patternsOf pc !! c)) cg
+            cg'' = rename [(b, n) | (j, ((b, _), PVar (Hint n))) <- zip [0 :: Int ..] (zip quantified (patternsOf pc)), j /= c] cg'
             (intro, cg''') = nameByClause td pc cg''
         out <- proveRhs k info 0 cg''' (pcRhs pc)
         pure out {outTactic = intro <> outTactic out}
   out <- finish outs
   pure (outTactic out, outAux out)
   where
+    -- The values the statement is over, its implicit ones first: the columns of a clause's patterns.
+    quantified = tdValues td <> tdBinders td
+    patternsOf pc = pcValuePats pc <> pcPatterns pc
     -- A pattern cases are told apart by: a constructor, 0, or a successor; or an absurd one, which no case fits, each refuted.
     matchesOn = \case
       PCon {} -> True
@@ -2512,6 +2514,6 @@ byClauses k info g td pcs = do
     fieldName j = \case
       PVar (Hint n) -> n
       _ -> "#" <> T.pack (show j)
-    dataCtorsOf binder = case lookup binder (tdBinders td) of
+    dataCtorsOf binder = case lookup binder quantified of
       Just (TData dn _ _) -> maybe [] dataCtors (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
       _ -> []

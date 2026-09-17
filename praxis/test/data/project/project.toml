@@ -1,0 +1,5 @@
+# A project of several packages, as a Cabal project: the packages, and the
+# constraints on versions which hold throughout, declared here and nowhere else.
+[project]
+packages = ["packages/*"]
+constraints = ["lists >= 0.1"]

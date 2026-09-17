@@ -1,0 +1,6 @@
+module Cycle1 where
+
+import Cycle2
+
+four : Nat
+four = 4

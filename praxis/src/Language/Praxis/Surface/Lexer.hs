@@ -54,6 +54,7 @@ module Language.Praxis.Surface.Lexer (
   natural,
   rational,
   qualifiedName,
+  stringLiteral,
   isOperatorChar,
 
   -- * Layout
@@ -178,6 +179,10 @@ keywords =
   [ "module"
   , "where"
   , "open"
+  , "import"
+  , "private"
+  , "public"
+  , "renaming"
   , "using"
   , "hiding"
   , "data"
@@ -297,6 +302,10 @@ rational = token do
     Nothing -> fromInteger whole
     Just (Left ds) -> fromInteger whole + read ds / (10 ^ length ds)
     Just (Right d) -> fromInteger whole / fromInteger d
+
+-- | A string in double quotes, without escapes: the name of a library in an import.
+stringLiteral :: Parser (Located Text)
+stringLiteral = located (token (char '"' *> takeWhileP (Just "a character of the string") (\c -> c /= '"' && c /= '\n') <* char '"')) <?> "a string"
 
 -- | A name, possibly qualified: @x@, @List.Nil@, @(<>)@, @(<>).unfold-Nil@, @List.(:)@.
 qualifiedName :: Parser (Located QName)

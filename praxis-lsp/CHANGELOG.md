@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- A `.px` document is checked as a module of the package enclosing it, its
+  imports resolved and the modules it imports checked first (`analyseIn`).
+
 - The language server.
 - A VS Code extension, in `editors/vscode` of the repository, which
   highlights `.pra` and `.prf` files and runs the server for them.

@@ -21,6 +21,7 @@ module Language.Praxis.Surface.Syntax.Raw (
   Segment (..),
   QName (..),
   segmentText,
+  segmentRaw,
   qnameText,
   unqualified,
 
@@ -30,7 +31,9 @@ module Language.Praxis.Surface.Syntax.Raw (
   ClassDecl (..),
   InstanceDecl (..),
   TyConstraint,
-  OpenSpec (..),
+  Import (..),
+  Directives (..),
+  noDirectives,
   Assoc (..),
   DataDecl (..),
   DataParam (..),
@@ -86,10 +89,17 @@ data Located a = Located
 
 -- * Names
 
--- | A segment of a qualified name: an identifier, or an operator written in parentheses in prefix position.
+{- |
+A segment of a qualified name: an identifier, or an operator written in
+parentheses in prefix position.  The component of a package a module
+belongs to heads the qualified names of the module's globals, so that two
+packages may expose modules of one name; it is never written, and never
+parsed.
+-}
 data Segment
   = Ident !Text
   | Op !Text
+  | Component !Text
   deriving stock (Show, Eq, Ord)
 
 -- | A name, with the namespaces qualifying it: @List.Nil@, @(<>).unfold-Nil@, @List.(:)@.
@@ -103,6 +113,14 @@ segmentText :: Segment -> Text
 segmentText = \case
   Ident t -> t
   Op t -> "(" <> t <> ")"
+  Component c -> c
+
+-- | The text of a segment without the parentheses of an operator: what a core name is made of.
+segmentRaw :: Segment -> Text
+segmentRaw = \case
+  Ident t -> t
+  Op t -> t
+  Component c -> c
 
 -- | The name as it is written, qualifiers first.
 qnameText :: QName -> Text
@@ -113,15 +131,28 @@ unqualified = QName []
 
 -- * Modules and declarations
 
+{- |
+A file: the header naming its top-level module, when it has one, and its
+declarations.  A file without a header is the module its path names in the
+library it belongs to, or @Main@ on its own.
+-}
 data Module = Module
-  { moduleName :: !(Located QName)
+  { moduleName :: !(Maybe (Located QName))
   , moduleDecls :: ![Located Decl]
   }
   deriving stock (Show, Eq)
 
 data Decl
-  = -- | @open T@, @open T using (a, b)@, @open T hiding (a)@
-    DOpen !(Located QName) !OpenSpec
+  = -- | @open T@, @open T using (a, b) renaming (c to d) public@: a namespace opened, its members in unqualified scope, and exported when @public@
+    DOpen !(Located QName) !Directives !Bool
+  | -- | @import M@, @import "pkg" M as N using (a)@: a module in scope by its name, qualifying its members
+    DImport !Import
+  | -- | @open import M … public@: the module imported, and opened
+    DOpenImport !Import !Bool
+  | -- | @module N where@ and its declarations: a module within the module, @N@ a namespace of it
+    DModule !(Located Text) ![Located Decl]
+  | -- | @private@ and its declarations, which the module does not export
+    DPrivate ![Located Decl]
   | DData !DataDecl
   | -- | @type T : kind@: the kind of a data type declared after it
     DKindSig !(Located Text) !Kind
@@ -166,11 +197,35 @@ data InstanceDecl = InstanceDecl
   }
   deriving stock (Show, Eq)
 
-data OpenSpec
-  = OpenAll
-  | OpenUsing ![Located Segment]
-  | OpenHiding ![Located Segment]
+{- |
+An import: the library the module is taken from, when named, @"pkg"@ or
+@"pkg:sublib"@, where two libraries expose modules of one name; the module;
+the name it is in scope by, after @as@, when given; and what is taken of it.
+-}
+data Import = Import
+  { importLibrary :: !(Maybe (Located Text))
+  , importModule :: !(Located QName)
+  , importAs :: !(Maybe (Located QName))
+  , importDirectives :: !Directives
+  }
   deriving stock (Show, Eq)
+
+{- |
+What an import or an opening takes of a namespace, as in Agda: the members
+named after @using@ and no other, when given; none of those after @hiding@;
+and each after @renaming@ by its new name, @(old to new; …)@, taken whether
+or not @using@ names it.
+-}
+data Directives = Directives
+  { dirUsing :: !(Maybe [Located Segment])
+  , dirHiding :: ![Located Segment]
+  , dirRenaming :: ![(Located Segment, Located Segment)]
+  }
+  deriving stock (Show, Eq)
+
+-- | Everything of a namespace, unrenamed.
+noDirectives :: Directives
+noDirectives = Directives Nothing [] []
 
 data Assoc = AssocLeft | AssocRight | AssocNone
   deriving stock (Show, Eq, Ord)

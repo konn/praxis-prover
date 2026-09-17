@@ -1,0 +1,7 @@
+module A where
+
+data List a = Nil | a : List a
+
+(<>) : List a -> List a -> List a
+(<>) Nil ys = ys
+(<>) (x : xs) ys = x : (xs <> ys)

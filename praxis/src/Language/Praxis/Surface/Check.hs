@@ -14,6 +14,13 @@ without it.  A data type in the GADT style has its index functions defined
 between the codes of its constructors and its membership predicate, which
 checks the indices of its constructors' entries by them.
 
+The modules of a package are checked in the order of their imports, each
+against a 'Build': the core after the modules before it, whose definitions
+and lemmas it extends, the tables of their globals, and what the engine
+knows of their functions.  A module reaches the globals of another only
+through its imports; the core, which judges, sees every lemma certified
+before, which is sound, a lemma being a lemma.
+
 The core is the only judge.  The driver never builds a proof term of its
 own; it reads the core's verdict on the text it generated, which it keeps,
 so that what was certified can be inspected, and checked again, with the
@@ -28,6 +35,12 @@ module Language.Praxis.Surface.Check (
   -- * Checking
   checkSource,
   checkSourceWith,
+  checkModule,
+  headerName,
+
+  -- * The build
+  Build (..),
+  initialBuild,
 
   -- * The core state
   Core (..),
@@ -41,6 +54,7 @@ import Control.Monad (foldM)
 import Data.Bifunctor (first)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -56,14 +70,16 @@ import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData)
 import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
-import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), TheoremInfo (..), indexFunctionCores, renderQualName)
-import Language.Praxis.Surface.Fixity (Fixities, moduleFixities, renderFixityError)
+import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), QualName, TheoremInfo (..), displayQualName, emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
+import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), ScopeError (..), moduleExports, renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), RelOp (..), stripLocations)
-import Language.Praxis.Surface.Syntax.Raw (Span (..))
+import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span (..))
+import Language.Praxis.Surface.Syntax.Raw qualified as R
 
 -- * Reports
 
@@ -127,30 +143,75 @@ certifyDecl text core = do
       Right (_, lemma) -> Right c {coreLemmas = Map.insert (declName d) lemma (coreLemmas c)}
       Left err -> Left (renderSchemaTacticError (coreSignature c) err)
 
+-- * The build
+
+{- |
+What a build threads through the modules it checks, in order: the core, the
+tables of the environment the modules before filled — their globals,
+namespaces, instances and display names — what the engine knows of their
+functions and data types, and what each exports.  A module checked on its
+own starts from 'initialBuild'.
+-}
+data Build = Build
+  { buildCore :: !Core
+  , buildEnv :: !Env
+  , buildMembers :: !(Map Text [(Int, FieldPred)])
+  , buildIndexEqs :: !(Map Text [(CT, CT)])
+  -- ^ the equations of indices the branch of each constructor checks, by its core name
+  , buildUnfoldings :: ![Unfolding]
+  , buildClosures :: !(Map Text Closure)
+  , buildIndexSpecs :: !(Map Text IndexSpec)
+  , buildExports :: !(Map QualName ModuleExports)
+  -- ^ what each module checked exports, by its name, its library first
+  }
+
+-- | A build before any module: the prelude, whose definitions and the core's builtins unfold as a module's own functions do.
+initialBuild :: Prelude -> Build
+initialBuild p = Build (initialCore p) emptyEnv Map.empty Map.empty [Unfolding n l r | (n, l, r) <- preludeUnfoldings p] Map.empty Map.empty Map.empty
+
 -- * Checking
 
--- | Check a module's source: every report, and what was generated.
+-- | Check a module's source on its own: every report, and what was generated.
 checkSource :: Prelude -> FilePath -> Text -> Checked
 checkSource = checkSourceWith (\_ _ -> [])
 
 {- |
-Check a module's source, proving of each function the specifications given
-for it, after its closure lemma: each certified as its lemma @f.#name@, as a
-theorem is, and a failure reported.
+Check a module's source on its own, proving of each function the
+specifications given for it, after its closure lemma: each certified as its
+lemma @f.#name@, as a theorem is, and a failure reported.
 -}
 checkSourceWith :: (Env -> FunDef -> [Spec]) -> Prelude -> FilePath -> Text -> Checked
-checkSourceWith specsOf p file src = case parseModule file src of
+checkSourceWith specsOf p file src = fst (checkModule specsOf (initialBuild p) Map.empty Nothing file src)
+
+-- | The name a file's header gives its module, or @Main@ when it has none.
+headerName :: R.Module -> QualName
+headerName m = case R.moduleName m of
+  Just (Located _ (QName qs b)) -> qs <> [b]
+  Nothing -> [Ident "Main"]
+
+{- |
+Check a module's source in a build: given the imports the build resolved
+for it, each by the library and the name written, and the module's name,
+its library first, or none, for a file on its own, named by its header.
+The reports and what was generated; and the build after the module, which
+records what it exports when it elaborated.
+-}
+checkModule :: (Env -> FunDef -> [Spec]) -> Build -> Imports -> Maybe QualName -> FilePath -> Text -> (Checked, Build)
+checkModule specsOf build imports name file src = case parseModule file src of
   Left err ->
     let (l, c) = syntaxErrorPosition err
-     in Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing
-  Right m -> case moduleFixities m of
-    Left ferr ->
-      let (sp, msg) = renderFixityError ferr
-       in Checked [Report sp SevError (T.pack msg)] [] [] Nothing
-    Right fx ->
-      let (env, items) = elabModule fx m
-       in -- The definitions of the prelude and of the core's builtins unfold as a module's own functions do.
-          runItems specsOf fx env (initialCore p) [Unfolding n l r | (n, l, r) <- preludeUnfoldings p] items
+     in (Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing, build)
+  Right m ->
+    let modQ = fromMaybe (headerName m) name
+        imported = Map.unions [meFixities e | Right e <- Map.elems imports]
+     in case moduleFixitiesWith imported m of
+          Left ferr ->
+            let (sp, msg) = renderFixityError ferr
+             in (Checked [Report sp SevError (T.pack msg)] [] [] Nothing, build)
+          Right fx ->
+            let (renamed, scopeErrors) = renameModule fx (buildEnv build) imports modQ m
+                (env, items) = elabModule fx (buildEnv build) renamed
+             in runItems specsOf fx env build (moduleExports fx renamed) [Report sp SevError (T.pack msg) | ScopeError sp msg <- scopeErrors] items
 
 data Run = Run
   { runCore :: !Core
@@ -167,23 +228,35 @@ data Run = Run
   -- ^ the certified obligations of the function whose lemmas are being proved
   }
 
-runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Core -> [Unfolding] -> [Item] -> Checked
-runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items)
+runItems :: (Env -> FunDef -> [Spec]) -> Fixities -> Env -> Build -> ModuleExports -> [Report] -> [Item] -> (Checked, Build)
+runItems specsOf fx env build0 exports reports0 items = finish (foldl step start items)
   where
     start =
       Run
-        { runCore = core0
-        , runReports = []
+        { runCore = buildCore build0
+        , runReports = reverse reports0
         , runText = []
         , runCertified = []
-        , runMembers = Map.empty
-        , runIndexEqs = Map.empty
-        , runUnfoldings = unfoldings0
-        , runClosures = Map.empty
-        , runIndexSpecs = Map.empty
+        , runMembers = buildMembers build0
+        , runIndexEqs = buildIndexEqs build0
+        , runUnfoldings = buildUnfoldings build0
+        , runClosures = buildClosures build0
+        , runIndexSpecs = buildIndexSpecs build0
         , runObligations = []
         }
-    finish r = Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r))
+    finish r =
+      ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r))
+      , Build
+          { buildCore = runCore r
+          , buildEnv = env
+          , buildMembers = runMembers r
+          , buildIndexEqs = runIndexEqs r
+          , buildUnfoldings = runUnfoldings r
+          , buildClosures = runClosures r
+          , buildIndexSpecs = runIndexSpecs r
+          , buildExports = Map.insert (meName exports) exports (buildExports build0)
+          }
+      )
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}
     emit t r = r {runText = t : runText r}
 
@@ -203,7 +276,7 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items
           -- The index functions of the data types encoded before, and of this one, defined before its predicate.
           indexFns dn = if dn == self || Map.member dn encoded then indexFunctionCores env dn else Nothing
           enc = encodeData (`Map.lookup` encoded) (`Set.member` coreVariadic (runCore r)) indexFns info
-          rejected (r', err) = report sp SevError ("the encoding of " <> T.unpack self <> " was rejected: " <> err) r'
+          rejected (r', err) = report sp SevError ("the encoding of " <> T.unpack (displayQualName (dataQual info)) <> " was rejected: " <> err) r'
        in case define (encodedCodes enc) r of
             Left failure -> rejected failure
             Right r1 ->
@@ -247,7 +320,7 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items
     -- A function's lemmas about its results: its closure, their indices, and the specifications asked of it.
     finishFunction fd r = (specify fd (indexed fd (closure fd (r {runObligations = obligationFacts r fd})))) {runObligations = []}
 
-    funName fd = T.unpack (renderQualName (funQual (fdInfo fd)))
+    funName fd = T.unpack (displayQualName (funQual (fdInfo fd)))
 
     -- The obligations of a function certified: each lemma's name, its variables, and the equation it concludes.
     obligationFacts r fd =
@@ -262,12 +335,12 @@ runItems specsOf fx env core0 unfoldings0 items = finish (foldl step start items
 
     -- A theorem, or the obligation a proof in a function's clause is: proved, and certified.
     proveAndCertify r td =
-      let name = T.unpack (renderQualName (thmQual (tdInfo td)))
+      let name = T.unpack (displayQualName (thmQual (tdInfo td)))
        in case proveTheorem (knowledge r) td of
             Left (EngineError sp msg) -> report sp SevError msg r
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
-    -- The lemmas of the library a proof may cite by name: those certified, but the module's own, which are mangled.
+    -- The lemmas of the library a proof may cite by name: those certified, but the modules' own, which are mangled.
     knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"])
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.

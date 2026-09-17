@@ -6,7 +6,7 @@
     { "include": "#comments" },
     {
       "name": "keyword.other.declaration.px",
-      "match": "\\b(module|where|open|using|hiding|data|type|infixl|infixr|infix|Type)\\b"
+      "match": "\\b(module|where|open|import|as|public|private|using|hiding|renaming|to|data|type|infixl|infixr|infix|Type)\\b"
     },
     {
       "name": "keyword.control.px",
