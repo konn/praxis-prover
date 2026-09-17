@@ -496,9 +496,9 @@ kernel's own evaluator. It checks lemma 1
 for every function, and lemma 2 and the membership hypotheses for every
 statement of `test/data/adequacy.px` — statements true and false, over every
 relation, connective and bounded quantifier — and of `list.px`, `gadt.px`
-and `nat.px`: indexed types and their index functions, value parameters,
-implicit values taken at runtime, proofs as arguments, and functions matching
-on values of `Nat`. A value of an indexed type is generated well typed at its
+and `nat.px`: indexed types and their index functions, constructors with
+named fields their indices mention, value parameters, implicit values taken
+at runtime, proofs as arguments, and functions matching on values of `Nat`. A value of an indexed type is generated well typed at its
 indices, entry by entry of a telescope — a statement's value parameters then
 its values, a function's value parameters then its arguments, a
 constructor's implicit arguments then its fields — and an entry which is,

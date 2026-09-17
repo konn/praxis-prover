@@ -85,3 +85,7 @@ extra-implicit = fzero {2} {2}
 -- An implicit argument of a type its parameter does not have.
 kind-implicit : Fin 1
 kind-implicit = fzero {nil}
+
+-- A field named as an implicit argument is.
+data Dup (n : nat) where
+  MkDup : {m : nat} -> (m : nat) -> Dup m

@@ -77,7 +77,7 @@ import Data.Set qualified as Set
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
+import Data.Text.Builder.Linear (Builder, fromDec, fromText, fromUnboundedDec, runBuilder)
 import Data.Void (absurd)
 import Language.Praxis.Surface.Compile (functionLemma, ownDictionary, ruleBinders)
 import Language.Praxis.Surface.CoreText
@@ -150,12 +150,52 @@ hypText = \case
 formula :: Expr Text -> Either String Builder
 formula = propText (\h -> "b_" <> mangleVariable h) CVar
 
--- | The goal as the user reads it: the variables, the hypotheses by their names, the conclusion.
+-- | The goal as the user reads it: the variables, the hypotheses by their names, the conclusion, each over the variables' surface names.
 renderGoal :: Env -> Goal -> Text
-renderGoal _ g = runBuilder (foldMap (<> "\n") (map var (goalVars g) <> map hyp (goalHyps g) <> ["⊢ " <> either fromString id (formula (goalConcl g))]))
+renderGoal _ g = runBuilder (foldMap (<> "\n") (map var (goalVars g) <> map hyp (goalHyps g) <> ["⊢ " <> either fromString id (formula (surfaceNames g (goalConcl g)))]))
   where
     var (n, (_, _)) = fromText n
-    hyp (core, h) = fromText (maybe core fst (find ((== core) . snd) (goalNames g))) <> " : " <> either fromString id (hypText h)
+    hyp (core, h) = fromText (maybe core fst (find ((== core) . snd) (goalNames g))) <> " : " <> either fromString id (hypText (surfaceHyp h))
+    surfaceHyp = \case
+      HProp p -> HProp (surfaceNames g p)
+      HMember p v -> HMember p (surfaceName g v)
+
+{- |
+A core variable of a goal by the name the surface has for it, where the goal
+has one which a clause or a tactic gave — what the user wrote, rather than
+the eigenvariable the core introduced, @e_0@ — and the core's own otherwise.
+-}
+surfaceName :: Goal -> Text -> Text
+surfaceName g v = case [n | (n, (core, _)) <- goalVars g, core == v, not ("#" `T.isPrefixOf` n)] of
+  n : _ -> n
+  [] -> v
+
+-- | A formula or a term of a goal over its variables' surface names, to be read, not checked.
+surfaceNames :: Goal -> Expr Text -> Expr Text
+surfaceNames g = fmap (surfaceName g)
+
+{- |
+A core term as the surface writes it, to be read in a message: the
+arithmetic infix, a constructor or a function by its surface name, an
+argument in parentheses where it is an application.
+-}
+readable :: Env -> CT -> Builder
+readable env = go (0 :: Int)
+  where
+    -- At depth 1, an operand of an infix operator, where an infix term needs parentheses; at 2, an argument, where an application does too.
+    go d = \case
+      CVar v -> fromText v
+      CNum n -> fromUnboundedDec n
+      CSym f [a, b] | Just op <- lookup f infixes -> paren (d >= 1) (go 1 a <> " " <> op <> " " <> go 1 b)
+      CSym f [] -> fromText (nameOf f)
+      CSym f args -> paren (d >= 2) (unwordsB (fromText (nameOf f) : map (go 2) args))
+      t -> render t
+    paren p b = if p then "(" <> b <> ")" else b
+    infixes = [("add", "+"), ("sub", "-"), ("mul", "*"), ("pow", "^")] :: [(Text, Builder)]
+    nameOf f = case (ctorByCore env f, find ((== f) . funCore) [fn | GFun fn <- Map.elems (envGlobals env)]) of
+      (Just c, _) -> R.segmentText (last (ctorQual c))
+      (_, Just fn) -> renderQualName (funQual fn)
+      _ -> f
 
 -- * Knowledge
 
@@ -330,7 +370,7 @@ proveTheorem k td = do
       marked = goal0 {goalNames = goalNames goal0 <> [(hypMark j, h) | (j, (h, _)) <- zip [1 ..] leading]}
   (tactic, aux) <- case tdClauses td of
     [pc]
-      | all isVariable (pcPatterns pc) -> do
+      | all isVariable (pcValuePats pc <> pcPatterns pc) -> do
           let (intro, named) = nameByClause td pc (rename [(b, n) | ((b, _), PVar (Hint n)) <- zip (tdBinders td) (pcPatterns pc)] marked)
           out <- proveRhs k info (counter 0) named (pcRhs pc)
           pure (intro <> outTactic out, outAux out)
@@ -1015,7 +1055,7 @@ dropped.  The tactic introducing them, and the goal after.
 nameByClause :: TheoremDef -> ProofClause -> Goal -> (Builder, Goal)
 nameByClause td pc g0 = (intro, g2 {goalNames = [(s, h) | (s, h) <- goalNames g2, not ("#hyp-" `T.isPrefixOf` s)] <> given})
   where
-    g1 = rename [(v, n) | ((v, _), Just n) <- zip (tdValues td) (pcValueNames pc)] g0
+    g1 = rename [(v, n) | ((v, _), PVar (Hint n)) <- zip (tdValues td) (pcValuePats pc)] g0
     count = hypothesisCount td
     nameOf j = case drop (j - 1) (pcHypNames pc) of
       m : _ -> m
@@ -1272,7 +1312,7 @@ evidence k info g le = case spineOf le of
       known <- traverse valueTerm [0 .. nv - 1]
       pure (snd (implications (instantiate (\i -> if i < nv then fromCT (known !! i) else fst (typed !! (i - nv))) (fmap absurd sc))))
     theorem sp t args
-      | thmQual t == thmQual info = named <$> recursive sp args
+      | thmQual t == thmQual info = named <$> recursive sp (implicitsOf le) args
       | otherwise = do
           typed <- traverse (typedArg k g) (take (length (thmMembered t)) args)
           let assign = assignment (thmMembered t) (map snd typed)
@@ -1315,21 +1355,23 @@ evidence k info g le = case spineOf le of
           _ -> Right Nothing
       _ -> Right Nothing
     own sp p = maybe (Left (EngineError sp "a law at a type parameter no constraint with laws is on, or one the statement's methods do not determine")) (Right . gpName) (find ((== p) . gpPremise) (goalPremises g))
-    -- A recursive call names the induction hypothesis at its argument.
-    -- The induction hypothesis a recursive call names: at the field it passes, the other values as they are, which the hypothesis keeps.
-    recursive sp args =
+    -- The induction hypothesis a recursive call names: at the field it passes, the other values as they are, which
+    -- the hypothesis keeps.  The theorem's implicit values are given in braces, in order, or left out, which is as they are.
+    recursive sp imps args =
       let varCore = \case
             Located _ (R.EName (QName [] (Ident v))) -> fst <$> lookup v (goalVars g)
             Located _ (R.EParen x) -> varCore x
             _ -> Nothing
-          cores = map varCore args
-          ihs = [(j, ih) | (j, Just c) <- zip [0 :: Int ..] cores, Just ih <- [lookup c (goalIH g)]]
+          values = map mangleVariable (thmValues info)
+          given = zip (map varCore imps) values <> zip (map varCore args) (thmBinders info)
+          ihs = [(j, ih) | (j, (Just c, _)) <- zip [0 :: Int ..] given, Just ih <- [lookup c (goalIH g)]]
        in case ihs of
             [(j, ih)]
-              | length args == length (thmBinders info)
-              , and [c == Just b | (j', (c, b)) <- zip [0 ..] (zip cores (thmBinders info)), j' /= j] ->
+              | length imps <= length values
+              , length args == length (thmBinders info)
+              , and [c == Just b | (j', (c, b)) <- zip [0 ..] given, j' /= j] ->
                   Right ih
-            _ -> Left (EngineError sp "a recursive call must be at a field of the value matched on, which has an induction hypothesis, and pass the other values as they are")
+            _ -> Left (EngineError sp "a recursive call must be at a field of the value matched on, which has an induction hypothesis, and pass the other values, its implicit ones in braces, as they are")
 
 -- | The head of a type an instance may be for: a data type, by its qualified name, or @Nat@.
 headOf :: Ty -> Maybe Text
@@ -1652,6 +1694,16 @@ spineOf = go []
       Located _ (R.EParen x) | null acc -> go acc x
       h -> (h, acc)
 
+-- | The implicit arguments of an application, in braces, in order.
+implicitsOf :: Located R.Expr -> [Located R.Expr]
+implicitsOf = go []
+  where
+    go acc = \case
+      Located _ (R.EApp f _) -> go acc f
+      Located _ (R.EImplicitApp f x) -> go (x : acc) f
+      Located _ (R.EParen x) | null acc -> go acc x
+      _ -> acc
+
 -- * Tactics
 
 {- |
@@ -1715,6 +1767,21 @@ calcProof k info n g sp (R.Calc first steps) = do
   t0 <- term k g first
   ts <- forM steps \(Located ssp (R.CalcStep _ t _)) -> (,) ssp <$> term k g t
   let ends = t0 : map snd ts
+  -- The chain proves the equation between its ends, which the goal must be: checked here, as the core will,
+  -- so that the mismatch is reported over the names the user wrote, rather than the core's eigenvariables.
+  let shown e = either (const "?") (readable (knowEnv k)) (termCT CVar (surfaceNames g e))
+      same a b = fmap numerals (termCT CVar a) == fmap numerals (termCT CVar b)
+      -- A successor of a numeral is the next numeral, as the core reads it.
+      numerals = \case
+        CSym "S" [x] | CNum i <- numerals x -> CNum (i + 1)
+        CSym f xs -> CSym f (map numerals xs)
+        t -> t
+      chain = shown t0 <> " = " <> shown (last ends)
+  case stripLocations (goalConcl g) of
+    Rel RelEq l r
+      | same t0 l && same (last ends) r -> pure ()
+      | otherwise -> Left (EngineError sp (T.unpack (runBuilder ("calc: the chain proves " <> chain <> ", which is not the goal, " <> shown l <> " = " <> shown r))))
+    _ -> Left (EngineError sp (T.unpack (runBuilder ("calc: the chain proves " <> chain <> ", and the goal is not an equation"))))
   proofs <- forM (zip3 ends (map snd ts) steps) \(a, b, Located ssp (R.CalcStep _ _ p)) -> do
     let stepGoal = g {goalConcl = Rel RelEq a b}
     case p of
@@ -2465,16 +2532,24 @@ fromCT = \case
 
 -- * By clauses
 
--- | A proof by clauses matching on one value: induction on it, each clause a case, its recursive calls the induction hypotheses.
+{- |
+A proof by clauses matching on one value: induction on it, each clause a
+case, its recursive calls the induction hypotheses.  A clause matches on the
+theorem's implicit values, in braces, and on the values it quantifies over,
+which its statement has in that order: the columns are of both.
+-}
 byClauses :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Builder, [(Text, Text)])
 byClauses k info g td pcs = do
-  let columns = nub [i | pc <- pcs, (i, p) <- zip [0 ..] (pcPatterns pc), matchesOn p]
+  let columns = nub [i | pc <- pcs, (i, p) <- zip [0 ..] (patternsOf pc), matchesOn p]
   c <- case columns of
     [c] -> Right c
     [] -> Left (EngineError (tdSpan td) "several clauses, none matching on a constructor, 0 or S")
     _ -> Left (EngineError (tdSpan td) "clauses matching on several values are not supported yet")
-  let (binder, bty) = tdBinders td !! c
-  unless (null [() | pc <- pcs, PNat j <- [pcPatterns pc !! c], j > 0]) $
+  let (binder, bty) = quantified !! c
+  -- An implicit value which is, bare, an index of a binder is that index, and no variable of the statement: its binder is matched on instead.
+  unless (isJust (lookup binder (goalVars g))) $
+    Left (EngineError (tdSpan td) ("the implicit value " <> T.unpack binder <> " is an index of a value the theorem quantifies over, and no variable of its statement: match on that value"))
+  unless (null [() | pc <- pcs, PNat j <- [patternsOf pc !! c], j > 0]) $
     Left (EngineError (tdSpan td) "a clause on a numeral other than 0: write it S n, matching on the successor")
   (cases, finish) <- induction k info 0 g (tdSpan td) binder []
   outs <- forM (zip [0 :: Int ..] cases) \(i, cg) -> do
@@ -2489,18 +2564,21 @@ byClauses k info g td pcs = do
                 , \case PCon (Ref _ r) _ -> r == ctorCore ctor; _ -> False
                 , \case PCon _ subs -> [fieldName j p | (j, p) <- zip [0 :: Int ..] subs]; _ -> []
                 )
-    case find (fits . (!! c) . pcPatterns) pcs of
+    case find (fits . (!! c) . patternsOf) pcs of
       -- A case the binder's indices exclude needs no clause: it is refuted.
       Nothing -> either (\_ -> Left (EngineError (tdSpan td) ("no clause for " <> what))) (Right . closed) (refute k cg)
       Just pc -> do
-        let cg' = introduce (fieldsOf (pcPatterns pc !! c)) cg
-            cg'' = rename [(b, n) | (j, ((b, _), PVar (Hint n))) <- zip [0 :: Int ..] (zip (tdBinders td) (pcPatterns pc)), j /= c] cg'
+        let cg' = introduce (fieldsOf (patternsOf pc !! c)) cg
+            cg'' = rename [(b, n) | (j, ((b, _), PVar (Hint n))) <- zip [0 :: Int ..] (zip quantified (patternsOf pc)), j /= c] cg'
             (intro, cg''') = nameByClause td pc cg''
         out <- proveRhs k info 0 cg''' (pcRhs pc)
         pure out {outTactic = intro <> outTactic out}
   out <- finish outs
   pure (outTactic out, outAux out)
   where
+    -- The values the statement is over, its implicit ones first: the columns of a clause's patterns.
+    quantified = tdValues td <> tdBinders td
+    patternsOf pc = pcValuePats pc <> pcPatterns pc
     -- A pattern cases are told apart by: a constructor, 0, or a successor; or an absurd one, which no case fits, each refuted.
     matchesOn = \case
       PCon {} -> True
@@ -2512,6 +2590,6 @@ byClauses k info g td pcs = do
     fieldName j = \case
       PVar (Hint n) -> n
       _ -> "#" <> T.pack (show j)
-    dataCtorsOf binder = case lookup binder (tdBinders td) of
+    dataCtorsOf binder = case lookup binder quantified of
       Just (TData dn _ _) -> maybe [] dataCtors (find ((== dn) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals (knowEnv k))])
       _ -> []

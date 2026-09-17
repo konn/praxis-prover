@@ -102,3 +102,24 @@ zero-of-three = fzero {2}
 
 both-nil : SameVec {Nat} nil nil
 both-nil = BothNil
+
+-- A named field, (m : nat) ->, is a value the constructor takes, in scope for
+-- the indices of its result, as an implicit argument is: Zero m is at
+-- PLt2 0 (S m). Matching Zero k learns the index from k, and k from the index.
+data PLt2 (n : nat) (m : nat) where
+  Zero : (m : nat) -> PLt2 0 (S m)
+  Succ : {n m : nat} -> PLt2 n m -> PLt2 (S n) (S m)
+
+plt2-of-lt : {n m : nat} -> (n < m) -> PLt2 n m
+plt2-of-lt {0} {S m} h = Zero m
+plt2-of-lt {S n} {S m} h = Succ (plt2-of-lt h)
+plt2-of-lt {n} {0} h = absurd h
+
+lt-of-plt2 : {n m : nat} -> PLt2 n m -> (n < m)
+lt-of-plt2 (Zero k) = rfl
+lt-of-plt2 (Succ p) = lt-of-plt2 p
+
+-- The field named in a pattern, the right index the successor of it.
+plt2-zero : {n m : nat} -> PLt2 n m -> 0 < m
+plt2-zero (Zero k) = rfl
+plt2-zero (Succ p) = rfl

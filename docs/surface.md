@@ -326,10 +326,17 @@ whose type mentions the head's parameters has its type written, `{xs : Vec a
 n}`, in a constructor's signature as in a function's or a theorem's.
 
 A constructor's implicit arguments, `{n : nat}`, come before its fields, and
-a variable its indices mention which nothing binds is one too. The indices
-of its result are patterns — variables, numerals, `S` and constructors — so
-that matching on the constructor can solve them; indices elsewhere may apply
-functions and the arithmetic of `Nat`.
+a variable its indices mention which nothing binds is one too. A field may be
+named, `(m : nat) ->`, and is then in scope after it, for the types of the
+fields after it and the indices of the result: `Zero : (m : nat) -> PLt 0 (S
+m)` takes `m` as an argument its type depends on, where an implicit one,
+`{m : nat} -> PLt 0 (S m)`, is found from the type expected. Such an argument
+is an index — a variable, a numeral, `S`, a constructor or a function applied
+— and matching `Zero k` learns the index from `k`, or `k` from an index which
+is a variable; against a numeral, `k` is refused, as nothing solves it. The
+indices of its result are patterns — variables, numerals, `S` and
+constructors — so that matching on the constructor can solve them; indices
+elsewhere may apply functions and the arithmetic of `Nat`.
 
 A signature's free variables at indices are its implicit value parameters,
 as its free type variables are its type parameters: `n : Nat` in `tail`, and
@@ -526,20 +533,27 @@ constructor is the induction hypothesis there. Clauses matching on a value of
 recursive call at `n` the hypothesis; a numeral other than `0` is written as
 the successor. A value the statement quantifies over need not be named: in
 `PLt n m -> n < m` the type before the arrow to a proposition is that of a
-value, which a clause matches on as on any other. A clause may name, in
-braces, the theorem's implicit values, and, after the patterns of its values,
-its hypotheses, each by a variable or `_`: `lt-of-succ-lt {n} {m} h = h`
-names the hypothesis `S n < S m` `h`. A hypothesis mentioning the value
-matched on, which the induction reverts, is introduced by that name in each
-case. A right side is a proof term
+value, which a clause matches on as on any other. A clause gives, in braces,
+patterns for the theorem's implicit parameters, in the order its signature
+has them: an implicit value is a value the statement quantifies over, and is
+matched on as any other — `zero-add {0} = rfl` and `zero-add {S n} = cong
+(zero-add {n})` prove `{n : nat} -> 0 + n ≡ n` by induction on `n` — while an
+implicit type takes a name, which does not matter. An implicit value which
+is, bare, an index of a value the theorem quantifies over is that index, and
+not a variable of the statement: it is not matched on, only the value is. After
+the patterns of its values, a clause names its hypotheses, each by a variable
+or `_`: `lt-of-succ-lt {n} {m} h = h` names the hypothesis `S n < S m` `h`. A
+hypothesis mentioning the value matched on, which the induction reverts, is
+introduced by that name in each case. A right side is a proof term
 — a lemma or a hypothesis, `cong e`, `rfl` — a `calc`, or `by` tactics.
 Where the heads of the sides of an equation differ, `cong e` first unfolds
 them, outermost first, until their heads agree, so that the congruence is
 under what their definitions share: `length (x :- xs) ≡ Vec.#idx (x :- xs)` is
 `S (length xs) ≡ S (Vec.#idx xs)`.
 
-**By calculation.** `calc t₀ = t₁ := p₁ … = tₙ := pₙ` proves `t₀ = tₙ`; an
-omitted justification is `rfl`.
+**By calculation.** `calc t₀ = t₁ := p₁ … = tₙ := pₙ` proves `t₀ = tₙ`, which
+must be the goal's equation, its sides as written; an omitted justification
+is `rfl`.
 
 **By tactics** (Lean 4 style, with Rocq's spellings accepted). A tactic acts
 on the first goal; newlines and `;` sequence; `{ … }` and `· …` focus the first
@@ -549,7 +563,10 @@ turn. The engine translates, so far: `rfl` (`refl`, `reflexivity`), `exact`,
 introduces: the constructor's fields, then the induction hypotheses, `IH` by
 default, `IH1 …` when there are several), `assumption`, `sorry` (`admit`),
 focused blocks, and a bare proof term, `by IH`, which closes the goal by the
-term or else by congruence. The grammar also accepts `apply`, `rw [e, ← e'] at
+term or else by congruence. A goal reported — by `sorry`, when unsolved, or
+when a `calc` does not prove it — is over the names the clause and `intro`
+gave its variables, not the eigenvariables the core introduces for them, `e_0`.
+The grammar also accepts `apply`, `rw [e, ← e'] at
 h`, `unfold`, `simp only`, `constructor`, `left`, `right`, `exfalso`,
 `contradiction`, `cases`, `obtain`, `exists`/`use`, `have`, `show`, `revert`,
 `clear`, `by_cases`, `try`, `repeat`, `first`, `all_goals`, `any_goals`, `<;>`

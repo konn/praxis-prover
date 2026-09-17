@@ -29,10 +29,14 @@ no-rhs n
 unit-term : Nat
 unit-term = ()
 
--- A theorem's implicit value matched on, rather than named.
+-- A theorem's implicit value matched on, with no clause for S n, which is not refuted.
 match-implicit : {n : nat} -> 0 < S n
 match-implicit {0} = rfl
 
 -- More patterns than the values and the hypotheses of the theorem.
 too-many : {n : nat} -> 0 < n -> 0 < S n
 too-many h g = rfl
+
+-- An implicit value which is an index of the value matched on: no variable of the statement.
+match-index : {n m : nat} -> PLt n m -> 0 < m
+match-index {n} {S k} p = rfl

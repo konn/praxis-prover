@@ -124,3 +124,14 @@ lt-trans {n} {m} {k} nltm mltk = lt-of-plt (plt-trans {n} {m} {k} nltm mltk)
 -- The same, by the lemma of the library, applied to the hypotheses.
 lt-trans-lib : {n m k : nat} -> n < m -> m < k -> n < k
 lt-trans-lib {n} {m} {k} nltm mltk = ltTrans nltm mltk
+
+-- A theorem's clause matches on its implicit values as on the values it
+-- quantifies over, the statement being over both: induction on n, the
+-- recursive appeal at n its hypothesis.
+zero-add-implicit : {n : nat} -> 0 + n ≡ n
+zero-add-implicit {0} = rfl
+zero-add-implicit {S n} = cong (zero-add-implicit {n})
+
+-- An implicit value matched on before a hypothesis mentioning it is named.
+pos-pred-implicit : {n : nat} -> 0 < n -> S (n - 1) ≡ n
+pos-pred-implicit {S k} h = rfl
