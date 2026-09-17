@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Semantic tokens (`textDocument/semanticTokens/full`): in a `.px` document
+  every name is a token of what it is — a data type, a constructor, a
+  function or theorem, a class, a method, a module or instance, a type
+  variable, a value parameter, a variable, a builtin or a lemma of the
+  library — and the words of the tactic language are keywords in tactic
+  position only; in `.pra` and `.prf` documents, the theorems, rules and
+  definitions declared, and the names appealing to them.
+- Go to definition (`textDocument/definition`): from a name of a `.px`
+  document to its declaration, in the document or in the file of the module
+  it imports, an import or an opening to the module's header, and a lemma
+  generated for a function to the function; from an appeal in a `.pra` or
+  `.prf` document to the declaration it names. `analyseDocument`,
+  `definitionsAt` and `semanticTokensOf` are the API.
+- Positions are converted between the checkers' columns, which expand tabs,
+  and the protocol's UTF-16 units.
 - A `.px` document is checked as a module of the package enclosing it, its
   imports resolved and the modules it imports checked first (`analyseIn`).
 

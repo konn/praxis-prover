@@ -51,9 +51,16 @@ library
   import: defaults
   hs-source-dirs: src
   -- cabal-gild: discover src
-  exposed-modules: Language.Praxis.LSP
+  exposed-modules:
+    Language.Praxis.LSP
+    Language.Praxis.LSP.Core
+    Language.Praxis.LSP.Index
+    Language.Praxis.LSP.Position
+    Language.Praxis.LSP.Surface
+
   build-depends:
     containers,
+    directory,
     filepath,
     lsp,
     lsp-types,
@@ -82,7 +89,9 @@ test-suite praxis-lsp-test
   main-is: Test.hs
   hs-source-dirs: test
   build-depends:
+    filepath,
     lsp-types,
+    praxis,
     praxis-lsp,
     tasty,
     tasty-hunit,

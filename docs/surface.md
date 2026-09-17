@@ -638,7 +638,12 @@ for every constructor and for every function whose result is of a data type.
   report; `--dump-core` prints the core text generated — the definitions,
   and every declaration handed to the kernel — for inspection.
 - `praxis-lsp` serves `.px` documents with the driver's diagnostics, each as a
-  module of the package enclosing it.
+  module of the package enclosing it; with semantic tokens, every name
+  coloured by what the renamer and the environment say it is — a data type,
+  a constructor, a function, a theorem, a class, a method, a module, a
+  variable, a word of the tactic language; and with go to definition, in
+  the document or in the module it imports. `Check.checkedRenamed` and
+  `Rename.rnResolved` and `rnHeaders` are what it reads.
 - `editors/vscode` highlights `.px` and starts the server.
 
 ## Scope of the current implementation

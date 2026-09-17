@@ -1,14 +1,23 @@
 # praxis-lsp
 
-A language server for the files of praxis: `.pra` files of theorems and
-rules, as `praFile` splices them, and `.prf` files of definitions, as
-`prfFile` does.
+A language server for the files of praxis: `.px` modules of the surface
+language, `.pra` files of theorems and rules, as `praFile` splices them, and
+`.prf` files of definitions, as `prfFile` does.
 
 It speaks the Language Server Protocol over standard input and output:
 
 ```bash
 cabal run praxis-lsp
 ```
+
+A `.px` document is checked by the driver of the praxis package as a module
+of the package enclosing it, the modules it imports checked first, or on its
+own; every report is a diagnostic where the driver places it. What the
+driver learns of the module's names gives each a semantic token — a data
+type, a constructor, a function, a theorem, a class, a method, a module, a
+type variable, a value, a variable, or a word of the tactic language, which
+is a word only in tactic position — and a definition to go to, in the
+document or in the module it imports.
 
 A `.pra` document is read over the `builtin` signature, with the lemmas of the
 library of praxis-core, `src-pra/lemmas.pra`, and the unfolding
@@ -18,7 +27,9 @@ tactic which fails is an error at its position,
 and a `sorry` an information diagnostic listing the goal it stopped at, with
 the hypotheses by name. Hovering over a tactic shows the goal it faces, found
 by running the proof with that tactic replaced by `sorry`. A `.prf` document
-is checked as the quasiquoter checks it, over the empty signature.
+is checked as the quasiquoter checks it, over the empty signature. In both,
+a theorem, a rule or a definition is a definition to go to from the names
+appealing to it, and the lemmas of the library are told apart.
 
 ## Editors
 

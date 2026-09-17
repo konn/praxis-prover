@@ -18,8 +18,9 @@ The packages map onto the layers:
   library, and their quasiquoters;
 - `praxis` — the surface language, its packages and projects, and its checker,
   `praxis check`;
-- `praxis-lsp` — a language server for `.px`, `.pra` and `.prf` files, with
-  the VS Code extension in `editors/vscode`.
+- `praxis-lsp` — a language server for `.px`, `.pra` and `.prf` files:
+  diagnostics, semantic highlighting and go to definition, with the VS Code
+  extension in `editors/vscode`.
 
 A reader new to the code base might read [kernel.md](kernel.md) for the
 calculus and its trust model, skim [pra-and-prf.md](pra-and-prf.md), and then

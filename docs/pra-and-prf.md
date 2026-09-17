@@ -160,4 +160,7 @@ over an abstract function, proved once from `Ind`.
 - The quasiquoters `[prf| … |]` and `[pra| … |]` (`PrimitiveRecursion.Quote`,
   `Tactic.Quote`) check at compile time and splice definitions and proofs.
 - `praxis-lsp` serves `.pra` and `.prf` files: diagnostics from the same
-  checkers, hover by re-running a proof with `sorry` injected at the cursor.
+  checkers, hover by re-running a proof with `sorry` injected at the cursor,
+  and, read lexically, the theorems, rules and definitions of a file as
+  definitions to go to from the names appealing to them, with semantic
+  tokens for them and for the lemmas of the library.
