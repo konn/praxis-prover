@@ -14,12 +14,19 @@
     { "open": "(", "close": ")" },
     { "open": "[", "close": "]" },
     { "open": "⟨", "close": "⟩" },
-    { "open": "{-", "close": "-}" }
+    { "open": "{-", "close": "-}" },
+    { "open": "\"", "close": "\"", "notIn": ["string", "comment"] }
   ],
   "surroundingPairs": [
     ["{", "}"],
     ["(", ")"],
     ["[", "]"],
-    ["⟨", "⟩"]
-  ]
+    ["⟨", "⟩"],
+    ["\"", "\""]
+  ],
+  "wordPattern": {
+    "comment": "A name of the surface language, its dashes included, or an operator, or a number.",
+    "pattern": "[\\p{L}_][\\p{L}\\p{N}_']*(?:-[\\p{L}\\p{N}][\\p{L}\\p{N}_']*)*|[!#$%&*+./<=>?@\\\\^|~:-]+|[0-9]+",
+    "flags": "u"
+  }
 }

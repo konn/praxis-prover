@@ -3,38 +3,35 @@
   "name": "Praxis",
   "scopeName": "source.px",
   "patterns": [
-    { "include": "#comments" },
     {
-      "name": "keyword.other.declaration.px",
-      "match": "\\b(module|where|open|import|as|public|private|using|hiding|renaming|to|data|type|infixl|infixr|infix|Type)\\b"
+      "include": "#comments"
     },
     {
-      "name": "keyword.control.px",
-      "match": "\\b(case|of|if|then|else|let|in|by|calc|with|fun)\\b"
+      "include": "#strings"
     },
     {
-      "name": "keyword.control.tactic.px",
-      "match": "(?<![\\w'-])(intro|intros|exact|apply|rfl|refl|reflexivity|symm|symmetry|trans|transitivity|rw|rewrite|unfold|simp|only|constructor|split|left|right|exfalso|contradiction|absurd|assumption|trivial|decide|cong|congr|cases|destruct|induction|generalizing|obtain|use|have|assert|show|change|revert|clear|by_cases|sorry|admit|try|repeat|first|all_goals|any_goals|at)(?![\\w'-])"
+      "include": "#imports"
     },
     {
-      "name": "keyword.operator.quantifier.px",
-      "match": "∀|∃|λ|\\b(forall|exists)\\b"
+      "include": "#keywords"
     },
     {
-      "name": "keyword.operator.logic.px",
-      "match": "≡|≠|≤|≥|∧|∨|¬|↔|→|←|⊤|⊥|:=|<;>|=>|->|<-|·"
+      "include": "#builtins"
     },
     {
-      "name": "entity.name.type.constructor.px",
-      "match": "(?<![\\w'-])[A-Z][\\w']*(?:-[A-Za-z0-9][\\w']*)*"
+      "include": "#declarations"
     },
     {
-      "name": "constant.numeric.px",
-      "match": "\\b[0-9]+\\b"
+      "include": "#tactics"
     },
     {
-      "name": "keyword.operator.px",
-      "match": "[!#$%&*+./<=>?@\\\\^|~:-]+"
+      "include": "#names"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
     }
   ],
   "repository": {
@@ -44,11 +41,154 @@
           "name": "comment.block.px",
           "begin": "\\{-",
           "end": "-\\}",
-          "patterns": [{ "include": "#comments" }]
+          "patterns": [
+            {
+              "include": "#comments"
+            }
+          ]
         },
         {
+          "comment": "A run of dashes not followed by another operator character.",
           "name": "comment.line.double-dash.px",
-          "match": "--(?![!#$%&*+./<=>?@\\\\^|~:]).*$"
+          "match": "--+(?![!#$%&*+./<=>?@\\\\^|~:]|(?![\\x00-\\x7F])[\\p{S}\\p{P}&&[^⟨⟩·∀∃λ]]).*$"
+        }
+      ]
+    },
+    "strings": {
+      "comment": "The name of a library in an import.",
+      "name": "string.quoted.double.px",
+      "match": "\"[^\"\\n]*\""
+    },
+    "imports": {
+      "comment": "An import or an opening: as and to are words only here.",
+      "begin": "^\\s*(open\\s+import|open|import)(?![\\p{L}\\p{N}_'-])",
+      "end": "$",
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "name": "keyword.other.import.px",
+          "match": "(?<![\\p{L}\\p{N}_'-])(open|import|as|using|hiding|renaming|to|public)(?![\\p{L}\\p{N}_'-])"
+        },
+        {
+          "name": "entity.name.namespace.px",
+          "match": "(?<=import\\s|open\\s|as\\s|\"\\s)[\\p{L}_][\\p{L}\\p{N}_']*(?:-[\\p{L}\\p{N}][\\p{L}\\p{N}_']*)*(?:\\.[\\p{L}_][\\p{L}\\p{N}_']*(?:-[\\p{L}\\p{N}][\\p{L}\\p{N}_']*)*)*(?![\\p{L}\\p{N}_'.])",
+          "comment": "The module, after import, open or a library, and its alias after as."
+        },
+        {
+          "include": "#names"
+        },
+        {
+          "include": "#operators"
+        }
+      ],
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.import.px"
+        }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.other.declaration.px",
+          "match": "(?<![\\p{L}\\p{N}_'-])(module|where|open|import|public|private|using|hiding|renaming|data|class|instance|infixl|infixr|infix|type|Type)(?![\\p{L}\\p{N}_'-])"
+        },
+        {
+          "name": "keyword.control.px",
+          "match": "(?<![\\p{L}\\p{N}_'-])(case|of|if|then|else|let|in|by|calc|forall|exists|fun|with)(?![\\p{L}\\p{N}_'-])"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "comment": "The type of numbers, and the successor.",
+          "name": "support.type.builtin.px",
+          "match": "(?<![\\p{L}\\p{N}_'-])(Nat|nat)(?![\\p{L}\\p{N}_'-])"
+        },
+        {
+          "name": "support.function.builtin.px",
+          "match": "(?<![\\p{L}\\p{N}_'-])(S|suc)(?![\\p{L}\\p{N}_'-])"
+        },
+        {
+          "comment": "The induction hypotheses the engine names, and the wildcard.",
+          "name": "variable.language.px",
+          "match": "(?<![\\p{L}\\p{N}_'-])(IH[0-9]*|_)(?![\\p{L}\\p{N}_'-])"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "comment": "A signature: a name, or an operator in parentheses, before a colon.",
+          "match": "^\\s*((?:[\\p{Ll}_][\\p{L}\\p{N}_']*(?:-[\\p{L}\\p{N}][\\p{L}\\p{N}_']*)*)|\\([!#$%&*+./<=>?@\\\\^|~:-]+\\))\\s*(?=:(?![!#$%&*+./<=>?@\\\\^|~:-]))",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.px"
+            }
+          }
+        },
+        {
+          "comment": "A clause: a name, or an operator in parentheses, heading a line with an equation, or an absurd clause, which ends in ().",
+          "match": "^\\s*((?:[\\p{Ll}_][\\p{L}\\p{N}_']*(?:-[\\p{L}\\p{N}][\\p{L}\\p{N}_']*)*)|\\([!#$%&*+./<=>?@\\\\^|~:-]+\\))(?=(?:\\s|\\{).*(?:(?<![!#$%&*+./<=>?@\\\\^|~:-])=(?![!#$%&*+./<=>?@\\\\^|~:-])|\\(\\)\\s*(?:--.*)?$))",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.px"
+            }
+          }
+        }
+      ]
+    },
+    "tactics": {
+      "name": "keyword.control.tactic.px",
+      "match": "(?<![\\p{L}\\p{N}_'-])(intro|intros|exact|apply|rfl|refl|reflexivity|symm|symmetry|trans|transitivity|rw|rewrite|unfold|simp|only|constructor|split|left|right|exfalso|contradiction|absurd|assumption|trivial|decide|cong|congr|cases|destruct|induction|generalizing|obtain|use|have|assert|show|change|revert|clear|by_cases|sorry|admit|try|repeat|first|all_goals|any_goals|at)(?![\\p{L}\\p{N}_'-])"
+    },
+    "names": {
+      "patterns": [
+        {
+          "comment": "A qualifier: a name, or an operator in parentheses, before a dot.",
+          "name": "entity.name.namespace.px",
+          "match": "(?<![\\p{L}\\p{N}_'])(?:[\\p{L}_][\\p{L}\\p{N}_']*(?:-[\\p{L}\\p{N}][\\p{L}\\p{N}_']*)*|\\([!#$%&*+./<=>?@\\\\^|~:-]+\\))(?=\\.(?:[\\p{L}_(]))"
+        },
+        {
+          "comment": "A constructor or a type, by convention: a name starting in upper case.",
+          "name": "entity.name.type.px",
+          "match": "(?<![\\p{L}\\p{N}_'])[\\p{Lu}][\\p{L}\\p{N}_']*(?:-(?:[\\p{L}\\p{N}][\\p{L}\\p{N}_']*|[!#$%&*+/<=>?@\\\\^|~:]+))*(?![\\p{L}\\p{N}_'])"
+        },
+        {
+          "comment": "Any other name, dashes and all, so that its dashes are no operator.",
+          "name": "meta.identifier.px",
+          "match": "(?<![\\p{L}\\p{N}_'])[\\p{L}_][\\p{L}\\p{N}_']*(?:-(?:[\\p{L}\\p{N}][\\p{L}\\p{N}_']*|[!#$%&*+/<=>?@\\\\^|~:]+))*(?![\\p{L}\\p{N}_'])"
+        }
+      ]
+    },
+    "numbers": {
+      "name": "constant.numeric.px",
+      "match": "(?<![\\p{L}\\p{N}_'-])[0-9]+(?:[./][0-9]+)?(?![\\p{L}\\p{N}_'-])"
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.quantifier.px",
+          "match": "∀|∃|λ"
+        },
+        {
+          "name": "punctuation.bracket.tuple.px",
+          "match": "⟨|⟩"
+        },
+        {
+          "name": "keyword.operator.logic.px",
+          "match": "≡|≠|≤|≥|∧|∨|¬|↔|⊤|⊥|→|←|⇒|:=|<;>|=>|->|<-|·"
+        },
+        {
+          "comment": "Runs of symbol characters, ASCII or not, but for the brackets and binders of the grammar.",
+          "name": "keyword.operator.px",
+          "match": "(?:[!#$%&*+./<=>?@\\\\^|~:-]|(?![\\x00-\\x7F])[\\p{S}\\p{P}&&[^⟨⟩·∀∃λ]])+"
         }
       ]
     }

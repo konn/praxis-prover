@@ -1,8 +1,8 @@
 {
   "name": "praxis",
   "displayName": "Praxis",
-  "description": "The languages of the Praxis prover — the surface language px, and the core languages pra and prf: highlighting, and the praxis-lsp language server for diagnostics and goals on hover.",
-  "version": "0.2.1",
+  "description": "The languages of the Praxis prover — the surface language px, and the core languages pra and prf: highlighting, and the praxis-lsp language server for diagnostics, semantic highlighting, go to definition and goals on hover.",
+  "version": "0.3.0",
   "publisher": "konn",
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
@@ -83,6 +83,17 @@
           "default": "praxis-lsp",
           "description": "The praxis-lsp executable: a command on the path, or an absolute path."
         }
+      }
+    },
+    "configurationDefaults": {
+      "[px]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "[pra]": {
+        "editor.semanticHighlighting.enabled": true
+      },
+      "[prf]": {
+        "editor.semanticHighlighting.enabled": true
       }
     }
   },

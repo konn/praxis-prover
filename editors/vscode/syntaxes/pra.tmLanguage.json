@@ -3,42 +3,79 @@
   "name": "Praxis proofs",
   "scopeName": "source.pra",
   "patterns": [
-    { "include": "#comments" },
+    {
+      "include": "#comments"
+    },
+    {
+      "comment": "A theorem or a rule, and its name.",
+      "match": "(?<![\\p{L}\\p{N}_'])(theorem|rule)\\s+([\\p{L}][\\p{L}\\p{N}_']*)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.declaration.pra"
+        },
+        "2": {
+          "name": "entity.name.function.pra"
+        }
+      }
+    },
     {
       "name": "keyword.other.declaration.pra",
-      "match": "\\b(theorem|rule|library|by|var|term|atom|formula|ctx)\\b"
+      "match": "(?<![\\p{L}\\p{N}_'])(theorem|rule|library|by|where|and|not|free|in)(?![\\p{L}\\p{N}_'])"
+    },
+    {
+      "comment": "The sorts of the metavariables of a rule.",
+      "name": "storage.type.sort.pra",
+      "match": "(?<![\\p{L}\\p{N}_'])(var|term|atom|formula|ctx)(?![\\p{L}\\p{N}_'])"
     },
     {
       "name": "keyword.control.tactic.pra",
-      "match": "\\b(refl|symmetry|rewrite|in|cong|induction|as|on|assumption|exact|calc|have|skip|sorry|try|repeat|reflect|reify)\\b"
+      "match": "(?<![\\p{L}\\p{N}_'])(refl|symmetry|rewrite|cong|induction|as|on|assumption|exact|calc|have|skip|sorry|try|repeat|reflect|reify)(?![\\p{L}\\p{N}_'])"
     },
     {
+      "comment": "The rules of the calculus, applied backwards.",
       "name": "entity.name.function.rule.pra",
-      "match": "\\b(Id|ExFalso|ConjL|ConjR|DisjL|DisjR1|DisjR2|ImplL|ImplR|Defeq|Subst|SuccNonZero|SuccInj|Ind|Cut)\\b"
+      "match": "(?<![\\p{L}\\p{N}_'])(Id|ExFalso|ConjL|ConjR|DisjL|DisjR1|DisjR2|ImplL|ImplR|Defeq|Subst|SuccNonZero|SuccInj|Ind|Cut)(?![\\p{L}\\p{N}_'])"
     },
     {
       "name": "constant.language.successor.pra",
-      "match": "\\b(S|Succ)\\b"
+      "match": "(?<![\\p{L}\\p{N}_'])(S|Succ)(?![\\p{L}\\p{N}_'])"
+    },
+    {
+      "comment": "The hypotheses the engine names.",
+      "name": "variable.other.hypothesis.pra",
+      "match": "(?<![\\p{L}\\p{N}_'])H[0-9]*(?![\\p{L}\\p{N}_'])"
     },
     {
       "name": "constant.numeric.pra",
-      "match": "\\b[0-9]+\\b"
+      "match": "(?<![\\p{L}\\p{N}_'])[0-9]+(?![\\p{L}\\p{N}_'])"
+    },
+    {
+      "comment": "A schema applied to function parameters, named: a brace group of names alone; a brace group holding tactics is a block.",
+      "match": "\\{\\s*([\\p{L}][\\p{L}\\p{N}_']*(?:\\s*,\\s*[\\p{L}][\\p{L}\\p{N}_']*)*)\\s*\\}",
+      "captures": {
+        "1": {
+          "name": "variable.parameter.pra"
+        }
+      }
+    },
+    {
+      "name": "variable.other.variadic.pra",
+      "match": "\\$\\[[^\\]]*\\]"
     },
     {
       "name": "keyword.operator.sequent.pra",
-      "match": "\\|-|⊢|==>|→|/\\\\|∧|\\\\/|∨|_\\|_|⊥|~|¬"
+      "match": "\\|-|⊢|==>|→|/\\\\|∧|\\\\/|∨|_\\|_|⊥|~|¬|∉"
     },
     {
       "name": "keyword.operator.quantifier.pra",
-      "match": "∀|∃|μ|λ|\\b(forall|exists)\\b"
+      "match": "∀|∃|μ|λ|(?<![\\p{L}\\p{N}_'])(forall|exists)(?![\\p{L}\\p{N}_'])"
     },
     {
       "name": "punctuation.definition.code.pra",
       "match": "⟦|⟧|\\[\\[|\\]\\]"
     },
     {
-      "name": "keyword.operator.term.pra",
-      "match": "<=|==|<|=|\\+|-|\\*|\\^"
+      "include": "#terms"
     }
   ],
   "repository": {
@@ -48,11 +85,27 @@
           "name": "comment.block.pra",
           "begin": "\\{-",
           "end": "-\\}",
-          "patterns": [{ "include": "#comments" }]
+          "patterns": [
+            {
+              "include": "#comments"
+            }
+          ]
         },
         {
           "name": "comment.line.double-dash.pra",
           "match": "--.*$"
+        }
+      ]
+    },
+    "terms": {
+      "patterns": [
+        {
+          "name": "keyword.operator.term.pra",
+          "match": "<=|==|<|=|\\+|-|\\*|\\^"
+        },
+        {
+          "name": "constant.language.wildcard.pra",
+          "match": "(?<![\\p{L}\\p{N}_'])_(?![\\p{L}\\p{N}_'])"
         }
       ]
     }
