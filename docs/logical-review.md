@@ -302,3 +302,13 @@ checks.
    the library restored it, and the complete rerun passed.
    The surface suite (67 tests), LSP suite (19 tests), formatting checks and
    core package check also pass after this change.
+2. A single `test/data/replay.pra` fixture now drives both runtime certificate
+   replay and Haskell proof generation. Six preservation groups compare
+   primitive conclusions with separately instantiated statements, covering
+   substitution capture, compound formula identity, context multiplicity,
+   premise weakening, induction eigenconditions, nested schematic lambdas,
+   captured functions and locally quantified premises. Invalid eigenvariable
+   instances are rejected. The core suite passes 399 tests and 38 doctest
+   examples. A surface regression also replays its retained theorem
+   certificates through the independent kernel check.
+   The surface suite passes 68 tests; formatting and Cabal Gild checks pass.

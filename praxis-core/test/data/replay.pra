@@ -1,0 +1,26 @@
+rule replaySymm (t s : term) (Γ : ctx) : t = s, Γ |- s = t
+by Defeq t t; Subst x t s (x = t); Id
+
+rule replayId (A : formula) (Γ : ctx) : A, Γ |- A
+by assumption
+
+rule replayWeaken (a : term) (Γ : ctx) (D : a = 0, Γ |- a = 0) : a = 0, a = 1, Γ |- a = 0
+by exact D
+
+rule replayInd (n : var) (t : term) (Γ : ctx) (P(n) : formula)
+  (base : Γ |- P(0)) (step : P(n), Γ |- P(S n)) : Γ |- P(t)
+  where n ∉ Γ, t
+by Ind n (P(n)) t { exact base } { exact step }
+
+rule replayClosure (n : var) (p(n) : term) : |- mu {λ i. p(i)} 1 = (if p(0) then 0 else 1)
+by refl
+
+rule replayNested (n : var) (p(n) : term) : |- holdsBelow {λ i. mu {λ j. p(j)} i} 0 = 1
+by refl
+
+rule replayLocalFunction (n : var) (p(n) : term) (t : term)
+  (D ∀ x : |- p(x) = p(x)) : |- p(t) = p(t)
+by exact D
+
+theorem replayLocalAt : |- S x = S x
+by exact replayLocalFunction n (S n) x { refl }

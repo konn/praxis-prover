@@ -3,12 +3,16 @@
 -- | The checker, end to end: what certifies, and what must not.
 module Language.Praxis.Surface.CheckTest (checkTests) where
 
+import Control.Monad (forM_)
 import Data.Map.Strict qualified as Map
+import Data.Multiset qualified as MS
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (runBuilder)
 import Data.Text.IO qualified as TIO
+import Language.Praxis.PRA.Certificate
+import Language.Praxis.PRA.Tactic (Appeal (..))
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, predicateOver, predicateParam)
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
@@ -17,7 +21,7 @@ import Language.Praxis.Surface.Env (CtorInfo (..), Env, FunInfo (..), Global (..
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Index (Unified (..), emptySubst, unifyIx)
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (Prelude, prelude)
+import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..), RelOp (..))
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..), segmentText)
@@ -29,7 +33,19 @@ checkTests :: TestTree
 checkTests =
   testGroup
     "checker"
-    [ testCase "the List example certifies, in the functional and the tactic style" $ do
+    [ testCase "surface theorems retain independently replayable certificates" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module Replay where", "same : (x : Nat) -> x ≡ x", "same x = rfl", "again : 0 ≡ 0", "again = same 0"]
+            result = checkSource p "Replay.px" source
+        errors result @?= []
+        case checkedFinal result of
+          Nothing -> assertFailure "no checked core"
+          Just (_, core) -> do
+            let added = coreCertificates core `Map.difference` preludeCertificates p
+            Map.size added @?= 2
+            forM_ (Map.toList added) $ \(name, cert) ->
+              either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal name [] [] MS.empty) [])
+    , testCase "the List example certifies, in the functional and the tactic style" $ do
         c <- checkFile "test/data/list.px"
         errors c @?= []
         checkedTheorems c @?= ["Data.List.append-nil", "Data.List.append-nil-tactically"]

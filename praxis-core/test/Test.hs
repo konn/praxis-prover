@@ -20,6 +20,7 @@ import Language.Praxis.PRA.ProofTest (proofTests)
 import Language.Praxis.PRA.QuantifierTest (quantifierTests)
 import Language.Praxis.PRA.QuoteLibraryTest (libraryTests)
 import Language.Praxis.PRA.QuoteTest (quoteTests)
+import Language.Praxis.PRA.ReplayTest (replayTests)
 import Language.Praxis.PRA.SchemaTest (schemaTests)
 import Language.Praxis.PRA.Syntax
 import Language.Praxis.PRA.TacticTest (tacticTests)
@@ -33,7 +34,8 @@ main =
   defaultMain $
     testGroup
       "praxis-core"
-      [ certificateTests
+      [ replayTests
+      , certificateTests
       , prfQuoteTests
       , elaborationTests
       , primitiveRecursionTests
