@@ -7,6 +7,7 @@ by it. These documents describe the design, from the bottom up.
 | document | what it covers |
 |---|---|
 | [kernel.md](kernel.md) | the trusted core: terms, formulas and sequents of quantifier-free PRA, the inference rules, definitional equality, the checker, and exactly what is trusted |
+| [logical-review.md](logical-review.md) | adversarial mathematical review: repaired defects, remaining findings, the conservativity argument and its limits, and implementation uniformity |
 | [pra-and-prf.md](pra-and-prf.md) | the core's two languages: `prf` definitions by equations (schemas, variadic schemas, closure conversion) and `pra` statements and tactics (derived rules, lemma appeals, certification, reflection, the lemma library) |
 | [surface.md](surface.md) | the surface language `.px`: syntax, layout, namespaces, types, propositions, the three proof styles, tooling, and the scope of the implementation |
 | [packages.md](packages.md) | packages, projects and modules: `package.toml` and `project.toml`, libraries and sublibraries, versions and constraints, files and nested modules, imports and openings, the renamer and canonical names, `praxis check` over projects |

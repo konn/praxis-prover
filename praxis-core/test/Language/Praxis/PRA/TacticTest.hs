@@ -11,12 +11,17 @@ proof fails here as a rejected proof rather than a wrong theorem.
 module Language.Praxis.PRA.TacticTest (tacticTests) where
 
 import Control.Exception (displayException)
-import Control.Monad (foldM)
+import Control.Monad (foldM, forM_)
+import Control.Monad.Free (Free (..))
 import Data.Foldable (toList)
+import Data.Functor.Foldable (cata)
 import Data.List (sort)
 import Data.Map.Strict qualified as Map
+import Data.Multiset qualified as MS
 import Data.Sized (pattern Nil, pattern (:<))
 import Data.Text qualified as T
+import Data.Void (Void, absurd)
+import Language.Praxis.PRA.Equality (defEqIn, defaultFuel)
 import Language.Praxis.PRA.Pattern (Hole (..))
 import Language.Praxis.PRA.PrimitiveRecursion (PRFCode (..), builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (parseEquations)
@@ -912,6 +917,31 @@ abstractFunctionTests =
         proved builtin lemmas "|- mu {λ i z. z < i} 0 z = 0 by exact muZero"
         proved builtin lemmas "|- (μ i < 0. z + 1 < i) = 0 by exact muZero"
         proved builtin lemmas "|- mu {lt} 0 1 = 0 by exact muZero"
+    , testCase "schematic substitution reaches compiled lambda bodies" $ do
+        lemmas <- checkedAll builtin wrapSource
+        proved builtin lemmas "|- mu {λ i z. z} 1 1 = (if 1 then 0 else 1) by exact wrap n 1"
+        certifies builtin (wrapSource <> "\nrule renamed (m : var) (q(m) : term) : |- mu {λ i. q(i)} 1 = (if q(0) then 0 else 1) by exact wrap m (q(m))")
+        certifies builtin "rule closure (n : var) (p(n) : term) (t : term) : |- mu {λ i. p(i)} t = mu {λ i. p(i)} t by refl\nrule useClosure (n : var) (p(n) : term) (u : term) : |- mu {λ i. p(i)} u = mu {λ i. p(i)} u by exact closure"
+        let lemma = lemmas Map.! "wrap"
+            appeal value = Appeal "wrap" [ArgVar (Obj "n"), ArgFun (abstraction [Obj "n"] (Lit value))] [] mempty
+        forM_ [0, 1] $ \value -> do
+          (_, conclusion) <- either (assertFailure . show) pure (instantiateLemma builtin lemma (appeal value))
+          case conclusion of
+            _ :|- Atm (lhs :=== rhs) -> do
+              kernel <- either (assertFailure . show) pure (signatureKernelEnv builtin)
+              assertBool "both sides of an instantiated definitional equality agree" =<< either (assertFailure . show) pure (defEqIn kernel defaultFuel lhs rhs)
+              functionMetas lhs @?= []
+            _ -> assertFailure "expected an equation"
+    , testCase "the schematic contradiction cannot certify 1 = 0, 0 = 1 or bottom" $ do
+        source <- readFile "test/data/schematic-contradiction.pra"
+        ds <- parsed (parseDecls (schemaScope builtin) source)
+        env <- either (assertFailure . show) pure (signatureEnv builtin)
+        let step lemmas d = case checkDecl env lemmas d of
+              Left err -> Left (declName d, err)
+              Right (_, lemma) -> Right (Map.insert (declName d) lemma lemmas)
+        case foldM step Map.empty ds of
+          Left (name, _) -> name @?= "bad"
+          Right _ -> assertFailure "certified the inconsistent declarations"
     , testCase "course-of-values induction over holdsBelow is a rule with the step as its only premise, proved once" $ do
         sig <- cvSignature
         lemmas <- checkedAll sig cvSource
@@ -925,6 +955,7 @@ abstractFunctionTests =
         (const (pure ()))
         (const (assertFailure ("accepted: " <> src)))
         (parseDecls (schemaScope builtin) src)
+    wrapSource = "rule wrap (n : var) (p(n) : term) : |- mu {λ i. p(i)} 1 = (if p(0) then 0 else 1) by refl"
     -- Every declaration of the source checks, each a lemma for those after it.
     checkedAll sig src = do
       decls <- parsed (parseDecls (schemaScope sig) src)
@@ -994,6 +1025,26 @@ eigenTests =
         lemma <- checked (indSource "where n ∉ Γ, t")
         lemmaBound lemma @?= ["n"]
         lemmaBound (declLemma (head decls')) @?= ["n"]
+    , testCase "the certifier checks eigenconditions even for directly constructed appeals" $ do
+        lemma <- checked (indSource "where n ∉ Γ, t")
+        env <- either (assertFailure . displayException) pure (signatureEnv builtin)
+        let x = Obj "x"
+            a = Atm (Var x :=== Lit 0)
+            b = Atm (suc (Var x) :=== Lit 0)
+            gamma = MS.insertOne (a :==> b) MS.empty
+            base = Defeq (Lit 0) (Lit 0) (Id (Lit 0 :=== Lit 0) gamma)
+            step = ImplL a b (Id (Var x :=== Lit 0) gamma) (Id (suc (Var x) :=== Lit 0) (MS.insertOne a MS.empty))
+            appeal = Appeal "ind" [ArgVar x, ArgTerm (Lit 1), ArgCtx gamma, ArgForm a] [] mempty
+            proof = Free (LemmaStep appeal (map (cata (Free . RuleStep)) [base, step])) :: Free (Step SchemaName) Void
+        -- Both premises are valid. Without the eigencondition the appeal
+        -- concludes (x = 0 ==> S x = 0) |- 1 = 0, false at x = 1.
+        forM_ [base, step] $ \p -> case inferConclusionIn (envKernel env) p of
+          Left err -> assertFailure (show err)
+          Right _ -> pure ()
+        case certify env (Map.singleton "ind" lemma) absurd proof of
+          Left (NotEigen "ind" "n" v) -> v @?= x
+          Left err -> assertFailure (show err)
+          Right s -> assertFailure ("certified a false sequent: " <> show s)
     , testCase "induction on a var metavariable needs the declaration to cover the context, the term and the motive" $ do
         failsCheck (indSource "") \case
           NotDeclaredFresh "n" ["Γ", "t"] -> True

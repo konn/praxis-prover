@@ -261,6 +261,22 @@ rule sameVia (n : var) (u : term) (q(n) : term) : |- q(u) = q(u)
 by exact sameQ _ u
 |]
 
+-- Substitution must act inside compiled lambdas just as it acts on direct
+-- applications of p. These proofs are also checked after instantiation.
+[pra|
+rule wrappedSearch (n : var) (p(n) : term)
+  : |- mu {λ i. p(i)} 1 = (if p(0) then 0 else 1)
+by refl
+
+rule capturedSearch (n : var) (p(n) : term) (t : term)
+  : |- (μ i < 1. p(i) + t) = (if p(0) + t then 0 else 1)
+by refl
+
+rule nestedSearch (n : var) (p(n) : term)
+  : |- mu {λ i. mu {λ j. p(j)} i} 1 = 1
+by refl
+|]
+
 -- A declaration shadows the unfolding lemma of its name, for the declarations after it.
 [pra|
 theorem add_S : |- 1 = 1
@@ -395,6 +411,14 @@ quoteTests =
         inferConclusionIn kenv (muZeroVia "k" (abstraction ["k"] (Var "w"))) @?= Right (sequentMu "|- mu {λ i j. j} 0 w = 0")
         inferConclusionIn kenv (sameVia "k" (Lit 2) (abstraction ["k"] (suc (Var "k")))) @?= Right (sequentMu "|- S 2 = S 2")
         inferConclusionIn kenv (sameVia "k" (Var "y") (abstraction ["k"] (Var "k"))) @?= Right (sequentMu "|- y = y")
+    , testCase "expanded proofs substitute schematic functions inside nested and captured lambdas" $ do
+        kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
+        forM_ [Lit 0, Lit 1, Var "x", Var "x'", suc (Var "n")] $ \body -> do
+          let p = abstraction ["n"] body
+          forM_ [wrappedSearch "n" p, capturedSearch "n" p (Var "x"), nestedSearch "n" p] $ \proof ->
+            case inferConclusionIn kenv proof of
+              Left err -> assertFailure (show err)
+              Right _ -> pure ()
     , testCase "a formula metavariable under Id is the identity expanded at the instance" $ do
         kenv <- either (assertFailure . show) pure (Sig.signatureKernelEnv builtin)
         let compound = atomMu "a = 0 /\\ (b = 0 ==> c = 0 \\/ _|_)"

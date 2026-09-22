@@ -21,8 +21,9 @@ recursion by "Language.Praxis.Surface.Compile"; the right sides of a
 theorem's clauses are proofs, which the engine elaborates in the goals it
 reaches.
 
-Nothing here is trusted: the types only guide the translation, and every
-statement is checked by the core.
+The core checks generated declarations. That their statements mean what
+the source says is a separate adequacy obligation: elaboration must preserve
+the statement and retain every proof obligation before erasing arguments.
 -}
 module Language.Praxis.Surface.Elab (
   -- * Items
@@ -48,6 +49,7 @@ module Language.Praxis.Surface.Elab (
   Failure,
   runTC,
   inferTerm,
+  inferTermWithObligations,
   checkTerm,
   elabProp,
   elabType,
@@ -808,7 +810,7 @@ elabInstance fx env sp idl = do
         let (env1, funs1) = foldl (declare (const full)) (env, []) (classMethods cls)
             env2 = register env1 funs1 Map.empty
             siblings = Map.fromList [(funCore f, (methodQual m, funArity f)) | (m, f) <- funs1]
-        uses <- forM funs1 \(m, f) -> (methodQual m,) . placesUsed siblings (placeRefs full) <$> methodClauses clauses env2 m f
+        uses <- forM funs1 \(m, f) -> (methodQual m,) . placesUsed siblings (placeRefs full) . map fst <$> methodClauses clauses env2 m f
         let reach = usedThrough (Map.fromList uses)
         pure \m -> [s | (s, r) <- zip full (placeRefs full), r `Set.member` Map.findWithDefault Set.empty (methodQual m) reach]
   let (env3, funs) = foldl (declare slotsOf) (env, []) (classMethods cls)
@@ -822,11 +824,13 @@ elabInstance fx env sp idl = do
       let mine = [c | c <- clauses, clauseHead c == Just (last (methodQual m))]
           (args, result) = arrows (schemeType (funScheme f))
       when (null mine) $ Left (ElabError sp ("no clauses for the method " <> T.unpack (segmentText (last (methodQual m)))))
-      forM mine \c -> fst <$> runTC (elabFunClause fx e f [] args result c)
+      forM mine \c -> runTC (elabFunClause fx e f [] args result c)
     define clauses (e, items) (m, f) = do
-      fcs <- methodClauses clauses e m f
-      let (args, result) = arrows (schemeType (funScheme f))
-      pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f args result fcs sp [] [])])
+      clauses' <- methodClauses clauses e m f
+      let fcs = map fst clauses'
+          obligations = concatMap snd clauses'
+          (args, result) = arrows (schemeType (funScheme f))
+      pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f args result fcs sp [] obligations)])
     prove headTy vars given full iq clauses (e, items, proved) l = do
       let lawSeg = last (lawQual l)
           mine = [c | c <- clauses, clauseHead c == Just lawSeg]
@@ -1573,7 +1577,7 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     _ | PAbsurd `elem` pats -> failAt rsp "a clause with an absurd pattern, (), has no right side: nothing matches it"
     R.RExpr e -> do
       e' <- liftE (resolved fx e)
-      checkTerm envBody (funSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' (applyTy refined result)
+      fst <$> elabTerm CollectProofArguments envBody (funSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' (applyTy refined result)
     _ -> failAt rsp "a function's clause is a term, not a proof"
   -- Each proof the body gives is an obligation: its proposition, under the clause's own
   -- preconditions, named by its proof patterns, a theorem proved by what was written.
@@ -1892,11 +1896,19 @@ fixes is a hole, which the translation erases, as the element type of
 @length Nil@.
 -}
 inferTerm :: Env -> [Slot] -> Ctx a -> Located R.Expr -> TC (Expr a, Ty)
-inferTerm env givens ctx le = elabTerm env givens ctx le THole
+inferTerm env givens ctx le = elabTerm NoProofArguments env givens ctx le THole
+
+{- | Elaborate a term for a caller which will certify every returned proof
+obligation before erasing proof arguments from the generated code.
+-}
+inferTermWithObligations :: Env -> [Slot] -> Ctx a -> Located R.Expr -> TC ((Expr a, Ty), [(Expr a, Located R.Expr)])
+inferTermWithObligations env givens ctx le = do
+  result@(e, _) <- elabTerm CollectProofArguments env givens ctx le THole
+  pure (result, proofArgs e)
 
 -- | A term of the type expected.
 checkTerm :: Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a)
-checkTerm env givens ctx le expected = fst <$> elabTerm env givens ctx le expected
+checkTerm env givens ctx le expected = fst <$> elabTerm NoProofArguments env givens ctx le expected
 
 {- |
 The head of an application: the number of the parameters of its type, its
@@ -1916,6 +1928,11 @@ data AppHead a = AppHead
   , ahApply :: Assignment -> TC ([Expr a] -> Expr a)
   }
 
+-- Proof erasure is permitted only when the caller retains and certifies
+-- the resulting obligations. Public term elaboration cannot silently discard them; callers
+-- collecting obligations must return them or emit their core derivations.
+data ProofArguments = NoProofArguments | CollectProofArguments
+
 {- |
 A term against what is known of its type, and its type: what is expected of
 it together with what the term determines.  The dictionary given is the
@@ -1934,14 +1951,14 @@ not yet, is undetermined: it is checked again once the other arguments have
 determined more of its domain, and the application is undetermined itself
 when none do.
 -}
-elabTerm :: Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
-elabTerm env givens ctx le@(Located sp e) expected = case e of
+elabTerm :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
+elabTerm proofArguments env givens ctx le@(Located sp e) expected = case e of
   R.EParen (Located _ (R.EInfix (Located _ op) l r))
     | R.operatorName op == QName [] (Op ":")
     , Right ty <- ascribed r -> do
         t <- agree env sp expected ty
-        elabTerm env givens ctx l t
-  R.EParen x -> elabTerm env givens ctx x expected
+        elabTerm proofArguments env givens ctx l t
+  R.EParen x -> elabTerm proofArguments env givens ctx x expected
   R.ENat n -> (At (Irrelevant sp) (Nat n),) <$> agree env sp expected TNat
   R.EInfix (Located osp op) l r -> application (Located osp (R.EName (R.operatorName op))) [] [l, r]
   R.EIf {} -> failAt sp "if is not supported yet"
@@ -1987,6 +2004,9 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
       -- Each proof, against its proposition at what the application found: kept in the
       -- term, for the proof to be checked there, and erased from the code.
       proofs <- forM proofAt \(i, prop) -> (\p -> (i, ProofArg p (Irrelevant (args !! i)))) <$> prop s2
+      case (proofArguments, proofs) of
+        (NoProofArguments, _ : _) -> failAt sp "proof arguments in statements are not supported: their proof obligations must be checked before erasure"
+        _ -> pure ()
       apply <- ahApply h s2
       t <- agree env sp expected (substScheme n s2 (ahResult h))
       let terms = [done' IM.! j | j <- [0 .. length (ahDomains h) - 1]]
@@ -2008,7 +2028,7 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
     -- An argument against its domain as far as it is known; put off, with the type tried and why, when undetermined.
     argument deps n (s, done, pending) (i, d, a) = do
       let dom = substScheme n s d
-      attempt (elabTerm env givens ctx a dom) >>= \case
+      attempt (elabTerm proofArguments env givens ctx a dom) >>= \case
         Right (a', t) -> (,IM.insert i a' done,pending) <$> (found n (location a) d t s >>= dependent deps i a)
         Left why -> pure (s, done, pending <> [(i, d, a, dom, why)])
     -- An argument the head's type depends on, a constructor's named field: the index it is, at the value parameter it stands for.
@@ -2029,7 +2049,7 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
     again deps n (s, done, left, progress) entry@(i, d, a, tried, _)
       | dom == tried = pure (s, done, left <> [entry], progress)
       | otherwise =
-          attempt (elabTerm env givens ctx a dom) >>= \case
+          attempt (elabTerm proofArguments env givens ctx a dom) >>= \case
             Right (a', t) -> (,IM.insert i a' done,left,True) <$> (found n (location a) d t s >>= dependent deps i a)
             Left why -> pure (s, done, left <> [(i, d, a, dom, why)], progress)
       where
@@ -2041,7 +2061,7 @@ elabTerm env givens ctx le@(Located sp e) expected = case e of
       R.EName (QName [] (Ident x)) | Just (v, t) <- lookup x ctx -> pure (plain (0, 0) [] t (Var v))
       R.EName q -> resolveHead hsp q
       R.ENat k -> pure (plain (0, 0) [] TNat (Nat k))
-      R.EParen x -> (\(e', t) -> plain (0, 0) [] t e') <$> elabTerm env givens ctx x THole
+      R.EParen x -> (\(e', t) -> plain (0, 0) [] t e') <$> elabTerm proofArguments env givens ctx x THole
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
     plain n doms res hd = AppHead n doms res [] [] [] (const (pure (apps hd)))
     -- A value parameter of the enclosing signature, where the clause has it as a variable.

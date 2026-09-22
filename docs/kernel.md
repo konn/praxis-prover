@@ -136,9 +136,12 @@ Trusted: `Rule/G3i.hs` and the generated checker; the evaluator of
 `PRFCode`/`Program`, `Equality`, and the equality of terms in `Syntax`, which
 interns two terms to compare them when their trees are large;
 `extendKernelEnv`'s closure, arity and acyclicity checks; `Proof.Transform`.
-Everything that *produces* proofs — tactics, quasiquoters, the language
-server, the surface language — is untrusted: its output is checked. The
-surface language produces statements too, and the kernel certifies the core
+For declaration certification, also trusted are schematic instantiation
+(`Signature.instantiateSchematicTerm` and `Tactic.instantiateLemma`) and
+the appeal checks described below. Primitive proof-producing tactics,
+quasiquoters, the language server and the surface language submit their
+output for checking. The surface language produces statements too, and the
+kernel certifies the core
 statement it is given; that this statement means what the surface one says
 is argued in [elaboration.md](elaboration.md), § Statements and their
 adequacy.
@@ -149,9 +152,21 @@ a lemma is checked against the lemma's *statement*, instantiated; the
 instantiated proof is not re-run. This rests on the admissibility of
 substitution and weakening, which holds for the idealised calculus; a
 re-check of an instantiated `Defeq` could fail on fuel, but never succeed
-wrongly. The eigenvariable conditions of such appeals are checked by the
-tactic engine (`useLemma`); a producer that bypasses the engine and builds
-appeal steps by hand must not be trusted with them.
+wrongly. The eigenvariable conditions of such appeals are checked by
+`instantiateLemma`, which both the tactic engine and the certifier call.
+Directly constructed appeal steps therefore undergo the same checks.
+
+Substitution must replace every occurrence of a schematic function, including
+occurrences inside compiled lambda parameters of a schema. Leaving a lambda
+unchanged while replacing direct applications is not an admissible
+substitution: it can certify `1 = 0`. Certification and generated proofs use
+the same substitution operation. Closed functions are substituted directly
+in the compiled program, preserving its structure. Replacements with captures
+open closures over fresh variables, substitute their bodies, and rebuild their
+captures. Replacement terms are inserted simultaneously, without substituting
+inside them again. Regression tests reject the inconsistent appeal and
+check legitimate instantiated proofs
+with the primitive checker, including nested closures and captured values.
 
 The same argument covers a premise over variables of its own, `(assoc ∀ x y
 z : …)`. In the proof of its rule it is appealed to as a theorem is, at

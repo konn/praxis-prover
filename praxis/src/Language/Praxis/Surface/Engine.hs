@@ -1181,7 +1181,7 @@ termProof k info n g le@(Located sp e) = case e of
   _ -> case spineOf le of
     (Located _ (R.EName (QName [] (Ident w))), [arg]) | w `elem` ["cong", "congr"] -> do
       ev <- evidence k info g arg
-      pure (closed (evBefore ev <> congUnfolded k g ev))
+      pure (evidenceOut ev (evBefore ev <> congUnfolded k g ev))
     (Located _ (R.EName (QName [] (Ident w))), []) | w `elem` ["rfl", "refl"] -> closed <$> rflTactic k g sp
     -- What cannot be, from hypotheses whose equations clash once unfolded.
     _ | Bottom <- stripLocations (goalConcl g), Right tac <- refute k g -> pure (closed tac)
@@ -1195,7 +1195,7 @@ termProof k info n g le@(Located sp e) = case e of
       -- A hypothesis as it is, an induction hypothesis a recursive call names among them: taken to the goal once both are unfolded, where they differ.
       -- A lemma at its arguments: taken to the goal once the indices its conclusion gives terms are rewritten, where they differ.
       let bare = T.null (runBuilder (evBefore ev)) && T.null (runBuilder (evAfter ev))
-      pure (closed (fromMaybe (evBefore ev <> exactAppeal ev) (if bare then hypothesisBridge k g (evName ev) else indexedAppeal k g ev)))
+      pure (evidenceOut ev (fromMaybe (evBefore ev <> exactAppeal ev) (if bare then hypothesisBridge k g (evName ev) else indexedAppeal k g ev)))
 
 {- |
 What a proof term refers to in the core — a hypothesis, an induction
@@ -1209,12 +1209,18 @@ data Evidence = Evidence
   , evBefore :: !Builder
   , evAfter :: !Builder
   , evEquation :: !(Maybe Builder)
+  , evAux :: ![(Text, Text)]
+  -- ^ auxiliary declarations used by proofs supplied as term arguments
   , evConclusion :: !(Maybe (Expr Text))
   -- ^ what a lemma concludes at its arguments, where its value parameters are known there
   }
 
 named :: Text -> Evidence
-named n = Evidence n "" "" Nothing Nothing
+named n = Evidence n "" "" Nothing [] Nothing
+
+-- | Keep auxiliary declarations when an appeal becomes a proof.
+evidenceOut :: Evidence -> Builder -> Out
+evidenceOut ev tactic = Out tactic (evAux ev)
 
 {- |
 A lemma's appeal where its conclusion at its arguments is the goal once the
@@ -1334,7 +1340,9 @@ evidence k info g le = case spineOf le of
     _ -> case resolve (knowEnv k) q of
       GTheorem t : _ -> theorem sp t args
       GLaw l : _ -> do
-        typed <- traverse (typedArg k g) args
+        checked <- traverse (typedArg k info g) args
+        let typed = map fst checked
+            checks = map snd checked
         case Map.lookup 0 (assignment (map snd (lawBinders l)) (map snd typed)) of
           Just (TParam j []) -> do
             name <- own sp (PLaw (lawQual l) j)
@@ -1342,7 +1350,7 @@ evidence k info g le = case spineOf le of
             -- The law's methods, the goal's places for them at j.
             let table = Map.fromList <$> traverse (\(s, r) -> (r,) <$> goalPlace s {slotParam = j}) (zip (lawSlots l) (placeRefs (lawSlots l)))
             eq <- equationOf sp (lawProp l) table typed (length (lawBinders l))
-            Right (Evidence name pre "" eq Nothing)
+            Right (Evidence name (mconcat (map outTactic checks) <> pre) "" eq (concatMap outAux checks) Nothing)
           Just ty
             | Just h <- headOf ty -> do
                 inst <- maybe (Left (EngineError sp ("no instance of " <> T.unpack (displayQualName (lawClass l)) <> " for " <> T.unpack h))) Right (Map.lookup (lawClass l, h) (envInstances (knowEnv k)))
@@ -1358,7 +1366,7 @@ evidence k info g le = case spineOf le of
             hs <- forM args \case
               Located _ (R.EName (QName [] (Ident h))) | Just c <- lookup h (goalNames g) -> Right c
               Located asp _ -> Left (EngineError asp "a lemma of the library is applied to hypotheses, by their names")
-            Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing Nothing)
+            Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing [] Nothing)
       _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (displayQName q)))
   (Located sp _, _) -> Left (EngineError sp "a proof term: a hypothesis or a lemma, applied")
   where
@@ -1385,8 +1393,10 @@ evidence k info g le = case spineOf le of
     theorem sp t args
       | thmQual t == thmQual info = named <$> recursive sp (implicitsOf le) args
       | otherwise = do
-          typed <- traverse (typedArg k g) (take (length (thmMembered t)) args)
-          let assign = assignment (thmMembered t) (map snd typed)
+          checked <- traverse (typedArg k info g) (take (length (thmMembered t)) args)
+          let typed = map fst checked
+              checks = map snd checked
+              assign = assignment (thmMembered t) (map snd typed)
               membered = \case
                 TData _ _ _ -> True
                 TParam i [] -> membershipSlot i `elem` thmSlots t
@@ -1398,7 +1408,7 @@ evidence k info g le = case spineOf le of
           eq <- case thmStatement t of
             Just sc | any isMembershipSlot (thmSlots t) -> equationOf sp sc (placesAt t assign) typed (length (thmMembered t))
             _ -> Right Nothing
-          Right (Evidence (thmCore t) (pre <> idx) post eq (conclusionAt t typed sigma))
+          Right (Evidence (thmCore t) (mconcat (map outTactic checks) <> pre <> idx) post eq (concatMap outAux checks) (conclusionAt t typed sigma))
     -- The place of the goal's dictionary for a method at one of its type parameters.
     goalPlace s = lookup s (zip (goalDict g) (placeRefs (goalDict g)))
     -- The places of a theorem's dictionary at the instances its arguments give: the goal's at its type parameters, the instances' functions at known types.
@@ -1451,11 +1461,24 @@ headOf = \case
   TData dn _ _ -> Just dn
   _ -> Nothing
 
--- | An argument of an appeal, elaborated in the goal, with its type.
-typedArg :: Knowledge -> Goal -> Located R.Expr -> Either EngineError (Expr Text, Ty)
-typedArg k g e0 = do
+{- | A term in a proof, its type, and the core derivations which must be
+checked before its proof arguments may be erased. Cut keeps each obligation
+in the final derivation even if later computation does not use it.
+-}
+typedArg :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError ((Expr Text, Ty), Out)
+typedArg k info g e0 = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTerm (knowEnv k) (goalDict g) (goalVars g) e))
+  (typed, obligations') <- either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTermWithObligations (knowEnv k) (goalDict g) (goalVars g) e))
+  checks <- forM obligations' \(prop, raw) -> do
+    let (line, col) = R.spanStart (location raw)
+        -- Proof arguments can themselves use induction. Their auxiliary
+        -- declarations have a namespace distinct from the enclosing proof
+        -- and from every other argument's source position.
+        local = info {thmCore = thmCore info <> "_arg_L" <> T.pack (show line) <> "C" <> T.pack (show col)}
+    proof <- termProof k local 0 g {goalConcl = prop} raw
+    stated <- either (Left . EngineError (location raw)) Right (formula prop)
+    pure proof {outTactic = "Cut (" <> stated <> ") { " <> outTactic proof <> " } { skip }; "}
+  pure (typed, Out (mconcat (map outTactic checks)) (concatMap outAux checks))
 
 -- | The type parameters of a theorem which the types of the arguments given determine, by the types of its binders.
 assignment :: [Ty] -> [Ty] -> Map Int Ty
@@ -1800,12 +1823,12 @@ runTactics k info n g0 sp tacs0 = do
         R.TRefl -> (\x -> (closed x, more)) <$> rflTactic k g tsp
         R.TAssumption -> Right (closed "assumption", more)
         R.TSorry -> Left (EngineError tsp ("sorry: the goal is\n" <> T.unpack (renderGoal (knowEnv k) g)))
-        R.TExact e -> (\ev -> (closed (evBefore ev <> exactAppeal ev), more)) <$> evidence k info g e
-        R.TCong (Just e) -> (\ev -> (closed (evBefore ev <> congUnfolded k g ev), more)) <$> evidence k info g e
+        R.TExact e -> (\ev -> (evidenceOut ev (evBefore ev <> exactAppeal ev), more)) <$> evidence k info g e
+        R.TCong (Just e) -> (\ev -> (evidenceOut ev (evBefore ev <> congUnfolded k g ev), more)) <$> evidence k info g e
         R.TCong Nothing -> Right (closed "cong", more)
         R.TTerm e -> case unLocated e of
           R.EProof rhs -> (,more) <$> proveRhs k info n g (Located tsp rhs)
-          _ -> (\ev -> (closed (evBefore ev <> "(" <> exactAppeal ev <> " | " <> congAppeal ev <> ")"), more)) <$> evidence k info g e
+          _ -> (\ev -> (evidenceOut ev (evBefore ev <> "(" <> exactAppeal ev <> " | " <> congAppeal ev <> ")"), more)) <$> evidence k info g e
         R.TCalc c -> (,more) <$> calcProof k info n g tsp c
         R.TFocus inner -> do
           out <- runTactics k info n g tsp inner
@@ -1838,9 +1861,11 @@ introduce names g =
 
 calcProof :: Knowledge -> TheoremInfo -> Counter -> Goal -> Span -> R.Calc -> Either EngineError Out
 calcProof k info n g sp (R.Calc first steps) = do
-  t0 <- term k g first
-  ts <- forM steps \(Located ssp (R.CalcStep _ t _)) -> (,) ssp <$> term k g t
-  let ends = t0 : map snd ts
+  (t0, firstCheck) <- term k info g first
+  checked <- forM steps \(Located ssp (R.CalcStep _ t _)) -> (,) ssp <$> term k info g t
+  let ts = [(ssp, t) | (ssp, (t, _)) <- checked]
+      checks = firstCheck : [o | (_, (_, o)) <- checked]
+      ends = t0 : map snd ts
   -- The chain proves the equation between its ends, which the goal must be: checked here, as the core will,
   -- so that the mismatch is reported over the names the user wrote, rather than the core's eigenvariables.
   let shown e = either (const "?") (readable (knowEnv k)) (termCT CVar (surfaceNames g e))
@@ -1863,17 +1888,15 @@ calcProof k info n g sp (R.Calc first steps) = do
       Just rhs -> proveRhs k info n stepGoal rhs
   texts <- traverse (render' sp) ends
   let tac = "calc " <> head texts <> mconcat [" = " <> t <> " by (" <> outTactic o <> ")" | (t, o) <- zip (drop 1 texts) proofs]
-  pure (Out tac (concatMap outAux proofs))
+  pure (Out (mconcat (map outTactic checks) <> tac) (concatMap outAux checks <> concatMap outAux proofs))
   where
     render' ssp e = either (Left . EngineError ssp) (Right . render) (termCT CVar e)
 
--- | A surface term in the goal, with its variables.
-term :: Knowledge -> Goal -> Located R.Expr -> Either EngineError (Expr Text)
-term k g e0 = do
-  e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (fst <$> inferTerm (knowEnv k) (goalDict g) ctx e))
-  where
-    ctx = [(n, (v, t)) | (n, (v, t)) <- goalVars g]
+-- | A surface term in the goal, with its variables and checked obligations.
+term :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError (Expr Text, Out)
+term k info g e = do
+  ((t, _), checks) <- typedArg k info g e
+  pure (t, checks)
 
 -- * Reflexivity
 

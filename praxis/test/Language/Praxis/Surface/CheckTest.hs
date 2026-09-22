@@ -15,11 +15,13 @@ import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), el
 import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, membershipProof, theoremStatement)
 import Language.Praxis.Surface.Env (CtorInfo (..), Env, FunInfo (..), Global (..), constructorsNamed, emptyEnv, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
+import Language.Praxis.Surface.Index (Unified (..), emptySubst, unifyIx)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude, prelude)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..), RelOp (..))
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..), segmentText)
+import Language.Praxis.Surface.Types (Ix (..))
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -87,6 +89,58 @@ checkTests =
         let errs = [(l, m) | Report (Span (l, _) _) SevError m <- checkedReports c]
         mapM_ (\(n, l) -> assertBool ("an error for " <> n) (any ((== l) . fst) errs)) [("Box", 9 :: Int), ("apply", 12), ("fun-refl", 16), ("partly", 20)]
         assertBool "the partial application is named" (any (("applied to 1 of its 2 arguments" `T.isInfixOf`) . snd) errs)
+    , testCase "proof arguments cannot be erased from statements without checking" $ do
+        p <- either assertFailure pure prelude
+        mapM_
+          ( \statement -> do
+              let src = T.unlines ["module Unchecked where", "f : (0 ≡ 1) -> Nat", "f h = 0", "bad : " <> statement, "bad = rfl"]
+                  c = checkSource p "unchecked.px" src
+              assertBool "the statement was rejected" (not (null (errors c)))
+              assertBool "the theorem was not certified" ("Unchecked.bad" `notElem` checkedTheorems c)
+              assertBool "the unchecked proof argument is diagnosed" (any ("proof arguments" `T.isInfixOf`) (map reportMessage (checkedReports c)))
+          )
+          [ "f rfl ≡ 0"
+          , "(absurd rfl : Nat) ≡ 0"
+          , "∀ n < 2, f rfl ≡ n"
+          , "∀ n < f rfl, n ≡ n"
+          ]
+    , testCase "proof arguments in theorem applications and calculations are certified before erasure" $ do
+        p <- either assertFailure pure prelude
+        let bodies = ["same (f rfl)", "calc\n  0\n  = f rfl := rfl\n  = 0 := rfl"]
+        mapM_
+          ( \body -> do
+              let src = T.unlines ["module Unchecked where", "f : (0 ≡ 1) -> Nat", "f h = 0", "same : (n : Nat) -> n ≡ n", "same n = rfl", "bad : 0 ≡ 0", "bad = " <> body]
+                  c = checkSource p "unchecked.px" src
+              assertBool "the nonexistent proof was rejected" (not (null (errors c)))
+              assertBool "the theorem was not certified" ("Unchecked.bad" `notElem` checkedTheorems c)
+          )
+          bodies
+        mapM_
+          ( \body -> do
+              let valid = T.unlines ["module Checked where", "f : (0 ≡ 0) -> Nat", "f h = 0", "same : (n : Nat) -> n ≡ n", "same n = rfl", "good : 0 ≡ 0", "good = " <> body]
+                  good = checkSource p "checked.px" valid
+              errors good @?= []
+              assertBool "a valid proof argument remains supported" ("Checked.good" `elem` checkedTheorems good)
+          )
+          bodies
+    , testCase "instance method bodies retain the same proof obligations as ordinary functions" $ do
+        p <- either assertFailure pure prelude
+        let src = T.unlines ["module Obligations where", "class Pointed a where", "  point : a", "instance Pointed Nat where", "  point = absurd rfl"]
+            c = checkSource p "obligations.px" src
+        assertBool "the nonexistent proof of bottom was rejected" (not (null (errors c)))
+        assertBool "the supplied proof was checked" (any ("rfl: the goal is not an equation" `T.isInfixOf`) (map reportMessage (checkedReports c)))
+        let valid = T.unlines ["module Obligations where", "f : (0 ≡ 0) -> Nat", "f h = 0", "class Pointed a where", "  point : a", "instance Pointed Nat where", "  point = f rfl"]
+            good = checkSource p "obligations.px" valid
+        errors good @?= []
+        assertBool "the valid method's obligation certified" (any ("#obligation" `T.isInfixOf`) (checkedTheorems good))
+    , testCase "an occurs check crosses constructors, but never assumes a function preserves its argument" $ do
+        let n = IxParam 0
+        case unifyIx (const True) n (IxSucc (IxFun "sub" [n, IxNat 1])) emptySubst of
+          Stuck _ -> pure ()
+          other -> assertFailure ("n = S (n - 1) has the solution n = 1: " <> show other)
+        case unifyIx (const True) n (IxSucc n) emptySubst of
+          Clash _ -> pure ()
+          other -> assertFailure ("n = S n has no solution: " <> show other)
     , testCase "duplicate theorem binders cannot merge independent membership hypotheses" $ do
         c <- checkFile "test/data/duplicate-binders.px"
         checkedTheorems c @?= ["DuplicateBinders.only-a", "DuplicateBinders.only-b", "DuplicateBinders.fine"]

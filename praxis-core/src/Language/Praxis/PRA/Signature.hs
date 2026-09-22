@@ -78,11 +78,17 @@ module Language.Praxis.PRA.Signature (
   instantiateSchemaAt,
   decompileProgram,
   decompileFunction,
+
+  -- * Schematic substitution
+  InstantiationError (..),
+  instantiateSchematicTerm,
+  instantiateSchematicTermAt,
 ) where
 
 import Control.Exception (displayException)
 import Control.Monad (foldM, forM_, guard, when)
 import Data.Foldable (toList)
+import Data.HashSet qualified as HS
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -94,11 +100,12 @@ import Data.Type.Equality (testEquality, (:~:) (Refl))
 import Data.Type.Natural (SBool (..), sNat, (%<=?))
 import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal, type (+), type (-), type (<=))
 import Language.Haskell.TH.Syntax (Name)
+import Language.Praxis.Name (Fresh (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode (..), V)
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Error (SchemaError (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration.Syntax (Equation)
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
-import Language.Praxis.PRA.Syntax (Abstraction (..), Term (..), suc)
+import Language.Praxis.PRA.Syntax (Abstraction (..), Term (..), abstractName, abstraction, applyAbstraction, suc)
 import Numeric.Natural (Natural)
 
 -- | A code with its arity hidden.
@@ -576,3 +583,86 @@ decompileProgram slots = \case
 -- | A function applied to terms as a term, its code unfolded; 'Nothing' when they are not as many as its arity.
 decompileFunction :: F.SomeFunction -> [Term b] -> Maybe (Term b)
 decompileFunction (F.SomeFunction f) slots = (`decompileProgram` F.functionProgram f) <$> SV.fromList' slots
+
+-- | A schematic term could not be instantiated completely.
+data InstantiationError
+  = UnboundFunction !String
+  | FunctionArgumentMismatch !String !Int
+  | UnrecognisedSchematicFunction
+  | SchemaInstantiationFailed !String !SchemaError
+  deriving (Show, Eq)
+
+{- |
+Simultaneous substitution of variables and schematic functions, including
+occurrences inside compiled schema parameters. The replacement terms and
+abstractions are inserted without substituting inside them again.
+
+A closure is opened over fresh variables and its original captured arguments,
+its body instantiated, and then closed again. The old captures are removed
+from the schema application before its new captures are appended. This is the
+single substitution operation used by both certification and generated proofs.
+-}
+instantiateSchematicTerm :: forall a b. (Fresh a) => Signature -> Map String (Abstraction a) -> (b -> Term a) -> Term b -> Either InstantiationError (Term a)
+instantiateSchematicTerm sig functions = go
+  where
+    go :: forall v. (v -> Term a) -> Term v -> Either InstantiationError (Term a)
+    go variable = \case
+      Var v -> pure (variable v)
+      Lit n -> pure (Lit n)
+      App f xs -> do
+        args <- traverse (go variable) xs
+        case abstractName f of
+          Just (n, _) -> do
+            a <- lookupFunction n
+            maybe (Left (FunctionArgumentMismatch n (length args))) Right (applyAbstraction a (toList args))
+          Nothing
+            | null (F.opaqueCalls (F.functionProgram f)) -> pure (App f args)
+            | Just code <- closedFunctions (F.functionProgram f) -> pure (App (F.programFunction code) args)
+            | Just inst <- schemaInstanceOf sig f -> do
+                let params = instanceParameters inst
+                    closure (F.SomeFunction g) = abstractName g == Nothing && not (null (F.opaqueCalls (F.functionProgram g)))
+                    extras = if any closure params then fromIntegral (instanceExtras inst) else 0
+                    (fixed, captured) = splitAt (length args - extras) (toList args)
+                    avoid = HS.fromList (concatMap toList args <> concatMap toList (Map.elems functions))
+                    slots = freshSlots avoid
+                    parameter (F.SomeFunction (g :: F.Function k)) = case abstractName g of
+                      Just (n, _) -> Right <$> lookupFunction n
+                      Nothing
+                        | closure (F.SomeFunction g) -> do
+                            let own = fromIntegral (natVal (Proxy @k)) - extras
+                                vs = take own slots
+                                -- Captures are opaque leaves here: substituting inside an
+                                -- already substituted argument would not be simultaneous.
+                                inputs = map (Var . Left) vs <> map (Var . Right) captured
+                            body <- maybe (Left UnrecognisedSchematicFunction) Right (decompileFunction (F.SomeFunction g) inputs)
+                            body' <- go (either Var id) body
+                            pure (Right (abstraction vs body'))
+                        | otherwise -> pure (Left (F.SomeFunction g))
+                params' <- traverse parameter params
+                either (Left . SchemaInstantiationFailed (instanceName inst)) Right (applySchemaAt sig (instanceName inst) params' fixed)
+            | otherwise -> Left UnrecognisedSchematicFunction
+
+    -- Substitution by closed functions preserves the surrounding program's
+    -- representation. In particular, identity substitution leaves lambda
+    -- code unchanged. Only replacements with captures need closure conversion.
+    closedFunctions :: forall n. (KnownNat n) => F.Program n -> Maybe (F.Program n)
+    closedFunctions = \case
+      F.Base code -> pure (F.Base code)
+      F.Call ident -> pure (F.Call ident)
+      F.Opaque ident -> do
+        (name, _) <- abstractName (F.Abstract ident)
+        a <- Map.lookup name functions
+        guard (null (abstractionCaptured a))
+        F.SomeFunction (g :: F.Function m) <- pure (abstractionFunction a)
+        Refl <- testEquality (sNat @n) (sNat @m)
+        pure (F.functionProgram g)
+      F.Comp f xs -> F.Comp <$> closedFunctions f <*> traverse closedFunctions xs
+      F.Rec base step -> F.Rec <$> closedFunctions base <*> closedFunctions step
+
+    lookupFunction n = maybe (Left (UnboundFunction n)) Right (Map.lookup n functions)
+    freshSlots used = let v = freshen used anyName in v : freshSlots (HS.insert v used)
+
+-- | 'instantiateSchematicTerm' in a generated, already certified proof.
+instantiateSchematicTermAt :: (Fresh a) => Signature -> Map String (Abstraction a) -> (b -> Term a) -> Term b -> Term a
+instantiateSchematicTermAt sig functions variable =
+  either (error . ("Language.Praxis.PRA.Signature.instantiateSchematicTermAt: " <>) . show) id . instantiateSchematicTerm sig functions variable

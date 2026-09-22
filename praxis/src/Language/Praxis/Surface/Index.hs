@@ -144,15 +144,18 @@ unifyIxNamed names flexible a0 b0 s = go (applyIx s a0) (applyIx s b0)
           (IxSucc _, IxCon {}) -> Clash (render b <> " is no successor")
           _ -> Stuck (render a <> " and " <> render b <> ": neither is solved by the other")
     bind k t
-      | k `elem` keysOf t = if constructorForm t then Clash (render t <> " would contain itself") else Stuck (render t <> " mentions what it is to solve")
+      | k `elem` keysOf t = if occursThroughConstructors k t then Clash (render t <> " would contain itself") else Stuck (render t <> " mentions what it is to solve")
       | otherwise =
           let Subst m = s
               one = Subst (Map.singleton k t)
            in Unified (Subst (Map.insert k t (Map.map (applyIx one) m)))
-    constructorForm = \case
-      IxSucc x -> constructorForm x || True
-      IxCon _ _ -> True
-      _ -> False
+    -- Only a constructor-only path makes a value its own proper subterm.
+    -- A function can decrease its argument: n = S (n - 1) has solutions.
+    occursThroughConstructors k = \case
+      IxSucc x -> occursThroughConstructors k x
+      IxCon _ xs -> any (occursThroughConstructors k) xs
+      IxFun _ _ -> False
+      x -> keyOf x == Just k
 
 -- | Unify indices pairwise, left to right; the first clash or stuck pair is the answer.
 unifyAll :: (Key -> Bool) -> [(Ix, Ix)] -> Subst -> Unified

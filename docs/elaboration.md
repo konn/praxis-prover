@@ -9,7 +9,7 @@ the translation sound and fast. The code is in
 
 ## The trust architecture
 
-The surface layer is an untrusted *producer*. It emits text in the concrete
+The surface layer produces proofs and statements. It emits text in the concrete
 syntax of praxis-core — `prf` equations for definitions and `pra`
 declarations for lemmas and theorems — and hands it to the core's own parsers
 and checker:
@@ -34,9 +34,11 @@ What must be trusted is therefore small:
 The definitions themselves — the prelude's, the codes of constructors, the
 membership predicates, the compiled functions — are not trusted: adding a
 primitive recursive definition is always sound, and what the argument needs
-of them is certified. Everything else — the parser, the type checker, the
-encoder, the compiler, the proof engine — can only cause a rejection when it
-is wrong. A declaration which fails is reported and **never becomes a
+of them is certified. Generated proofs are checked independently of the
+surface proof engine. The parser, elaborator and statement translation also
+determine which proposition is submitted; their correctness is part of the
+source-to-core adequacy obligation, not established by checking that core
+proposition's proof. A declaration which fails is reported and **never becomes a
 lemma**: later declarations are checked without it (unlike the language
 server of `.pra` files, which keeps failed declarations as lemmas for
 convenience). A theorem is not in scope in its own proof.
@@ -348,6 +350,14 @@ With both, every generated lemma of the examples certifies in milliseconds.
 ## Statements and their adequacy
 
 ### The translation
+
+Proof arguments may be erased only after their obligations are collected for
+certification. Function bodies, including instance methods, retain these
+obligations. Theorem applications and calculations include each supplied
+proof as a premise of a core `Cut`, so it is checked even when computation
+erases the argument. Statements currently reject proof arguments because
+statement elaboration does not yet support certifying their obligations. In
+particular, `absurd rfl` cannot become a numeral in a theorem's statement.
 
 A theorem `{ā} → (x₁ : T₁) → … → A` becomes, by `Engine.statementGoal`, the
 core sequent

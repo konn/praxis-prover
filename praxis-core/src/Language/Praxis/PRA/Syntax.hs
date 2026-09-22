@@ -27,6 +27,7 @@ module Language.Praxis.PRA.Syntax (
   abstractFunction,
   abstractName,
   functionMetas,
+  functionMetasInCode,
   Abstraction (..),
   abstraction,
   capturedTerms,
@@ -432,8 +433,13 @@ functionMetas = L.nub . go
     go = \case
       Var _ -> []
       Lit _ -> []
-      App f xs -> mapMaybe' decodeAbstract (F.opaqueCalls (F.functionProgram f)) <> concatMap go (Foldable.toList xs)
-    mapMaybe' g = foldr (\x acc -> maybe acc (: acc) (g x)) []
+      App f xs -> functionMetasInCode f <> concatMap go (Foldable.toList xs)
+
+{- | The schematic functions called inside a compiled function, including
+calls inside schema parameters and nested lambdas.
+-}
+functionMetasInCode :: (KnownNat n) => Function n -> [(String, [String])]
+functionMetasInCode = L.nub . foldr (\x acc -> maybe acc (: acc) (decodeAbstract x)) [] . F.opaqueCalls . F.functionProgram
 
 {- |
 What a term metavariable with parameters is instantiated by.  As a term, a

@@ -1,0 +1,22 @@
+-- Regression: parsing succeeds, but certification must reject bad.
+-- Before complete schematic substitution, every declaration below certified.
+
+rule wrap (n : var) (p(n) : term)
+  : |- mu {λ i. p(i)} 1 = (if p(0) then 0 else 1)
+by refl
+
+rule bad (n : var) (p(n) : term)
+  : |- (if p(0) then 0 else 1) = 0
+by calc (if p(0) then 0 else 1)
+      = mu {λ i. p(i)} 1
+      = (if 1 then 0 else 1) by exact wrap n 1
+      = 0
+
+theorem contradiction : |- 1 = 0
+by calc 1 = (if 0 then 0 else 1) = 0 by exact bad z 0
+
+theorem zeroEqualsOne : |- 0 = 1
+by symmetry (1 = 0); exact contradiction
+
+theorem explosion : |- _|_
+by have H: (1 = 0) { exact contradiction }; SuccNonZero

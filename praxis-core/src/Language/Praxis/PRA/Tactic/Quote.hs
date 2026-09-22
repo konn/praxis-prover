@@ -112,7 +112,7 @@ import Data.Hashable (Hashable (..))
 import Data.List (intercalate, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (mapMaybe)
 import Data.Multiset (Multiset)
 import Data.Multiset qualified as MS
 import Data.Proxy (Proxy (..))
@@ -651,68 +651,58 @@ liftName env = \case
   Meta s n -> failL (n <> " is a " <> sortName s <> " metavariable, but stands as a variable")
 
 liftTerm :: LiftEnv -> Term SchemaName -> LCode (Term W)
-liftTerm env = go . canonicalise
+liftTerm env term
+  | null metas = plain (canonicalise term)
+  | otherwise = do
+      -- The runtime certifier and generated proofs perform exactly the same
+      -- substitution, including closure bodies and their captured arguments.
+      body <- skeleton (canonicalise term)
+      functions <- traverse function metas
+      need NeedsFresh
+      sig <-
+        if hasSchema term
+          then need NeedsSignature >> pure (boundName (leSignature env))
+          else pure [||signature []||]
+      pure [||instantiateSchematicTermAt $$sig (Map.fromList $$(listCode functions)) id $$body||]
   where
-    go = \case
-      Var (Meta R.TermS n) -> metaParam env R.TermS n
+    metas = functionMetas term
+    -- Direct applications need only their replacements; embedding the whole
+    -- signature in every such proof would duplicate unrelated definitions.
+    hasSchema = \case
+      App f xs -> (case f of F.Inline code -> not (null (F.opaqueCalls code)); _ -> False) || any hasSchema xs
+      _ -> False
+
+    variable (Meta R.TermS n) = metaParam env R.TermS n
+    variable v = do
+      x <- liftName env v
+      pure [||Var $$x||]
+
+    function (n, _) = do
+      a <- metaParam env R.TermS n
+      pure [||(n, $$a)||]
+
+    -- Keep replacement terms as leaves until simultaneous substitution runs;
+    -- occurrences inside replacements must not be substituted a second time.
+    skeleton = \case
       Var v -> do
-        x <- liftName env v
-        pure [||Var $$x||]
+        t <- variable v
+        pure [||Var $$t||]
+      Lit n -> pure [||Lit n||]
+      App f args -> do
+        applied <- lift (functionCode (leSig env) f)
+        as <- traverse skeleton args
+        pure [||App $$applied $$(liftSizedWith id as)||]
+
+    plain = \case
+      Var v -> variable v
       Lit n -> pure [||Lit n||]
       Succ :$ args -> do
-        t <- go (SV.sIndex [od|0|] args)
+        t <- plain (SV.sIndex [od|0|] args)
         pure [||suc $$t||]
-      -- A term metavariable with parameters applied is its abstraction at
-      -- the arguments; an instance of a schema at one is the schema
-      -- instantiated again at the function of the abstraction, at run time.
-      App f args
-        | Just (p, _) <- abstractName f -> do
-            a <- metaParam env R.TermS p
-            as <- traverse go (toList args)
-            pure [||abstractionAt $$a $$(listCode as)||]
-        -- An instance of a schema at such metavariables, or at closures
-        -- calling them: each is instantiated again at run time, and the
-        -- other parameters are kept.  A closure, as a body over its own
-        -- parameters, is abstracted again from the body instantiated, as an
-        -- argument for such a metavariable is, so that caller and callee
-        -- meet in the same closure; the arguments it captured, which a
-        -- variadic instance takes last, are captured again with it.
-        | Just inst <- schemaInstanceOf (leSig env) f
-        , params <- zip (instanceParameters inst) (abstractParameters inst)
-        , any opaque params -> do
-            let extras = if any closure params then fromIntegral (instanceExtras inst) else 0
-                (fixed, captured) = splitAt (length (toList args) - extras) (toList args)
-            params' <- traverse (parameter inst extras captured) params
-            fixed' <- traverse go fixed
-            need NeedsSignature
-            let schema = instanceName inst
-            pure [||instantiateSchemaAt $$(boundName (leSignature env)) schema $$(listCode params') $$(listCode fixed')||]
-        | otherwise -> do
-            applied <- lift (functionCode (leSig env) f)
-            as <- traverse go args
-            pure [||App $$applied $$(liftSizedWith id as)||]
-
-    -- A parameter an abstract function stands for or calls, and one which calls without being one.
-    opaque (F.SomeFunction g, abstract) = isJust abstract || not (null (F.opaqueCalls (F.functionProgram g)))
-    closure p@(_, abstract) = opaque p && not (isJust abstract)
-
-    -- A parameter of an instance, as it is at run time.
-    parameter inst extras captured = \case
-      (_, Just (p, _)) -> do
-        a <- metaParam env R.TermS p
-        pure [||Right $$a||]
-      (F.SomeFunction (g :: F.Function k), Nothing)
-        | not (null (F.opaqueCalls (F.functionProgram g))) -> do
-            let own = fromIntegral (natVal (Proxy @k)) - extras
-                slots = [Obj ("«slot" <> show i <> "»") | i <- [0 .. own - 1 :: Int]]
-            body <- maybe (failL ("a parameter of an instance of " <> instanceName inst <> " does not decompile")) pure (decompileFunction (F.SomeFunction g) (map Var slots <> captured))
-            body' <- go body
-            params' <- traverse (liftName env) slots
-            need NeedsHashable
-            pure [||Right (abstraction $$(listCode params') $$body')||]
-        | otherwise -> do
-            code <- lift (functionCode (leSig env) g)
-            pure [||Left (F.SomeFunction $$code)||]
+      App f args -> do
+        applied <- lift (functionCode (leSig env) f)
+        as <- traverse plain args
+        pure [||App $$applied $$(liftSizedWith id as)||]
 
 -- | A function of the signature, by the Haskell name it records.
 functionCode :: (KnownNat n) => Signature -> F.Function n -> Q (Code Q (F.Function n))

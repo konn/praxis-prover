@@ -3,10 +3,12 @@
 praxis-core has two concrete languages over the kernel of
 [kernel.md](kernel.md): `prf`, in which primitive recursive functions are
 *defined* by equations, and `pra`, in which theorems and derived rules are
-*stated* as sequents and *proved* by a small tactic language. Both are
-untrusted front ends: `prf` produces kernel definitions, which the kernel
-environment checks for closure and acyclicity; `pra` produces proofs, which
-the kernel checker checks.
+*stated* as sequents and *proved* by a small tactic language. `prf` produces
+kernel definitions, which the kernel environment checks for references,
+arities and acyclicity. Primitive `pra` proof steps are kernel-checked;
+appeals to previously certified lemmas rely additionally on the declaration
+certifier's substitution and side-condition checks, as described in
+[kernel.md](kernel.md).
 
 ## `prf`: functions by equations
 

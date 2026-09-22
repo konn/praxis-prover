@@ -3,10 +3,12 @@
 The surface language is what a user of praxis writes: modules of data types,
 functions defined by pattern matching, and theorems proved by clauses, by
 calculations or by tactics, in a syntax close to Agda and Haskell. It lives in
-the `praxis` package. Nothing in it is trusted: every definition becomes a
-primitive recursive definition of the core, and every proof a declaration of
-the core's `pra` language, certified by the kernel — see
-[elaboration.md](elaboration.md) for how, and [kernel.md](kernel.md) for what
+the `praxis` package. Every definition becomes a primitive recursive
+definition of the core, and every proof a declaration of
+the core's `pra` language, checked by its declaration certifier. That the
+core statement preserves the surface statement's meaning is a separate
+adequacy obligation — see [elaboration.md](elaboration.md) for how, and
+[kernel.md](kernel.md) for what
 the kernel checks.
 
 ```

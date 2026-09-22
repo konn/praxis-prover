@@ -169,10 +169,12 @@ test-suite praxis-core-test
 
   build-depends:
     containers,
+    free,
     ghc-typelits-knownnat,
     hashable,
     lens,
     praxis-core,
+    recursion-schemes,
     sized,
     tasty,
     tasty-hunit,

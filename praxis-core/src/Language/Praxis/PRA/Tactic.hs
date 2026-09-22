@@ -20,10 +20,11 @@ is named as the script says, by 'As', or by the next number the branch has
 not used.  'On' picks the hypotheses a rule acts on by name, where the
 engine would otherwise look for the unique one of the right shape.
 
-Nothing here is trusted.  'prove' hands the proof it built to the checker
-and compares the sequent it infers with the goal, so a tactic which produced
-the wrong proof is an error, not an unsound theorem; an appeal to a lemma is
-checked against the lemma's statement, instantiated afresh.  See
+Primitive tactic output is checked: 'prove' hands the proof it built to the
+checker and compares the sequent it infers with the goal. An appeal to a
+lemma is checked against its statement, instantiated afresh, without replaying
+its proof; schematic substitution and the appeal's eigenvariable checks are
+therefore part of the trusted certification boundary. See
 "Language.Praxis.PRA.Tactic.Parser" for the textual syntax.
 -}
 module Language.Praxis.PRA.Tactic (
@@ -86,7 +87,7 @@ module Language.Praxis.PRA.Tactic (
 import Control.Applicative ((<|>))
 import Control.Exception (displayException)
 import Control.Lens ((^?))
-import Control.Monad (foldM, forM_, join, unless, when, zipWithM, (>=>))
+import Control.Monad (foldM, forM_, join, unless, when, (>=>))
 import Control.Monad.Free (Free (..))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, put)
@@ -115,6 +116,7 @@ import Data.Type.Equality qualified as TE
 import Data.Type.Natural (sNat)
 import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
+import GHC.TypeNats (KnownNat)
 import Language.Praxis.Name (Fresh (..))
 import Language.Praxis.PRA.Equality (defEqIn, defaultFuel)
 import Language.Praxis.PRA.Pattern
@@ -125,7 +127,7 @@ import Language.Praxis.PRA.Proof
 import Language.Praxis.PRA.Proof.Transform (argNames, substAtomic, substFormula, substProof, weakenProof)
 import Language.Praxis.PRA.Reflection (CodeView (..), codeView, comparisonSymbol, decodeFormula, encodeFormula)
 import Language.Praxis.PRA.Rule qualified as R
-import Language.Praxis.PRA.Signature (SchemaInstance (..), Signature, Symbol (..), applySchemaAt, applySymbol, decompileFunction, instanceName, schemaInstanceOf, signatureKernelEnv)
+import Language.Praxis.PRA.Signature (InstantiationError (..), SchemaInstance (..), Signature, Symbol (..), applySymbol, decompileFunction, instanceName, instantiateSchematicTerm, schemaInstanceOf, signatureKernelEnv)
 import Language.Praxis.PRA.Syntax
 import Language.Praxis.PRA.Syntax.Pretty
 
@@ -1830,14 +1832,6 @@ useLemmaWith heads sig hints name lemma userArgs goal = do
   let unbound = [ref | (n, s) <- metas, let ref = R.MetaRef s n, not (isBound ref b3)]
   unless (null unbound) $ Left (CannotInstantiate name unbound)
   args <- traverse (argOfSort b3) metas
-  -- The instance of a bound variable metavariable is apart from the goal and
-  -- the other arguments, but for a metavariable it parameterizes.
-  forM_ (lemmaBound lemma) \x -> case Map.lookup x (bVars b3) of
-    Just v
-      | v `HS.member` goalNames (goalSequent goal)
-          || or [v `HS.member` argNames arg | ((n, _), arg) <- zip metas args, n /= x, x `notElem` Map.findWithDefault [] n parameterised] ->
-          Left (NotEigen name x v)
-    _ -> pure ()
   let sigma = [(v, HM.lookupDefault (Var v) v (bFree b3)) | v <- HS.toList free]
       appeal = Appeal name args sigma weakening
   (premiseSequents, conclusion) <- instantiateLemma sig lemma appeal
@@ -2009,6 +2003,9 @@ matchTermL sig cons b pat t = case canonicalise pat of
           Just (b', slots) ->
             Matched b' {bFuns = Map.insert n (abstraction (map fst slots) (foldl (\u (v, arg) -> abstractTerm arg v u) t slots)) (bFuns b')}
     | Just inst <- schemaInstanceOf sig f
+    , any schematicClosure (instanceParameters inst) ->
+        matchClosure f (SV.toList ps)
+    | Just inst <- schemaInstanceOf sig f
     , any isJust (abstractParameters inst)
     , all fixedParameter (zip (abstractParameters inst) (instanceParameters inst)) ->
         sameApplication (F.SomeFunction f) (SV.toList ps)
@@ -2038,6 +2035,29 @@ matchTermL sig cons b pat t = case canonicalise pat of
       Just u
         | u == t -> Matched b
         | otherwise -> Mismatch
+
+    schematicClosure (F.SomeFunction g) = isNothing (abstractName g) && not (null (F.opaqueCalls (F.functionProgram g)))
+
+    -- Identical compiled heads determine identity bindings for the schematic
+    -- functions inside them, leaving their ordinary arguments to be matched.
+    -- A binding already supplied must agree: explicit substitution cannot be
+    -- bypassed merely because the goal still contains the old lambda code.
+    matchClosure :: (KnownNat k) => Function k -> [Term a] -> Match a
+    matchClosure f args = case canonicalise t of
+      App g us
+        | F.SomeFunction f == F.SomeFunction g ->
+            case foldM identityBinding b (functionMetasInCode f) of
+              Just b' -> matchAll (matchTermL sig cons) b' (zip args (SV.toList us))
+              Nothing -> compareBound
+      _ -> compareBound
+
+    identityBinding bs (n, params) = case Map.lookup n (bFuns bs) of
+      Nothing ->
+        let (bs', _) = parameterPlaceholders bs params
+         in Just bs' {bFuns = Map.insert n (identityAbstraction n params) (bFuns bs')}
+      Just a
+        | identityOf a == Just (abstractFunction n params) -> Just bs
+        | otherwise -> Nothing
 
     -- An abstract function as the function the goal's term applies, taking as many
     -- arguments, each an instance of the pattern's: one solution, when nothing else
@@ -2171,26 +2191,15 @@ with parameters applied is its abstraction at the arguments, and an
 instance of a schema at one the schema at the function of the abstraction.
 -}
 boundTerm :: (Schematic a) => Signature -> Bindings a -> Term a -> Maybe (Term a)
-boundTerm sig b = go
+boundTerm sig b t = do
+  resolved <- traverse variable t
+  either (const Nothing) Just (instantiateSchematicTerm sig (bFuns b) id resolved)
   where
-    go = \case
-      Var v -> case metaName v of
-        Just (R.TermS, n) -> Map.lookup n (bTerms b)
-        Just (R.VarS, n) -> Var <$> Map.lookup n (bVars b)
-        Just _ -> Nothing
-        Nothing -> Just (HM.lookupDefault (Var v) v (bFree b))
-      Lit n -> Just (Lit n)
-      App f xs
-        | Just (n, _) <- abstractName f -> do
-            a <- Map.lookup n (bFuns b)
-            xs' <- traverse go (toList xs)
-            applyAbstraction a xs'
-        | Just inst <- schemaInstanceOf sig f
-        , any isJust (abstractParameters inst) -> do
-            params <- boundParameters (`Map.lookup` bFuns b) inst
-            xs' <- traverse go (toList xs)
-            either (const Nothing) Just (applySchemaAt sig (instanceName inst) params xs')
-        | otherwise -> App f <$> traverse go xs
+    variable v = case metaName v of
+      Just (R.TermS, n) -> Map.lookup n (bTerms b)
+      Just (R.VarS, n) -> Var <$> Map.lookup n (bVars b)
+      Just _ -> Nothing
+      Nothing -> Just (HM.lookupDefault (Var v) v (bFree b))
 
 -- | The parameters of each metavariable of a lemma's statement, where it is applied: an atom or formula metavariable, or a term metavariable, an abstract function.
 metaParameters :: (Schematic a) => Lemma a -> Map String [String]
@@ -2245,14 +2254,6 @@ termMetas n t = [m | v <- toList t, Just (_, m) <- [metaName v], m /= n] <> [m |
 abstractParameters :: SchemaInstance -> [Maybe (String, [String])]
 abstractParameters inst = [abstractName f | F.SomeFunction f <- instanceParameters inst]
 
--- | The parameters of an instance of a schema, in order, each abstract function among them as the lookup binds it.
-boundParameters :: (Monad m) => (String -> m (Abstraction a)) -> SchemaInstance -> m [Either F.SomeFunction (Abstraction a)]
-boundParameters look inst = zipWithM param (instanceParameters inst) (abstractParameters inst)
-  where
-    param p = \case
-      Nothing -> pure (Left p)
-      Just (n, _) -> Right <$> look n
-
 -- | Replace every occurrence of the term by the variable, throughout a term.
 abstractTerm :: (Eq a) => Term a -> a -> Term a -> Term a
 abstractTerm t x = go
@@ -2288,11 +2289,21 @@ instantiateLemma sig lemma appeal = do
   b <- appealBindings lemma appeal
   premises <- traverse (instantiateSequent sig name sigma MS.empty b) (premisesApart lemma appeal)
   conclusion <- instantiateSequent sig name sigma extra b (lemmaGoal lemma)
+  -- This condition belongs to certification, not just tactic construction:
+  -- a directly constructed appeal must not admit an invalid induction instance.
+  -- Parameterized metavariables may mention their formal eigenvariable.
+  forM_ (lemmaBound lemma) \x -> case Map.lookup x (bVars b) of
+    Just v
+      | v `HS.member` goalNames conclusion
+          || or [v `HS.member` argNames arg | ((n, _), arg) <- zip (lemmaMetas lemma) (appealArgs appeal), n /= x, x `notElem` Map.findWithDefault [] n parameterised] ->
+          Left (NotEigen name x v)
+    _ -> pure ()
   pure (premises, conclusion)
   where
     name = appealName appeal
     sigma = HM.fromList (appealSubst appeal)
     extra = appealWeakening appeal
+    parameterised = metaParameters lemma
 
 -- | The bindings the arguments of an appeal make for the metavariables of the lemma.
 appealBindings :: (Schematic a) => Lemma a -> Appeal a -> Either (Failure a) (Bindings a)
@@ -2349,25 +2360,21 @@ instantiateFormula sig name sigma b = instF
       Just (_, n) -> Left (Malformed (n <> " is not an atom metavariable, but stands as an atom in " <> name))
       Nothing -> (:===) <$> instT s <*> instT t
 
-    instT = \case
-      Var v -> case metaName v of
-        Just (R.TermS, n) -> look R.TermS n (bTerms b)
-        Just (R.VarS, n) -> Var <$> look R.VarS n (bVars b)
-        Just (_, n) -> Left (Malformed (n <> " is not a term metavariable, but stands as a term in " <> name))
-        Nothing -> pure (HM.lookupDefault (Var v) v sigma)
-      Lit n -> pure (Lit n)
-      App f xs
-        | Just (n, _) <- abstractName f -> do
-            a <- look R.TermS n (bFuns b)
-            xs' <- traverse instT (toList xs)
-            maybe (Left (Malformed (n <> " applied to " <> show (length xs') <> " arguments in " <> name))) Right (applyAbstraction a xs')
-        | Just inst <- schemaInstanceOf sig f
-        , any isJust (abstractParameters inst) -> do
-            params <- boundParameters (\n -> look R.TermS n (bFuns b)) inst
-            xs' <- traverse instT (toList xs)
-            let metas = unwords [n | Just (n, _) <- abstractParameters inst]
-            first (CannotCapture name metas . displayException) (applySchemaAt sig (instanceName inst) params xs')
-        | otherwise -> App f <$> traverse instT xs
+    instT t = do
+      resolved <- traverse variable t
+      first instantiationFailure (instantiateSchematicTerm sig (bFuns b) id resolved)
+
+    variable v = case metaName v of
+      Just (R.TermS, n) -> look R.TermS n (bTerms b)
+      Just (R.VarS, n) -> Var <$> look R.VarS n (bVars b)
+      Just (_, n) -> Left (Malformed (n <> " is not a term metavariable, but stands as a term in " <> name))
+      Nothing -> pure (HM.lookupDefault (Var v) v sigma)
+
+    instantiationFailure = \case
+      UnboundFunction n -> CannotInstantiate name [R.MetaRef R.TermS n]
+      FunctionArgumentMismatch n arity -> Malformed (n <> " applied to " <> show arity <> " arguments in " <> name)
+      UnrecognisedSchematicFunction -> Malformed ("cannot instantiate schematic code in " <> name)
+      SchemaInstantiationFailed schema err -> CannotCapture name schema (displayException err)
 
     -- The parameters of an applied metavariable, substituted by its arguments at once.
     atParameters :: forall x. Atomic a -> (HashMap a (Term a) -> x -> x) -> x -> Either (Failure a) x
