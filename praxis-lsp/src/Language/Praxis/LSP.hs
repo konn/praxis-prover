@@ -20,7 +20,8 @@ library of praxis-core, "Language.Praxis.PRA.Library", and the unfolding
 lemmas of 'builtin' in scope and each declaration a lemma for those after it,
 as the quasiquoter reads it with those lemmas in scope; every declaration is checked, and a failure is a
 diagnostic at the tactic which failed, a @sorry@
-an information diagnostic listing the goal it stopped at.  Hovering over a
+a warning listing the unfinished goal. Draft statements remain available for
+editing, with their unproved dependencies propagated to users and hovers.  Hovering over a
 tactic shows the goal it faces, found by running the proof with that tactic
 replaced by @sorry@.  A @.prf@ document is checked as the quasiquoter checks
 it, over the empty signature.  Both are indexed lexically,
@@ -66,7 +67,8 @@ import Language.Praxis.LSP.Core (indexPra, indexPrf)
 import Language.Praxis.LSP.Index (Index (..), Target (..), Token (..), referencesAt)
 import Language.Praxis.LSP.Position (Lines, fromPosition, lineAt, linesOf, toPosition, toRange)
 import Language.Praxis.LSP.Surface (indexModule, moduleDefinitions)
-import Language.Praxis.PRA.Library (certifiedLibrary, libraryScope)
+import Language.Praxis.PRA.Certificate (Certificate, certificateLemma, checkCertificate, derivationAppeals)
+import Language.Praxis.PRA.Library (certifiedLibrary, libraryCertificates, libraryScope)
 import Language.Praxis.PRA.PrimitiveRecursion (builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (checkErrorPosition, checkQuote, renderCheckError)
 import Language.Praxis.PRA.Syntax.Parser (syntaxErrorPosition)
@@ -281,30 +283,69 @@ analysePrf text = case checkQuote mempty Map.empty Set.empty id "" text of
      in [Report line column DiagnosticSeverity_Error (T.pack (renderCheckError err)) Nothing]
   Right _ -> []
 
-{- |
-Check every declaration, each a lemma for those after it, by its statement
-even when its proof fails; one which fails is reported, at the tactic which failed when one is
-known, and a @sorry@ as information with the goal it stopped at.
+{- | Editor assumptions carry their unproved roots. Only Proved entries hold
+certificates; a successful proof against a draft remains conditional.
+-}
+data EditorLemma
+  = Proved !Certificate
+  | Assumed !(Lemma SchemaName) !(Set String)
+
+editorStatement :: EditorLemma -> Lemma SchemaName
+editorStatement (Proved certificate) = certificateLemma certificate
+editorStatement (Assumed lemma _) = lemma
+
+unprovedRoots :: EditorLemma -> Set String
+unprovedRoots (Proved _) = Set.empty
+unprovedRoots (Assumed _ roots) = roots
+
+checkEditorDeclaration :: Env -> Map String EditorLemma -> Decl SchemaName -> (EditorLemma, Maybe (TacticError SchemaName))
+checkEditorDeclaration kernel known decl = case checkDecl kernel (fmap editorStatement known) decl of
+  Left err -> failed err
+  Right (proof, lemma) ->
+    let used = derivationAppeals proof `Set.difference` Set.fromList (map fst (lemmaPremises lemma))
+        roots = Set.unions (map unprovedRoots (Map.elems (Map.restrictKeys known used)))
+     in if Set.null roots
+          then case checkCertificate kernel (Map.mapMaybe proved known) decl of
+            Right certificate -> (Proved certificate, Nothing)
+            Left err -> failed err
+          else (Assumed lemma roots, Nothing)
+  where
+    failed err = (Assumed (declLemma decl) (Set.singleton (declName decl)), Just err)
+    proved (Proved certificate) = Just certificate
+    proved Assumed {} = Nothing
+
+conditionalMessage :: Set String -> Text
+conditionalMessage roots = "Conditional proof; unproved dependencies: " <> T.intercalate ", " (map T.pack (Set.toAscList roots))
+
+{- | Check drafts for useful local feedback, while keeping their conditional
+status distinct from certification, including through transitive appeals.
 -}
 analysePra :: Text -> [Report]
-analysePra text = case builtinLemmas of
+analysePra text = case libraryCertificates of
   Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack err) Nothing]
-  Right base -> case parseQuoteIn (lemmaSorts base) (schemaScope builtin) (T.unpack text) of
+  Right base -> case parseQuoteIn (lemmaSorts (fmap certificateLemma base)) (schemaScope builtin) (T.unpack text) of
     Left err ->
       let (line, column) = syntaxErrorPosition err
        in [Report line column DiagnosticSeverity_Error (T.pack (displayException err)) Nothing]
     Right (_, decls) -> case signatureEnv builtin of
       Left err -> [Report 1 1 DiagnosticSeverity_Error (T.pack (displayException err)) Nothing]
-      Right kernel -> go kernel (withoutDeclared decls base) decls
+      Right kernel -> go kernel (fmap Proved (withoutDeclared decls base)) decls
   where
     go _ _ [] = []
-    go kernel lemmas (d : ds) = case checkDecl kernel lemmas d of
-      Right (_, lemma) -> go kernel (Map.insert (declName d) lemma lemmas) ds
-      Left err -> report d err : go kernel (Map.insert (declName d) (declLemma d) lemmas) ds
+    go kernel known (d : ds) =
+      let (entry, failure) = checkEditorDeclaration kernel known d
+          reports = case failure of
+            Just err -> [report d err]
+            Nothing
+              | not (Set.null (unprovedRoots entry)) ->
+                  let (line, column) = fromMaybe (1, 1) (firstLoc (declTactic d))
+                   in [Report line column DiagnosticSeverity_Warning (conditionalMessage (unprovedRoots entry)) Nothing]
+            _ -> []
+       in reports <> go kernel (Map.insert (declName d) entry known) ds
     report d err =
       let (line, column) = maybe (fromMaybe (1, 1) (firstLoc (declTactic d))) (\(Loc l c) -> (l, c)) (errorLoc err)
           severity = case errorFailure err of
-            Unfinished -> DiagnosticSeverity_Information
+            Unfinished -> DiagnosticSeverity_Warning
             _ -> DiagnosticSeverity_Error
        in Report line column severity (T.pack (unlocated (renderSchemaTacticError builtin err))) Nothing
     -- The position opens the rendering; the diagnostic carries it already.
@@ -325,7 +366,7 @@ any declaration, but the lemmas of the library the document declares itself.
 The library read as a document then appeals only to what comes before, as
 when it is certified.
 -}
-withoutDeclared :: [Decl SchemaName] -> Map String (Lemma SchemaName) -> Map String (Lemma SchemaName)
+withoutDeclared :: [Decl SchemaName] -> Map String a -> Map String a
 withoutDeclared decls = (`Map.withoutKeys` Set.intersection (Set.fromList (map declName decls)) library)
   where
     library = either (const Set.empty) Map.keysSet certifiedLibrary
@@ -341,8 +382,8 @@ with that tactic replaced by @sorry@.
 -}
 hoverAt :: Text -> Int -> Int -> Maybe Text
 hoverAt text line column = do
-  base <- either (const Nothing) Just builtinLemmas
-  (_, decls) <- either (const Nothing) Just (parseQuoteIn (lemmaSorts base) (schemaScope builtin) (T.unpack text))
+  base <- either (const Nothing) Just libraryCertificates
+  (_, decls) <- either (const Nothing) Just (parseQuoteIn (lemmaSorts (fmap certificateLemma base)) (schemaScope builtin) (T.unpack text))
   kernel <- either (const Nothing) Just (signatureEnv builtin)
   -- The last declaration with a tactic at or before the position, and that tactic.
   (before, d, target) <-
@@ -351,10 +392,15 @@ hoverAt text line column = do
       | (before, d) <- reverse (zip (prefixes decls) decls)
       , Just loc <- [locBefore (declTactic d)]
       ]
-  let lemmas = certified kernel (withoutDeclared decls base) before
+  let known = editorScope kernel (fmap Proved (withoutDeclared decls base)) before
+      (entry, failure) = checkEditorDeclaration kernel known d
+      annotation = case failure of
+        Just _ -> "Unproved declaration: " <> T.pack (declName d) <> "\n\n"
+        Nothing | not (Set.null (unprovedRoots entry)) -> conditionalMessage (unprovedRoots entry) <> "\n\n"
+        _ -> ""
       stubbed = d {declTactic = replaceAt target Sorry (declTactic d)}
-  case checkDecl kernel lemmas stubbed of
-    Left (TacticError _ goal Unfinished) -> Just (renderGoal goal)
+  case checkDecl kernel (fmap editorStatement known) stubbed of
+    Left (TacticError _ goal Unfinished) -> Just (annotation <> renderGoal goal)
     _ -> Nothing
   where
     prefixes ds = [take i ds | i <- [0 .. length ds - 1]]
@@ -368,13 +414,9 @@ hoverAt text line column = do
         )
     unlines' = foldr1 (\a b -> a <> "\n" <> b)
 
--- | The lemmas of the declarations after those given, in order: as certified, or by statement alone when the proof fails.
-certified :: Env -> Map String (Lemma SchemaName) -> [Decl SchemaName] -> Map String (Lemma SchemaName)
-certified kernel base = foldl step base
-  where
-    step lemmas d = case checkDecl kernel lemmas d of
-      Right (_, lemma) -> Map.insert (declName d) lemma lemmas
-      Left _ -> Map.insert (declName d) (declLemma d) lemmas
+-- | One status-aware scope construction for diagnostics and hover.
+editorScope :: Env -> Map String EditorLemma -> [Decl SchemaName] -> Map String EditorLemma
+editorScope kernel = foldl (\known d -> Map.insert (declName d) (fst (checkEditorDeclaration kernel known d)) known)
 
 -- | Every position the parser attached in a tactic.
 locations :: Tactic a -> [Loc]

@@ -40,8 +40,9 @@ determine which proposition is submitted; their correctness is part of the
 source-to-core adequacy obligation, not established by checking that core
 proposition's proof. A declaration which fails is reported and **never becomes a
 lemma**: later declarations are checked without it (unlike the language
-server of `.pra` files, which keeps failed declarations as lemmas for
-convenience). A theorem is not in scope in its own proof.
+server of `.pra` files, which keeps failed declarations as explicitly
+unproved assumptions and reports every proof depending on them as
+conditional). A theorem is not in scope in its own proof.
 
 What no machine checks is the reading of the source: that the parser, the
 fixities and the resolution of names give a statement the meaning its author

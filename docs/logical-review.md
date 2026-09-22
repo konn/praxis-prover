@@ -130,33 +130,22 @@ runtime substitution of a theorem's free variables.
 Validation after this follow-up passes all 401 core tests, 38 doctest
 examples and 74 surface tests, including both new capture regressions.
 
-## Remaining actionable findings
+## Follow-up findings and resolutions
 
-### P2: draft assumptions are indistinguishable from proved dependencies in the editor
+### Closed: the editor distinguishes certificates from unproved assumptions
 
-In `praxis-lsp/src/Language/Praxis/LSP.hs`, `analysePra` inserts
-`declLemma d` after `checkDecl` fails. The helper named `certified` does the
-same. For example:
+The editor now stores either a checked `Certificate` or an assumed statement
+with its transitive unproved roots. A `sorry` produces a warning. A proof
+using an unproved declaration produces a separate conditional-proof warning,
+and hover shows that status alongside its goal. A failed tactic also leaves
+an explicitly tracked assumption.
 
-```text
-theorem hole : |- 0 = 1
-by sorry
-theorem downstream : |- 0 = 1
-by exact hole
-```
-
-The analysis reports the `sorry` as information, but does not report that
-`downstream` depends on an unproved assumption. This behavior is deliberate
-and covered by the existing LSP test; running the example above also returns
-only that one information diagnostic. It is not a new discovery about
-batch certification: the quasiquoter rejects `hole`, and the surface batch
-checker does not register failed theorems. Nevertheless, editor diagnostics
-do not constitute a certification verdict.
-
-**Recommendation:** retain statements for navigation and exploratory
-checking, but track unproved dependencies transitively and expose a distinct
-conditional status. Keep the certified environment separate from the draft
-environment; do not use the same `Map String Lemma` to imply both contracts.
+Dependencies come from the derivation actually selected by tactic search,
+using the same traversal as certificate retention. Unused drafts, failed
+alternatives and shadowed local premises do not taint a completed proof.
+Later redefinition does not retroactively certify an earlier conditional
+proof; rechecking a document with its original root proof repaired clears
+the downstream status. Diagnostics and hover use the same editor checker.
 
 ### Closed: adequacy tests require witnesses and exercise parameter predicates
 
@@ -238,11 +227,12 @@ The implementation provides the following ingredients for such a translation:
    binders. The two certification defects above broke precisely this step.
 
 These ingredients give a defensible conditional conservativity argument.
-The missing implementation-wide result is a verified expansion of every
-accepted certificate, including locally quantified premises and schematic
-closures, and preservation of its conclusion. This review does not claim
-that result. Nor does the informal standard-model adequacy argument in
-`elaboration.md` by itself prove proof-theoretic conservativity.
+An explicit expansion path now covers locally quantified premises and
+schematic closures, and checks each replayed result independently. A formal
+implementation-wide proof of totality and conclusion preservation remains
+outstanding; the regression suite does not establish that theorem. Nor does
+the informal standard-model adequacy argument in `elaboration.md` by itself
+prove proof-theoretic conservativity.
 
 The absence of a total primitive-recursive evaluator for all PRF codes must
 not be confused with an obstruction to a uniform syntactic proof
@@ -270,8 +260,8 @@ The remaining structural risks are concrete:
 
 - `Lemma` remains publicly constructible for raw syntax and editor drafts.
   The production library and surface environment now use abstract
-  `Certificate` entries; extending that distinction to editor dependency
-  status is tracked above.
+  `Certificate` entries; editor entries explicitly distinguish these from
+  assumptions with transitive unproved dependencies.
 - Proof erasure is duplicated in `CoreText.termCT` and `Compile.bodyCT`.
   Both accept general `Expr` values and erase `ProofArg`; certification is
   enforced by their callers. Prefer an obligation-bearing elaboration
@@ -285,9 +275,11 @@ The remaining structural risks are concrete:
   simultaneous substitution, freshness, and agreement between an
   instantiated statement and an expanded proof's conclusion.
 
-The appropriate next architectural step is a common certificate and
-obligation representation, rather than additional special cases in each
-frontend.
+Certificate storage, replay and dependency tracking now share a common
+representation. The separate proof-erasure traversals remain a maintenance
+concern; an obligation-bearing lowering representation is a further
+architectural improvement, beyond the four follow-up stages implemented
+here.
 
 ## Evidence and scope
 
@@ -344,3 +336,11 @@ checks.
    predicate models and nonmember tests cover direct and nested parameter
    membership. After repairing the exposed constructor-generation gap, the
    surface suite passes 74 tests with 1,000 samples per property.
+4. The editor now distinguishes certified entries from draft assumptions,
+   propagates transitive conditional status, and annotates diagnostics and
+   hover. Regressions cover direct and transitive dependencies, failed
+   tactics, unused drafts, failed alternatives, shadowing and repaired roots.
+   All 25 LSP tests pass. The final `cabal build all --offline`, Fourmolu
+   checks on all 21 changed Haskell files, Cabal Gild and whitespace checks
+   pass. Together with the latest core and surface runs, this gives 500
+   passing tests and 38 passing doctest examples.

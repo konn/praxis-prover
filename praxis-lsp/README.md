@@ -24,9 +24,14 @@ library of praxis-core, `src-pra/lemmas.pra`, and the unfolding
 lemmas of `builtin` in scope and each declaration a lemma for those after it,
 as the quasiquoter reads it. Every declaration is checked as it is edited: a
 tactic which fails is an error at its position,
-and a `sorry` an information diagnostic listing the goal it stopped at, with
-the hypotheses by name. Hovering over a tactic shows the goal it faces, found
-by running the proof with that tactic replaced by `sorry`. A `.prf` document
+and a `sorry` a warning listing the unfinished goal and its hypotheses.
+Failed declarations remain available as draft assumptions for editing.
+A proof using one is reported as conditional, with its transitive unproved
+dependencies. Unused drafts and failed tactic alternatives do not affect a
+completed proof's status. Certified entries retain checked certificates.
+Hovering over a tactic shows the goal it faces, found by running the proof
+with that tactic replaced by `sorry`, together with any unproved or
+conditional status. A `.prf` document
 is checked as the quasiquoter checks it, over the empty signature. In both,
 a theorem, a rule or a definition is a definition to go to from the names
 appealing to it, and the lemmas of the library are told apart.

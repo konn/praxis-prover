@@ -27,9 +27,9 @@ tests =
         languageOf "Main.hs" @?= Nothing
     , testCase "a file which certifies reports nothing" $
         analyse Pra proofs @?= []
-    , testCase "a sorry is reported as information, with the goal" $
+    , testCase "a sorry is reported as an unproved warning, with the goal" $
         analyse Pra (proofs <> "\ntheorem open : a = 0 |- a = 0 /\\ a = 0\nby ConjR { Id } { sorry }\n")
-          @?= [Report 8 19 DiagnosticSeverity_Information "sorry: the proof stops here\n  H1 : a = 0\n  |- a = 0" Nothing]
+          @?= [Report 8 19 DiagnosticSeverity_Warning "sorry: the proof stops here\n  H1 : a = 0\n  |- a = 0" Nothing]
     , testCase "a failing tactic is reported at its position" $ do
         let reports = analyse Pra "theorem wrong : |- 2 = 3\nby refl\n"
         map reportLine reports @?= [2]
@@ -43,9 +43,35 @@ tests =
           @?= Just "H1 : b = 0\n|- b = 0"
         hoverAt (proofs <> "\ntheorem again : b = 0 |- b + 0 = b\nby Cut (b = 0) { exact H1 } { exact plusZero }\n") 8 33
           @?= Just "H1 : b = 0\nH2 : b = 0\n|- b + 0 = b"
-    , testCase "a declaration whose proof fails is still a lemma for those after it" $
+    , testCase "a failed declaration remains a draft and makes its users conditional" $
         map reportSeverity (analyse Pra "theorem later : |- 3 = 3\nby sorry\n\ntheorem uses : b = 0 |- 3 = 3\nby exact later\n")
-          @?= [DiagnosticSeverity_Information]
+          @?= [DiagnosticSeverity_Warning, DiagnosticSeverity_Warning]
+    , testCase "unproved dependencies propagate transitively" $ do
+        let source = "theorem a : |- 0 = 1\nby sorry\ntheorem b : |- 0 = 1\nby exact a\ntheorem c : |- 0 = 1\nby exact b\n"
+            reports = analyse Pra source
+        map reportSeverity reports @?= replicate 3 DiagnosticSeverity_Warning
+        map reportMessage (drop 1 reports) @?= replicate 2 "Conditional proof; unproved dependencies: a"
+        hoverAt source 6 4 @?= Just "Conditional proof; unproved dependencies: a\n\n|- 0 = 1"
+        hoverAt source 2 4 @?= Just "Unproved declaration: a\n\n|- 0 = 1"
+    , testCase "a failed tactic also leaves a tracked assumption" $ do
+        let reports = analyse Pra "theorem a : |- 0 = 1\nby refl\ntheorem b : |- 0 = 1\nby exact a\n"
+        map reportSeverity reports @?= [DiagnosticSeverity_Error, DiagnosticSeverity_Warning]
+        map reportMessage (drop 1 reports) @?= ["Conditional proof; unproved dependencies: a"]
+    , testCase "unused drafts and failed alternatives do not taint proofs" $ do
+        let source = "theorem draft : |- 0 = 1\nby sorry\ntheorem good : |- 0 = 0\nby exact draft | refl\n"
+        map reportSeverity (analyse Pra source) @?= [DiagnosticSeverity_Warning]
+    , testCase "local premises shadow draft declarations without inheriting their status" $ do
+        let source = "theorem D : |- 0 = 1\nby sorry\nrule local (D : |- 0 = 0) : |- 0 = 0\nby exact D\n"
+        map reportSeverity (analyse Pra source) @?= [DiagnosticSeverity_Warning]
+    , testCase "correcting the root proof clears downstream conditional status" $ do
+        let source = "theorem a : |- 0 = 0\nby refl\ntheorem b : |- 0 = 0\nby exact a\ntheorem c : |- 0 = 0\nby exact b\n"
+        analyse Pra source @?= []
+        hoverAt source 6 4 @?= Just "|- 0 = 0"
+    , testCase "later name shadowing cannot retroactively certify a conditional proof" $ do
+        let source = "theorem a : |- 0 = 0\nby sorry\ntheorem b : |- 0 = 0\nby exact a\ntheorem a : |- 0 = 0\nby refl\ntheorem c : |- 0 = 0\nby exact b\n"
+            reports = analyse Pra source
+        map reportSeverity reports @?= replicate 3 DiagnosticSeverity_Warning
+        map reportMessage (drop 1 reports) @?= replicate 2 "Conditional proof; unproved dependencies: a"
     , testCase "a module of the surface language is checked, a failed proof reported" $ do
         analyse Px surface @?= []
         map reportSeverity (analyse Px (surface <> "\nwrong : {a : Type} -> (xs : List a) -> xs <> Nil ≡ Nil\nwrong {a} xs = by sorry\n")) @?= [DiagnosticSeverity_Error]
