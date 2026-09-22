@@ -32,6 +32,9 @@ module Language.Praxis.Surface.CoreText (
 
   -- * From the surface
   termCT,
+  TermLowering (..),
+  standardLowering,
+  lowerTermWith,
   propText,
   Pred (..),
   membershipText,
@@ -54,7 +57,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec)
 import Language.Praxis.Surface.Syntax
+import Language.Praxis.Surface.Term qualified as Term
 import Numeric.Natural (Natural)
+import Text.Read (readMaybe)
 
 -- * Core terms
 
@@ -161,25 +166,48 @@ symbols, @S@ and the arithmetic of @Nat@ by the builtin ones.  Only
 first-order applications of globals reach the core.
 -}
 termCT :: (a -> CT) -> Expr a -> Either String CT
-termCT var = go
+termCT var e = do
+  prepared <- Term.prepareTerm e
+  t <- Term.withoutObligations prepared
+  lowerTermWith (standardLowering var) t
+
+{- | The context-dependent parts of lowering. Application arguments retain
+their computational syntax alongside the core term, for structural recursion
+checks. Proof erasure has already produced a 'Term.PendingTerm'; these hooks
+cannot encounter or discard proof arguments.
+-}
+data TermLowering a = TermLowering
+  { lowerVariable :: a -> CT
+  , lowerDictionaryValue :: Int -> Either String CT
+  , lowerApplication :: Ref -> [(Term.Term a, CT)] -> Either String CT
+  }
+
+-- | Ordinary applications and the dictionary variables used in statements.
+standardLowering :: (a -> CT) -> TermLowering a
+standardLowering var =
+  TermLowering
+    { lowerVariable = var
+    , lowerDictionaryValue = Right . CVar . valueVar . T.pack . show
+    , lowerApplication = \(Ref _ core) args -> Right (CSym core (map snd args))
+    }
+
+-- | The shared lowering traversal for statements, proof terms and function bodies.
+lowerTermWith :: TermLowering a -> Term.Term a -> Either String CT
+lowerTermWith lowering = go
   where
-    go e = case spine e of
-      (Var v, []) -> Right (var v)
-      (Var _, _ : _) -> Left "a variable applied to arguments"
-      (Nat n, []) -> Right (CNum n)
-      -- A function passed as the parameter of a schema, in braces; a value of a dictionary, its variable.
-      (Global (Ref RefStatic core), []) -> Right (CStatic core)
-      (Global (Ref RefValueParam k), []) -> Right (CVar (valueVar k))
-      (Global (Ref (RefPartial n) core), dict) -> (\d -> CPartial core d n) <$> traverse go dict
-      (Global (Ref _ core), args) -> CSym core <$> traverse go (dropProofs args)
-      -- A proof given for what cannot be, absurd p: a value of any type, 0.
-      (ProofArg {}, _) -> Right (CNum 0)
-      (h, _) -> Left ("no core term for " <> shape h)
-    shape = \case
-      Lam {} -> "a λ"
-      Case {} -> "a case expression"
-      If {} -> "an if expression"
-      _ -> "a proposition or a type"
+    go = \case
+      Term.Variable v -> Right (lowerVariable lowering v)
+      Term.Literal n -> Right (CNum n)
+      Term.Call r@(Ref kind core) args -> case (kind, args) of
+        (RefStatic, []) -> Right (CStatic core)
+        (RefValueParam, []) -> do
+          i <- maybe (Left "internal: a value of the dictionary at no position") Right (readMaybe (T.unpack core))
+          if i < 0 then Left "internal: a negative dictionary position" else lowerDictionaryValue lowering i
+        (RefValueParam, _) -> Left "a dictionary value applied to arguments"
+        (RefPartial n, _) -> (\dict -> CPartial core dict n) <$> traverse go args
+        _ -> do
+          translated <- traverse go args
+          lowerApplication lowering r (zip args translated)
 
 {- |
 The text of a core formula for a surface proposition, the bound variables of

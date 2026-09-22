@@ -7,6 +7,7 @@ import Language.Praxis.Surface.CheckTest (checkTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
 import Language.Praxis.Surface.Prelude
 import Language.Praxis.Surface.ResolveTest (resolveTests)
+import Language.Praxis.Surface.TermTest (termTests)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -20,6 +21,7 @@ main =
           mapM_ (\n -> assertBool n (Map.member n (preludeLemmas p))) ["hdCons", "tlCons", "dropConsSucc", "cvrecUnfold", "histAt", "cvInduction", "belowElim"]
       , parserTests
       , resolveTests
+      , termTests
       , checkTests
       , adequacyTests
       , packageTests

@@ -44,14 +44,12 @@ module Language.Praxis.Surface.Compile (
   ruleBinders,
 ) where
 
-import Bound (Scope, Var (..), fromScope)
 import Control.Monad (forM, unless, when)
 import Data.List (nub)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
-import Data.Void (Void, absurd)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (collapseLemma, ctorLemma)
@@ -59,8 +57,8 @@ import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (segmentRaw)
+import Language.Praxis.Surface.Term qualified as Term
 import Language.Praxis.Surface.Types (Ty (TNat))
-import Text.Read (readMaybe)
 
 -- | A function in the core: its definition, and its lemmas with their declarations, in order.
 data Compiled = Compiled
@@ -68,6 +66,8 @@ data Compiled = Compiled
   , compiledLemmas :: ![(Text, Text)]
   , compiledUnfoldings :: ![(Text, CT, CT)]
   -- ^ each unfolding lemma, with its sides
+  , compiledObligations :: ![TheoremDef]
+  -- ^ all proof obligations retained by the clauses, to be certified by the driver
   }
 
 -- | The core name of a lemma of a function: @f.#def@, @f.unfold-Nil@, …
@@ -137,7 +137,7 @@ compileFunction env fd = do
       b <- body (\i -> args !! argIndex ps i) inDef (const (Left "unreachable")) fc
       rhs <- clauseRhs ps fc
       let triples = [(CSym core (patternArgs ps fc <> dict), rhs, "refl")]
-      pure (Compiled [definition b] (unfoldings triples) (table triples))
+      pure (compiled [definition b] (unfoldings triples) (table triples))
     [c] | fdArgs fd !! c == TNat -> natColumn c
     [c] -> do
       let ctorRefs = [r | fc <- clauses, PCon r _ <- [fcPatterns fc !! c]]
@@ -181,7 +181,7 @@ compileFunction env fd = do
                   [(start, "exact " <> fromText defLemma), (tagged, "cong " <> fromText (ctorLemma ci "tag")), (branch, "exact " <> fromText (collapseLemma dat (ctorIndex ci)))]
                     <> fieldSteps ci scr (fieldVars ps fc ci) branch
             pure (lhs, rhs, calc lhs steps)
-          pure (Compiled [definition dispatch] ((defLemma, lemma defLemma vargs defLhs (dispatchAt (vargs !! c) (vargs !!)) "refl") : unfoldings proofs) (table proofs))
+          pure (compiled [definition dispatch] ((defLemma, lemma defLemma vargs defLhs (dispatchAt (vargs !! c) (vargs !!)) "refl") : unfoldings proofs) (table proofs))
         else do
           -- Course-of-values recursion on column c: the λ takes k, h and the other arguments.
           let lamParams = ["k", "h"] <> map argName others
@@ -242,7 +242,7 @@ compileFunction env fd = do
                     <> [(t, "cong " <> fromText defLemma) | (_, t) <- defSteps]
             pure (lhs, rhs, haves <> calc lhs steps)
           pure
-            ( Compiled
+            ( compiled
                 [definition (cvrec (args !! c) (map (args !!) others))]
                 ( (defLemma, lemma defLemma vargs defLhs (cvrec (vargs !! c) vothers) "refl")
                     : (betaLemma, lemma betaLemma vargs (cvrec (vargs !! c) vothers) (betaBody (vargs !! c) vothers) "refl")
@@ -269,6 +269,7 @@ compileFunction env fd = do
       | i < userArity = CVar ("v_" <> argName i)
       | otherwise = CVar (valueVar (T.pack (show (i - userArity))))
     dict = dictionaryCT slots
+    compiled eqns lemmas unfolds = Compiled eqns lemmas unfolds (fdObligations fd)
     body = bodyCT info userArity
     -- The values of the dictionary: arguments of the definition, variables of a lemma.
     inDef = CVar . argName . (userArity +)
@@ -321,7 +322,7 @@ compileFunction env fd = do
             rhs <- clauseRhs ps fc
             let lhs = CSym core (patternArgs ps fc <> dict)
             pure (lhs, rhs, calc lhs [(dispatchAt (scrOf fc) (argVar ps fc), "exact " <> fromText defLemma), (rhs, "refl")])
-          pure (Compiled [definition (ifChain (sgnT (args !! c)) [b0, bS])] ((defLemma, lemma defLemma vargs defLhs (dispatchAt (vargs !! c) (vargs !!)) "refl") : unfoldings proofs) (table proofs))
+          pure (compiled [definition (ifChain (sgnT (args !! c)) [b0, bS])] ((defLemma, lemma defLemma vargs defLhs (dispatchAt (vargs !! c) (vargs !!)) "refl") : unfoldings proofs) (table proofs))
         else do
           let lamParams = ["k", "h"] <> map argName others
               other i = CVar (argName i)
@@ -355,7 +356,7 @@ compileFunction env fd = do
                     <> (if recursiveHere then [(viaHist, "cong E"), (viaDef, "cong " <> fromText defLemma)] else [])
             pure (lhs, rhs, haves <> calc lhs steps)
           pure
-            ( Compiled
+            ( compiled
                 [definition (cvrec (args !! c) (map (args !!) others))]
                 ( (defLemma, lemma defLemma vargs defLhs (cvrec (vargs !! c) vothers) "refl")
                     : (betaLemma, lemma betaLemma vargs (cvrec (vargs !! c) vothers) (betaBody (vargs !! c) vothers) "refl")
@@ -508,7 +509,7 @@ compileFunction env fd = do
         pure (combo, (lhs, rhs, haves <> calc lhs steps))
       let named = [(functionLemma info ("unfold-" <> T.intercalate "-" [if b then "S" else "0" | b <- combo]), p) | (combo, p) <- proofs]
       pure
-        ( Compiled
+        ( compiled
             [definition (cvrec (scrOf args) (map (args !!) others))]
             ( (defLemma, lemma defLemma vargs defLhs (cvrec (scrOf vargs) vothers) "refl")
                 -- At a code of its own, so that its history is not computed out.
@@ -649,23 +650,18 @@ ruleBinders statics vs =
     zs = ["z_" <> T.pack (show i) | i <- [1 .. maximum (0 : map snd statics)]]
 
 -- | Whether a body calls the function.
-callsSelf :: Text -> Scope Int Expr Void -> Bool
-callsSelf core body = core `elem` [r | Global (Ref _ r) <- universe (fromScope body)]
-  where
-    universe e =
-      e : case e of
-        App f x -> universe f <> universe x
-        At _ x -> universe x
-        _ -> []
+callsSelf :: Text -> Term.Term a -> Bool
+callsSelf core = \case
+  Term.Call (Ref _ r) args -> r == core || any (callsSelf core) args
+  _ -> False
 
 -- | The pattern variables of a clause which are arguments of its recursive calls.
 recVars :: Text -> FunClause -> [Int]
-recVars core fc = [i | Var (B i) <- concatMap snd' (calls (fromScope (fcBody fc)))]
+recVars core fc = [i | Term.Variable i <- calls (fcBody fc)]
   where
-    snd' (_, as) = as
-    calls e = case spine e of
-      (Global (Ref _ r), as) | r == core -> [(r, map stripLocations as)] <> concatMap calls as
-      (_, as) -> concatMap calls as
+    calls = \case
+      Term.Call (Ref _ r) args -> [arg | r == core, arg <- args] <> concatMap calls args
+      _ -> []
 
 {- |
 The core term of a clause's body: the variables by the first function given,
@@ -676,30 +672,20 @@ schema.  A parameter of the dictionary, applied, is the parameter of the
 schema applied; passed on, the parameter in braces.
 -}
 bodyCT :: FunInfo -> Int -> (Int -> CT) -> (Int -> CT) -> ([(Maybe Int, CT)] -> Either String CT) -> FunClause -> Either String CT
-bodyCT info userArity var dvar rec fc = go (fromScope (fcBody fc))
+bodyCT info userArity var dvar rec fc = lowerTermWith lowering (fcBody fc)
   where
-    core = funCore info
-    own = ownDictionary (funSlots info)
-    go e = case spine e of
-      (Var (B i), []) -> Right (var i)
-      (Var (F v), _) -> absurd v
-      (Global (Ref RefStatic w), []) -> Right (CStatic w)
-      (Global (Ref RefStatic w), as) -> CSym w <$> traverse go as
-      (Global (Ref (RefPartial n) f), dict) -> (\d -> CPartial f d n) <$> traverse go dict
-      (Global (Ref RefValueParam k), []) -> dvar <$> maybe (Left "internal: a value of the dictionary at no position") Right (readMaybe (T.unpack k))
-      (Global (Ref _ r), as)
-        | r == core -> do
-            let (users, passed) = splitAt userArity (dropProofs as)
-            unless (map stripLocations passed == own) $
-              Left "a recursive call passes the dictionary on unchanged: primitive recursion keeps the parameters of its schema"
-            cts <- traverse go users
-            rec (zip (map variable users) cts)
-        | otherwise -> CSym r <$> traverse go (dropProofs as)
-      -- A proof given for what cannot be, absurd p: a value of any type, 0.
-      (ProofArg {}, _) -> Right (CNum 0)
-      (Nat n, []) -> Right (CNum n)
-      _ -> Left "no core term for this expression"
-    -- The pattern variable an argument is, when it is one.
-    variable a = case stripLocations a of
-      Var (B i) -> Just i
+    lowering =
+      (standardLowering var)
+        { lowerDictionaryValue = Right . dvar
+        , lowerApplication = \ref@(Ref _ r) args ->
+            if r == funCore info
+              then do
+                let (users, passed) = splitAt userArity args
+                unless (map (Term.toExpr . fst) passed == ownDictionary (funSlots info)) $
+                  Left "a recursive call passes the dictionary on unchanged: primitive recursion keeps the parameters of its schema"
+                rec [(variable arg, ct) | (arg, ct) <- users]
+              else lowerApplication (standardLowering var) ref args
+        }
+    variable = \case
+      Term.Variable i -> Just i
       _ -> Nothing

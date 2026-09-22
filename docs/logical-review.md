@@ -262,12 +262,14 @@ The remaining structural risks are concrete:
   The production library and surface environment now use abstract
   `Certificate` entries; editor entries explicitly distinguish these from
   assumptions with transitive unproved dependencies.
-- Proof erasure is duplicated in `CoreText.termCT` and `Compile.bodyCT`.
-  Both accept general `Expr` values and erase `ProofArg`; certification is
-  enforced by their callers. Prefer an obligation-bearing elaboration
-  result and one shared lowering traversal, with explicit hooks for
-  recursive calls and dictionaries. Adding another caller should not
-  silently create another way to drop obligations.
+- Proof erasure now lives in `Term.prepareTerm`. Its abstract `PendingTerm`
+  retains the proof-free computation and all erased obligations together.
+  Clause rewrites preserve this bundle; the compiler returns its obligations
+  to the checker. `CoreText.lowerTermWith` is the shared lowering traversal,
+  with hooks for recursive applications and dictionary values. The ordinary
+  `termCT` entry point rejects expressions with pending proof obligations.
+  The obligation-handling callers remain part of the reviewed implementation;
+  this representation is not a machine-checked proof of their correctness.
 - The shared schematic substitution has a structural path for closed
   replacements and closure reconstruction for replacements with captures.
   This distinction is justified by representation and arity, not by
@@ -275,11 +277,13 @@ The remaining structural risks are concrete:
   simultaneous substitution, freshness, and agreement between an
   instantiated statement and an expanded proof's conclusion.
 
-Certificate storage, replay and dependency tracking now share a common
-representation. The separate proof-erasure traversals remain a maintenance
-concern; an obligation-bearing lowering representation is a further
-architectural improvement, beyond the four follow-up stages implemented
-here.
+Certificate storage, replay and dependency tracking share a common
+representation. Proof erasure and lowering now also have shared
+implementations, with explicit pending obligations. Bottom elimination has
+its own expression constructor: `absurd p` occupies a value argument slot,
+whereas a proof passed to a proposition parameter is erased. Conflating the
+two previously dropped nested bottom-elimination arguments and could cause
+arity errors even under a valid hypothesis of bottom.
 
 ## Evidence and scope
 
@@ -344,3 +348,19 @@ checks.
    checks on all 21 changed Haskell files, Cabal Gild and whitespace checks
    pass. Together with the latest core and surface runs, this gives 500
    passing tests and 38 passing doctest examples.
+
+## Proof-erasure unification follow-up
+
+The two lowering traversals have been replaced by shared proof preparation
+and core lowering. Five focused erasure tests and three end-to-end checker
+tests cover obligation retention, source scopes and order, schema captures,
+unused nested values, recursive clauses and bottom elimination in value
+argument positions. The existing valid and invalid proof-argument cases
+remain covered.
+
+Validation passes 82 surface tests (with 1,000 samples per adequacy property),
+401 core tests, 25 LSP tests and 38 doctest examples. Both affected executable
+builds, Fourmolu, Cabal Gild and whitespace checks pass. The surface package
+check succeeds with its existing metadata and dependency-bound warnings.
+HLS again failed to load its cradle because its cache was outside the
+sandbox; the executed compiler checks were Cabal builds and tests.

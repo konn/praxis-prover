@@ -90,6 +90,7 @@ import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), s
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
+import Language.Praxis.Surface.Term qualified as Term
 import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), firstOrder, mergeTy, normIx, renderTy)
 
 -- * Goals
@@ -1468,17 +1469,22 @@ in the final derivation even if later computation does not use it.
 typedArg :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError ((Expr Text, Ty), Out)
 typedArg k info g e0 = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  (typed, obligations') <- either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTermWithObligations (knowEnv k) (goalDict g) (goalVars g) e))
-  checks <- forM obligations' \(prop, raw) -> do
-    let (line, col) = R.spanStart (location raw)
-        -- Proof arguments can themselves use induction. Their auxiliary
-        -- declarations have a namespace distinct from the enclosing proof
-        -- and from every other argument's source position.
-        local = info {thmCore = thmCore info <> "_arg_L" <> T.pack (show line) <> "C" <> T.pack (show col)}
-    proof <- termProof k local 0 g {goalConcl = prop} raw
-    stated <- either (Left . EngineError (location raw)) Right (formula prop)
-    pure proof {outTactic = "Cut (" <> stated <> ") { " <> outTactic proof <> " } { skip }; "}
-  pure (typed, Out (mconcat (map outTactic checks)) (concatMap outAux checks))
+  (prepared, ty) <- either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTermWithObligations (knowEnv k) (goalDict g) (goalVars g) e))
+  checked <-
+    Term.traverseObligations
+      ( \(prop, raw) -> do
+          let (line, col) = R.spanStart (location raw)
+              -- Proof arguments can themselves use induction. Their auxiliary
+              -- declarations have a namespace distinct from the enclosing proof
+              -- and from every other argument's source position.
+              local = info {thmCore = thmCore info <> "_arg_L" <> T.pack (show line) <> "C" <> T.pack (show col)}
+          proof <- termProof k local 0 g {goalConcl = prop} raw
+          stated <- either (Left . EngineError (location raw)) Right (formula prop)
+          pure proof {outTactic = "Cut (" <> stated <> ") { " <> outTactic proof <> " } { skip }; "}
+      )
+      prepared
+  let checks = Term.obligations checked
+  pure ((Term.toExpr (Term.computation checked), ty), Out (mconcat (map outTactic checks)) (concatMap outAux checks))
 
 -- | The type parameters of a theorem which the types of the arguments given determine, by the types of its binders.
 assignment :: [Ty] -> [Ty] -> Map Int Ty

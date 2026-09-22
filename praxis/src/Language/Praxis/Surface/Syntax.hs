@@ -33,7 +33,6 @@ module Language.Praxis.Surface.Syntax (
   apps,
   isProofArg,
   dropProofs,
-  proofArgs,
   mapGlobals,
   globalsOf,
 
@@ -172,6 +171,8 @@ data Expr a
     checked apart
     -}
     ProofArg (Expr a) !(Irrelevant (Located R.Expr))
+  | -- | elimination of bottom as a value; unlike a proof argument, it occupies a runtime slot
+    Absurd !(Irrelevant (Located R.Expr))
   deriving stock (Functor, Foldable, Traversable)
 
 instance Applicative Expr where
@@ -199,6 +200,7 @@ instance Monad Expr where
     Universe -> Universe
     Hole -> Hole
     ProofArg p r -> ProofArg (p >>= k) r
+    Absurd r -> Absurd r
 
 -- | α-equivalence: binders compare by index, hints and spans not at all.
 instance Eq1 Expr where
@@ -225,6 +227,7 @@ instance Eq1 Expr where
       go Universe Universe = True
       go Hole Hole = True
       go (ProofArg p _) (ProofArg q _) = go p q
+      go Absurd {} Absurd {} = True
       go _ _ = False
 
 -- | For debugging: the constructors, spans left out.
@@ -252,6 +255,7 @@ instance Show1 Expr where
         Universe -> showString "Universe"
         Hole -> showString "Hole"
         ProofArg p _ -> con d "ProofArg" [flip go p]
+        Absurd _ -> showString "Absurd"
       scope :: forall b. (Show b) => Scope b Expr a -> Int -> ShowS
       scope b d = liftShowsPrec sp sl d b
       con d name fields = showParen (d > 10) (showString name . foldr (\f acc -> showChar ' ' . f 11 . acc) id fields)
@@ -293,14 +297,6 @@ isProofArg = \case
 dropProofs :: [Expr a] -> [Expr a]
 dropProofs = filter (not . isProofArg)
 
--- | The proofs an expression gives, in order: each proposition, and the proof as it was written.
-proofArgs :: Expr a -> [(Expr a, Located R.Expr)]
-proofArgs = \case
-  ProofArg p (Irrelevant r) -> [(p, r)]
-  App f x -> proofArgs f <> proofArgs x
-  At _ e -> proofArgs e
-  _ -> []
-
 -- | Every global reference replaced as the function says, under binders too.
 mapGlobals :: (Ref -> Ref) -> Expr a -> Expr a
 mapGlobals f = go
@@ -326,6 +322,7 @@ mapGlobals f = go
       Universe -> Universe
       Hole -> Hole
       ProofArg p r -> ProofArg (go p) r
+      Absurd r -> Absurd r
 
 -- | The global references of an expression, under binders too.
 globalsOf :: Expr a -> [Ref]

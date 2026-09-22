@@ -14,6 +14,9 @@ sides of the unfolding lemmas — as the certified lemmas describe its symbols:
 constructors as free symbols (@C.#tag@, @C.#field-j@), functions by their
 unfolding lemmas, the membership of a code by its constructor and fields
 (@C.#intro@, @T.#inversion@), and the builtins by the kernel's own evaluator.
+Function bodies use the elaborated computational fragment after obligation
+extraction. Erasure itself is checked separately by TermTest and the checker
+regressions; these differential interpreters do not independently test it.
 On random values,
 
 * each function commutes with the encoding: @f̂ (e v̄) = e (f v̄)@;
@@ -63,7 +66,7 @@ import Language.Praxis.PRA.Syntax.Parser (parseTerm, plainScope)
 import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..), checkSource, headerName)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.CoreText (CT (..), isParameter)
-import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule)
+import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule, fcBody)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
 import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), TheoremInfo (..), emptyEnv, indexFunctionCores, renderQualName)
@@ -74,6 +77,7 @@ import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax
+import Language.Praxis.Surface.Term qualified as Term
 import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), normIx)
 import Numeric.Natural (Natural)
 import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, elements, expectFailure, forAll, ioProperty, label, property, scale, sized, (===))
@@ -374,12 +378,12 @@ evalRef ld = go
       (Global (Ref RefBuiltin b), as) -> arithmetic b (map (nat . go) as)
       (Global (Ref RefFunction f), as) -> call f (map go (dropProofs as))
       -- A proof standing as a value, as absurd's does: 0, as the code has it.
-      (ProofArg {}, []) -> VNat 0
+      (Absurd {}, []) -> VNat 0
       (h, _) -> error ("not a term of the fragment: " <> show (fmap (const ()) h))
     call f vs = case Map.lookup f (ldFuns ld) of
       Nothing -> error ("no function " <> T.unpack f)
       Just fd -> case mapMaybe (\fc -> (,) fc <$> matchAll (fcPatterns fc) vs) (fdClauses fd) of
-        (fc, bound) : _ -> go (instantiate (Var . (bound !!)) (fmap absurd (fcBody fc)))
+        (fc, bound) : _ -> go (Term.toExpr (fmap (bound !!) (fcBody fc)))
         [] -> error ("no clause of " <> T.unpack f <> " matches")
 
 -- | The arithmetic of @Nat@, as the surface language means it: subtraction is truncated.

@@ -77,6 +77,7 @@ library
     Language.Praxis.Surface.Shape
     Language.Praxis.Surface.Syntax
     Language.Praxis.Surface.Syntax.Raw
+    Language.Praxis.Surface.Term
     Language.Praxis.Surface.Types
 
   -- cabal-gild: discover src --include=src/**/Internal.hs --include=src/**/Internal/**/*.hs
@@ -124,6 +125,7 @@ test-suite praxis-test
     Language.Praxis.Surface.CheckTest
     Language.Praxis.Surface.ParserTest
     Language.Praxis.Surface.ResolveTest
+    Language.Praxis.Surface.TermTest
 
   ghc-options:
     -threaded

@@ -326,13 +326,13 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
     -- A function compiled and defined, its unfolding lemmas certified and its clauses' obligations proved; Left when refused, reported.
     defineFunction fd r = case compileFunction env fd of
       Left err -> Left (report (fdSpan fd) SevError (funName fd <> ": " <> err) r)
-      Right (Compiled eqns lemmas unfolds) -> case define eqns r of
+      Right (Compiled eqns lemmas unfolds obligations) -> case define eqns r of
         Left (r1, err) -> Left (report (fdSpan fd) SevError ("the definition of " <> funName fd <> " was rejected: " <> err) r1)
         Right r1 ->
           let r2 = certifyAll (fdSpan fd) r1 lemmas
               certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
            in -- Then what the proofs its clauses give must prove.
-              Right (foldl proveAndCertify (r2 {runUnfoldings = runUnfoldings r2 <> certified}) (fdObligations fd))
+              Right (foldl proveAndCertify (r2 {runUnfoldings = runUnfoldings r2 <> certified}) obligations)
 
     -- A function's lemmas about its results: its closure, their indices, and the specifications asked of it.
     finishFunction fd r = (specify fd (indexed fd (closure fd (r {runObligations = obligationFacts r fd})))) {runObligations = []}

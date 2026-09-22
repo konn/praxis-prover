@@ -360,6 +360,27 @@ erases the argument. Statements currently reject proof arguments because
 statement elaboration does not yet support certifying their obligations. In
 particular, `absurd rfl` cannot become a numeral in a theorem's statement.
 
+`Term.prepareTerm` performs proof erasure once, returning an abstract
+`PendingTerm`: a first-order computation and all the propositions and source
+proofs removed from it. A function clause stores this bundle, with each
+obligation translated to a theorem under the clause's own hypotheses.
+Dictionary pruning rewrites the computation while retaining its obligations.
+`compileFunction` includes those obligations in its result, and the checker
+certifies them along with the generated definitions and lemmas.
+
+Statements and function bodies share `CoreText.lowerTermWith`. Its input is
+the proof-free `Term` syntax; context-specific hooks interpret variables,
+dictionary values and recursive applications. `CoreText.termCT`, the entry
+point for general expressions in statements, refuses pending obligations.
+In proof terms, `Engine.typedArg` instead translates every obligation into
+a derivation included through `Cut` before returning the computation.
+
+Proof parameters and elimination of bottom have distinct syntax nodes.
+For `f : P → Nat → Nat`, `f p n` compiles to `f_core n`, retaining the
+obligation `p : P`. By contrast, `g (absurd p)` retains its value argument
+and compiles to `g_core 0`, retaining `p : ⊥`. The latter argument must not
+be removed from the application's runtime arity.
+
 A theorem `{ā} → (x₁ : T₁) → … → A` becomes, by `Engine.statementGoal`, the
 core sequent
 
@@ -482,14 +503,14 @@ quantifies over nothing less: every value has exactly one index, so a
 statement for all values and all the indices they have is one for each value
 at its own.
 
-Each step is an induction on syntax or on finite trees, and a free-variable
-theorem is read as its numeric instances: the argument is finitary, the kind
-of reasoning Hilbert's metamathematics allows. It could be formalised in PRA
-module by module, but not uniformly — surface functions reach every
-primitive recursive function, and no primitive recursive function evaluates
-them all, so a uniform statement would need evaluators indexed by fuel — and
-nothing would be gained: a formal proof would rest on a semantics written
-down by hand, as this one does.
+Each step uses induction on syntax or finite trees, and a free-variable
+theorem is read as its numeric instances. This is an informal adequacy
+argument, not a formal verification of the implementation. A uniform
+primitive-recursive evaluator for all primitive-recursive programs does
+not exist; that does not preclude a uniform syntactic proof translation.
+Verifying such a translation and its agreement with statements is the
+separate proof-theoretic conservativity obligation described in
+[the logical review](logical-review.md#conservativity-over-pra).
 
 Membership checks the fields of a type parameter by the parameter's
 predicate, and, at an indexed type, the indices of the constructors'
@@ -502,7 +523,7 @@ where a statement needs the finer typing.
 
 ### Testing the translation
 
-The argument is proved once; its implementation is tested.
+The implementation is tested against the informal argument above.
 `praxis/test/Language/Praxis/Surface/AdequacyTest.hs` runs two interpreters
 on random values. One is a reference semantics of the elaborated surface
 syntax: trees, functions run by their clauses, no codes. The other evaluates
@@ -511,7 +532,11 @@ and the sides of the unfolding lemmas — as the certified lemmas describe its
 symbols: constructors as free symbols (I), functions by their unfolding
 lemmas (U), membership by a code's constructor, its fields and the equations
 of indices of its entries (M and the inversion), and the builtins by the
-kernel's own evaluator. It checks lemma 1
+kernel's own evaluator. Function bodies are read from the computational
+fragment after obligation extraction; these differential tests do not
+independently validate proof erasure. `TermTest` and the end-to-end checker
+regressions cover erased obligations, nested bottom elimination, and rejected
+unchecked proofs separately. The adequacy suite checks lemma 1
 for every function, and lemma 2 and the membership hypotheses for every
 statement of `test/data/adequacy.px` — statements true and false, over every
 relation, connective and bounded quantifier — and of `list.px`, `gadt.px`

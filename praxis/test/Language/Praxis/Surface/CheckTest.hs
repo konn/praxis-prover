@@ -149,6 +149,53 @@ checkTests =
             good = checkSource p "obligations.px" valid
         errors good @?= []
         assertBool "the valid method's obligation certified" (any ("#obligation" `T.isInfixOf`) (checkedTheorems good))
+    , testCase "bottom elimination retains value slots in functions and constructors" $ do
+        p <- either assertFailure pure prelude
+        let src =
+              T.unlines
+                [ "module BottomValues where"
+                , "ident : Nat -> Nat"
+                , "ident n = n"
+                , "nested : ⊥ -> Nat"
+                , "nested h = ident (absurd h)"
+                , "data Box = box Nat"
+                , "wrapped : ⊥ -> Box"
+                , "wrapped h = box (absurd h)"
+                ]
+            c = checkSource p "bottom-values.px" src
+        errors c @?= []
+        length (filter ("#obligation" `T.isInfixOf`) (checkedTheorems c)) @?= 2
+    , testCase "unused nested values still require their supplied proofs" $ do
+        p <- either assertFailure pure prelude
+        let source proposition =
+              T.unlines
+                [ "module NestedObligations where"
+                , "needs : (" <> proposition <> ") -> Nat"
+                , "needs h = 1"
+                , "ignore : Nat -> Nat"
+                , "ignore n = 0"
+                , "nested : Nat"
+                , "nested = ignore (needs rfl)"
+                ]
+            bad = checkSource p "nested.px" (source "0 ≡ 1")
+            good = checkSource p "nested.px" (source "0 ≡ 0")
+        assertBool "an unused proof obligation was lost" (not (null (errors bad)))
+        errors good @?= []
+        assertBool "the nested obligation was certified" (any ("#obligation" `T.isInfixOf`) (checkedTheorems good))
+    , testCase "recursive clauses retain obligations under their own hypotheses" $ do
+        p <- either assertFailure pure prelude
+        let src =
+              T.unlines
+                [ "module RecursiveObligations where"
+                , "keep : (0 ≡ 0) -> Nat -> Nat"
+                , "keep h n = n"
+                , "walk : (0 ≡ 0) -> Nat -> Nat"
+                , "walk h 0 = keep h 0"
+                , "walk h (S n) = keep h (walk h n)"
+                ]
+            c = checkSource p "recursive-obligations.px" src
+        errors c @?= []
+        length (filter ("#obligation" `T.isInfixOf`) (checkedTheorems c)) @?= 3
     , testCase "an occurs check crosses constructors, but never assumes a function preserves its argument" $ do
         let n = IxParam 0
         case unifyIx (const True) n (IxSucc (IxFun "sub" [n, IxNat 1])) emptySubst of
