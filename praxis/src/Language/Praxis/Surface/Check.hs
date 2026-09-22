@@ -44,6 +44,7 @@ module Language.Praxis.Surface.Check (
 
   -- * The core state
   Core (..),
+  coreLemmas,
   initialCore,
   addDefinitions,
   certifyDecl,
@@ -59,12 +60,13 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Language.Praxis.PRA.Certificate
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (parseEquations)
 import Language.Praxis.PRA.PrimitiveRecursion.Environment (CompiledEnv, compileDefinitions, environmentSignature, extendEnvironment)
 import Language.Praxis.PRA.Signature (Signature)
 import Language.Praxis.PRA.Tactic qualified as PRA
 import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
-import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
+import Language.Praxis.PRA.Tactic.Quote (SchemaName, renderSchemaTacticError, schemaScope)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
@@ -116,15 +118,19 @@ data Core = Core
   { coreCompiled :: !CompiledEnv
   , coreSignature :: !Signature
   , coreEnv :: !PRA.Env
-  , coreLemmas :: !(Map String (PRA.Lemma SchemaName))
+  , coreCertificates :: !(Map String Certificate)
   , coreMembership :: !(Map Text (Text, [Int]))
   -- ^ the membership predicate of each data type encoded, by its qualified name, with the parameters it takes the predicates of
   , coreVariadic :: !(Set Text)
   -- ^ the membership predicates which are variadic templates, taking what a closure given as their parameter captures
   }
 
+-- | The statement view is derived from retained, checked certificates.
+coreLemmas :: Core -> Map String (PRA.Lemma SchemaName)
+coreLemmas = fmap certificateLemma . coreCertificates
+
 initialCore :: Prelude -> Core
-initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeLemmas p) Map.empty Set.empty
+initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeCertificates p) Map.empty Set.empty
 
 -- | Extend the core with definitions, as @prf@ equations.
 addDefinitions :: [Text] -> Core -> Either String Core
@@ -142,8 +148,8 @@ certifyDecl text core = do
   decls <- first displayException (parseDeclsIn (fmap (map snd . PRA.lemmaMetas) (coreLemmas core)) (schemaScope (coreSignature core)) (T.unpack text))
   foldM one core decls
   where
-    one c d = case checkDecl (coreEnv c) (coreLemmas c) d of
-      Right (_, lemma) -> Right c {coreLemmas = Map.insert (declName d) lemma (coreLemmas c)}
+    one c d = case checkCertificate (coreEnv c) (coreCertificates c) d of
+      Right certificate -> Right c {coreCertificates = Map.insert (declName d) certificate (coreCertificates c)}
       Left err -> Left (renderSchemaTacticError (coreSignature c) err)
 
 -- * The build

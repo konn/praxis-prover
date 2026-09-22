@@ -77,7 +77,7 @@ import Language.Praxis.Package.Build (ModuleResult (..), checkFile, componentId,
 import Language.Praxis.Surface.Check qualified as Surface
 import Language.Praxis.Surface.Engine (Knowledge (..))
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
+import Language.Praxis.Surface.Prelude (Prelude (..), prelude, preludeLemmas)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..), Span (..))
 import System.Directory (canonicalizePath)
 import System.Exit (ExitCode (..))

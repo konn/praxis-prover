@@ -72,8 +72,8 @@ but @var@ and @term@ ones.  In the proof of the rule it is a lemma, appealed
 to at instances of its variables, by @exact@, @cong@, @rewrite@ or
 @symmetry@, as a theorem is, the metavariables of the rule standing for
 themselves; an appeal to the rule leaves it as a goal with its variables
-free, renamed apart from what the metavariables stand for.  Only a
-declaration checked at run time may have one; the quasiquoter refuses it.
+free, renamed apart from what the metavariables stand for.  The quasiquoter exports a quantified premise as a function taking one term
+argument per local variable and returning its proof.
 
 A rule declares its eigenvariable conditions after its conclusion: @where n
 not free in Γ, t@, or @where n ∉ Γ, t@, for a @var@ metavariable @n@ and

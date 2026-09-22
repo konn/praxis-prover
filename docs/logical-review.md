@@ -151,19 +151,30 @@ predicates or distinguish every missing membership premise. Add inhabited
 and empty predicates, nontrivial data-type instances, and nested container
 instances. These are testing gaps, not demonstrated new false theorems.
 
-### P2: runtime certification and exported proof generation have different domains
+### Closed: runtime certification and exported proof generation now cover quantified premises
 
-`Tactic.Quote.checkDecl` supports a rule premise with its own universally
-instantiable variables. `compileDecl` explicitly rejects that same binder
-form. The surface language uses such premises for laws and closure
-conditions. Consequently, the existing quasiquotation path cannot serve as
-a uniform expansion/replay check for all runtime-certified declarations.
+`Certificate` is an abstract checked entry retaining the `Free Step`
+derivation and its lexical dependency certificates. The runtime library,
+surface prelude and surface checker store these entries; statement maps are
+projections for parsing and tactic search. A failed declaration cannot be
+inserted through this API. Dependencies are retained by identity, so later
+shadowing does not rewrite an earlier proof.
 
-**Recommendation:** give locally quantified premises an explicit place in
-the common proof representation and support the same representation in
-certification and expansion. Until then, document this as a coverage limit
-on proof replay. A statement certified through this route should not be
-described as having been independently replayed by the primitive checker.
+`replayCertificate` instantiates the retained derivation, substitutes actual
+premise proofs, expands appeals recursively, and checks the resulting
+primitive proof and its conclusion with `inferConclusionIn`. It uses the
+statement instantiator for proof fields, including schematic closures.
+Supplied premise proofs are checked against their instantiated sequents.
+Replay is explicit: ordinary checking retains a certificate without eagerly
+expanding its dependency DAG.
+
+The quasiquoter now represents a universally quantified premise by a proof
+function taking one term per local variable. Calls abstract the premise
+proof by capture-avoiding substitution. Runtime replay and export share
+premise alpha-renaming, substitution-template freshening, schematic term
+substitution and primitive proof transformations. Haskell quotation remains
+a specialized code-generation backend; independent kernel replay is the
+check on its output, not an assumption that generation is correct.
 
 ## Conservativity over PRA
 
@@ -230,11 +241,10 @@ demonstrated sources of disagreement.
 
 The remaining structural risks are concrete:
 
-- `Lemma` is a publicly constructible statement record, and declaration
-  environments carry no checked provenance or proof body. The API relies
-  on callers to distinguish certified lemmas, local premises and draft
-  assumptions. An abstract certified-entry type would make the obligation
-  explicit without removing raw syntax for parsing and diagnostics.
+- `Lemma` remains publicly constructible for raw syntax and editor drafts.
+  The production library and surface environment now use abstract
+  `Certificate` entries; extending that distinction to editor dependency
+  status is tracked above.
 - Proof erasure is duplicated in `CoreText.termCT` and `Compile.bodyCT`.
   Both accept general `Expr` values and erase `ProofArg`; certification is
   enforced by their callers. Prefer an obligation-bearing elaboration
@@ -280,3 +290,15 @@ Executed validation after the repairs:
 Existing warnings and the unavailable HLS cradle do not count as successful
 HLS verification; package builds and tests provide the executed compiler
 checks.
+
+## Follow-up stages
+
+1. Certificate retention and quantified-premise replay are implemented in
+   `Language.Praxis.PRA.Certificate`, the runtime library and the surface
+   checker. Four focused regressions cover runtime replay, exported proof
+   functions, incorrect supplied premises and lexical dependency retention.
+   The core suite passes 393 tests and all 38 doctest examples. The initial
+   doctest run lacked the local package in Cabal's environment; rebuilding
+   the library restored it, and the complete rerun passed.
+   The surface suite (67 tests), LSP suite (19 tests), formatting checks and
+   core package check also pass after this change.

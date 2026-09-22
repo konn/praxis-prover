@@ -98,7 +98,7 @@ module Language.Praxis.PRA.Tactic.Quote (
 
 import Control.Exception (displayException)
 import Control.Monad (foldM, unless, when)
-import Control.Monad.Free (Free (..), iter)
+import Control.Monad.Free (Free (..))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Writer.Strict (WriterT, runWriterT, tell)
 import Data.Char (isLower)
@@ -106,7 +106,6 @@ import Data.Foldable (toList)
 import Data.Functor.Foldable (cata)
 import Data.HashMap.Strict (HashMap)
 import Data.HashMap.Strict qualified as HM
-import Data.HashSet (HashSet)
 import Data.HashSet qualified as HS
 import Data.Hashable (Hashable (..))
 import Data.List (intercalate, sort)
@@ -125,6 +124,7 @@ import Data.Type.Ordinal (od)
 import GHC.Generics (Generic)
 import GHC.TypeNats (KnownNat, SomeNat (..), natVal, someNatVal)
 import Language.Haskell.TH (Code, Dec, DocLoc (..), Exp, Loc (..), Name, Q, Type, joinCode, litT, location, mkName, nameBase, newName, numTyLit, putDoc, unTypeCode, unsafeCodeCoerce)
+import Language.Haskell.TH qualified as TH
 import Language.Haskell.TH.Datatype (ConstructorInfo (..), DatatypeInfo (..), reifyDatatype)
 import Language.Haskell.TH.Desugar qualified as D
 import Language.Haskell.TH.Quote (QuasiQuoter (..))
@@ -136,7 +136,7 @@ import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.PrimitiveRecursion.Quote (liftSignature, quoteFile)
 import Language.Praxis.PRA.PrimitiveRecursion.TH.Internal (liftSizedWith)
 import Language.Praxis.PRA.Proof
-import Language.Praxis.PRA.Proof.Transform (argNames, identityProof, substAtomic, substFormula, substProof, weakenProof)
+import Language.Praxis.PRA.Proof.Transform (identityProof, substAtomic, substFormula, substProof, weakenProof)
 import Language.Praxis.PRA.Rule qualified as R
 import Language.Praxis.PRA.Signature
 import Language.Praxis.PRA.Syntax
@@ -325,7 +325,7 @@ praQuoterIn lib =
         (goal, tac) <- either (fail . displayException) pure (parseGoalIn (lemmaSorts lemmas) (schemaScope sig [] []) src)
         proof <- either (fail . renderSchemaTacticError sig) pure (proveOpenWith env (fmap entryLemma lemmas) Map.empty goal tac)
         sigName <- newName "sig"
-        (body, flags) <- runWriterT (liftProof (LiftEnv sig sigName Map.empty Map.empty Map.empty lemmas) proof)
+        (body, flags) <- runWriterT (liftProof (LiftEnv sig sigName Map.empty Map.empty Map.empty Map.empty lemmas) proof)
         signatureBinding sig sigName flags (pure body)
     , quoteDec = \src -> do
         (declared, lemmas) <- inScope
@@ -437,8 +437,6 @@ compileDecl sig global lemmas decl = do
       prems = Map.fromList [(n, s) | PremiseBinder n _ s <- binders]
   unless (startsLower dname) $
     fail ("pra: " <> dname <> " is not a Haskell variable name")
-  unless (null [() | PremiseBinder _ (_ : _) _ <- binders]) $
-    fail ("pra: " <> dname <> " has a premise over variables of its own, which only a declaration checked at run time may have")
   (checked, lemma) <- either (fail . renderSchemaTacticError sig) pure (checkDecl env0 (fmap entryLemma lemmas) decl)
 
   -- One parameter per binder, in order.
@@ -448,16 +446,16 @@ compileDecl sig global lemmas decl = do
 
   -- The object variables the script introduces, to be chosen fresh at run
   -- time when there are metavariables whose instantiations could clash.
-  let stated = HS.unions (map schemaNames (goalSequent (declGoal decl) : Map.elems prems))
+  let stated = HS.unions (map goalNames (goalSequent (declGoal decl) : Map.elems prems))
       proof = freshenSubstitutions stated checked
-      internal = sort [s | Obj s <- HS.toList (proofNames proof), not (Obj s `HS.member` stated)]
+      internal = sort [s | Obj s <- HS.toList (derivationNames proof), not (Obj s `HS.member` stated)]
       runtimeFresh = not (null metas) && not (null internal)
   internalNames <- traverse (newName . stem) internal
   sigName <- newName "sig"
   let objParams
         | runtimeFresh = Map.fromList (zip internal internalNames)
         | otherwise = Map.empty
-      env = LiftEnv sig sigName metaParams premParams objParams lemmas
+      env = LiftEnv sig sigName metaParams premParams (Map.fromList (lemmaLocals lemma)) objParams lemmas
 
   (body, flags) <- runWriterT (liftProof env proof)
   usedName <- newName "used"
@@ -526,7 +524,7 @@ binderType a = \case
     R.AtomS -> [t|Atomic $(QTH.varT a)|]
     R.FormS -> [t|Formula $(QTH.varT a)|]
     R.CtxS -> [t|Multiset (Formula $(QTH.varT a))|]
-  PremiseBinder {} -> [t|Proof $(QTH.varT a)|]
+  PremiseBinder _ xs _ -> foldr (\_ rest -> [t|Term $(QTH.varT a) -> $rest|]) [t|Proof $(QTH.varT a)|] xs
 
 -- | Every name in the actual arguments, and those the statement fixes, as an expression.
 usedNames :: LiftEnv -> [Binder SchemaName] -> [String] -> Q Exp
@@ -538,47 +536,6 @@ usedNames env binders fixed =
       R.VarS -> [|HS.singleton $p|]
       R.CtxS -> [|HS.fromList (foldMap toList $p)|]
       _ -> [|HS.fromList (toList $p)|]
-
--- | The names occurring in a sequent.
-schemaNames :: Sequent SchemaName -> HashSet SchemaName
-schemaNames = goalNames
-
-{- |
-The names occurring in the arguments of a proof, those of the appeals to
-lemmas included: their arguments, the terms substituted for the free
-variables of the lemma and the hypotheses weakened in, but not the free
-variables themselves, which are the lemma's.
--}
-proofNames :: Free (Step SchemaName) h -> HashSet SchemaName
-proofNames = iter step . fmap (const HS.empty)
-  where
-    step = \case
-      RuleStep s -> let (args, subs) = stepFields s in HS.unions (map argNames args <> subs)
-      LemmaStep appeal subs ->
-        HS.unions
-          ( map argNames (appealArgs appeal)
-              <> [HS.fromList (toList t) | (_, t) <- appealSubst appeal]
-              <> [argNames (ArgCtx (appealWeakening appeal))]
-              <> subs
-          )
-      WeakenStep extra sub -> HS.union (argNames (ArgCtx extra)) sub
-
-{- |
-Alpha-rename the variable bound by each substitution template.  Renaming the
-whole proof would also change free occurrences in the statement and premises;
-leaving the binder unchanged would let it capture names inside metavariables
-when those are instantiated.  The new names are internal, so the runtime
-freshening in 'compileDecl' also keeps them apart from the actual arguments.
--}
-freshenSubstitutions :: HashSet SchemaName -> Free (Step SchemaName) h -> Free (Step SchemaName) h
-freshenSubstitutions stated proof = go proof
-  where
-    used = stated <> proofNames proof
-    go (Pure h) = Pure h
-    go (Free (RuleStep (SubstF x t s p d))) =
-      let x' = freshen used x
-       in Free (RuleStep (SubstF x' t s (subst x (Var x') p) (go d)))
-    go (Free step) = Free (fmap go step)
 
 -- | The inference figure attached to a generated binding.
 figure :: Signature -> Decl SchemaName -> String
@@ -606,6 +563,7 @@ data LiftEnv = LiftEnv
   -- ^ the signature bound at run time, when a proof needs it
   , leMeta :: Map (R.Sort, String) Name
   , lePremise :: Map String Name
+  , leLocals :: Map String [SchemaName]
   , leObj :: Map String Name
   -- ^ object variables bound at run time
   , leLemmas :: Map String LemmaEntry
@@ -829,6 +787,14 @@ liftProof env proof = do
           args' <- traverse (liftArg env) args
           subs' <- traverse go subs
           lift (foldl (\f x -> [|$f $(pure x)|]) (QTH.conE con) (args' <> subs'))
+        Free (LemmaStep appeal [])
+          | Just p <- Map.lookup (appealName appeal) (lePremise env)
+          , Just xs <- Map.lookup (appealName appeal) (leLocals env) -> do
+              terms <- traverse (liftTerm env . (\x -> maybe (Var x) id (lookup x (appealSubst appeal)))) xs
+              need NeedsFresh
+              extra <- liftContext env (appealWeakening appeal)
+              let applied = foldl (\f x -> [|$f $(unTypeCode x)|]) (QTH.varE p) terms
+              lift [|weakenProof $(unTypeCode extra) $applied|]
         Free (LemmaStep appeal subs) -> do
           entry <- maybe (failL ("no lemma named " <> appealName appeal)) pure (Map.lookup (appealName appeal) (leLemmas env))
           case entrySource entry of
@@ -838,7 +804,25 @@ liftProof env proof = do
               -- The constraints of the binding are the caller's too; the signature it binds is its own.
               mapM_ need (Set.toList (Set.delete NeedsSignature flags))
               args' <- traverse (liftArg env) (appealArgs appeal)
-              subs' <- traverse go subs
+              subs' <-
+                sequence
+                  [ do
+                      body <- go sub
+                      terms <- traverse (const (lift (newName "local"))) renaming
+                      pairs <-
+                        sequence
+                          [ do
+                              v <- liftName env chosen
+                              pure [|($(unTypeCode v), $(QTH.varE term))|]
+                          | ((_, chosen), term) <- zip renaming terms
+                          ]
+                      if null terms
+                        then pure body
+                        else do
+                          need NeedsFresh
+                          lift (TH.lamE (map TH.varP terms) [|substProof $(QTH.listE pairs) $(pure body)|])
+                  | (sub, renaming) <- zip subs (premiseRenamings (entryLemma entry) appeal)
+                  ]
               let applied = foldl (\f x -> [|$f $(pure x)|]) (QTH.varE binding) (args' <> subs')
               substituted <- case appealSubst appeal of
                 [] -> pure applied

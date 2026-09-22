@@ -10,6 +10,7 @@ import Control.Lens.Extras (is)
 import Data.Hashable (hash)
 import Data.Sized (pattern Nil, pattern (:<))
 import Data.Type.Ordinal (od)
+import Language.Praxis.PRA.CertificateTest (certificateTests)
 import Language.Praxis.PRA.ElaborationTest (elaborationTests)
 import Language.Praxis.PRA.Equality
 import Language.Praxis.PRA.PRFQuoteTest (prfQuoteTests)
@@ -32,7 +33,8 @@ main =
   defaultMain $
     testGroup
       "praxis-core"
-      [ prfQuoteTests
+      [ certificateTests
+      , prfQuoteTests
       , elaborationTests
       , primitiveRecursionTests
       , evalableTermTests

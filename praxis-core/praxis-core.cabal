@@ -86,6 +86,7 @@ library
   exposed-modules:
     Data.Multiset
     Language.Praxis.Name
+    Language.Praxis.PRA.Certificate
     Language.Praxis.PRA.Equality
     Language.Praxis.PRA.Lemmas
     Language.Praxis.PRA.Library
@@ -147,6 +148,7 @@ test-suite praxis-core-test
   hs-source-dirs: test
   -- cabal-gild: discover test --exclude=test/Test.hs
   other-modules:
+    Language.Praxis.PRA.CertificateTest
     Language.Praxis.PRA.ElaborationTest
     Language.Praxis.PRA.PRFQuoteSupport
     Language.Praxis.PRA.PRFQuoteTest

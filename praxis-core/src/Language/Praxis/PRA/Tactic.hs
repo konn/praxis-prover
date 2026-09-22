@@ -71,6 +71,10 @@ module Language.Praxis.PRA.Tactic (
   Appeal (..),
   Partial,
   instantiateLemma,
+  instantiateArguments,
+  premiseRenamings,
+  derivationNames,
+  freshenSubstitutions,
   certify,
 
   -- * Errors
@@ -88,7 +92,7 @@ import Control.Applicative ((<|>))
 import Control.Exception (displayException)
 import Control.Lens ((^?))
 import Control.Monad (foldM, forM_, join, unless, when, (>=>))
-import Control.Monad.Free (Free (..))
+import Control.Monad.Free (Free (..), iter)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.State.Strict (StateT, evalStateT, get, put)
 import Data.Bifunctor (first)
@@ -1707,7 +1711,17 @@ every instance of them, whatever the metavariables stand for.  The renaming
 depends on the appeal only, so the certifier makes it again.
 -}
 premisesApart :: (Schematic a) => Lemma a -> Appeal a -> [Sequent a]
-premisesApart lemma appeal = [apart (localsOf lemma n) s | (n, s) <- lemmaPremises lemma]
+premisesApart lemma appeal =
+  [ foldr (MS.insertOne . substFormula sigma) MS.empty hyps :|- substFormula sigma c
+  | ((_, hyps :|- c), pairs) <- zip (lemmaPremises lemma) (premiseRenamings lemma appeal)
+  , let sigma = HM.fromList [(x, Var y) | (x, y) <- pairs]
+  ]
+
+{- | The alpha-renaming of each premise's universally quantified variables.
+Replay uses the same renaming as statement instantiation.
+-}
+premiseRenamings :: (Schematic a) => Lemma a -> Appeal a -> [[(a, a)]]
+premiseRenamings lemma appeal = [zip xs (chosen xs) | (n, _) <- lemmaPremises lemma, let xs = localsOf lemma n]
   where
     avoid =
       HS.unions
@@ -1715,11 +1729,6 @@ premisesApart lemma appeal = [apart (localsOf lemma n) s | (n, s) <- lemmaPremis
             <> [HS.fromList (v : toList t) | (v, t) <- appealSubst appeal]
             <> [argNames (ArgCtx (appealWeakening appeal))]
         )
-    apart [] s = s
-    apart xs (hyps :|- c) =
-      let renaming = HM.fromList [(x, Var x') | (x, x') <- zip xs (chosen xs), x /= x']
-       in foldr (MS.insertOne . substFormula renaming) MS.empty (toList hyps) :|- substFormula renaming c
-    -- A variable is kept unless the appeal's names have it; renamed, it is apart from them and from the others.
     chosen xs = reverse (snd (foldl pick (HS.empty, []) xs))
       where
         pick (taken, acc) x
@@ -2342,9 +2351,45 @@ at the arguments; an instance of a schema at one is the schema instantiated
 again at the function of the abstraction, applied to the arguments and then
 to the terms the function captures.
 -}
-instantiateFormula :: forall a. (Schematic a) => Signature -> String -> HashMap a (Term a) -> Bindings a -> Formula a -> Either (Failure a) (Formula a)
-instantiateFormula sig name sigma b = instF
+instantiateFormula :: (Schematic a) => Signature -> String -> HashMap a (Term a) -> Bindings a -> Formula a -> Either (Failure a) (Formula a)
+instantiateFormula sig name sigma b f = do
+  result <- instantiateArgument sig name sigma b (ArgForm f)
+  case result of
+    ArgForm f' -> pure f'
+    _ -> Left (Malformed "formula instantiation changed its sort")
+
+-- | Instantiate proof fields with precisely the substitution used for statements.
+instantiateArguments :: (Schematic a) => Signature -> Lemma a -> Appeal a -> [Arg a] -> Either (Failure a) [Arg a]
+instantiateArguments sig lemma appeal args = do
+  b <- appealBindings lemma appeal
+  traverse (instantiateArgument sig (appealName appeal) (HM.fromList (appealSubst appeal)) b) args
+
+instantiateArgument :: forall a. (Schematic a) => Signature -> String -> HashMap a (Term a) -> Bindings a -> Arg a -> Either (Failure a) (Arg a)
+instantiateArgument sig name sigma b = \case
+  ArgVar v -> ArgVar <$> instV v
+  ArgTerm t -> ArgTerm <$> instT t
+  ArgAtom p -> ArgAtom <$> instA p
+  ArgForm f -> ArgForm <$> instF f
+  ArgCtx g -> do
+    hyps :|- _ <- instantiateSequent sig name sigma MS.empty b (g :|- Bot)
+    pure (ArgCtx hyps)
+  ArgFun (Abstraction params body fun captured) -> do
+    params' <- traverse instV params
+    body' <- instT body
+    captured' <- traverse instT captured
+    case fun of
+      F.SomeFunction f
+        | Just (n, _) <- abstractName f -> do
+            replacement <- look R.TermS n (bFuns b)
+            pure (ArgFun (Abstraction params' body' (abstractionFunction replacement) (captured' <> abstractionCaptured replacement)))
+        | null (F.opaqueCalls (F.functionProgram f)) -> pure (ArgFun (Abstraction params' body' fun captured'))
+        | otherwise -> pure (ArgFun (abstraction params' body'))
   where
+    instV v =
+      variable v >>= \case
+        Var w -> pure w
+        _ -> Left (Malformed ("a variable was instantiated by a non-variable in " <> name))
+
     instF = \case
       Atm p -> case metaAtom p of
         Just (R.FormS, n) -> look R.FormS n (bForms b) >>= atParameters p substFormula
@@ -2386,6 +2431,43 @@ instantiateFormula sig name sigma b = instF
 
     look :: forall v. R.Sort -> String -> Map String v -> Either (Failure a) v
     look s n = maybe (Left (CannotInstantiate name [R.MetaRef s n])) Right . Map.lookup n
+
+{- |
+The names occurring in the arguments of a proof, those of the appeals to
+lemmas included: their arguments, the terms substituted for the free
+variables of the lemma and the hypotheses weakened in, but not the free
+variables themselves, which are the lemma's.
+-}
+derivationNames :: (Hashable a) => Free (Step a) h -> HashSet a
+derivationNames = iter step . fmap (const HS.empty)
+  where
+    step = \case
+      RuleStep s -> let (args, subs) = stepFields s in HS.unions (map argNames args <> subs)
+      LemmaStep appeal subs ->
+        HS.unions
+          ( map argNames (appealArgs appeal)
+              <> [HS.fromList (toList t) | (_, t) <- appealSubst appeal]
+              <> [argNames (ArgCtx (appealWeakening appeal))]
+              <> subs
+          )
+      WeakenStep extra sub -> HS.union (argNames (ArgCtx extra)) sub
+
+{- |
+Alpha-rename the variable bound by each substitution template.  Renaming the
+whole proof would also change free occurrences in the statement and premises;
+leaving the binder unchanged would let it capture names inside metavariables
+when those are instantiated.  The new names are internal, so the runtime
+freshening in 'compileDecl' also keeps them apart from the actual arguments.
+-}
+freshenSubstitutions :: (Fresh a) => HashSet a -> Free (Step a) h -> Free (Step a) h
+freshenSubstitutions stated proof = go proof
+  where
+    used = stated <> derivationNames proof
+    go (Pure h) = Pure h
+    go (Free (RuleStep (SubstF x t s p d))) =
+      let x' = freshen used x
+       in Free (RuleStep (SubstF x' t s (subst x (Var x') p) (go d)))
+    go (Free step) = Free (fmap go step)
 
 -- * Terms
 

@@ -17,6 +17,7 @@ module Language.Praxis.PRA.Library (
   libraryDeclarations,
   certifiedLibrary,
   libraryScope,
+  libraryCertificates,
 ) where
 
 import Control.Exception (displayException)
@@ -26,11 +27,11 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Language.Haskell.TH.Syntax (addDependentFile, lift, makeRelativeToProject, runIO)
+import Language.Praxis.PRA.Certificate
 import Language.Praxis.PRA.PrimitiveRecursion (builtin)
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
-import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaName, renderSchemaTacticError, schemaScope)
-import Language.Praxis.PRA.Tactic.Unfolding (renderUnfoldingError, unfoldingLemmas)
+import Language.Praxis.PRA.Tactic.Quote (SchemaName, renderSchemaTacticError, schemaScope)
 import System.IO (IOMode (ReadMode), hGetContents', hSetEncoding, utf8, withFile)
 
 -- | The text of @src-pra/lemmas.pra@, as it was when the package was built.
@@ -45,9 +46,7 @@ librarySource =
 
 -- | The unfolding lemmas of 'builtin', which every declaration may appeal to.
 unfolding :: Either String (Map String (Lemma SchemaName))
-unfolding = bimapUnfolding (unfoldingLemmas (schemaScope builtin [] []))
-  where
-    bimapUnfolding = either (Left . renderUnfoldingError builtin renderSchemaName) (Right . fmap certifiedLemma)
+unfolding = fmap (fmap certificateLemma) (unfoldingCertificates builtin)
 
 -- | The declarations of the library, parsed.
 libraryDeclarations :: Either String [Decl SchemaName]
@@ -63,14 +62,20 @@ reported by name.
 -}
 certifiedLibrary :: Either String (Map String (Lemma SchemaName))
 certifiedLibrary = do
-  base <- unfolding
+  scope <- libraryCertificates
+  decls <- libraryDeclarations
+  pure (fmap certificateLemma (Map.restrictKeys scope (Set.fromList (map declName decls))))
+
+-- | The retained library derivations, including the primitive unfolding proofs.
+libraryCertificates :: Either String (Map String Certificate)
+libraryCertificates = do
+  base <- unfoldingCertificates builtin
   decls <- libraryDeclarations
   env <- first displayException (signatureEnv builtin)
-  scope <- foldM (certify env) base decls
-  pure (Map.restrictKeys scope (Set.fromList (map declName decls)))
+  foldM (certifyDeclaration env) base decls
   where
-    certify env known d = case checkDecl env known d of
-      Right (_, lemma) -> Right (Map.insert (declName d) lemma known)
+    certifyDeclaration env known d = case checkCertificate env known d of
+      Right certificate -> Right (Map.insert (declName d) certificate known)
       Left err -> Left (declName d <> ": " <> renderSchemaTacticError builtin err)
 
 {- |
@@ -78,4 +83,4 @@ The lemmas in scope before any declaration of a document: those of the
 library, and the unfolding lemmas of 'builtin'.
 -}
 libraryScope :: Either String (Map String (Lemma SchemaName))
-libraryScope = Map.union <$> certifiedLibrary <*> unfolding
+libraryScope = fmap (fmap certificateLemma) libraryCertificates

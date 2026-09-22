@@ -16,6 +16,7 @@ the definitions in scope, when the prelude is first needed.
 -}
 module Language.Praxis.Surface.Prelude (
   Prelude (..),
+  preludeLemmas,
   prelude,
   preludeDefinitions,
   preludeProofs,
@@ -30,7 +31,8 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Language.Haskell.TH.Syntax (addDependentFile, lift, makeRelativeToProject, runIO)
-import Language.Praxis.PRA.Library (libraryScope)
+import Language.Praxis.PRA.Certificate
+import Language.Praxis.PRA.Library (libraryCertificates)
 import Language.Praxis.PRA.PrimitiveRecursion (builtin)
 import Language.Praxis.PRA.PrimitiveRecursion.Code (PRFCode (..))
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (parseEquations)
@@ -38,10 +40,10 @@ import Language.Praxis.PRA.PrimitiveRecursion.Environment (CompiledEnv, compileD
 import Language.Praxis.PRA.PrimitiveRecursion.Function (Function (..))
 import Language.Praxis.PRA.Signature (Signature, symbolName, symbolOfFunction)
 import Language.Praxis.PRA.Syntax (Atomic (..), Formula (..), Sequent (..), Term (..), canonicalise)
-import Language.Praxis.PRA.Tactic (Certified (..), Env, Lemma (..), signatureEnv)
+import Language.Praxis.PRA.Tactic (Env, Lemma (..), signatureEnv)
 import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
-import Language.Praxis.PRA.Tactic.Quote (SchemaName (..), checkDecl, renderSchemaName, renderSchemaTacticError, schemaScope)
-import Language.Praxis.PRA.Tactic.Unfolding (Unfolding (..), renderUnfoldingError, unfoldingLemmas, unfoldings)
+import Language.Praxis.PRA.Tactic.Quote (SchemaName (..), renderSchemaTacticError, schemaScope)
+import Language.Praxis.PRA.Tactic.Unfolding (Unfolding (..), unfoldings)
 import Language.Praxis.Surface.CoreText (CT (..))
 import System.IO (IOMode (ReadMode), hGetContents', hSetEncoding, utf8, withFile)
 
@@ -71,11 +73,15 @@ data Prelude = Prelude
   -- ^ 'builtin' and the prelude's definitions, which a module's definitions extend
   , preludeSignature :: !Signature
   , preludeEnv :: !Env
-  , preludeLemmas :: !(Map String (Lemma SchemaName))
+  , preludeCertificates :: !(Map String Certificate)
   {- ^ the lemmas of praxis-core's library, the unfolding lemmas of the
   definitions, and the prelude's own lemmas, each certified
   -}
   }
+
+-- | Parser and tactic view; the authoritative store retains derivations.
+preludeLemmas :: Prelude -> Map String (Lemma SchemaName)
+preludeLemmas = fmap certificateLemma . preludeCertificates
 
 {- |
 The prelude, certified: its definitions compiled over 'builtin', and each of
@@ -89,16 +95,16 @@ prelude = do
   compiled <- first displayException (extendEnvironment base block)
   let sig = environmentSignature compiled
   env <- first displayException (signatureEnv sig)
-  library <- libraryScope
-  unfolding <- first (renderUnfoldingError sig renderSchemaName) (unfoldingLemmas (schemaScope sig [] []))
-  let known = Map.union library (fmap certifiedLemma unfolding)
-  decls <- first displayException (parseDeclsIn (fmap (map snd . lemmaMetas) known) (schemaScope sig) preludeProofs)
+  library <- libraryCertificates
+  unfolding <- unfoldingCertificates sig
+  let known = Map.union library unfolding
+  decls <- first displayException (parseDeclsIn (fmap (map snd . lemmaMetas . certificateLemma) known) (schemaScope sig) preludeProofs)
   lemmas <- foldM (certify env sig) known decls
   pure (Prelude compiled sig env lemmas)
   where
     base = compiledEnvironment builtin
-    certify env sig known d = case checkDecl env known d of
-      Right (_, lemma) -> Right (Map.insert (declName d) lemma known)
+    certify env sig known d = case checkCertificate env known d of
+      Right lemma -> Right (Map.insert (declName d) lemma known)
       Left err -> Left (declName d <> ": " <> renderSchemaTacticError sig err)
 
 {- |
