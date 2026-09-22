@@ -91,3 +91,11 @@ length-nil {a} xs = by sorry
 
 trivial : (n : Nat) -> ⊤ ∧ ¬ ⊥
 trivial n = by sorry
+
+-- Membership tests also evaluate these at explicit nonmembers. Dropping a
+-- parameter predicate, including inside a nested container, must be detected.
+parameter-self : {a : Type} -> (x : a) -> x ≡ x
+parameter-self {a} x = by sorry
+
+nested-self : {a : Type} -> (xs : List (List a)) -> xs ≡ xs
+nested-self {a} xs = by sorry

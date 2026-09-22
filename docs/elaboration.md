@@ -528,6 +528,19 @@ the codes of its values, as its memberships are: (M) for indices. The core side
 evaluates symbolically because numerals are out of reach: the membership of
 a code unrolls a history one level for every number below the code.
 
+Generator exhaustion is a test failure, not a proof of emptiness. Deliberately
+empty domains are recognized by constructor-index disjointness or an
+explicitly empty type-parameter predicate. Equality preconditions can supply
+unfixed natural-number witnesses when no field type depends on the entry;
+all preconditions are still checked after generation.
+
+Parameter predicates are also instantiated at concrete finite sets of
+numerals, constructor values, nested containers and the empty set. The core
+reference evaluator follows these arguments through membership predicates.
+Negative examples evaluate translated membership premises on explicit
+nonmembers, including nonmembers nested inside containers, to detect lost
+constraints.
+
 ## Proofs
 
 The engine translates a proof into one core tactic per declaration, plus

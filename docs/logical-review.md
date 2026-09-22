@@ -130,26 +130,25 @@ checking, but track unproved dependencies transitively and expose a distinct
 conditional status. Keep the certified environment separate from the draft
 environment; do not use the same `Map String Lemma` to imply both contracts.
 
-### P2: adequacy tests can pass without testing an inhabited domain
+### Closed: adequacy tests require witnesses and exercise parameter predicates
 
-In `praxis/test/Language/Praxis/Surface/AdequacyTest.hs`, both
-`propFunction` and `propStatement` turn failure to generate arguments after
-50 attempts into a successful property labelled “vacuous.” Failure of a
-generator is not evidence that its domain is empty. A regression in index
-generation or a sparsely inhabited type can therefore remove all useful
-samples while the suite remains green.
+Generator exhaustion now fails with an insufficient-coverage diagnostic.
+Only a structural constructor-index clash, an explicitly empty parameter
+predicate, or a data type with no constructors establishes an empty domain.
+An intentionally broken generator is tested to ensure exhaustion fails.
 
-**Recommendation:** require successful sample coverage for fixtures known
-to be inhabited, seed them with concrete witnesses, and distinguish
-deliberately empty fixtures from generator exhaustion. Exhaustion should
-be reported as insufficient coverage, not mathematical vacuity.
+This exposed an intermittent failure to generate an inhabited `ELt`
+fixture. The generator now constructs witnesses for equality preconditions
+by assigning an unfixed natural-number entry when no field type depends on
+it. It preserves fixed indices and checks every precondition afterwards.
 
-There is a separate coverage limitation: `genAt` interprets every type
-parameter as `Nat`, with the always-true membership predicate, and generates
-small naturals. Those tests cannot establish behavior for arbitrary type
-predicates or distinguish every missing membership premise. Add inhabited
-and empty predicates, nontrivial data-type instances, and nested container
-instances. These are testing gaps, not demonstrated new false theorems.
+Polymorphic fixtures also run with explicit finite predicates containing
+selected numerals, constructor values, nested containers, and no values.
+The core reference evaluator now passes predicate arguments through nested
+membership checks. Concrete nonmember regressions inspect translated
+statements and fail if a membership premise or a nested parameter predicate
+is dropped. These finite tests strengthen coverage; they are not a proof
+of adequacy for arbitrary predicates.
 
 ### Closed: runtime certification and exported proof generation now cover quantified premises
 
@@ -312,3 +311,8 @@ checks.
    examples. A surface regression also replays its retained theorem
    certificates through the independent kernel check.
    The surface suite passes 68 tests; formatting and Cabal Gild checks pass.
+3. Adequacy tests now require witnesses for inhabited fixtures and distinguish
+   structurally empty domains from generator exhaustion. Concrete finite
+   predicate models and nonmember tests cover direct and nested parameter
+   membership. After repairing the exposed constructor-generation gap, the
+   surface suite passes 74 tests with 1,000 samples per property.

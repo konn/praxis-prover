@@ -26,9 +26,9 @@ course-of-values history one level for every number below it.
 
 A membership predicate takes the predicates of its type's parameters, and a
 statement over a type parameter is a rule over the parameter's predicate.
-The values are generated with their type parameters at @Nat@, whose
-predicate every code satisfies, and each field well typed: there, the shape
-of a code decides its membership, and a type parameter's predicate holds.
+Type parameters are exercised at natural numbers and at explicit finite
+predicates, including the empty predicate, selected constructor values and
+nested containers. Membership follows the actual predicate arguments.
 
 A value of an indexed type is generated well typed at its indices, entry by
 entry of a telescope — a statement's value parameters then its values, a
@@ -36,9 +36,9 @@ function's value parameters then its arguments, a constructor's implicit
 arguments then its fields — so that a function which omits a constructor
 impossible at its indices is only applied where it is defined, and each
 equation of indices a statement has holds of the codes of its values, as
-its memberships do.  A telescope whose types have no values at the indices
-they ask — a statement over none, as one over @PLt n 0@ — is vacuous: taken
-as passing, and labelled so, when fifty tries find no values.
+its memberships do.  Constructor-index clashes establish emptiness for deliberately empty
+telescopes, such as @PLt n 0@. All other telescopes must produce witnesses;
+generator exhaustion is a failing test, never evidence of emptiness.
 -}
 module Language.Praxis.Surface.AdequacyTest (adequacyTests) where
 
@@ -46,6 +46,7 @@ import Bound (instantiate, instantiate1)
 import Control.Applicative ((<|>))
 import Control.Exception (displayException)
 import Control.Monad (foldM, guard)
+import Data.Foldable (toList)
 import Data.List (find, partition)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -75,7 +76,7 @@ import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), normIx)
 import Numeric.Natural (Natural)
-import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, elements, forAll, ioProperty, label, scale, sized, (===))
+import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, elements, expectFailure, forAll, ioProperty, label, property, scale, sized, (===))
 import Test.Tasty (TestTree, testGroup, withResource)
 import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
 import Test.Tasty.QuickCheck (testProperty)
@@ -87,19 +88,19 @@ adequacyTests :: TestTree
 adequacyTests =
   testGroup
     "adequacy of the translation"
-    ( certifies
-        : [ withResource (load path) (const (pure ())) \get ->
-              testGroup
-                path
-                [ testProperty "each function commutes with the encoding" $ ioProperty do
-                    ld <- get
-                    pure (conjoin [propFunction ld fd | fd <- Map.elems (ldFuns ld)])
-                , testProperty "each proposition of each statement has the same truth in the core" $ ioProperty do
-                    ld <- get
-                    pure (conjoin [propStatement ld td | td <- ldTheorems ld])
-                ]
-          | path <- ["test/data/adequacy.px", "test/data/list.px", "test/data/gadt.px", "test/data/nat.px"]
-          ]
+    ( [certifies, parameterTests, testProperty "generator exhaustion fails" (expectFailure (withWitness "deliberately broken generator" (pure Nothing :: Gen (Maybe Int)) (const (property True))))]
+        <> [ withResource (load path) (const (pure ())) \get ->
+               testGroup
+                 path
+                 [ testProperty "each function commutes with the encoding" $ ioProperty do
+                     ld <- get
+                     pure (conjoin [propFunction ld fd | fd <- Map.elems (ldFuns ld)])
+                 , testProperty "each proposition of each statement has the same truth in the core" $ ioProperty do
+                     ld <- get
+                     pure (conjoin [propStatement ld td | td <- ldTheorems ld])
+                 ]
+           | path <- ["test/data/adequacy.px", "test/data/list.px", "test/data/gadt.px", "test/data/nat.px"]
+           ]
     )
 
 certifies :: TestTree
@@ -132,6 +133,8 @@ data Loaded = Loaded
   -- ^ the equations of indices each constructor's branch of its type's membership checks, by its core name, over the positions of its code
   , ldUnfoldings :: !(Map Text [(CT, CT)])
   -- ^ the sides of the unfolding lemmas of each function, by its core name
+  , ldParameterValues :: !(Maybe [Value])
+  -- ^ Nothing is Nat; Just values is an explicit finite predicate.
   , ldBuiltin :: Text -> [Natural] -> Natural
   }
 
@@ -170,6 +173,7 @@ load path = do
       , ldMembership = membership
       , ldIndexEqs = Map.fromList (concatMap encodedIndexEquations encodings)
       , ldUnfoldings = Map.fromList unfoldings
+      , ldParameterValues = Nothing
       , ldBuiltin = builtin
       }
 
@@ -222,7 +226,10 @@ genTele ld given tys = go 0 given
 genAt :: Loaded -> Ty -> (Int -> Maybe Value) -> Gen (Maybe (Value, [Value]))
 genAt ld ty known = case ty of
   TNat -> (\k -> Just (VNat (fromIntegral k), [])) <$> chooseInt (0, 3)
-  TParam _ _ -> genAt ld TNat known
+  TParam _ _ -> case ldParameterValues ld of
+    Nothing -> genAt ld TNat known
+    Just [] -> pure Nothing
+    Just vs -> (\v -> Just (v, [])) <$> elements vs
   THole -> genAt ld TNat known
   TArrow _ _ -> error "a function type: values are first-order"
   TData n args ixs -> case Map.lookup n (ldDatas ld) of
@@ -253,12 +260,51 @@ genData ld d args asked = sized \s ->
             at k = listToMaybe [p | (p, en) <- zip [0 ..] tele, teRole en `elem` [Explicit k, Stored k]]
         r <- genTele ld fixed [substParams args (teType en) | en <- tele]
         pure do
-          env <- r
+          generated <- r
+          let env = constructorWitness ld fixed tele [stripLocations (instantiate Var (fmap absurd prop)) | (_, prop) <- gcProofs g] generated
           -- Its preconditions hold of the entries, or no value is built of them.
           guard (all (\(_, p) -> truth ld (instantiate (\i -> Var (env Map.! i)) (fmap absurd p))) (gcProofs g))
           fields <- traverse (\k -> at k >>= (`Map.lookup` env)) [0 .. length (ctorFields c) - 1]
           is <- traverse (ixValue ld (`Map.lookup` env)) (gcResult g)
           pure (VCon (ctorCore c) fields, is)
+
+{- | Construct witnesses for equality preconditions by assigning an unfixed
+Nat entry when no field type depends on it. All preconditions are checked
+afterwards; fixed indices and the types of generated fields stay intact.
+-}
+constructorWitness :: Loaded -> Map Int Value -> [TeleEntry] -> [Expr Int] -> Map Int Value -> Map Int Value
+constructorWitness ld fixed tele equations initial = foldl satisfy initial equations
+  where
+    satisfy env (Rel RelEq lhs rhs)
+      | Var i <- stripLocations lhs = assign env i rhs
+      | Var i <- stripLocations rhs = assign env i lhs
+    satisfy env _ = env
+    assign env i rhs
+      | i >= 0
+      , i < length tele
+      , teType (tele !! i) == TNat
+      , Map.notMember i fixed
+      , i `notElem` toList rhs
+      , not (any (depends i . teType) tele) =
+          Map.insert i (evalRef ld (fmap (env Map.!) rhs)) env
+      | otherwise = env
+    depends i = \case
+      TData _ ts xs -> any (depends i) ts || any (occurs i) xs
+      TParam _ ts -> any (depends i) ts
+      TArrow a b -> depends i a || depends i b
+      _ -> False
+    occurs i = \case
+      IxParam j -> i == j
+      IxSucc x -> occurs i x
+      IxCon _ xs -> any (occurs i) xs
+      IxFun _ xs -> any (occurs i) xs
+      _ -> False
+
+-- | Failure to obtain a witness is insufficient coverage, never vacuity.
+withWitness :: (Show a) => String -> Gen (Maybe a) -> (a -> Property) -> Property
+withWitness description generator check = forAll (tries 50 generator) \case
+  Nothing -> counterexample ("insufficient coverage: " <> description) False
+  Just witness -> check witness
 
 -- | A constructor's result index against the value asked of it: what that fixes of its telescope, added to what is fixed; Nothing where they clash.
 matchValue :: Ix -> Value -> Map Int Value -> Maybe (Map Int Value)
@@ -502,9 +548,9 @@ evalCore ld = go
       CSym f as
         | Set.member f (ldCtors ld) -> CK f (map (go env) as)
         -- A predicate at its parameters, applied: of a generated value, its shape decides it.
-        | Just d <- Map.lookup f (ldPredicates ld), x : _ <- reverse as -> CN (if member ld d (go env x) then 1 else 0)
-        -- A type parameter's predicate, a parameter of the statement's rule: at Nat, where values are generated, every code satisfies it.
-        | "w_" `T.isPrefixOf` f -> CN 1
+        | Just d <- Map.lookup f (ldPredicates ld), let (params, values) = partition isParameter as, [x] <- values -> CN (if member ld d (map (predicate ld) params) (go env x) then 1 else 0)
+        -- A type parameter is interpreted by the selected test predicate.
+        | "w_" `T.isPrefixOf` f, [x] <- as -> CN (if parameterMember ld (go env x) then 1 else 0)
         | Just eqs <- Map.lookup f (ldUnfoldings ld) -> unfold eqs (map (go env) as)
         | otherwise -> CN (ldBuiltin ld f (map (numeral . go env) as))
       CRaw t -> error ("raw text in a statement: " <> T.unpack t)
@@ -536,9 +582,9 @@ constructor of the type, every field of the type itself, or of a data type
 encoded before it, a member in turn, and the equations of indices of the
 constructor's entries holding at the fields of the code.
 -}
-member :: Loaded -> DataInfo -> Code -> Bool
-member ld d = \case
-  CK c fs | Just ci <- find ((== c) . ctorCore) (dataCtors d) -> and (zipWith ok (ctorFields ci) fs) && all (indexed fs) (Map.findWithDefault [] c (ldIndexEqs ld))
+member :: Loaded -> DataInfo -> [Code -> Bool] -> Code -> Bool
+member ld d predicates = \case
+  CK c fs | Just ci <- find ((== c) . ctorCore) (dataCtors d) -> length fs == length (ctorFields ci) && and (zipWith ok (ctorFields ci) fs) && all (indexed fs) (Map.findWithDefault [] c (ldIndexEqs ld))
   _ -> False
   where
     -- An equation of indices, at the fields of a code by their positions.
@@ -546,12 +592,53 @@ member ld d = \case
       let at = Map.fromList [("#" <> T.pack (show p), f) | (p, f) <- zip [0 :: Int ..] fs]
        in evalCore ld at l == evalCore ld at r
     self = renderQualName (dataQual d)
-    earlier = takeWhile (/= self) (ldOrder ld)
+    positions = maybe [] snd (Map.lookup self (ldMembership ld))
+    parameters = Map.fromList (zip positions predicates)
     ok t f = case t of
-      TData n _ _
-        | n == self -> member ld d f
-        | n `elem` earlier, Just d' <- Map.lookup n (ldDatas ld) -> member ld d' f
+      TParam i _ -> maybe (error "missing predicate for a type parameter") ($ f) (Map.lookup i parameters)
+      TData n args _
+        | Just d' <- Map.lookup n (ldDatas ld) ->
+            let used = maybe [] snd (Map.lookup n (ldMembership ld))
+             in member ld d' [ok (args !! i) | i <- used] f
       _ -> True
+
+-- | Explicit finite predicates include nonmembers; Nat accepts every code.
+parameterMember :: Loaded -> Code -> Bool
+parameterMember ld value = maybe True (elem value . map encode) (ldParameterValues ld)
+
+predicate :: Loaded -> CT -> Code -> Bool
+predicate ld p = case p of
+  CStatic "anyIs" -> const True
+  CStatic n | "w_" `T.isPrefixOf` n -> parameterMember ld
+  CStatic n | Just d <- Map.lookup n (ldPredicates ld) -> member ld d []
+  CPartial n ps _ | Just d <- Map.lookup n (ldPredicates ld) -> member ld d (map (predicate ld) ps)
+  _ -> error ("unsupported membership predicate: " <> show p)
+
+{- | A sufficient, structural emptiness check. Unknown indices never count
+as clashes. Unlike generator exhaustion, constructor disjointness is evidence.
+-}
+emptyTelescope :: Loaded -> [Ty] -> Bool
+emptyTelescope ld = any emptyType
+  where
+    emptyType (TParam _ _) = ldParameterValues ld == Just []
+    emptyType (TData n _ asked)
+      | Just d <- Map.lookup n (ldDatas ld) =
+          all
+            ( \c -> case ctorGadt c of
+                Nothing -> False
+                Just g -> or (zipWith clash asked (gcResult g))
+            )
+            (dataCtors d)
+    emptyType _ = False
+    clash x y = case (normIx x, normIx y) of
+      (IxNat n, IxNat m) -> n /= m
+      (IxNat 0, IxSucc _) -> True
+      (IxSucc _, IxNat 0) -> True
+      (IxNat n, IxSucc y') | n > 0 -> clash (IxNat (n - 1)) y'
+      (IxSucc x', IxNat n) | n > 0 -> clash x' (IxNat (n - 1))
+      (IxSucc x', IxSucc y') -> clash x' y'
+      (IxCon c xs, IxCon d ys) -> c /= d || or (zipWith clash xs ys)
+      _ -> False
 
 -- | The truth of a core formula.
 holds :: Loaded -> Map Text Code -> Formula -> Bool
@@ -584,10 +671,9 @@ Lemma 1: the function commutes with the encoding, at well-typed arguments,
 its value parameters first: those it takes at runtime lead its arguments.
 -}
 propFunction :: Loaded -> FunDef -> Property
-propFunction ld fd =
-  forAll (tries 50 (genTele ld Map.empty (valueTys <> explicitTys))) \case
-    Nothing -> label ("vacuous, no arguments: " <> T.unpack core) True
-    Just entries ->
+propFunction ld fd
+  | emptyTelescope ld (valueTys <> explicitTys) = label "empty domain by constructor indices" True
+  | otherwise = withWitness ("no function arguments for " <> T.unpack core) (genTele ld Map.empty (valueTys <> explicitTys)) $ \entries ->
       let values = [entries Map.! i | i <- [0 .. length valueTys - 1]]
           vs = [values !! i | i <- funRuntime info] <> [entries Map.! (length valueTys + j) | j <- [0 .. length explicitTys - 1]]
           xs = ["v_arg" <> T.pack (show i) | i <- [0 .. length vs - 1]]
@@ -605,28 +691,88 @@ Lemma 2, and the premises of memberships and indices: the statement means
 the same on both sides, at well-typed values, its value parameters first.
 -}
 propStatement :: Loaded -> TheoremDef -> Property
-propStatement ld td = case theoremStatement (ldMembership ld) td of
-  Left err -> counterexample ("no statement: " <> err) False
-  Right text -> case parse sequentP "" text of
-    Left err -> counterexample (errorBundlePretty err) False
-    Right (hyps, concl) ->
-      let indexFns = Set.fromList [fn | (_, fn, _) <- tdIndexHyps td]
-          isIndexEquation = \case
-            FEq (CSym fn [CVar _]) _ -> Set.member fn indexFns
-            _ -> False
-          (memberships, rest) = partition (isMembership ld) hyps
-          (indexEqs, props) = partition isIndexEquation rest
-          entries = tdValues td <> tdBinders td
-       in forAll (tries 50 (genTele ld Map.empty (map snd entries))) \case
-            Nothing -> label ("vacuous, no values: " <> T.unpack (renderQualName (thmQual (tdInfo td)))) True
-            Just values ->
-              let vs = Map.elems values
-                  (as, c) = implications (instantiate (Var . (vs !!)) (fmap absurd (tdProp td)))
-                  env = Map.fromList (zip [mangleVariable n | (n, _) <- entries] (map encode vs))
-               in counterexample (T.unpack text) $
-                    counterexample (show vs) $
-                      conjoin
-                        [ counterexample "a membership hypothesis fails of the code of a value" (all (holds ld env) memberships)
-                        , counterexample "an equation of indices fails of the codes of the values" (all (holds ld env) indexEqs)
-                        , map (holds ld env) props <> [holds ld env concl] === map (truth ld) as <> [truth ld c]
-                        ]
+propStatement ld td
+  | emptyTelescope ld (map snd (tdValues td <> tdBinders td)) = label "empty domain by constructor indices" True
+  | otherwise = propertyOf (theoremStatement (ldMembership ld) td)
+  where
+    propertyOf result = case result of
+      Left err -> counterexample ("no statement: " <> err) False
+      Right text -> case parse sequentP "" text of
+        Left err -> counterexample (errorBundlePretty err) False
+        Right (hyps, concl) ->
+          let indexFns = Set.fromList [fn | (_, fn, _) <- tdIndexHyps td]
+              isIndexEquation = \case
+                FEq (CSym fn [CVar _]) _ -> Set.member fn indexFns
+                _ -> False
+              (memberships, rest) = partition (isMembership ld) hyps
+              (indexEqs, props) = partition isIndexEquation rest
+              entries = tdValues td <> tdBinders td
+           in withWitness ("no statement values for " <> T.unpack (renderQualName (thmQual (tdInfo td)))) (genTele ld Map.empty (map snd entries)) $ \values ->
+                let vs = Map.elems values
+                    (as, c) = implications (instantiate (Var . (vs !!)) (fmap absurd (tdProp td)))
+                    env = Map.fromList (zip [mangleVariable n | (n, _) <- entries] (map encode vs))
+                 in counterexample (T.unpack text) $
+                      counterexample (show vs) $
+                        conjoin
+                          [ counterexample "a membership hypothesis fails of the code of a value" (all (holds ld env) memberships)
+                          , counterexample "an equation of indices fails of the codes of the values" (all (holds ld env) indexEqs)
+                          , map (holds ld env) props <> [holds ld env concl] === map (truth ld) as <> [truth ld c]
+                          ]
+
+-- Concrete witnesses are independent of telescope generation. Each finite
+-- predicate has explicit nonmembers, and nested membership must apply it.
+parameterTests :: TestTree
+parameterTests = withResource (load "test/data/adequacy.px") (const (pure ())) $ \get ->
+  testGroup
+    "nontrivial parameter predicates"
+    ( testCase
+        "translated memberships reject nonmembers, including nested fields"
+        ( do
+            ld <- get
+            let (nil, cons) = listConstructors ld
+                list = foldr (\v rest -> VCon cons [v, rest]) (VCon nil [])
+            mapM_
+              ( \(_, values) -> do
+                  let model = ld {ldParameterValues = Just values}
+                  mapM_ (\v -> membershipTruth model "Adequacy.parameter-self" v >>= (@?= True)) values
+                  membershipTruth model "Adequacy.parameter-self" (VNat 99) >>= (@?= False)
+                  membershipTruth model "Adequacy.nested-self" (list [list []]) >>= (@?= True)
+                  membershipTruth model "Adequacy.nested-self" (list [list [VNat 99]]) >>= (@?= False)
+              )
+              (parameterModels ld)
+        )
+        : [ testProperty name $ ioProperty do
+              ld <- get
+              let values = fromMaybe (error "missing parameter model") (lookup name (parameterModels ld))
+                  model = ld {ldParameterValues = Just values}
+              pure (conjoin ([propFunction model fd | fd <- Map.elems (ldFuns model)] <> [propStatement model td | td <- ldTheorems model]))
+          | name <- ["even numerals", "constructor values", "nested containers", "empty predicate"]
+          ]
+    )
+
+listConstructors :: Loaded -> (Text, Text)
+listConstructors ld = case dataCtors (ldDatas ld Map.! "Adequacy.List") of
+  [nil, cons] -> (ctorCore nil, ctorCore cons)
+  _ -> error "the List fixture changed its constructors"
+
+parameterModels :: Loaded -> [(String, [Value])]
+parameterModels ld = case dataCtors (ldDatas ld Map.! "Adequacy.Color") of
+  red : green : _ ->
+    let colors = [VCon (ctorCore red) [], VCon (ctorCore green) []]
+        (nil, cons) = listConstructors ld
+     in [ ("even numerals", [VNat 0, VNat 2])
+        , ("constructor values", colors)
+        , ("nested containers", VCon nil [] : [VCon cons [c, VCon nil []] | c <- colors])
+        , ("empty predicate", [])
+        ]
+  _ -> error "the Color fixture changed its constructors"
+
+membershipTruth :: Loaded -> Text -> Value -> IO Bool
+membershipTruth ld name value = do
+  td <- maybe (assertFailure ("missing statement " <> T.unpack name)) pure (find ((== name) . renderQualName . thmQual . tdInfo) (ldTheorems ld))
+  text <- either assertFailure pure (theoremStatement (ldMembership ld) td)
+  (hyps, _) <- either (assertFailure . errorBundlePretty) pure (parse sequentP "" text)
+  let memberships = filter (isMembership ld) hyps
+  case (tdValues td <> tdBinders td, memberships) of
+    ([(n, _)], _ : _) -> pure (all (holds ld (Map.singleton (mangleVariable n) (encode value))) memberships)
+    _ -> assertFailure "a unary polymorphic statement lost its membership premise"
