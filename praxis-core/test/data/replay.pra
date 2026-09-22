@@ -24,3 +24,17 @@ by exact D
 
 theorem replayLocalAt : |- S x = S x
 by exact replayLocalFunction n (S n) x { refl }
+
+-- A premise-local n must not make the body's induction n externally fixed.
+rule replayLocalFresh (t : term) (D ∀ n : |- n = n) : |- t = t
+by Ind n (n = n) t { refl } { refl }
+
+-- A binder in one branch may share the spelling of a free variable in another.
+theorem replayShadowed : |- n = n /\ 0 = 0
+by ConjR { refl } { Ind n (n = n) 0 { refl } { refl } }
+
+theorem replayShadowedAt : |- 2 = 2 /\ 0 = 0
+by exact replayShadowed
+
+rule replayFixed (t : term) : |- n = n /\ t = t
+by ConjR { refl } { Ind n (n = n) t { refl } { refl } }

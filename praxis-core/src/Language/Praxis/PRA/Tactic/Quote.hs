@@ -434,7 +434,6 @@ compileDecl sig global lemmas decl = do
   let dname = declName decl
       binders = declBinders decl
       metas = binderMetas binders
-      prems = Map.fromList [(n, s) | PremiseBinder n _ s <- binders]
   unless (startsLower dname) $
     fail ("pra: " <> dname <> " is not a Haskell variable name")
   (checked, lemma) <- either (fail . renderSchemaTacticError sig) pure (checkDecl env0 (fmap entryLemma lemmas) decl)
@@ -444,16 +443,19 @@ compileDecl sig global lemmas decl = do
   let metaParams = Map.fromList [((s, n), p) | ((n, Left s), p) <- zip (binderParams binders) params]
       premParams = Map.fromList [(n, p) | ((n, Right ()), p) <- zip (binderParams binders) params]
 
-  -- The object variables the script introduces, to be chosen fresh at run
-  -- time when there are metavariables whose instantiations could clash.
-  let stated = HS.unions (map goalNames (goalSequent (declGoal decl) : Map.elems prems))
+  -- Reserve object-name placeholders before inserting actual arguments.
+  -- Afterwards restore free external names with capture-avoiding proof
+  -- substitution. A binder can share a spelling with an external name in
+  -- another branch, so merely excluding external names from freshening is
+  -- insufficient.
+  let stated = lemmaExternalNames lemma
       proof = freshenSubstitutions stated checked
-      internal = sort [s | Obj s <- HS.toList (derivationNames proof), not (Obj s `HS.member` stated)]
-      runtimeFresh = not (null metas) && not (null internal)
-  internalNames <- traverse (newName . stem) internal
+      objects = sort [s | Obj s <- HS.toList (derivationNames proof)]
+      runtimeFresh = not (null metas) && not (null objects)
+  objectNames <- traverse (newName . stem) objects
   sigName <- newName "sig"
   let objParams
-        | runtimeFresh = Map.fromList (zip internal internalNames)
+        | runtimeFresh = Map.fromList (zip objects objectNames)
         | otherwise = Map.empty
       env = LiftEnv sig sigName metaParams premParams (Map.fromList (lemmaLocals lemma)) objParams lemmas
 
@@ -463,13 +465,18 @@ compileDecl sig global lemmas decl = do
         | runtimeFresh =
             (usedName, usedNames env binders [s | Obj s <- HS.toList stated])
               : [ (x, [|freshen $(foldr (\y acc -> [|HS.insert $(QTH.varE y) $acc|]) (QTH.varE usedName) earlier) (fromString s)|])
-                | (s, x, earlier) <- zip3 internal internalNames (inits' internalNames)
+                | (s, x, earlier) <- zip3 objects objectNames (inits' objectNames)
                 ]
         | otherwise = []
       flags'
         | runtimeFresh = Set.insert NeedsFresh (Set.insert NeedsIsString flags)
         | otherwise = flags
-      body' = signatureBinding sig sigName flags' (QTH.letBindings freshDecs (pure body))
+      restored
+        | runtimeFresh =
+            let pairs = [[|($(QTH.varE x), Var (fromString s))|] | (s, x) <- zip objects objectNames, Obj s `HS.member` stated]
+             in [|substProof $(QTH.listE pairs) $(pure body)|]
+        | otherwise = pure body
+      body' = signatureBinding sig sigName flags' (QTH.letBindings freshDecs restored)
 
   a <- newName "a"
   let constraints =

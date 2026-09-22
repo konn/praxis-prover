@@ -73,6 +73,7 @@ module Language.Praxis.PRA.Tactic (
   instantiateLemma,
   instantiateArguments,
   premiseRenamings,
+  lemmaExternalNames,
   derivationNames,
   freshenSubstitutions,
   certify,
@@ -1687,8 +1688,14 @@ instForm b = \case
 
 -- | The free variables of a lemma: the names of its statement which are not metavariables, nor the variables of a premise its own.
 freeVariables :: (Schematic a) => Lemma a -> HashSet a
-freeVariables lemma =
-  HS.filter (isNothing . metaName) (HS.unions (goalNames (lemmaGoal lemma) : [goalNames s `HS.difference` HS.fromList (localsOf lemma n) | (n, s) <- lemmaPremises lemma]))
+freeVariables = HS.filter (isNothing . metaName) . lemmaExternalNames
+
+{- | Names in the externally visible statement. A quantified premise's local
+variables belong only to that premise, not to the scope of the rule body.
+-}
+lemmaExternalNames :: (Hashable a) => Lemma a -> HashSet a
+lemmaExternalNames lemma =
+  HS.unions (goalNames (lemmaGoal lemma) : [goalNames s `HS.difference` HS.fromList (localsOf lemma n) | (n, s) <- lemmaPremises lemma])
 
 {- |
 Whether no premise of a lemma mentions a context metavariable: an appeal to

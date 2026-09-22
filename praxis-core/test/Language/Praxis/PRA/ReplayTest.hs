@@ -60,6 +60,24 @@ replayTests = withResource load (const (pure ())) $ \get ->
           let f = abstraction [n] body
           agrees known "replayClosure" [ArgVar n, ArgFun f] [] (replayClosure n f)
           agrees known "replayNested" [ArgVar n, ArgFun f] [] (replayNested n f)
+    , testCase "free-variable substitution respects binders in separate branches" $ do
+        known <- get
+        let cert = known Map.! "replayShadowed"
+            call = Appeal "replayShadowed" [] [(Obj "n", Lit 2)] MS.empty
+        (_, expected) <- right (instantiateLemma builtin (certificateLemma cert) call)
+        proof <- right (replayCertificate environment cert call [])
+        inferConclusionIn (envKernel environment) proof @?= Right expected
+        actual <- right (inferConclusionIn (envKernel environment) (replayShadowedAt :: Proof String))
+        mapSequent actual @?= expected
+        forM_ terms $ \t -> agrees known "replayFixed" [ArgTerm t] [] (replayFixed t)
+    , testCase "premise-local names do not fix internal induction variables" $ do
+        known <- get
+        forM_ terms $ \t -> do
+          let cert = known Map.! "replayLocalFresh"
+              call = Appeal "replayLocalFresh" [mapArg (ArgTerm t)] [] MS.empty
+          (premises, _) <- right (instantiateLemma builtin (certificateLemma cert) call)
+          ps <- traverse proveReflexive premises
+          agrees known "replayLocalFresh" [ArgTerm t] ps (replayLocalFresh t reflex)
     , testCase "quantified premise variables stay apart from captured arguments" $ do
         known <- get
         forM_ terms $ \t -> do

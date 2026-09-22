@@ -5,6 +5,7 @@ module Language.Praxis.PRA.Certificate (
   Certificate,
   certificateLemma,
   checkCertificate,
+  derivationAppeals,
   primitiveCertificate,
   unfoldingCertificates,
   replayCertificate,
@@ -55,12 +56,17 @@ certificateLemma = storedLemma
 checkCertificate :: Env -> Map String Certificate -> Decl SchemaName -> Either (TacticError SchemaName) Certificate
 checkCertificate env known decl = do
   (proof, lemma) <- checkDecl env (fmap certificateLemma known) decl
-  let dependencies = Set.fromList (appeals proof) `Set.difference` Set.fromList (map fst (lemmaPremises lemma))
+  let dependencies = derivationAppeals proof `Set.difference` Set.fromList (map fst (lemmaPremises lemma))
   pure (Certificate lemma proof (Map.restrictKeys known dependencies))
-  where
-    appeals (Pure _) = []
-    appeals (Free (LemmaStep appeal subs)) = appealName appeal : concatMap appeals subs
-    appeals (Free step) = foldMap appeals step
+
+{- | The lemma names actually used by a derivation, after tactic alternatives
+have been resolved. Declaration premises must be removed by the caller.
+-}
+derivationAppeals :: Free (Step a) h -> Set.Set String
+derivationAppeals = \case
+  Pure _ -> Set.empty
+  Free (LemmaStep appeal subs) -> Set.insert (appealName appeal) (foldMap derivationAppeals subs)
+  Free step -> foldMap derivationAppeals step
 
 -- | Import a primitive proof only after the kernel has checked it.
 primitiveCertificate :: Env -> Proof SchemaName -> Either (Failure SchemaName) Certificate
@@ -89,12 +95,16 @@ replayCertificate env certificate appeal premises = do
 
     expand cert call supplied = do
       let lemma = certificateLemma cert
-          stated = HS.unions (map goalNames (lemmaGoal lemma : map snd (lemmaPremises lemma)))
+          stated = lemmaExternalNames lemma
           body = freshenSubstitutions stated (certificateDerivation cert)
-          internal = HS.toList (HS.filter (\case Obj _ -> True; _ -> False) (derivationNames body `HS.difference` stated))
+          objects = HS.toList (HS.filter (\case Obj _ -> True; _ -> False) (derivationNames body))
           avoid = stated <> HS.unions (map argNames (appealArgs call) <> [argNames (ArgCtx (appealWeakening call))] <> [HS.fromList (x : toList t) | (x, t) <- appealSubst call])
-          (_, renamed) = foldl (\(used, pairs) v -> let w = freshen used v in (HS.insert w used, (v, Var w) : pairs)) (avoid, []) internal
-          binding = call {appealSubst = renamed <> appealSubst call, appealWeakening = MS.empty}
+          (_, renamed) = foldl (\(used, pairs) v -> let w = freshen used v in (HS.insert w used, (v, Var w) : pairs)) (avoid, []) objects
+          -- Reserve placeholders before schematic substitution. Restore only
+          -- free external occurrences afterwards with capture-avoiding proof
+          -- substitution, protecting binders that share an external spelling.
+          restore = [(w, fromMaybe (Var v) (lookup v (appealSubst call))) | (v, Var w) <- renamed, v `HS.member` stated]
+          binding = call {appealSubst = renamed, appealWeakening = MS.empty}
           parameters = Map.fromList (zip (map fst (lemmaPremises lemma)) supplied)
           locals = Map.fromList (zip (map fst (lemmaPremises lemma)) (premiseRenamings lemma call))
           fields = instantiateArguments sig lemma binding
@@ -144,5 +154,27 @@ replayCertificate env certificate appeal premises = do
                 pure (weakenProof extra (substProof localPairs proof))
               Nothing -> do
                 dependency <- maybe (Left (UnknownPremise name)) pure (Map.lookup name (certificateDependencies cert))
-                expand dependency (Appeal name args pairs extra) proofs
-      weakenProof (appealWeakening call) <$> go body
+                let instantiated = Appeal name args pairs extra
+                    declaration = certificateLemma dependency
+                    sourceLocals = premiseRenamings declaration nested
+                    targetLocals = premiseRenamings declaration instantiated
+                -- The child derivations used the local names chosen before
+                -- instantiation. Their instantiated names need not be the
+                -- canonical fresh names chosen for this new appeal. Abstract
+                -- them and supply them at the latter, as export's premise
+                -- proof functions do.
+                aligned <-
+                  sequence
+                    [ do
+                        renaming <-
+                          sequence
+                            [ fields [ArgVar source] >>= \case
+                                [ArgVar actual] -> pure (actual, Var target)
+                                _ -> Left (Malformed "a local premise name changed its sort")
+                            | ((_, source), (_, target)) <- zip before after
+                            ]
+                        pure (substProof renaming proof)
+                    | (proof, (before, after)) <- zip proofs (zip sourceLocals targetLocals)
+                    ]
+                expand dependency instantiated aligned
+      weakenProof (appealWeakening call) . substProof restore <$> go body

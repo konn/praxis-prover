@@ -102,6 +102,34 @@ make a value its own proper subterm. The repair reports such constraints as
 the review did not exhibit an accepted primitive contradiction from this
 defect alone.
 
+### Follow-up: premise-local names incorrectly fixed internal induction binders
+
+While testing quantified-premise replay, the following valid rule exposed
+an additional capture defect:
+
+```text
+rule localFresh (t : term) (D ∀ n : |- n = n) : |- t = t
+by Ind n (n = n) t { refl } { refl }
+```
+
+Instantiating `t` with the object variable `n` produced a primitive induction
+whose eigenvariable also occurred in its induction term. The kernel rejected
+it with `TermEigenVariableViolation`. The exporter and replay implementation
+had counted the premise-local `n` as externally fixed, preventing freshening
+of the unrelated binder in the rule body.
+
+`lemmaExternalNames` now computes the shared scope boundary used by
+closedness checking, replay and export: quantified premise variables are
+removed from that premise's externally visible names. Object names are
+reserved before inserting schematic arguments, and free external names are
+restored by capture-avoiding primitive proof substitution. This also handles
+a binder sharing a spelling with a free variable in another branch. Common
+fixtures exercise both backends at colliding and noncolliding terms, and
+runtime substitution of a theorem's free variables.
+
+Validation after this follow-up passes all 401 core tests, 38 doctest
+examples and 74 surface tests, including both new capture regressions.
+
 ## Remaining actionable findings
 
 ### P2: draft assumptions are indistinguishable from proved dependencies in the editor
