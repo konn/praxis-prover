@@ -18,6 +18,7 @@ import Language.Praxis.Surface.LogicalPreconditionTest (logicalPreconditionTests
 import Language.Praxis.Surface.MethodContractTest (methodContractTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
 import Language.Praxis.Surface.Prelude
+import Language.Praxis.Surface.QuantifierCaptureTest (quantifierCaptureTests)
 import Language.Praxis.Surface.ResolveTest (resolveTests)
 import Language.Praxis.Surface.TermTest (termTests)
 import Test.Tasty
@@ -33,6 +34,7 @@ main =
           mapM_ (\n -> assertBool n (Map.member n (preludeLemmas p))) ["hdCons", "tlCons", "dropConsSucc", "cvrecUnfold", "histAt", "cvInduction", "belowElim"]
       , parserTests
       , resolveTests
+      , quantifierCaptureTests
       , termTests
       , coreTests
       , dependentClassTests

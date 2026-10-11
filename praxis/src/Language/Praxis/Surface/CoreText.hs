@@ -55,10 +55,11 @@ module Language.Praxis.Surface.CoreText (
 
 import Bound (Var (..), fromScope)
 import Control.Monad (unless)
+import Data.Char (isAlphaNum)
 import Data.List (intersperse, mapAccumL, nub, partition)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec)
+import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec, runBuilder)
 import Data.Traversable qualified as Traversable
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Term qualified as Term
@@ -289,15 +290,20 @@ lowerTermWith lowering = go
       _ -> []
 
 {- |
-The text of a core formula for a surface proposition, the bound variables of
-its quantifiers named by the function given, a name apart from the others.
+The text of a core formula for a surface proposition. Quantifier names start
+with the supplied hint and are freshened against free names and enclosing
+binders before their scopes are rendered.
 -}
 propText :: (Text -> Text) -> (a -> CT) -> Expr a -> Either String Builder
-propText fresh var = go var
+propText fresh var expression = go mentioned var expression
   where
-    go :: (b -> CT) -> Expr b -> Either String Builder
-    go v = \case
-      At _ e -> go v e
+    -- Reserve free names and names embedded in raw generated terms. Each
+    -- recursive scope also reserves its enclosing quantifier binders.
+    mentioned = foldMap (identifiers . runBuilder . render . var) expression <> concatMap (identifiers . refName) (globalsOf expression)
+    identifiers = filter (not . T.null) . T.split (\c -> not (isAlphaNum c || c == '_' || c == '\''))
+    go :: [Text] -> (b -> CT) -> Expr b -> Either String Builder
+    go occupied v = \case
+      At _ e -> go occupied v e
       Rel r a b -> do
         x <- render <$> termCT v a
         y <- render <$> termCT v b
@@ -309,20 +315,20 @@ propText fresh var = go var
           RelGt -> paren ("(lt " <> y <> " " <> x <> ") = 1")
           RelGe -> paren ("(le " <> y <> " " <> x <> ") = 1")
       Conn c a b -> do
-        x <- go v a
-        y <- go v b
+        x <- go occupied v a
+        y <- go occupied v b
         pure case c of
           And -> paren (x <> " /\\ " <> y)
           Or -> paren (x <> " \\/ " <> y)
           Iff -> paren (paren (x <> " ==> " <> y) <> " /\\ " <> paren (y <> " ==> " <> x))
-      Arrow a b -> (\x y -> paren (x <> " ==> " <> y)) <$> go v a <*> go v b
-      Not a -> (\x -> paren ("~ " <> x)) <$> go v a
+      Arrow a b -> (\x y -> paren (x <> " ==> " <> y)) <$> go occupied v a <*> go occupied v b
+      Not a -> (\x -> paren ("~ " <> x)) <$> go occupied v a
       Top -> Right "(0 = 0)"
       Bottom -> Right "_|_"
       Quant q (Hint h) (Just (rel, bound)) _ body -> do
-        let name = fresh h
+        let name = head [candidate | candidate <- iterate (<> "'") (fresh h), candidate `notElem` occupied]
         b <- render <$> termCT v bound
-        inner <- go (\case B () -> CVar name; F x -> v x) (fromScope body)
+        inner <- go (name : occupied) (\case B () -> CVar name; F x -> v x) (fromScope body)
         let limit = case rel of
               Below -> b
               AtMost -> "(S " <> b <> ")"

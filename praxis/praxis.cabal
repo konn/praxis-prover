@@ -151,6 +151,7 @@ test-suite praxis-test
     Language.Praxis.Surface.LogicalPreconditionTest
     Language.Praxis.Surface.MethodContractTest
     Language.Praxis.Surface.ParserTest
+    Language.Praxis.Surface.QuantifierCaptureTest
     Language.Praxis.Surface.ResolveTest
     Language.Praxis.Surface.TermTest
 
