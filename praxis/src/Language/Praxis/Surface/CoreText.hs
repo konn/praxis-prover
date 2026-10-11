@@ -55,10 +55,11 @@ module Language.Praxis.Surface.CoreText (
 
 import Bound (Var (..), fromScope)
 import Control.Monad (unless)
+import Data.Char (isAlphaNum)
 import Data.List (intersperse, mapAccumL, nub, partition)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec)
+import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec, runBuilder)
 import Data.Traversable qualified as Traversable
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Term qualified as Term
@@ -85,6 +86,8 @@ data CT
     dictionary's
     -}
     CPartial !Text ![CT] !Int
+  | -- | a partial schema with captures before and after its source arguments
+    CIndexedPartial !Text ![CT] !Int !Int
   | {- | a predicate standing as the parameter of a variadic schema, closed
     over the terms it captures: its binders, the element's and then a slot
     for each captured term; its body over them; and those terms, which the
@@ -115,6 +118,10 @@ render = \case
     let ys = [CVar ("y_" <> T.pack (show i)) | i <- [1 .. n]]
         (statics, values) = partition isParameter dict
      in "{λ " <> unwordsB (map render ys) <> ". " <> render (CSym f (statics <> ys <> values)) <> "}"
+  CIndexedPartial f captures n prefixCount ->
+    let ys = take n [CVar name | i <- [1 :: Int ..], let name = "y_" <> T.pack (show i), name `notElem` concatMap varsCT captures]
+        (prefix, suffix) = splitAt prefixCount captures
+     in "{λ " <> unwordsB (map render ys) <> ". " <> render (CSym f (prefix <> ys <> suffix)) <> "}"
   CClosure params body _ -> "{λ " <> unwordsB (map fromText params) <> ". " <> render body <> "}"
 
 -- | The ordinary runtime argument of a fixed callback: its packed environment.
@@ -137,6 +144,7 @@ isParameter :: CT -> Bool
 isParameter = \case
   CStatic _ -> True
   CPartial {} -> True
+  CIndexedPartial {} -> True
   CClosure {} -> True
   _ -> False
 
@@ -163,6 +171,7 @@ replaceCT f t = case f t of
   Nothing -> case t of
     CSym g args -> CSym g (map (replaceCT f) args)
     CPartial g dict n -> CPartial g (map (replaceCT f) dict) n
+    CIndexedPartial g captures n prefixCount -> CIndexedPartial g (map (replaceCT f) captures) n prefixCount
     CCallback code environment -> CCallback (replaceCT f code) (replaceCT f environment)
     -- A closure's body is closed over its binders: only what it captures is replaced.
     CClosure ps body captured -> CClosure ps body (map (replaceCT f) captured)
@@ -174,6 +183,7 @@ varsCT = \case
   CVar v -> [v]
   CSym _ args -> concatMap varsCT args
   CPartial _ dict _ -> concatMap varsCT dict
+  CIndexedPartial _ captures _ _ -> concatMap varsCT captures
   CCallback code environment -> varsCT code <> varsCT environment
   CClosure _ _ captured -> concatMap varsCT captured
   _ -> []
@@ -259,6 +269,9 @@ lowerTermWith lowering = go
           if i < 0 then Left "internal: a negative dictionary position" else lowerDictionaryValue lowering i
         (RefValueParam, _) -> Left "a dictionary value applied to arguments"
         (RefPartial n, _) -> (\dict -> CPartial core dict n) <$> traverse go args
+        (RefIndexedPartial n prefixCount, _) -> do
+          unless (n > 0 && prefixCount >= 0 && prefixCount <= length args) $ Left "an invalid indexed partial schema"
+          (\captures -> CIndexedPartial core captures n prefixCount) <$> traverse go args
         _ -> do
           translated <- traverse go args
           lowerApplication lowering r (zip args translated)
@@ -277,15 +290,20 @@ lowerTermWith lowering = go
       _ -> []
 
 {- |
-The text of a core formula for a surface proposition, the bound variables of
-its quantifiers named by the function given, a name apart from the others.
+The text of a core formula for a surface proposition. Quantifier names start
+with the supplied hint and are freshened against free names and enclosing
+binders before their scopes are rendered.
 -}
 propText :: (Text -> Text) -> (a -> CT) -> Expr a -> Either String Builder
-propText fresh var = go var
+propText fresh var expression = go mentioned var expression
   where
-    go :: (b -> CT) -> Expr b -> Either String Builder
-    go v = \case
-      At _ e -> go v e
+    -- Reserve free names and names embedded in raw generated terms. Each
+    -- recursive scope also reserves its enclosing quantifier binders.
+    mentioned = foldMap (identifiers . runBuilder . render . var) expression <> concatMap (identifiers . refName) (globalsOf expression)
+    identifiers = filter (not . T.null) . T.split (\c -> not (isAlphaNum c || c == '_' || c == '\''))
+    go :: [Text] -> (b -> CT) -> Expr b -> Either String Builder
+    go occupied v = \case
+      At _ e -> go occupied v e
       Rel r a b -> do
         x <- render <$> termCT v a
         y <- render <$> termCT v b
@@ -297,20 +315,20 @@ propText fresh var = go var
           RelGt -> paren ("(lt " <> y <> " " <> x <> ") = 1")
           RelGe -> paren ("(le " <> y <> " " <> x <> ") = 1")
       Conn c a b -> do
-        x <- go v a
-        y <- go v b
+        x <- go occupied v a
+        y <- go occupied v b
         pure case c of
           And -> paren (x <> " /\\ " <> y)
           Or -> paren (x <> " \\/ " <> y)
           Iff -> paren (paren (x <> " ==> " <> y) <> " /\\ " <> paren (y <> " ==> " <> x))
-      Arrow a b -> (\x y -> paren (x <> " ==> " <> y)) <$> go v a <*> go v b
-      Not a -> (\x -> paren ("~ " <> x)) <$> go v a
+      Arrow a b -> (\x y -> paren (x <> " ==> " <> y)) <$> go occupied v a <*> go occupied v b
+      Not a -> (\x -> paren ("~ " <> x)) <$> go occupied v a
       Top -> Right "(0 = 0)"
       Bottom -> Right "_|_"
       Quant q (Hint h) (Just (rel, bound)) _ body -> do
-        let name = fresh h
+        let name = head [candidate | candidate <- iterate (<> "'") (fresh h), candidate `notElem` occupied]
         b <- render <$> termCT v bound
-        inner <- go (\case B () -> CVar name; F x -> v x) (fromScope body)
+        inner <- go (name : occupied) (\case B () -> CVar name; F x -> v x) (fromScope body)
         let limit = case rel of
               Below -> b
               AtMost -> "(S " <> b <> ")"
@@ -365,6 +383,13 @@ parameterPredicate :: CT -> Pred
 parameterPredicate = \case
   CStatic p -> Pred p []
   CPartial p ps _ -> Pred p ps
+  CIndexedPartial p captures _ prefixCount ->
+    let fresh name
+          | name `elem` concatMap varsCT captures = fresh (name <> "'")
+          | otherwise = name
+        variable = fresh "indexed_value"
+        (prefix, suffix) = splitAt prefixCount captures
+     in predicateOver variable (CSym p (prefix <> [CVar variable] <> suffix))
   CClosure params body captured -> PredClosure params body captured
   _ -> Pred "anyIs" []
 

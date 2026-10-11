@@ -32,6 +32,8 @@ proof terms (@by IH@: @exact@, or else congruence), @assumption@ and
 module Language.Praxis.Surface.Engine (
   -- * Goals
   Goal (..),
+  SourceBindings,
+  initialSourceBindings,
   GoalPremise (..),
   Hyp (..),
   renderGoal,
@@ -66,12 +68,13 @@ module Language.Praxis.Surface.Engine (
   indexSpec,
 ) where
 
-import Bound (abstract, instantiate, toScope)
+import Bound (Var (..), abstract, instantiate, toScope)
+import Bound qualified
 import Control.Applicative ((<|>))
-import Control.Monad (foldM, forM, forM_, guard, unless, zipWithM)
+import Control.Monad (foldM, forM, forM_, guard, join, unless, zipWithM)
 import Data.Char (isAlphaNum)
 import Data.IntMap.Strict qualified as IM
-import Data.List (elemIndex, find, nub, sort)
+import Data.List (elemIndex, find, nub, nubBy, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
@@ -82,15 +85,19 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, fromUnboundedDec, runBuilder)
 import Data.Void (absurd)
-import Language.Praxis.Surface.Compile (functionLemma, ownDictionary, ruleBinders)
+import Language.Praxis.Surface.Builtin (BuiltinRole (..), builtinRoleName)
+import Language.Praxis.Surface.Compile (functionLemma, ruleBinders)
 import Language.Praxis.Surface.CoreText
+import Language.Praxis.Surface.Desugar (Dependency (AdmittedClass))
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), atPositions, ctorLemma, dataLemma)
 import Language.Praxis.Surface.Env
+import Language.Praxis.Surface.Evidence qualified as Required
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Match
 import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
+import Language.Praxis.Surface.SourceView
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
@@ -125,6 +132,9 @@ data Goal = Goal
   -}
   , goalPremises :: ![GoalPremise]
   -- ^ the premises of that rule, which the goal's proof may appeal to
+  , goalSourceBindings :: !SourceBindings
+  , goalQuantifierViews :: !QuantifierViews
+  -- ^ Source provenance, used only after reconstructing the current quantifier.
   }
 
 {- |
@@ -245,8 +255,8 @@ data Closure = Closure
   -- ^ the indices its arguments must have, under which it holds: an index function, the argument's position, and the index, over its lemma's variables
   , closureValues :: ![Text]
   -- ^ the variables of those indices its arguments do not give: its value parameters
-  , closureProps :: ![(CT, CT)]
-  -- ^ its preconditions, the propositions its proofs are of, as the equations the core states them as, over its lemma's variables
+  , closureProps :: ![Expr Text]
+  -- ^ the complete propositions of its preconditions, over its lemma's variables
   }
 
 -- | What the engine knows of the module so far.
@@ -279,15 +289,17 @@ data Knowledge = Knowledge
   -}
   , knowIndexSpecs :: !(Map Text IndexSpec)
   -- ^ what each function over indexed types says of indices, by its core name
-  , knowObligations :: ![(TheoremInfo, [Text], CT, CT, [(CT, CT)])]
+  , knowObligations :: ![(TheoremInfo, Goal)]
   {- ^ the obligations of the function whose lemmas are being proved,
-  certified: each lemma's core name, its variables, and the equation it
-  concludes, by which the precondition of a call in its clauses holds
+  certified with their complete sequents, including every hypothesis needed
+  when reusing a proof of a call's precondition
   -}
   , knowRuleMetas :: !(Map Text [Text])
   -- ^ Certified rule binder order, used when a premise alone mentions a type predicate.
   , knowLibrary :: !(Set Text)
   -- ^ the lemmas of the library and the prelude, certified, which a proof may cite by their names
+  , knowCheckedDeclarations :: !(Set Text)
+  -- ^ Completely checked declarations and certificates available to surface elaboration.
   }
 
 data EngineError = EngineError !Span !String
@@ -314,7 +326,7 @@ statementGoal membership td = do
   (prop, _) <- Term.prepareProposition (statementInstance td)
   let (antecedents, conclusion) = implications prop
   premises <- renderPremises True predicate binderCores (either (const (CVar "?")) id . termCT CVar . valueTerm) (tdPremises td)
-  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> indexHyps <> map HProp antecedents)] conclusion vars hypNames [] (tdSlots td) premises)
+  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> indexHyps <> map HProp antecedents)] conclusion vars hypNames [] (tdSlots td) premises (initialSourceBindings vars) (thmQuantifierViews (tdInfo td)))
   where
     binderCores = [mangleVariable n | (n, _) <- tdBinders td]
     valueCores = [mangleVariable n | (n, _) <- tdValues td]
@@ -385,11 +397,27 @@ renderPremises includeResultMembership predicate binders valueTerm pds = travers
       c <- formula (scPost contract)
       let binder = "(" <> fromText name <> " ∀ " <> unwordsB (map fromText (scLocals contract)) <> " : " <> intercalateB ", " ("schema_context" : hs) <> " |- " <> c <> ")"
       pure (GoalPremise (pdPremise pd) name binder Nothing (Just contract))
+    premise (k, pd) | PMethod _ _ ty ref <- pdPremise pd = do
+      entry <- termCT CVar (Global ref :: Expr Text)
+      callback <- methodCallback (length (fst (schemaArrows ty))) entry
+      validateMethodPredicates predicate ty
+      contract <- schemaContractWith includeResultMembership predicate valueTerm callback ty
+      let name = "method_closed_" <> T.pack (show k)
+      hs <- traverse hypText (scHyps contract)
+      c <- formula (scPost contract)
+      let quantified = if null (scLocals contract) then "" else " ∀ " <> unwordsB (map fromText (scLocals contract))
+          binder = "(" <> fromText name <> quantified <> " : " <> intercalateB ", " ("schema_context" : hs) <> " |- " <> c <> ")"
+      pure (GoalPremise (pdPremise pd) name binder Nothing (Just contract))
     premise (k, pd) = do
+      let callback = CCallback (CClosure ("unused_law_environment" : ["unused_law_" <> T.pack (show j) | j <- [0 .. length (pdBinders pd) - 1]]) (CNum 0) []) (CNum 0)
+          -- A law's quantified arguments have exact indices as well as
+          -- memberships, just like the arguments of a callback contract.
+          lawType = foldr TArrow TNat (pdBinders pd)
+      domains <- schemaContractWith False predicate valueTerm callback lawType
       let name = (case pdPremise pd of PLaw {} -> "law_"; _ -> "closed_") <> T.pack (show k)
-          locals = ["l_" <> T.pack (show j) | j <- [0 .. length (pdBinders pd) - 1]]
+          locals = scLocals domains
           body = instantiate (Var . (locals !!)) (fmap absurd (pdProp pd))
-          hyps = [membershipText p (CVar l) | (l, t) <- zip locals (pdBinders pd), Just p <- [predicate t]]
+      hyps <- traverse hypText (scHyps domains)
       c <- formula body
       let binder = "(" <> fromText name <> (if null locals then "" else " ∀ " <> unwordsB (map fromText locals)) <> " : " <> intercalateB ", " hyps <> " |- " <> c <> ")"
           closure = case (pdPremise pd, stripLocations body) of
@@ -399,7 +427,15 @@ renderPremises includeResultMembership predicate binders valueTerm pds = travers
                   (Global (Ref RefValueParam v), []) -> Just (valueVar v, [], result)
                   _ -> Nothing
             _ -> Nothing
-      pure (GoalPremise (pdPremise pd) name binder closure Nothing)
+      contract <- case (pdPremise pd, stripLocations body) of
+        (PClosure _ parameter, Rel RelLt (Nat 0) (App _ result)) -> case spine result of
+          (Global ref, _) -> do
+            entry <- termCT CVar (Global ref :: Expr Text)
+            method <- methodCallback (length (pdBinders pd)) entry
+            pure (Just domains {scCallback = method, scType = foldr TArrow (TParam parameter []) (pdBinders pd), scPost = body})
+          _ -> pure Nothing
+        _ -> pure Nothing
+      pure (GoalPremise (pdPremise pd) name binder closure contract)
 
 schemaArgumentType :: Ty -> Bool
 schemaArgumentType ty = let (domains, result) = schemaArrows ty in all firstOrder domains && firstOrder result
@@ -441,6 +477,292 @@ schemaContractUsing includeResultMembership avoid variableTerm predicate valueTe
   where
     foldr1OrTop [] = Top
     foldr1OrTop xs = foldr1 (Conn And) xs
+
+{- | An ordinary dictionary entry, represented as a callback only while
+building its logical contract. The dummy environment is ignored; applying
+this wrapper returns exactly the original method application.
+-}
+methodCallback :: Int -> CT -> Either String CT
+methodCallback arity entry = do
+  let fresh prefix = head [name | name <- iterate (<> "'") prefix, name `notElem` varsCT entry]
+      ignored = fresh "method_environment"
+      names = [fresh ("method_argument_" <> T.pack (show i)) | i <- [0 .. arity - 1]]
+  body <- applyMethodEntry entry (map CVar names)
+  pure (CCallback (CClosure (ignored : names) body []) (CNum 0))
+
+applyMethodEntry :: CT -> [CT] -> Either String CT
+applyMethodEntry entry arguments = case (entry, arguments) of
+  (_, []) | not (isParameter entry) -> Right entry
+  (CStatic name, _) -> Right (CSym name arguments)
+  (CPartial name captures arity, _) | length arguments == arity -> Right (CSym name (arguments <> captures))
+  (CIndexedPartial name captures arity prefix, _) | length arguments == arity -> Right (CSym name (take prefix captures <> arguments <> drop prefix captures))
+  (CClosure names body [], _)
+    | length names == length arguments ->
+        Right (substCT (Map.fromList (zip names arguments)) body)
+  (CCallback {}, _) -> applyCallback entry arguments
+  _ -> Left "a dictionary method does not have its declared arity"
+
+{- | Select dictionary entries through the same coherent resolver as term
+elaboration. Captured type indices are recovered from the actual goal,
+never replaced by unconstrained variables.
+-}
+
+-- Class laws need the complete first-order type of each argument, including
+-- dictionary-dependent indices, before their premise can be applied.
+lawArgumentFacts :: Knowledge -> TheoremInfo -> Goal -> [(Expr Text, Ty)] -> Either String Builder
+lawArgumentFacts k info initial values = fst <$> foldM argument ("", initial) values
+  where
+    argument state@(_, g) (value, ty) = do
+      term <- termCT CVar value
+      let env = goalEnv k info g
+          materialize ix = checkedIndexTerm k env (goalVars g) ix >>= either (const Nothing) Just . termCT CVar
+          variable name = fromMaybe (CVar name) (materialize (IxVar name))
+          parameter i = fromMaybe (CVar "?") (materialize (IxParam i))
+          ignored = head [name | name <- iterate (<> "'") "law_argument_environment", name `notElem` (schemaAvoid g <> varsCT term)]
+          callback = CCallback (CClosure [ignored] term []) (CNum 0)
+      validateMethodPredicates (typePredicate k g) ty
+      contract <- schemaContractUsing True (schemaAvoid g <> varsCT term) variable (typePredicate k g) parameter callback ty
+      unless ("?" `notElem` foldr (:) [] (scPost contract)) $ Left "a class-law argument has an unresolved dependent index"
+      foldM (fact contract) state (parts (scPost contract))
+    fact contract (before, g) proposition = do
+      proof <- proveSchemaContract k g contract {scPost = proposition}
+      stated <- formula proposition
+      let name = head [candidate | candidate <- iterate (<> "'") "LawArgument", candidate `notElem` map fst (goalHyps g)]
+      pure (before <> "have " <> fromText name <> ": " <> stated <> " { " <> proof <> " }; ", g {goalHyps = goalHyps g <> [(name, HProp proposition)]})
+    parts Top = []
+    parts (Conn And left right) = parts left <> parts right
+    parts proposition = [proposition]
+
+methodEntryAt :: Knowledge -> Goal -> Slot -> Ty -> Either String CT
+methodEntryAt k g slot actual = do
+  entry <- resolvedDictionaryEntry (knowEnv k) (goalDict g) slot actual
+  closed <- traverse capture entry
+  termCT CVar (join closed)
+  where
+    context = goalVars g <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+    capture ix = maybe (Left "a selected method's dependent index is not available in this goal") Right (checkedIndexTerm k (knowEnv k) context ix)
+
+{- | A method contract may come from the caller's matching premise or a
+certified implementation. Requiring both certificates for indexed results
+prevents a membership proof from silently forgetting the result's index.
+-}
+certifiedMethodEntry :: Knowledge -> Goal -> Ty -> CT -> Either String ()
+certifiedMethodEntry k g ty callback = do
+  let arity = length (fst (schemaArrows ty))
+      arguments = [CVar ("checked_method_argument_" <> T.pack (show i)) | i <- [0 .. arity - 1]]
+  applied <- applyCallback callback arguments
+  if any (matches applied arguments) (goalPremises g)
+    then Right ()
+    else case applied of
+      CSym name _ -> do
+        unless (Map.member name (knowClosures k)) $
+          Left "a selected method has no certified result membership contract"
+        case snd (schemaArrows ty) of
+          TData _ _ (_ : _) ->
+            unless (Map.member name (knowIndexSpecs k)) $
+              Left "a selected method has no certified exact result indices"
+          _ -> Right ()
+      _ -> Left "the caller has no matching typed contract for this dictionary method"
+  where
+    matches applied arguments premise = case (gpPremise premise, gpSchema premise) of
+      (PMethod {}, Just contract) -> applyCallback (scCallback contract) arguments == Right applied
+      _ -> False
+
+methodContract :: Knowledge -> Goal -> (Text -> CT) -> (Ty -> Maybe Pred) -> (Int -> CT) -> CT -> Ty -> Either String SchemaContract
+methodContract k g variableTerm predicate valueTerm entry ty = do
+  callback <- methodCallback (length (fst (schemaArrows ty))) entry
+  validateMethodPredicates predicate ty
+  certifiedMethodEntry k g ty callback
+  contract <- schemaContractUsing True (schemaAvoid g <> varsCT entry) variableTerm predicate valueTerm callback ty
+  unless ("?" `notElem` concatMap hypVariables (scHyps contract) <> foldr (:) [] (scPost contract)) $
+    Left "a method contract has an unresolved dependent index"
+  pure contract
+  where
+    hypVariables (HMember _ name) = [name]
+    hypVariables (HProp prop) = foldr (:) [] prop
+
+validateMethodPredicates :: (Ty -> Maybe Pred) -> Ty -> Either String ()
+validateMethodPredicates predicate ty = do
+  let (domains, result) = schemaArrows ty
+  unless (all (\t -> t == TNat || isJust (predicate t)) (result : domains)) $
+    Left "a dictionary method's typed contract needs every domain and result membership predicate"
+
+methodPremiseObligation :: Knowledge -> Goal -> [Slot] -> Map Int Ty -> (Text -> CT) -> (Int -> CT) -> Premise -> Either String Obligation
+methodPremiseObligation k g slots assign variableTerm valueTerm premise = case premise of
+  PMethod method parameter ty _ -> do
+    slot <- maybe (Left "a method contract refers to no dictionary entry") Right (find (\s -> slotMethod s == method && slotParam s == parameter) slots)
+    actual <- at parameter
+    entry <- methodEntryAt k g slot actual
+    values <- forM [(i, s) | (i, s) <- zip [0 :: Int ..] (valueSlots slots), dictionaryName i `elem` dependencies ty] \(i, s) -> do
+      actualValue <- at (slotParam s)
+      value <- methodEntryAt k g s actualValue
+      pure (dictionaryName i, value)
+    let variable name = fromMaybe (variableTerm name) (lookup name values)
+        predicate = instantiatedPredicate k g assign
+    OSchema <$> methodContract k g variable predicate valueTerm entry ty
+  _ -> Left "internal: a method contract was expected"
+  where
+    at i = maybe (Left "a method contract's class type is not determined by the arguments") Right (Map.lookup i assign)
+    dictionaryName i = "#d" <> T.pack (show i)
+    dependencies = concatMap Types.ixVars . Types.tyIndices
+
+{- | Logical contracts use the actual dictionary passed to a function.
+Static entries and runtime values keep the same positions as its code;
+extra membership predicates belong only to the generated lemma.
+-}
+functionDictionary :: FunInfo -> [Ty] -> [Slot]
+functionDictionary info argTypes = funProofSlots info <> [membershipSlot i | i <- variables, membershipSlot i `notElem` funProofSlots info]
+  where
+    result = snd (schemaArrows (schemeType (funScheme info)))
+    variables = nub (concatMap valueVariables (result : argTypes))
+
+functionEntry :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Slot -> Either String CT
+functionEntry k g info argTypes args given slot = case lookup slot (zip (funSlots info) (drop (length argTypes) args)) of
+  Just value -> Right value
+  Nothing -> do
+    actual <- functionClassType k g info argTypes args given (slotParam slot)
+    methodEntryAt k g slot actual
+
+classTypeFromPredicate :: Knowledge -> Goal -> Pred -> Either String Ty
+classTypeFromPredicate k g predicate
+  | predicate == anyPred = Right TNat
+  | Just parameter <- ownParam g predicate = Right (TParam parameter [])
+  | Pred name parameters <- predicate
+  , (dn, used) : _ <- [(dn, used) | (dn, (core, used)) <- Map.toList (knowMembership k), core == name]
+  , [dat] <- [d | GData d <- Map.elems (envGlobals (knowEnv k)), renderQualName (dataQual d) == dn] = do
+      unless (null (dataIndices dat)) $ Left "an indexed class type cannot be recovered from its erased membership predicate"
+      types <- forM [0 .. length (dataParams dat) - 1] \i -> case lookup i (zip used parameters) of
+        Just value -> classTypeFromPredicate k g (parameterPredicate value)
+        Nothing -> Left "a class type parameter cannot be recovered from its erased membership predicate"
+      Right (TData dn types [])
+  | otherwise = Left "a class type cannot be recovered from its membership predicate"
+
+{- | Prefer the full checked type of an actual argument to its erased
+membership predicate. Indices cannot be recovered from predicates alone.
+-}
+functionClassType :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Int -> Either String Ty
+functionClassType k g _ argTypes args predicates parameter =
+  case Map.lookup parameter (assignment argTypes (map (fromMaybe THole . argumentTypeOf 16) args)) of
+    Just ty | ty /= THole -> Right ty
+    _ -> maybe (Left "a proof-only dictionary needs the actual class type") (classTypeFromPredicate k g) (Map.lookup parameter predicates)
+  where
+    argumentTypeOf remaining term
+      | remaining <= 0 = Nothing
+      | otherwise = case term of
+          CVar core -> listToMaybe [ty | (_, (name, ty)) <- goalVars g, name == core]
+          CNum _ -> Just TNat
+          CSym core actuals
+            | Just function <- find ((== core) . funCore) [f | GFun f <- Map.elems (envGlobals (knowEnv k))] ->
+                let scheme = funScheme function
+                    (domains, result) = schemaArrows (schemeType scheme)
+                    expected = [snd (schemeValues scheme !! i) | i <- funRuntime function] <> take (funArity function) domains
+                    types = assignment expected (map (fromMaybe THole . argumentTypeOf (remaining - 1)) actuals)
+                    values = [(i, index) | i <- [0 .. length (schemeValues scheme) - 1], Right index <- [indexFromCore (functionValueAt (knowEnv k) function expected actuals i)]]
+                    specialized = Types.substScheme (length (schemeParams scheme), length (schemeValues scheme)) (Types.Assignment (IM.fromList (Map.toList types)) (IM.fromList values)) result
+                 in if THole == specialized || any (== IxHole) (Types.tyIndices specialized) then Nothing else Just specialized
+            | Just constructor <- find ((== core) . ctorCore) [c | GCtor c <- Map.elems (envGlobals (knowEnv k))]
+            , Just (GData datatype) <- Map.lookup (ctorData constructor) (envGlobals (knowEnv k))
+            , null (dataParams datatype)
+            , null (dataIndices datatype) ->
+                Just (TData (renderQualName (dataQual datatype)) [] [])
+          _ -> Nothing
+    indexFromCore = \case
+      CVar name -> Right (IxVar name)
+      CNum value -> Right (IxNat value)
+      CSym "S" [value] -> IxSucc <$> indexFromCore value
+      CSym name values -> IxFun name <$> traverse indexFromCore values
+      _ -> Left "a dictionary index is not a first-order term"
+
+{- | A logical precondition mentions the proof dictionary's places. Replace
+both its runtime values and applied static methods by the actual selected
+entries before attempting to prove it at a call.
+-}
+functionEvidenceEntries :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Either String (Map Text CT)
+functionEvidenceEntries k g info argTypes args predicates = Map.fromList <$> traverse selected (zip dict (placeRefs dict))
+  where
+    dict = functionDictionary info argTypes
+    selected (slot, Ref kind name)
+      | isMembershipSlot slot = do
+          predicate <- maybe (Left "a logical function dictionary is missing its membership predicate") Right (Map.lookup (slotParam slot) predicates)
+          pure (name, CClosure ["member_value"] (predicateAt predicate (CVar "member_value")) [])
+      | otherwise = do
+          value <- functionEntry k g info argTypes args predicates slot
+          pure (if kind == RefValueParam then valueVar name else name, value)
+
+instantiateEvidenceEntries :: Map Text CT -> CT -> Either String CT
+instantiateEvidenceEntries entries = go
+  where
+    go (CVar name) = Right (Map.findWithDefault (CVar name) name entries)
+    go (CStatic name) = Right (Map.findWithDefault (CStatic name) name entries)
+    go (CSym name arguments) = do
+      actuals <- traverse go arguments
+      maybe (Right (CSym name actuals)) (`applyMethodEntry` actuals) (Map.lookup name entries)
+    go (CPartial name captured arity) = CPartial name <$> traverse go captured <*> pure arity
+    go (CIndexedPartial name captured arity prefix) = CIndexedPartial name <$> traverse go captured <*> pure arity <*> pure prefix
+    go (CCallback code environment) = CCallback <$> go code <*> go environment
+    go (CClosure binders body captured) = CClosure binders <$> instantiateEvidenceEntries (foldr Map.delete entries binders) body <*> traverse go captured
+    go value = Right value
+
+functionPreconditions :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> [Expr Text] -> Either String [Expr Text]
+functionPreconditions _ _ _ _ _ _ [] = Right []
+functionPreconditions k g info argTypes args predicates props = do
+  entries <- functionEvidenceEntries k g info argTypes args predicates
+  traverse (mapPropositionTerms (Map.keys entries <> concatMap varsCT (Map.elems entries)) (instantiateEvidenceEntries entries)) props
+
+functionPremiseObligation :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Premise -> Either String Obligation
+functionPremiseObligation k g info argTypes args given = \case
+  PClosure method parameter -> do
+    actual <- maybe (Left "the predicate required by a method closure is not known") Right (Map.lookup parameter given)
+    case actual of
+      PredClosure {} -> do
+        slot <- maybe (Left "a closure premise has no method dictionary entry") Right (find (\entry -> slotMethod entry == method && slotParam entry == parameter) dict)
+        ty <- dictionaryMethodType (knowEnv k) dict slot
+        ref <- maybe (Left "a closure premise has no dictionary reference") Right (lookup slot (zip dict (placeRefs dict)))
+        functionPremiseObligation k g info argTypes args given (PMethod method parameter ty ref)
+      _ -> Right (OClosure method (siteOfPred k g actual))
+  PMethod method parameter ty _ -> do
+    slot <- maybe (Left "a function contract refers to no dictionary method") Right (find (\s -> slotMethod s == method && slotParam s == parameter) dict)
+    entry <- functionEntry k g info argTypes args given slot
+    values <- forM [(i, s) | (i, s) <- zip [0 :: Int ..] (valueSlots dict), name i `elem` concatMap Types.ixVars (Types.tyIndices ty)] \(i, s) -> (name i,) <$> functionEntry k g info argTypes args given s
+    let variable source = fromMaybe (CVar (mangleVariable source)) (lookup source values)
+    OSchema <$> methodContract k g variable predicate valueTerm entry ty
+  PSchema position ty -> do
+    callback <- maybe (Left "the callback argument is not given") Right (listToMaybe (drop position args))
+    OSchema <$> schemaContract g predicate valueTerm callback ty
+  PLaw law parameter -> (\ty -> OLaw law ty True) <$> functionClassType k g info argTypes args given parameter
+  where
+    dict = functionDictionary info argTypes
+    predicate = predicateOf (knowMembership k) (`Map.lookup` given)
+    valueTerm i = if null args then CVar "?" else functionValueAt (knowEnv k) info argTypes args i
+    name i = "#d" <> T.pack (show i)
+
+{- | Parameters appearing only in method or callback premises cannot be
+inferred from the ordinary sequent. Instantiate them in the certified rule's
+binder order, including the selected nullary dictionary values.
+-}
+functionRuleArguments :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Text -> Either String Builder
+functionRuleArguments k g info argTypes args given lemma = do
+  methods <- forM [(slot, ref) | (slot, ref) <- zip dict (placeRefs dict), not (isMembershipSlot slot)] \(slot, Ref _ name) -> do
+    entry <- functionEntry k g info argTypes args given slot
+    value <- applyMethodEntry entry [CVar ("z_" <> T.pack (show i)) | i <- [1 .. slotArity slot]]
+    pure (if slotArity slot > 0 then name else valueVar name, parens (render value))
+  callbacks <- forM (zip [1 ..] (schemaArguments argTypes)) \(serial, (position, ty)) -> do
+    callback <- maybe (Left "a function contract needs its fixed callback") Right (listToMaybe (drop position args))
+    value <- case callback of
+      CCallback code@CStatic {} _ -> parens . render <$> applyCallback (CCallback code (CVar "z_1")) [CVar ("z_" <> T.pack (show i)) | i <- [2 .. 1 + length (fst (schemaArrows ty))]]
+      CCallback CClosure {} _ -> Right "_"
+      _ -> Left "a function contract argument has no fixed code"
+    pure (schemaName serial, value)
+  let predicates = [(name, parens (render (predicateAt predicate (CVar "z_1")))) | (slot, Ref _ name) <- zip dict (placeRefs dict), isMembershipSlot slot, Just predicate <- [Map.lookup (slotParam slot) given]]
+      ordinary = [(mangleVariable ("x" <> T.pack (show i)), parens (render (callbackEnvironment value))) | (i, value) <- zip [0 :: Int ..] (take (length argTypes) args)]
+      indices = [(mangleVariable ("#" <> name), parens (render (functionValueAt (knowEnv k) info argTypes args i))) | (i, (name, _)) <- zip [0 ..] (schemeValues (funScheme info)), not (null args)]
+      argument name
+        | "z_" `T.isPrefixOf` name = fromText name
+        | otherwise = fromMaybe "_" (lookup name (predicates <> methods <> callbacks <> ordinary <> indices))
+  pure (mconcat [" " <> argument name | name <- Map.findWithDefault [] lemma (knowRuleMetas k), name /= "schema_context"])
+  where
+    dict = functionDictionary info argTypes
+    parens body = "(" <> body <> ")"
 
 -- | The text of a theorem's core statement: 'statementGoal' as a sequent.
 theoremStatement :: Map Text (Text, [Int]) -> TheoremDef -> Either String Text
@@ -587,8 +909,8 @@ specGoal k fd spec = do
       predicate = lemmaPredicate k dict
       applied = functionApplication fd
       hyps = [HMember p v | (v, Just p) <- zip cores (map predicate (fdArgs fd))] <> map HProp (specPre spec cores)
-  premises <- either (Left . EngineError (fdSpan fd)) Right (renderPremises True predicate cores (functionValueTerm k fd) (specPremises spec (knowEnv k) dict <> functionSchemaPremises fd))
-  pure (Goal (zip (map hname [1 ..]) hyps) (specPost spec cores applied) (zip names (zip cores (fdArgs fd))) [] [] dict premises)
+  premises <- either (Left . EngineError (fdSpan fd)) Right (renderPremises True predicate cores (functionValueTerm k fd) (functionPremises k fd spec))
+  pure (Goal (zip (map hname [1 ..]) hyps) (specPost spec cores applied) (zip names (zip cores (fdArgs fd))) [] [] dict premises (initialSourceBindings (zip names (zip cores (fdArgs fd)))) (funQuantifierViews (fdInfo fd)))
 
 {- |
 A specification proved by the skeleton every lemma of a function shares: by
@@ -625,7 +947,7 @@ proveSpec k fd spec = do
     dict = lemmaDictionary fd
     predicate = lemmaPredicate k dict
     argIs = map predicate (fdArgs fd)
-    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] [] Nothing
+    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] [] mempty Nothing
     columns = nub [i | fc <- fdClauses fd, (i, p) <- zip [0 ..] (fcPatterns fc), matchedOn p]
     -- An absurd pattern is matched on too: every case there is refuted.
     matchedOn = \case
@@ -634,7 +956,7 @@ proveSpec k fd spec = do
       PSucc _ -> True
       PAbsurd -> True
       _ -> False
-    pds = specPremises spec (knowEnv k) dict <> functionSchemaPremises fd
+    pds = functionPremises k fd spec
     -- The joint contract retains recursive result membership as well as
     -- indices. Project its certified index component instead of repeating
     -- induction with an index-only hypothesis that loses that membership.
@@ -661,18 +983,27 @@ proveSpec k fd spec = do
 
 -- | The dictionary of a function's lemmas: its own, then the membership predicate of each type parameter its values are of, parameters of the lemma's rule.
 lemmaDictionary :: FunDef -> [Slot]
-lemmaDictionary fd = funSlots info <> [membershipSlot i | i <- vars, membershipSlot i `notElem` funSlots info]
+lemmaDictionary fd = fdEvidenceSlots fd <> [membershipSlot i | i <- vars, membershipSlot i `notElem` fdEvidenceSlots fd]
   where
-    info = fdInfo fd
     vars = nub (concatMap valueVariables (fdResult fd : fdArgs fd))
+
+{- | Logical dictionaries contain laws and proof-only methods independently
+of the static parameters actually used by executable code.
+-}
+functionPremises :: Knowledge -> FunDef -> Spec -> [PremiseDef]
+functionPremises k fd spec =
+  nubBy
+    (\a b -> pdPremise a == pdPremise b)
+    (fdEvidencePremises fd <> specPremises spec (knowEnv k) (lemmaDictionary fd) <> functionSchemaPremises fd)
 
 functionSchemaPremises :: FunDef -> [PremiseDef]
 functionSchemaPremises fd = [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (fdArgs fd)]
 
 functionApplication :: FunDef -> Expr Text
-functionApplication fd = apps (Global (Ref RefFunction (funCore info))) (arguments <> ownDictionary (funSlots info))
+functionApplication fd = apps (Global (Ref RefFunction (funCore info))) (arguments <> dictionary)
   where
     info = fdInfo fd
+    dictionary = [Global (fromMaybe (error "internal: a runtime dictionary entry is absent from logical evidence") (lookup slot (zip (lemmaDictionary fd) (placeRefs (lemmaDictionary fd))))) | slot <- funSlots info]
     schemas = [(position, Ref RefStatic (schemaName serial)) | (serial, (position, _)) <- zip [1 ..] (schemaArguments (fdArgs fd))]
     arguments =
       [ maybe (Var core) (\ref -> SchemaParameter ty ref (Var core)) (lookup position schemas)
@@ -793,15 +1124,16 @@ data IndexSpec = IndexSpec
   , ixsValues :: ![Text]
   , ixsPre :: ![(Text, Int, CT)]
   , ixsPost :: ![(Text, CT)]
-  , ixsProps :: ![(CT, CT)]
-  -- ^ its preconditions, the propositions its proofs are of, as the equations the core states them as
+  , ixsPremises :: ![Premise]
+  , ixsProps :: ![Expr Text]
+  -- ^ the complete propositions required by its proof arguments
   }
 
 -- | What a function says of indices, when the types of its signature have any.
 indexSpecOf :: Knowledge -> FunDef -> Maybe IndexSpec
 indexSpecOf k fd
   | null pres0 && null posts0 && null props = Nothing
-  | otherwise = Just (IndexSpec (functionLemma info "#index") cores kept pres posts props)
+  | otherwise = Just (IndexSpec (functionLemma info "#index") cores kept pres posts (map pdPremise (functionPremises k fd (closureSpec "unused" []))) props)
   where
     info = fdInfo fd
     env = knowEnv k
@@ -825,14 +1157,13 @@ indexSpecOf k fd
     pres = [(fn, a, ct x) | (j, (fn, a, x)) <- zip [0 ..] pres0, j `notElem` defining]
     posts = [(fn, ct x) | (fn, x) <- posts0]
     kept = [paramCore i | i <- [0 .. length values - 1], i `notElem` map fst definitions]
-    -- Its preconditions over the variables of its lemmas, as the equations the core states them as.
+    -- Its complete preconditions over the variables of its lemmas.
     props =
-      [ (l, r)
+      [ mapGlobals rename (instantiate (fromCT . valueTerm) (fmap absurd prop))
       | (_, prop) <- funProofs info
-      , Rel RelEq a b <- [stripLocations (asEquation (instantiate (fromCT . valueTerm) (fmap absurd prop)))]
-      , Right l <- [termCT CVar a]
-      , Right r <- [termCT CVar b]
       ]
+    table = Map.fromList [(old, new) | (slot, old) <- zip (funProofSlots info) (placeRefs (funProofSlots info)), Just new <- [lookup slot (zip (lemmaDictionary fd) (placeRefs (lemmaDictionary fd)))]]
+    rename ref = Map.findWithDefault ref ref table
 
 -- | An index as a core term, the value parameters by the function given.
 ixCT :: (Int -> CT) -> Ix -> CT
@@ -849,12 +1180,14 @@ ixCTWith variable param = go
       IxSucc x -> CSym "S" [go x]
       IxCon c xs -> CSym c (map go xs)
       IxFun f xs -> CSym f (map go xs)
+      IxSchema name -> CStatic name
+      IxPartial name arity prefix xs -> CIndexedPartial name (map go xs) arity prefix
 
 {- | The indices a function's arguments must have, as the propositions of its lemmas' hypotheses, over its arguments' core variables.
-| Preconditions as hypotheses: the equations the core states them as.
+| Preconditions as hypotheses, retaining their full logical shape.
 -}
-propExprs :: [(CT, CT)] -> [Expr Text]
-propExprs props = [Rel RelEq (fromCT l) (fromCT r) | (l, r) <- props]
+propExprs :: [Expr Text] -> [Expr Text]
+propExprs = id
 
 {- |
 The preconditions of a lemma at what the substitution gives its variables:
@@ -863,28 +1196,137 @@ function being proved, which a proof its clauses give is; stated as a
 hypothesis, for the appeal to the lemma to find.  Left, with the one no
 hypothesis states and no obligation concludes.
 -}
+
+-- Keep the complete logical shape while changing its computational terms.
+-- Bound variables are opened under a fresh name and immediately reabstracted.
+mapPropositionTerms :: [Text] -> (CT -> Either String CT) -> Expr Text -> Either String (Expr Text)
+mapPropositionTerms reserved transform = go
+  where
+    term expression = fromCT <$> (termCT CVar expression >>= transform)
+    go expression = case expression of
+      At span' body -> At span' <$> go body
+      Typed _ _ _ body -> go body
+      Arrow left right -> Arrow <$> go left <*> go right
+      Conn connective left right -> Conn connective <$> go left <*> go right
+      Rel relation left right -> Rel relation <$> term left <*> term right
+      Not body -> Not <$> go body
+      Quant kind hint (Just (relation, bound)) Nothing body -> do
+        let name = head [candidate | candidate <- iterate (<> "'") "precondition_bound", candidate `notElem` (reserved <> foldr (:) [] expression)]
+        limit <- term bound
+        inside <- go (instantiate (const (Var name)) body)
+        pure (Quant kind hint (Just (relation, limit)) Nothing (abstract (\variable -> if variable == name then Just () else Nothing) inside))
+      Top -> pure Top
+      Bottom -> pure Bottom
+      _ -> Left "an unlowered proposition reached a function contract"
+
+-- Match desugared propositions structurally, including arbitrary nesting of
+-- bounded quantifiers. Only the supplied free variables are metavariables.
+matchProposition :: [Text] -> Expr Text -> Expr Text -> Map Text CT -> Maybe (Map Text CT)
+matchProposition variables = go
+  where
+    terms left right known = do
+      patternTerm <- either (const Nothing) Just (termCT CVar left)
+      actualTerm <- either (const Nothing) Just (termCT CVar right)
+      matchCT variables patternTerm actualTerm known
+    go left right known = case (stripLocations (asEquation left), stripLocations (asEquation right)) of
+      (Rel relation a b, Rel actual c d) | relation == actual -> terms a c known >>= terms b d
+      (Arrow a b, Arrow c d) -> go a c known >>= go b d
+      (Conn connective a b, Conn actual c d) | connective == actual -> go a c known >>= go b d
+      (Not a, Not b) -> go a b known
+      (Quant kind _ (Just (relation, limit)) Nothing body, Quant actual _ (Just (actualRelation, actualLimit)) Nothing actualBody)
+        | kind == actual && relation == actualRelation -> do
+            values <- terms limit actualLimit known
+            let taken = variables <> foldr (:) [] left <> foldr (:) [] right <> concatMap varsCT (Map.elems known)
+                name = head [candidate | candidate <- iterate (<> "'") "matched_quantifier", candidate `notElem` taken]
+            matched <- go (instantiate (const (Var name)) body) (instantiate (const (Var name)) actualBody) values
+            guard (all (notElem name . varsCT) (Map.elems matched))
+            pure matched
+      (Top, Top) -> Just known
+      (Bottom, Bottom) -> Just known
+      _ -> Nothing
+
+hypProposition :: Hyp -> Expr Text
+hypProposition (HProp proposition) = proposition
+hypProposition (HMember predicate variable) = Rel RelLt (Nat 0) (fromCT (predicateAt predicate (CVar variable)))
+
+-- The relational fast path remains available, but collecting it cannot erase
+-- a nonrelational requirement from the full checked obligation table.
+equationObligations :: Knowledge -> [(TheoremInfo, [Text], CT, CT, [Expr Text])]
+equationObligations knowledge =
+  [ (theorem, sequentVars goal, left, right, hypotheses)
+  | (theorem, goal) <- knowObligations knowledge
+  , Rel RelEq a b <- [stripLocations (asEquation (goalConcl goal))]
+  , Right left <- [termCT CVar a]
+  , Right right <- [termCT CVar b]
+  , let hypotheses = map (hypProposition . snd) (goalHyps goal)
+  ]
+
+-- Every full precondition must be present or follow from an earlier certified
+-- erased-proof obligation whose own hypotheses are established here.
+propositionsAt :: Knowledge -> Goal -> Map Text CT -> [Expr Text] -> Either String Builder
+propositionsAt k g sigma = fmap mconcat . traverse establish
+  where
+    apply known = mapPropositionTerms (Map.keys known <> concatMap varsCT (Map.elems known)) (Right . substCT known)
+    establish original = do
+      target <- apply sigma original
+      case stripLocations (asEquation target) of
+        Rel RelEq left right -> do
+          l <- termCT CVar left
+          r <- termCT CVar right
+          preconditionsAt k g Map.empty [(l, r)]
+        _ | any (matches target . hypProposition . snd) (goalHyps g) -> pure ""
+        _ -> case [result | (theorem, obligation) <- knowObligations k, Just assignment <- [matchProposition (sequentVars obligation) (goalConcl obligation) target Map.empty], Right result <- [appeal target theorem obligation assignment]] of
+          proof : _ -> pure proof
+          [] -> Left ("the full precondition " <> either id (T.unpack . runBuilder) (formula target) <> " is not established here")
+    matches a b = isJust (matchProposition [] a b Map.empty)
+    appeal target theorem obligation initial = do
+      (known, before) <- obligationHypotheses k g (sequentVars obligation) initial (map (hypProposition . snd) (goalHyps obligation))
+      proof <- obligationAppeal k g theorem known
+      stated <- formula target
+      pure (before <> "have (" <> stated <> ") { " <> proof <> " }; ")
+
+-- Check every assumption of a certified obligation, retaining quantified and
+-- connective propositions alongside the ordinary arithmetic equations.
+obligationHypotheses :: Knowledge -> Goal -> [Text] -> Map Text CT -> [Expr Text] -> Either String (Map Text CT, Builder)
+obligationHypotheses k g variables initial = solve initial
+  where
+    matches a b = isJust (matchProposition [] a b Map.empty)
+    solve known [] = pure (known, "")
+    solve known (proposition : rest) =
+      let extensions = [next | (_, hyp) <- goalHyps g, Just next <- [matchProposition variables proposition (hypProposition hyp) known]]
+          -- Several values can have the same membership. Keep every
+          -- consistent choice until the remaining indices and propositions
+          -- establish which value this obligation's binder denotes.
+          candidates = nub (extensions <> [known])
+       in choose [establish selected proposition rest | selected <- candidates]
+    choose [] = Left "a checked obligation's hypotheses are not established here"
+    choose (Right result : _) = Right result
+    choose (Left why : alternatives) = case alternatives of
+      [] -> Left why
+      _ -> choose alternatives
+    establish selected proposition rest = do
+      target <- mapPropositionTerms (Map.keys selected <> concatMap varsCT (Map.elems selected)) (Right . substCT selected) proposition
+      before <-
+        if any (matches target . hypProposition . snd) (goalHyps g)
+          then pure ""
+          else case stripLocations (asEquation target) of
+            Rel RelEq a b -> do
+              left <- termCT CVar a
+              right <- termCT CVar b
+              maybe (Left "a checked obligation's hypothesis is not established here") Right (equationFromHyps k g left right)
+            _ -> Left "a checked obligation's quantified hypothesis is not established here"
+      (known, after) <- solve selected rest
+      pure (known, before <> after)
+
 preconditionsAt :: Knowledge -> Goal -> Map Text CT -> [(CT, CT)] -> Either String Builder
 preconditionsAt k g sigma props = fmap mconcat . forM props $ \(l0, r0) -> do
   let l = substCT sigma l0
       r = substCT sigma r0
       concludes t (_, vs, ol, or', _) = matchCT vs ol t Map.empty >>= matchCT vs or' r
-      found t = listToMaybe [(o, sub) | o <- knowObligations k, Just sub <- [concludes t o]]
+      found t = listToMaybe [(o, sub) | o <- equationObligations k, Just sub <- [concludes t o]]
       -- The obligation's own hypotheses, the clause's preconditions, at what the match gives its
       -- variables: each at hand, or from a hypothesis by the equations between variables.
-      hypotheses (o, vs, _, _, hs) sub = foldM premise (sub, "") hs
-        where
-          premise (known, tac) (hl0, hr0) = do
-            -- A premise may determine a value absent from the conclusion,
-            -- such as the vector in an obligation proving the constant 0 < 2.
-            let matches = [s' | (_, l', r') <- goalEquations g, Just s <- [matchCT vs hl0 l' known], Just s' <- [matchCT vs hr0 r' s]]
-                known' = fromMaybe known (listToMaybe matches)
-                hl = substCT known' hl0
-                hr = substCT known' hr0
-            proof <-
-              if hasEquation g hl hr
-                then Right ""
-                else maybe (Left ("the precondition " <> T.unpack (runBuilder (equationText hl hr)) <> " of the obligation " <> T.unpack (thmCore o) <> " is not established here")) Right (equationFromHyps k g hl hr)
-            pure (known', tac <> proof)
+      hypotheses (_, vs, _, _, hs) sub = obligationHypotheses k g vs sub hs
       -- The left side rewritten by the equations of indices at hand, as the obligation
       -- states it at them: each step, with the hypothesis doing it.
       rewrites = rewriting l (goalEquations g)
@@ -925,7 +1367,7 @@ instantiate the certified rule, including its typed closure obligations.
 -}
 obligationAppeal :: Knowledge -> Goal -> TheoremInfo -> Map Text CT -> Either String Builder
 obligationAppeal k g info known
-  | null callbacks = Right ("exact " <> fromText (thmCore info))
+  | null (thmPremises info) = Right ("exact " <> fromText (thmCore info))
   | otherwise = do
       actualCallbacks <- forM (zip [1 ..] callbacks) \(serial, (position, _)) -> do
         value <-
@@ -1227,34 +1669,27 @@ indexOf k g eqs t0 = case t0 of
         , Just post <- lookup fn (ixsPost s) -> do
             let byArg = zip (ixsArgs s) args
             (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) byArg
-            props <- preconditionsAt k g (Map.fromList byArg <> sigma) (ixsProps s)
+            actualProps <- case find ((== h) . funCore) [f | GFun f <- Map.elems (envGlobals (knowEnv k))] of
+              Nothing -> Right (ixsProps s)
+              Just info ->
+                let argTypes = [snd (schemeValues (funScheme info) !! i) | i <- funRuntime info] <> take (funArity info) (fst (schemaArrows (schemeType (funScheme info))))
+                    given = knownPredicates k g argTypes args <> dictionaryPredicates k g info argTypes args
+                 in functionPreconditions k g info argTypes args given (ixsProps s)
+            props <- propositionsAt k g (Map.fromList byArg <> sigma) actualProps
             mems <- argMemberships k g h args
             callbacks <- case find ((== h) . funCore) [f | GFun f <- Map.elems (envGlobals (knowEnv k))] of
               Nothing -> Right ""
               Just info -> do
                 let argTypes = [snd (schemeValues (funScheme info) !! i) | i <- funRuntime info] <> take (funArity info) (fst (schemaArrows (schemeType (funScheme info))))
-                    result = snd (schemaArrows (schemeType (funScheme info)))
-                    variables = nub (concatMap valueVariables (result : argTypes))
-                    dict = funSlots info <> [membershipSlot i | i <- variables, membershipSlot i `notElem` funSlots info]
-                    given = knownPredicates k g argTypes args
-                    predicate = predicateOf (knowMembership k) (Just . (\i -> Map.findWithDefault anyPred i given))
-                proofs <- forM (schemaArguments argTypes) \(position, ty) -> do
-                  contract <- schemaContract g predicate (functionValueAt (knowEnv k) info argTypes args) (args !! position) ty
-                  proveSchemaContract k g contract
-                statics <- forM (zip [1 ..] (schemaArguments argTypes)) \(serial, (position, ty)) -> do
-                  argument <- case args !! position of
-                    CCallback code@CStatic {} _ -> (\body -> "(" <> render body <> ")") <$> applyCallback (CCallback code (CVar "z_1")) [CVar ("z_" <> T.pack (show j)) | j <- [2 .. 1 + length (fst (schemaArrows ty))]]
-                    CCallback CClosure {} _ -> Right "_"
-                    _ -> Left "an indexed function needs its fixed callback"
-                  pure (schemaName serial, argument)
-                let predicates = [(name, "(" <> render (predicateAt (Map.findWithDefault anyPred (slotParam slot) given) (CVar "z_1")) <> ")") | (slot, Ref _ name) <- zip dict (placeRefs dict), isMembershipSlot slot]
-                    runtime (CCallback _ environment) = environment
-                    runtime value = value
-                    values = [(name, "(" <> render (runtime value) <> ")") | (name, value) <- Map.toList (Map.fromList byArg <> sigma)]
-                    argument name
-                      | "z_" `T.isPrefixOf` name = fromText name
-                      | otherwise = fromMaybe "_" (lookup name (predicates <> statics <> values))
-                    explicit = if null statics then "" else mconcat [" " <> argument name | name <- Map.findWithDefault [] (ixsLemma s) (knowRuleMetas k), name /= "schema_context"]
+                    dict = functionDictionary info argTypes
+                    given0 = knownPredicates k g argTypes args <> dictionaryPredicates k g info argTypes args
+                    given = given0 <> Map.fromList [(slotParam slot, anyPred) | slot <- dict, isMembershipSlot slot]
+                    premises = ixsPremises s
+                forM_ [parameter | PMethod _ parameter _ _ <- premises] \parameter ->
+                  unless (Map.member parameter given0) $ Left "an indexed function's method contract needs its actual class predicate"
+                required <- traverse (functionPremiseObligation k g info argTypes args given) premises
+                proofs <- traverse (discharge k g) required
+                explicit <- if null premises then Right "" else functionRuleArguments k g info argTypes args given (ixsLemma s)
                 pure (explicit <> mconcat [" { " <> proof <> " }" | proof <- proofs])
             let at = substCT (Map.fromList byArg <> sigma)
                 appeal = mems <> haves <> props <> "exact " <> fromText (ixsLemma s) <> callbacks
@@ -1329,6 +1764,29 @@ knownPredicates k g tys args = Map.unions (zipWith fromArgument tys args)
           Map.unions [fromPredicate ty (parameterPredicate p) | (i, p) <- zip used parameters, Just ty <- [listToMaybe (drop i ts)]]
     fromPredicate _ _ = Map.empty
 
+{- | A class parameter can occur only in its dictionary, as with a nullary
+enumerator. Recover its actual predicate from the selected method's result
+contract before instantiating an index-only lemma.
+-}
+dictionaryPredicates :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred
+dictionaryPredicates k g info argTypes args =
+  Map.unions
+    [ fromPredicate result predicate
+    | (slot, entry) <- zip (funSlots info) (drop (length argTypes) args)
+    , not (isMembershipSlot slot)
+    , Right ty <- [dictionaryMethodType (knowEnv k) (funSlots info) slot]
+    , let (domains, result) = schemaArrows ty
+    , Right applied <- [applyMethodEntry entry [CVar ("dictionary_argument_" <> T.pack (show i)) | i <- [0 .. length domains - 1]]]
+    , Just predicate <- [termPred k g applied]
+    ]
+  where
+    fromPredicate (TParam i []) predicate = Map.singleton i predicate
+    fromPredicate (TData dn ts _) (Pred name parameters)
+      | Just (actual, used) <- Map.lookup dn (knowMembership k)
+      , name == actual =
+          Map.unions [fromPredicate ty (parameterPredicate p) | (i, p) <- zip used parameters, Just ty <- [listToMaybe (drop i ts)]]
+    fromPredicate _ _ = Map.empty
+
 -- | The membership predicate of a term, in a goal: a variable's, by its hypothesis; a function's result's, by its closure lemma at the predicates of its arguments.
 termPred :: Knowledge -> Goal -> CT -> Maybe Pred
 termPred k g term
@@ -1342,19 +1800,19 @@ termPred k g term
       , let captures = init args
       ] =
       Just p
+  | p : _ <-
+      [ parameterPredicate (substCT sigma (predicateParam p))
+      | gp <- goalPremises g
+      , Just contract <- [gpSchema gp]
+      , Rel RelLt (Nat 0) member <- parts (scPost contract)
+      , Right code <- [termCT CVar member]
+      , Just (p, patternTerm) <- [splitMembership code]
+      , Just sigma <- [matchCT (scLocals contract) patternTerm term Map.empty]
+      ] =
+      Just p
   | otherwise = case term of
       CVar v -> listToMaybe [p | (_, HMember p x) <- goalHyps g, x == v]
       CSym f args
-        | p : _ <-
-            [ p
-            | gp <- goalPremises g
-            , Just contract <- [gpSchema gp]
-            , Rel RelLt (Nat 0) member <- parts (scPost contract)
-            , Right code <- [termCT CVar member]
-            , Just (p, patternTerm) <- [splitMembership code]
-            , Just _ <- [matchCT (scLocals contract) patternTerm term Map.empty]
-            ] ->
-            Just p
         | Just cl <- Map.lookup f (knowClosures k) -> do
             let given = knownPredicates k g (closureArgTys cl) args
             predicateOf (knowMembership k) (`Map.lookup` given) (closureResultTy cl)
@@ -1493,7 +1951,7 @@ nameByClause td pc g0 =
 -- | A proposition's implications, as hypotheses and a conclusion.
 implications :: Expr a -> ([Expr a], Expr a)
 implications = \case
-  At _ e -> implications e
+  At sp e -> let (hs, c) = implications e in (hs, At sp c)
   Arrow a b -> let (hs, c) = implications b in (a : hs, c)
   e -> ([], e)
 
@@ -1581,10 +2039,13 @@ data Evidence = Evidence
   -- ^ auxiliary declarations used by proofs supplied as term arguments
   , evConclusion :: !(Maybe (Expr Text))
   -- ^ what a lemma concludes at its arguments, where its value parameters are known there
+  , evSourceBindings :: !(Maybe SourceBindings)
+  , evQuantifierViews :: !QuantifierViews
+  -- ^ The conclusion's declaration-scoped source provenance.
   }
 
 named :: Text -> Evidence
-named n = Evidence n "" "" Nothing [] Nothing
+named n = Evidence n "" "" Nothing [] Nothing Nothing mempty
 
 -- | Keep auxiliary declarations when an appeal becomes a proof.
 evidenceOut :: Evidence -> Builder -> Out
@@ -1748,21 +2209,25 @@ evidence :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineE
 evidence k info g le = case spineOf le of
   (Located sp (R.EName q), args) -> case q of
     QName [] (Ident w)
-      | null args, Just h <- lookup w (goalNames g) -> Right (named h)
+      | Just h <- lookup w (goalNames g)
+      , null args || maybe False boundedUniversal (hypothesis h) ->
+          quantifiedEvidence k info g sp (named h) args
     _ -> case resolve (knowEnv k) q of
       GTheorem t : _ -> theorem sp t args
       GLaw l : _ -> do
+        let name = lawClass l
+        checkedElaboration k g (goalEnv k info g) (requireDependency sp (AdmittedClass (QName (init name) (last name))))
         checked <- traverse (typedArg k info g) args
         let typed = map fst checked
             checks = map snd checked
         case Map.lookup 0 (assignment (map snd (lawBinders l)) (map snd typed)) of
           Just (TParam j []) -> do
             name <- own sp (PLaw (lawQual l) j)
-            pre <- memberships k g [(arg, e, typePredicate k g ty) | ((arg, (e, ty)), (_, TParam 0 [])) <- zip (zip args typed) (lawBinders l)]
+            pre <- either (Left . EngineError sp) Right (lawArgumentFacts k info g typed)
             -- The law's methods, the goal's places for them at j.
             let table = Map.fromList <$> traverse (\(s, r) -> (r,) <$> goalPlace s {slotParam = j}) (zip (lawSlots l) (placeRefs (lawSlots l)))
             eq <- equationOf sp (lawProp l) table typed (length (lawBinders l))
-            Right (Evidence name (mconcat (map outTactic checks) <> pre) "" eq (concatMap outAux checks) Nothing)
+            Right (Evidence name (mconcat (map outTactic checks) <> pre) "" eq (concatMap outAux checks) Nothing Nothing (lawQuantifierViews l))
           Just ty
             | Just h <- headOf ty -> do
                 inst <- maybe (Left (EngineError sp ("no instance of " <> T.unpack (displayQualName (lawClass l)) <> " for " <> T.unpack h))) Right (Map.lookup (lawClass l, h) (envInstances (knowEnv k)))
@@ -1778,10 +2243,28 @@ evidence k info g le = case spineOf le of
             hs <- forM args \case
               Located _ (R.EName (QName [] (Ident h))) | Just c <- lookup h (goalNames g) -> Right c
               Located asp _ -> Left (EngineError asp "a lemma of the library is applied to hypotheses, by their names")
-            Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing [] Nothing)
+            Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing [] Nothing Nothing mempty)
       _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (displayQName q)))
   (Located sp _, _) -> Left (EngineError sp "a proof term: a hypothesis or a lemma, applied")
   where
+    hypothesis name = case lookup name (goalHyps g) of
+      Just (HProp proposition) -> Just proposition
+      _ -> Nothing
+    boundedUniversal proposition = case stripLocations proposition of
+      Quant Forall _ (Just _) Nothing _ -> True
+      _ -> False
+    proofArguments _ [] arguments = Right arguments
+    proofArguments _ _ [] = Right []
+    proofArguments sp (premise : premises) arguments@(argument : rest) =
+      case proofName argument >>= (`lookup` goalNames g) >>= hypothesis of
+        Nothing -> Right arguments
+        Just actual
+          | isJust (matchProposition [] (asEquation premise) (asEquation actual) Map.empty) -> proofArguments sp premises rest
+          | otherwise -> Left (EngineError (location argument) "the theorem's explicit proof argument does not establish its antecedent")
+      where
+        proofName (Located _ (R.EName (QName [] (Ident name)))) = Just name
+        proofName (Located _ (R.EParen inner)) = proofName inner
+        proofName _ = Nothing
     -- The indices a theorem's binders must have, at the arguments given: found, and stated where no hypothesis does; with the value parameters they give.
     indexPremises sp t typed
       | null (thmIndexHyps t) = Right (Map.empty, "")
@@ -1791,20 +2274,105 @@ evidence k info g le = case spineOf le of
               (defined, pre) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
           premisesAt k g (goalEquations g) pre [v | (i, v) <- zip [0 ..] values, i `notElem` map fst defined] (zip (thmBinders t) args)
     -- What a theorem with value parameters concludes at its arguments: each value parameter the index of an argument, or found from one.
-    conclusionAt t typed sigma = do
-      sc <-
-        thmProp t <|> do
-          guard (all isMembershipSlot (thmSlots t))
-          thmStatement t
+    statementAt sp t typed sigma assigned = case (sourceStatement, theoremValuesAt t typed sigma) of
+      (Just sc, Just known) -> do
+        let nv = length (thmValues t)
+            instantiated = instantiate (\i -> if i < nv then fromCT (known !! i) else fst (typed !! (i - nv))) (fmap absurd sc)
+            count = 1 + maximum (-1 : map slotParam (thmSlots t))
+            types = [Map.findWithDefault (TParam i []) i assigned | i <- [0 .. count - 1]]
+        if sourceViews
+          then Just <$> checkedElaboration k g (goalEnv k info g) (instantiateProofDictionary (goalEnv k info g) (goalDict g) (goalVars g) sp (thmSlots t) types instantiated)
+          else pure (Just instantiated)
+      _ -> pure Nothing
+      where
+        sourceViews = not (null (quantifierViewsList (thmQuantifierViews t)))
+        sourceStatement =
+          thmProp t <|> do
+            guard (sourceViews || all isMembershipSlot (thmSlots t))
+            thmStatement t
+    theoremValuesAt t typed sigma = do
       guard (length typed == length (thmBinders t))
       args <- either (const Nothing) Just (traverse (termCT CVar . fst) typed)
       let values = map mangleVariable (thmValues t)
           (defined, _) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
           byBinder = Map.fromList (zip (thmBinders t) args)
           valueTerm i = maybe (Map.lookup (values !! i) sigma) (Just . substCT byBinder) (lookup i defined)
-          nv = length values
-      known <- traverse valueTerm [0 .. nv - 1]
-      pure (snd (implications (instantiate (\i -> if i < nv then fromCT (known !! i) else fst (typed !! (i - nv))) (fmap absurd sc))))
+      traverse valueTerm [0 .. length values - 1]
+    theoremSource t typed sigma assign =
+      let tag = Ident ("#application:" <> T.pack (show (Map.size (sourceApplications (goalSourceBindings g)))))
+          views = tagQuantifierViews tag (thmQuantifierViews t)
+          scoped = foldMap specialize (quantifierViewsList views)
+          specialize view =
+            withTypeBindings [(name, Map.findWithDefault (TParam i []) i assign) | (i, name) <- zip [0 ..] (Types.tsTypes (qvScope view))] (quantifierViewsFromList [view {qvTypeBindings = [(name, specializeType view ty) | (name, ty) <- qvTypeBindings view]}])
+          knownValues = fromMaybe [] (theoremValuesAt t typed sigma)
+          typeAssignment = Types.Assignment (IM.fromList (Map.toList assign)) (IM.fromList [(i, index) | (i, value) <- zip [0 ..] knownValues, Right index <- [expressionIndex (fromCT value)]])
+          specializeType view = Types.substScheme (length (Types.tsTypes (qvScope view)), length (thmValues t)) typeAssignment
+          actual = Map.fromList (zip (thmBinders t) typed)
+          implicit view = [(name, (fromCT value, specializeType view (fromMaybe TNat (lookup name (Types.tsValueTys (qvScope view)))))) | (name, value) <- zip (thmValues t) knownValues]
+          lexical view = [(name, value) | name <- qvParameters view, Just value <- [Map.lookup (mangleVariable name) actual]] <> implicit view
+          bases = Map.fromList [(qvOwner view, lexical view) | view <- quantifierViewsList scoped]
+          bindings = goalSourceBindings g
+       in (scoped, bindings {sourceApplications = bases <> sourceApplications bindings})
+    -- A finite binder may be the only occurrence determining a theorem's
+    -- type or index parameters. Read its checked source annotation before
+    -- selecting premises; elimination still reconstructs the entire lowered
+    -- quantifier and validates the actual value against that domain.
+    quantifiedAssignments sp t typed initial arguments = case thmStatement t <|> thmProp t of
+      Nothing -> Right (initial, False)
+      Just statement -> do
+        let (antecedents, conclusion) = implications (instantiate (const Hole) (fmap absurd statement))
+            remaining = skipProofs antecedents arguments
+        learned <- infer [] initial conclusion remaining
+        pure (learned, boundedUniversal conclusion && not (null remaining))
+      where
+        skipProofs (_ : rest) (arg : args)
+          | Just name <- proofName arg
+          , Just core <- lookup name (goalNames g)
+          , Just (HProp _) <- lookup core (goalHyps g) =
+              skipProofs rest args
+        skipProofs _ args = args
+        proofName (Located _ (R.EName (QName [] (Ident name)))) = Just name
+        proofName (Located _ (R.EParen inner)) = proofName inner
+        proofName _ = Nothing
+        infer _ known _ [] = Right known
+        infer earlier known proposition (arg : args) = case stripLocations proposition of
+          Quant Forall _ (Just _) Nothing body -> case candidates proposition of
+            [] -> Right known
+            [view] -> do
+              let ordinary = [(name, value) | name <- qvParameters view, Just value <- [lookup (mangleVariable name) (zip (thmBinders t) typed)]]
+                  previous = [(unLocated name, value) | name <- qvDomainBinders view, Just value <- [lookup (location name) earlier]]
+                  original = qvScope view
+                  sourceValues = reverse previous <> ordinary
+                  avoid = schemaAvoid g <> map fst (Types.tsValues original) <> concatMap (foldr (:) [] . fst . snd) sourceValues
+                  fresh i = head [name | name <- iterate (<> "'") ("#finite-inference-" <> T.pack (show i)), name `notElem` avoid]
+                  entries = [(name, (fresh i, value, ty)) | (i, (name, (value, ty))) <- zip [0 :: Int ..] sourceValues]
+                  bindings = [(name, IxVar core) | (name, (core, _, _)) <- entries]
+                  scope = original {Types.tsValues = bindings <> filter ((`notElem` map fst bindings) . fst) (Types.tsValues original), Types.tsValueTys = [(name, ty) | (name, (_, _, ty)) <- entries] <> filter ((`notElem` map fst bindings) . fst) (Types.tsValueTys original)}
+                  env = (knowEnv k) {envScope = scope, envTypeBindings = qvTypeBindings view, envBuiltins = Required.builtinScope (qvBuiltins view) (envBuiltins (knowEnv k))}
+                  context = [(name, (core, ty)) | (name, (core, _, ty)) <- entries]
+                  replacement name = listToMaybe [value | (_, (core, value, _)) <- entries, core == name]
+                  actualIndex index@(IxVar name) = maybe index (either (const index) id . expressionIndex) (replacement name)
+                  actualIndex (IxSucc index) = IxSucc (actualIndex index)
+                  actualIndex (IxCon name indices) = IxCon name (map actualIndex indices)
+                  actualIndex (IxFun name indices) = IxFun name (map actualIndex indices)
+                  actualIndex (IxPartial name arity prefix indices) = IxPartial name arity prefix (map actualIndex indices)
+                  actualIndex index = index
+                  parameters = (length (Types.tsTypes original), length (thmValues t))
+              written <- checkedElaboration k g env (quantifierType env context (qvDomain view))
+              let domain = Types.mapIx actualIndex written
+              ((value, actual), _) <- case typedArg k info g arg of
+                Right checked -> Right checked
+                Left original ->
+                  let expected = instantiateSchemaTypes parameters known domain
+                   in if Types.determined expected then typedFiniteArgument k info g arg expected else Left original
+              let learned = fromMaybe known (Types.matchTy parameters domain actual known)
+              infer ((qvSpan view, (value, domain)) : earlier) learned (instantiate (const Hole) body) args
+            _ -> Left (EngineError sp "a theorem's finite binder has ambiguous source provenance")
+          _ -> Right known
+        candidates proposition = nub [view | at <- locations proposition, view <- quantifierViewCandidates at (thmQuantifierViews t), qvQuantifier view == R.Forall, not (qvNumeric view)]
+        locations (At (Irrelevant at) inside) = at : locations inside
+        locations (Typed _ _ _ inside) = locations inside
+        locations _ = []
     theorem sp t args
       | thmQual t == thmQual info = named <$> recursive sp (implicitsOf le) args
       | otherwise = do
@@ -1815,7 +2383,7 @@ evidence k info g le = case spineOf le of
                 maybe (Left (EngineError sp "a theorem argument does not have its declared type")) Right (Types.matchTy parameters (binders !! position) actual known)
           ordinary <- forM [(position, arg) | (position, arg, ty) <- numbered, null (fst (schemaArrows ty))] \(position, arg) -> (position,) <$> typedArg k info g arg
           partial <- foldM (\known (position, ((_, actual), _)) -> learn known position actual) Types.emptyAssignment ordinary
-          (inferred, callbacks) <-
+          (ordinaryInferred, callbacks) <-
             foldM
               ( \(known, done) (position, arg, ty) -> do
                   checked <- typedArgExpected k info g arg (instantiateSchemaTypes parameters known ty)
@@ -1827,12 +2395,17 @@ evidence k info g le = case spineOf le of
           checked <- forM [0 .. length numbered - 1] \position -> maybe (Left (EngineError sp "an argument was not elaborated")) Right (lookup position (ordinary <> callbacks))
           let typed = map fst checked
               checks = map snd checked
-              assign = assignment (thmMembered t) (map snd typed)
+          (inferred, boundedArguments) <- quantifiedAssignments sp t typed ordinaryInferred (drop (length (thmBinders t)) args)
+          let assign = assignment (thmMembered t) (map snd typed) <> Map.fromList (IM.toList (Types.asTypes inferred))
               membered = \case
                 TData _ _ _ -> True
                 TParam i [] -> membershipSlot i `elem` thmSlots t
                 _ -> False
-          pre <- memberships k g [(arg, e, typePredicate k g ty) | ((arg, (e, ty)), bty) <- zip (zip args typed) (thmMembered t), membered bty]
+          let appliedPredicate = instantiatedPredicate k g assign
+          required <- forM [((arg, e), bty) | ((arg, (e, _)), bty) <- zip (zip args typed) (thmMembered t), membered bty] \((arg, value), ty) -> do
+            predicate <- maybe (Left (EngineError (location arg) "a theorem argument's exact indexed type predicate is unavailable")) Right (appliedPredicate ty)
+            pure (arg, value, Just predicate)
+          pre <- memberships k g required
           (indices, idx) <- indexPremises sp t typed
           let sigma =
                 indices
@@ -1840,7 +2413,7 @@ evidence k info g le = case spineOf le of
                     [ (mangleVariable name, code)
                     | (position, ix) <- IM.toList (Types.asValues inferred)
                     , Just name <- [listToMaybe (drop position (thmValues t))]
-                    , Just value <- [indexTermIn (goalEnv k info g) (goalVars g) ix]
+                    , Just value <- [checkedIndexTerm k (goalEnv k info g) (goalVars g) ix]
                     , Right code <- [termCT CVar value]
                     ]
           post <- premiseBlocks k g sp t assign typed sigma
@@ -1849,7 +2422,18 @@ evidence k info g le = case spineOf le of
           eq <- case thmStatement t of
             Just sc | any isMembershipSlot (thmSlots t) -> equationOf sp sc (placesAt t assign) typed (length (thmMembered t))
             _ -> Right Nothing
-          Right (Evidence (thmCore t) (mconcat (map outTactic checks) <> pre <> idx) (statics <> post) eq (concatMap outAux checks) (conclusionAt t typed sigma))
+          statement <- statementAt sp t typed sigma assign
+          let (views, bindings) = theoremSource t typed sigma assign
+              conclusion = snd . implications <$> statement
+              initial = Evidence (thmCore t) (mconcat (map outTactic checks) <> pre <> idx) (statics <> post) eq (concatMap outAux checks) conclusion (Just bindings) views
+          if maybe False boundedUniversal conclusion
+            then do
+              arguments <- proofArguments sp (maybe [] (fst . implications) statement) (drop (length (thmBinders t)) args)
+              quantifiedEvidence k info g sp initial arguments
+            else
+              if boundedArguments
+                then Left (EngineError sp "the bounded theorem's parameters cannot be inferred from its supplied arguments")
+                else Right initial
     -- The place of the goal's dictionary for a method at one of its type parameters.
     goalPlace s = lookup s (zip (goalDict g) (placeRefs (goalDict g)))
     -- The places of a theorem's dictionary at the instances its arguments give: the goal's at its type parameters, the instances' functions at known types.
@@ -1913,14 +2497,124 @@ headOf = \case
 checked before its proof arguments may be erased. Cut keeps each obligation
 in the final derivation even if later computation does not use it.
 -}
+
+{- | Eliminate bounded universals at source values. The finite branch uses
+coverage to transport the decoded enumeration member back to that value.
+-}
+quantifiedEvidence :: Knowledge -> TheoremInfo -> Goal -> Span -> Evidence -> [Located R.Expr] -> Either EngineError Evidence
+quantifiedEvidence _ _ _ _ ev [] = Right ev
+quantifiedEvidence k info g sp ev (argument : rest) = do
+  prop <- maybe (Left (EngineError sp "the applied hypothesis has no proposition")) Right (evConclusion ev <|> case lookup (evName ev) (goalHyps g) of Just (HProp p) -> Just p; _ -> Nothing)
+  let withViews = g {goalQuantifierViews = goalQuantifierViews g <> evQuantifierViews ev, goalSourceBindings = fromMaybe (goalSourceBindings g) (evSourceBindings ev)}
+      local = withViews {goalConcl = prop}
+  source <- finiteView k info local prop
+  case stripLocations prop of
+    Quant Forall _ (Just (relation, bound)) _ body -> do
+      let limit = case relation of Below -> bound; AtMost -> App (Global (Ref RefBuiltin "S")) bound
+          ty = maybe TNat (finiteElementType . viewDomain) source
+      ((value, _), checked) <- case source of
+        Nothing -> typedArgExpected k info local argument ty
+        Just _ -> typedFiniteArgument k info local argument ty
+      (rank, target, result, bridge, ready, roundtrip) <- case source of
+        Nothing -> do
+          let boundProp = Rel RelLt value limit
+          proof <- liftResult (conclude k local (goalEquations local) (asEquation boundProp))
+          (before, extended) <- liftResult (stateFacts (freshProofName local "UniversalBound") local [(boundProp, proof)])
+          pure (value, instantiate (const value) body, instantiate (const value) body, closed before, foldl (\current view -> bindSourceView view value TNat current) extended (sourceCandidatesFor local prop), Nothing)
+        Just view -> do
+          (rank, decoded, equation, before, extended) <- finiteWitness k info local sp view value
+          pure (rank, scopedValue decoded (viewBody view), scopedValue value (viewBody view), before, bindSourceView (viewSource view) value ty extended, Just equation)
+      let prefix = head [candidate | candidate <- iterate (<> "x") "Universal", all (not . T.isPrefixOf candidate) (map fst (goalHyps ready) <> sequentVars ready)]
+          factName = prefix <> "Fact"
+          targetName = prefix <> "Code"
+          resultName = prefix <> "ResultCode"
+          conclusionName = prefix <> "Result"
+      factText <- liftResult (formula prop)
+      rankCode <- liftResult (termCT CVar rank)
+      limitCode <- liftResult (termCT CVar limit)
+      (targetCode, _) <- liftResult (propositionCode target)
+      (resultCode, ownCode) <- liftResult (propositionCode result)
+      resultText <- liftResult (formula result)
+      let transport = case roundtrip of
+            Nothing -> "exact " <> fromText targetName
+            Just equality -> "calc (lt 0 " <> resultCode <> ") = (lt 0 " <> targetCode <> ") by cong " <> fromText equality <> " = 1 by exact " <> fromText targetName
+          before =
+            evBefore ev
+              <> outTactic checked
+              <> outTactic bridge
+              <> "have "
+              <> fromText factName
+              <> ": "
+              <> factText
+              <> " { "
+              <> exactAppeal ev
+              <> " }; "
+              <> "have "
+              <> fromText targetName
+              <> ": ((lt 0 "
+              <> targetCode
+              <> ") = 1) { exact belowElim _ "
+              <> render limitCode
+              <> " "
+              <> render rankCode
+              <> " }; "
+              <> "have "
+              <> fromText resultName
+              <> ": ((lt 0 "
+              <> resultCode
+              <> ") = 1) { "
+              <> transport
+              <> " }; "
+              <> (if ownCode then "have " <> fromText conclusionName <> ": " <> resultText <> " { exact " <> fromText resultName <> " }; " else "reflect " <> fromText resultName <> " as " <> fromText conclusionName <> "; ")
+          next = Evidence conclusionName before "" Nothing (evAux ev <> outAux checked <> outAux bridge) (Just result) (Just (goalSourceBindings ready)) (goalQuantifierViews ready)
+      quantifiedEvidence k info ready {goalHyps = goalHyps ready <> [(conclusionName, HProp result)]} sp next rest
+    _ -> Left (EngineError sp "the applied hypothesis is not a bounded universal proposition")
+  where
+    liftResult :: Either String a -> Either EngineError a
+    liftResult = either (Left . EngineError sp) Right
+
 typedArg :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError ((Expr Text, Ty), Out)
 typedArg k info g e0 = typedArgExpected k info g e0 THole
+
+-- A reusable finite proposition substitutes an implicit bound by the checked
+-- index projection recovering it. The caller may still name that bound by its
+-- original parameter. Compare those two representations only after recovering
+-- both as checked terms and proving any remaining index equalities. The finite
+-- bridge then proves the full value contract.
+typedFiniteArgument :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Ty -> Either EngineError ((Expr Text, Ty), Out)
+typedFiniteArgument k info g argument expected = case typedArgExpected k info g argument expected of
+  Right checked -> Right checked
+  Left original -> do
+    (value@(_, actual), checked) <- typedArg k info g argument
+    case (materialize actual, materialize expected) of
+      (Just left, Just right)
+        | sameShape left right
+        , Just proofs <- traverse (uncurry indexProof) (zip (Types.tyIndices left) (Types.tyIndices right)) ->
+            Right (value, checked {outTactic = outTactic checked <> mconcat proofs})
+      _ -> Left original
+  where
+    env = goalEnv k info g
+    context = goalVars g <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+    sameShape (TData name parameters indices) (TData name' parameters' indices') = name == name' && length indices == length indices' && length parameters == length parameters' && and (zipWith sameShape parameters parameters')
+    sameShape (TParam parameter arguments) (TParam parameter' arguments') = parameter == parameter' && length arguments == length arguments' && and (zipWith sameShape arguments arguments')
+    sameShape (TArrow argument result) (TArrow argument' result') = sameShape argument argument' && sameShape result result'
+    sameShape TNat TNat = True
+    sameShape _ _ = False
+    indexProof left right = do
+      a <- checkedIndexTerm k env context left >>= either (const Nothing) Just . termCT CVar
+      b <- checkedIndexTerm k env context right >>= either (const Nothing) Just . termCT CVar
+      proof <- either (const Nothing) Just (indexEquation k g (goalEquations g) a b)
+      pure ("Cut (" <> equationText a b <> ") { " <> proof <> " } { skip }; ")
+    materialize ty = do
+      indices <- traverse (\index -> checkedIndexTerm k env context index >>= either (const Nothing) (Just . Types.normIx) . expressionIndex) (Types.tyIndices ty)
+      let replacements = zip (Types.tyIndices ty) indices
+      pure (Types.mapIx (\index -> fromMaybe index (lookup index replacements)) ty)
 
 typedArgExpected :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Ty -> Either EngineError ((Expr Text, Ty), Out)
 typedArgExpected k info g e0 expected = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
   let hypotheses = [(name, surfaceNames g prop) | (name, h) <- goalNames g, Just (HProp prop) <- [lookup h (goalHyps g)]]
-  (prepared, ty) <- either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTermExpectedWithHypotheses hypotheses (goalEnv k info g) (goalDict g) (goalVars g) e expected))
+  (prepared, ty) <- checkedElaboration k g (goalEnv k info g) (inferTermExpectedWithHypotheses hypotheses (goalEnv k info g) (goalDict g) (goalVars g) e expected)
   checked <-
     Term.traverseObligations
       ( \(prop, raw) -> do
@@ -1936,6 +2630,321 @@ typedArgExpected k info g e0 expected = do
       prepared
   let checks = Term.obligations checked
   pure ((Term.toExpr (Term.computation checked), ty), Out (mconcat (map outTactic checks)) (concatMap outAux checks))
+
+{- | Elaborating after declaration checking must discharge the same dependency
+log as initial elaboration. In particular, proof arguments cannot erase a
+finite enumeration's adequacy requirements.
+-}
+checkedElaboration :: Knowledge -> Goal -> Env -> TC a -> Either EngineError a
+checkedElaboration k g env action = do
+  (value, required) <- either (\(ElabError sp why) -> Left (EngineError sp why)) Right (runTCWithRequirements action)
+  let available =
+        Required.Evidence
+          { Required.evidenceBuiltins = envBuiltins env
+          , Required.evidenceDeclarations = knowCheckedDeclarations k <> Map.keysSet (knowRuleMetas k)
+          , Required.evidenceSlots = goalDict g
+          , Required.evidencePremises = map gpPremise (goalPremises g)
+          }
+  either (\(sp, why) -> Left (EngineError sp why)) Right (Required.validateRequirements available required)
+  pure value
+
+{- | Proof-time index recovery may use only projection equations whose
+providers have completed checking. Elaboration records the same prerequisites
+in its dependency writer before this later, already-admitted proof phase.
+-}
+checkedIndexTerm :: Knowledge -> Env -> Ctx a -> Ix -> Maybe (Expr a)
+checkedIndexTerm knowledge env context index = do
+  (value, needed) <- indexTermInWithDependencies env context index
+  guard (needed `Set.isSubsetOf` knowCheckedDeclarations knowledge)
+  pure value
+
+{- | A source binder's meaning, retained independently of user-facing renaming.
+The raw views themselves contain no mutable proof context.
+-}
+data SourceBindings = SourceBindings
+  { sourceBase :: ![(Text, (Expr Text, Ty))]
+  , sourceApplications :: !(Map [Segment] [(Text, (Expr Text, Ty))])
+  , sourceQuantifiers :: !(Map ([Segment], Span) (Expr Text, Ty))
+  }
+
+initialSourceBindings :: Ctx Text -> SourceBindings
+initialSourceBindings vars = SourceBindings [(name, (Var core, ty)) | (name, (core, ty)) <- vars] Map.empty Map.empty
+
+{- | Matching includes the complete decoded body and bound. A span merely
+selects candidates; it never establishes that a transformed goal retains
+the semantics of its original source binder.
+-}
+data FiniteView = FiniteView
+  { viewSource :: !QuantifierView
+  , viewDomain :: !(FiniteDomain Text)
+  , viewBody :: !(Expr (Var () Text))
+  }
+
+finiteView :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Either EngineError (Maybe FiniteView)
+finiteView k info g expression = case stripLocations expression of
+  Quant quantifier _ (Just (Below, bound)) _ body -> do
+    let candidates = nub (concatMap (`quantifierViewCandidates` goalQuantifierViews g) (locations expression))
+        finiteCandidates = [view | view <- candidates, not (qvNumeric view)]
+        tried = [(view, reconstruct quantifier bound body view) | view <- finiteCandidates]
+        matches = nubBy sameView [found | (_, Right found) <- tried]
+    case matches of
+      [found] -> pure (Just found)
+      [] | null finiteCandidates -> pure Nothing
+      [] -> case [err | (_, Left err) <- tried] of
+        err : _ -> Left err
+        [] -> Left (EngineError R.noSpan "the finite quantifier's source scope is unavailable")
+      _ -> Left (EngineError (qvSpan (head finiteCandidates)) "the finite quantifier has ambiguous source provenance")
+  _ -> pure Nothing
+  where
+    sameView first second =
+      let a = viewDomain first
+          b = viewDomain second
+       in finiteElementType a == finiteElementType b
+            && finiteBound a == finiteBound b
+            && finiteDecode a == finiteDecode b
+            && finiteRank a == finiteRank b
+            && finiteOrdinal a == finiteOrdinal b
+            && finiteSelect a == finiteSelect b
+            && finiteCoverage a == finiteCoverage b
+            && finiteBuiltinBindings a == finiteBuiltinBindings b
+            && viewBody first == viewBody second
+    locations (At (Irrelevant sp) inner) = sp : locations inner
+    locations (Typed _ _ _ inner) = locations inner
+    locations _ = []
+    reconstruct quantifier bound body source = do
+      unless (qvQuantifier source == quantifier) $ Left (EngineError (qvSpan source) "the source quantifier kind changed")
+      let base = goalEnv k info g
+          env = base {envScope = qvScope source, envTypeBindings = [(name, sourceType ty) | (name, ty) <- qvTypeBindings source], envBuiltins = Required.builtinScope (qvBuiltins source) (envBuiltins (knowEnv k))}
+          prefix = freshProofName g "quantifier_source_"
+          baseEntries = [(name, (prefix <> "base_" <> T.pack (show j), value, ty)) | (j, (name, (value, ty))) <- zip [0 :: Int ..] (Map.findWithDefault (sourceBase (goalSourceBindings g)) (qvOwner source) (sourceApplications (goalSourceBindings g)))]
+          entries binders = [(unLocated name, (prefix <> "bound_" <> T.pack (show j), value, ty)) | (j, name) <- zip [0 :: Int ..] binders, Just (value, ty) <- [Map.lookup (qvOwner source, location name) (sourceQuantifiers (goalSourceBindings g))]]
+          -- Earlier source values keep their lexical index identities until
+          -- the whole view is substituted. Inserting caller names here would
+          -- let a later source binder capture them.
+          sourceIndices = [(actual, original) | (name, (_, value, _)) <- baseEntries, Just original <- [lookup name (Types.tsValues (qvScope source))], Right actual <- [expressionIndex value]]
+          sourceIndex index | Just original <- lookup index sourceIndices = original
+          sourceIndex (IxSucc index) = IxSucc (sourceIndex index)
+          sourceIndex (IxCon name indices) = IxCon name (map sourceIndex indices)
+          sourceIndex (IxFun name indices) = IxFun name (map sourceIndex indices)
+          sourceIndex (IxPartial name arity prefixCount indices) = IxPartial name arity prefixCount (map sourceIndex indices)
+          sourceIndex index = index
+          sourceType = Types.mapIx sourceIndex
+          context binders = reverse [(name, (core, sourceType ty)) | (name, (core, _, ty)) <- entries binders] <> [(name, (core, sourceType ty)) | (name, (core, _, ty)) <- baseEntries] <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+          substitutions binders = Map.fromList [(core, value) | (_, (core, value, _)) <- entries binders <> baseEntries]
+          replace binders name = Map.findWithDefault (Var name) name (substitutions binders)
+          domainContext = context (qvDomainBinders source)
+          bodyContext = context (qvBodyBinders source)
+      ty <- checkedElaboration k g env (quantifierType env domainContext (qvDomain source))
+      original <- checkedElaboration k g env (finiteDomain env (goalDict g) domainContext (qvSpan source) ty)
+      let valueIndex ix = case checkedIndexTerm k env domainContext ix of
+            Just value -> either (const ix) id (expressionIndex (value >>= replace (qvDomainBinders source)))
+            Nothing -> ix
+          actualType = Types.mapIx valueIndex ty
+          domain =
+            original
+              { finiteElementType = actualType
+              , finiteBound = finiteBound original >>= replace (qvDomainBinders source)
+              , finiteDecode = finiteDecode original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
+              , finiteRank = finiteRank original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
+              , finiteOrdinal = finiteOrdinal original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
+              , finiteSelect = finiteSelect original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
+              }
+          (inside, context') = enterQuantifier env bodyContext (qvBinder source) ty
+          alias = "#quantifier-domain"
+          bodyEnv = inside {envTypeBindings = (alias, maybe actualType (snd . snd) (find ((== unLocated (qvBinder source)) . fst) context')) : envTypeBindings inside}
+          written = case unLocated (qvBody source) of
+            R.EQuant q (binder : rest) Nothing rhs
+              | not (null (qvSameGroup source)) ->
+                  (qvBody source) {unLocated = R.EQuant q (binder {R.binderType = Just (Located (qvSpan source) (R.EName (QName [] (Ident alias))))} : rest) Nothing rhs}
+            _ -> qvBody source
+      resolved <- either (\err -> let (sp, why) = renderFixityError err in Left (EngineError sp why)) Right (resolveExpr (knowFixities k) written)
+      originalBody <- checkedElaboration k g bodyEnv (elabProp bodyEnv (goalDict g) context' resolved)
+      let rawBody = originalBody >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvBodyBinders source) value)
+      let decoded = rawBody >>= \case B () -> finiteDecode domain; F value -> Var (F value)
+          actual = Bound.fromScope body
+      unless (finiteBound domain == bound && decoded == actual) $
+        Left (EngineError (qvSpan source) "the finite quantifier's source view no longer matches its lowered proposition")
+      pure (FiniteView source domain rawBody)
+
+sourceCandidatesFor :: Goal -> Expr a -> [QuantifierView]
+sourceCandidatesFor g = go
+  where
+    go (At (Irrelevant sp) inner) = quantifierViewCandidates sp (goalQuantifierViews g) <> go inner
+    go (Typed _ _ _ inner) = go inner
+    go _ = []
+
+-- Auxiliary goals retain the names used by their generated proof scripts.
+auxiliaryDeclaration :: Text -> Goal -> Builder -> Either String Builder
+auxiliaryDeclaration name g tactic = do
+  statement <- goalSequent g
+  parameters <- ruleParams g
+  aliases <- forM (zip [1 ..] (goalHyps g)) \(position, (old, hyp)) ->
+    if old == hname position
+      then pure ""
+      else do
+        rendered <- hypText hyp
+        pure ("have " <> fromText old <> ": " <> rendered <> " { exact " <> fromText (hname position) <> " }; ")
+  pure ("rule " <> fromText name <> ruleBinders parameters (sequentVars g) <> schemaContextBinder g <> mconcat [" " <> gpBinder premise | premise <- goalPremises g] <> " : " <> statement <> "\nby " <> mconcat aliases <> tactic)
+
+auxiliaryArguments :: Goal -> [(Text, Expr Text)] -> Either String Builder
+auxiliaryArguments g values = do
+  parameters <- ruleParams g
+  ordinary <- traverse (termCT CVar . (\name -> fromMaybe (Var name) (lookup name values))) (sequentVars g)
+  pure (staticArgs parameters <> mconcat [" (" <> render value <> ")" | value <- ordinary] <> mconcat [" { exact " <> fromText (gpName premise) <> " }" | premise <- goalPremises g])
+
+bindSourceView :: QuantifierView -> Expr Text -> Ty -> Goal -> Goal
+bindSourceView view variable ty g = g {goalSourceBindings = bindings {sourceQuantifiers = Map.insert (qvOwner view, qvSpan view) (variable, ty) (sourceQuantifiers bindings)}}
+  where
+    bindings = goalSourceBindings g
+
+{- | Structural proof transformations update source substitutions alongside
+their ordinary propositions. Matching still rechecks the complete view.
+-}
+mapSourceBindings :: (Expr Text -> Expr Text) -> SourceBindings -> SourceBindings
+mapSourceBindings replace bindings =
+  bindings
+    { sourceBase = [(name, (replace value, ty)) | (name, (value, ty)) <- sourceBase bindings]
+    , sourceApplications = fmap (map (\(name, (value, ty)) -> (name, (replace value, ty)))) (sourceApplications bindings)
+    , sourceQuantifiers = fmap (\(value, ty) -> (replace value, ty)) (sourceQuantifiers bindings)
+    }
+
+{- | Choose names against both hypotheses and variables, including repeated
+invocations of a tactic located at the same source span.
+-}
+freshProofName :: Goal -> Text -> Text
+freshProofName g base = head [name | name <- iterate (<> "'") base, name `notElem` used]
+  where
+    used = map fst (goalHyps g) <> sequentVars g <> map (fst . snd) (goalVars g)
+
+scopedValue :: Expr a -> Expr (Var () a) -> Expr a
+scopedValue value body = body >>= \case B () -> value; F outer -> Var outer
+
+{- | A first-order value's membership and exact indices. The result is a
+conjunction of ordinary propositions, with no source quantifier marker.
+-}
+valueContract :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Ty -> Either String SchemaContract
+valueContract k info g value ty = do
+  term <- termCT CVar value
+  let env = goalEnv k info g
+      materialize ix = checkedIndexTerm k env (goalVars g) ix >>= either (const Nothing) Just . termCT CVar
+      variable name = fromMaybe (CVar name) (materialize (IxVar name))
+      parameter i = fromMaybe (CVar "?") (materialize (IxParam i))
+      callback = CCallback (CClosure [freshProofName g "value_environment"] term []) (CNum 0)
+  validateMethodPredicates (typePredicate k g) ty
+  contract <- schemaContractUsing True (schemaAvoid g <> varsCT term) variable (typePredicate k g) parameter callback ty
+  unless ("?" `notElem` foldr (:) [] (scPost contract)) $ Left "a finite value's dependent index is not available in this proof context"
+  pure contract
+
+valueFacts :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Ty -> Either String [Expr Text]
+valueFacts k info g value ty = parts . scPost <$> valueContract k info g value ty
+  where
+    parts Top = []
+    parts (Conn And x y) = parts x <> parts y
+    parts prop = [prop]
+
+proveValueFacts :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Ty -> Either String [(Expr Text, Builder)]
+proveValueFacts k info g value ty = do
+  contract <- valueContract k info g value ty
+  forM (parts (scPost contract)) \prop -> (prop,) <$> proveSchemaContract k g contract {scPost = prop}
+  where
+    parts Top = []
+    parts (Conn And x y) = parts x <> parts y
+    parts prop = [prop]
+
+{- | Registered bridge certificates are ordinary checked theorems. Their
+selection is explicit plan metadata; generated names are never inspected.
+-}
+finiteBridge :: Knowledge -> FiniteDomain Text -> BuiltinRole -> Either String TheoremInfo
+finiteBridge k domain role = do
+  name <- maybe (Left "the finite proof bridge has no registration") Right (Map.lookup (builtinRoleName role) (finiteBuiltinBindings domain))
+  case Map.lookup name (envGlobals (knowEnv k)) of
+    Just (GTheorem theorem) | thmCore theorem `Set.member` (knowCheckedDeclarations k <> Map.keysSet (knowRuleMetas k)) -> Right theorem
+    _ -> Left "the finite proof bridge theorem has not been checked"
+
+-- Indexed bridge certificates state the recovered index of their argument.
+-- Transport that statement using the exact index contract already proved.
+finiteBridgeProof :: Knowledge -> Goal -> TheoremInfo -> Expr Text -> Expr Text -> Either String Builder
+finiteBridgeProof k g theorem ordinal desired = do
+  proposition <- maybe (Left "the registered finite bridge has no proposition") Right (thmProp theorem <|> thmStatement theorem)
+  argument <- termCT CVar ordinal
+  let names = map mangleVariable (thmValues theorem)
+      (defined, _) = indexHypotheses (thmBinders theorem) names (thmIndexHyps theorem)
+      arguments = Map.fromList (zip (thmBinders theorem) [argument])
+  values <- forM [0 .. length names - 1] \i -> maybe (Left "the registered finite bridge has an unrecoverable value parameter") (Right . fromCT . substCT arguments) (lookup i defined)
+  let allValues = values <> [ordinal]
+      actual = snd (implications (instantiate (allValues !!) (fmap absurd proposition)))
+      ev = (named (thmCore theorem)) {evConclusion = Just actual}
+  pure (fromMaybe (exactAppeal ev) (lemmaBridge k g {goalConcl = desired} ev))
+
+{- | The bridge from a source witness back to its finite ordinal. All
+facts are proved from registered certificates and typed method contracts.
+-}
+finiteWitness :: Knowledge -> TheoremInfo -> Goal -> Span -> FiniteView -> Expr Text -> Either EngineError (Expr Text, Expr Text, Text, Out, Goal)
+finiteWitness k info g sp view value = liftResult do
+  let domain = viewDomain view
+      limit = finiteBound domain
+      rank = scopedValue value (finiteRank domain)
+      ordinal = scopedValue value (finiteOrdinal domain)
+      decoded = scopedValue rank (finiteDecode domain)
+      selected = scopedValue ordinal (finiteSelect domain)
+      prefix = head [candidate | candidate <- iterate (<> "x") "FiniteWitness", all (not . T.isPrefixOf candidate) (map fst (goalHyps g))]
+  fin <- maybe (Left "the finite ordinal type is not registered") Right (Map.lookup (builtinRoleName BuiltinFin) (finiteBuiltinBindings domain))
+  boundIndex <- expressionIndex limit
+  valueProofs <- proveValueFacts k info g value (finiteElementType domain)
+  (valuesBefore, valueGoal) <- stateFacts (prefix <> "Value") g valueProofs
+  ordinalProofs <- proveValueFacts k info valueGoal ordinal (TData (renderQualName fin) [] [boundIndex])
+  (ordinalBefore, ordinalGoal) <- stateFacts (prefix <> "Ordinal") valueGoal ordinalProofs
+  boundLemma <- finiteBridge k domain BuiltinFinToNatBound
+  boundProof <- finiteBridgeProof k ordinalGoal boundLemma ordinal (Rel RelLt rank limit)
+  (boundBefore, bounded) <- stateFacts (prefix <> "Bound") ordinalGoal [(Rel RelLt rank limit, boundProof)]
+  fromNatName <- maybe (Left "the finite ordinal constructor is not registered") Right (Map.lookup (builtinRoleName BuiltinFinFromNat) (finiteBuiltinBindings domain))
+  fromNat <- case Map.lookup fromNatName (envGlobals (knowEnv k)) of
+    Just (GFun function) -> Right function
+    _ -> Left "the finite ordinal constructor is not a function"
+  let converted = apps (Global (Ref RefFunction (funCore fromNat))) [[rank, limit] !! position | position <- funRuntime fromNat]
+  inverseLemma <- finiteBridge k domain BuiltinFinFromToNat
+  inverseProof <- finiteBridgeProof k bounded inverseLemma ordinal (Rel RelEq converted ordinal)
+  (inverseBefore, inverseGoal) <- stateFacts (prefix <> "Inverse") bounded [(Rel RelEq converted ordinal, inverseProof)]
+  selectedCT <- termCT CVar selected
+  decodedCT <- termCT CVar decoded
+  valueCT <- termCT CVar value
+  coverage <- traverse (\law -> discharge k inverseGoal (OLaw law (finiteElementType domain) False)) (finiteCoverage domain)
+  let inverseName = prefix <> "Inverse0"
+      roundtripName = prefix <> "Roundtrip0"
+      roundtrip = case coverage of
+        Nothing -> "exact " <> fromText inverseName
+        Just proof -> "calc " <> render decodedCT <> " = " <> render selectedCT <> " by cong " <> fromText inverseName <> " = " <> render valueCT <> " by (" <> proof <> ")"
+  (roundtripBefore, ready) <- stateFacts (prefix <> "Roundtrip") inverseGoal [(Rel RelEq decoded value, roundtrip)]
+  pure (rank, decoded, roundtripName, closed (valuesBefore <> ordinalBefore <> boundBefore <> inverseBefore <> roundtripBefore), ready)
+  where
+    liftResult :: Either String a -> Either EngineError a
+    liftResult = either (Left . EngineError sp) Right
+
+{- | Reify an ordinary first-order expression as an index without guessing
+source variable names. The checked type supplies the meaning of each name.
+-}
+expressionIndex :: Expr Text -> Either String Ix
+expressionIndex expression = case spine expression of
+  (Var value, []) -> Right (IxVar value)
+  (Nat value, []) -> Right (IxNat value)
+  (Global (Ref RefValueParam name), []) -> Right (IxVar ("#d" <> name))
+  (Global (Ref RefBuiltin "S"), [value]) -> IxSucc <$> expressionIndex value
+  (Global ref, arguments) -> (if refKind ref == RefConstructor then IxCon else IxFun) (refName ref) <$> traverse expressionIndex arguments
+  _ -> Left "the finite bound cannot be represented as an index"
+
+stateFacts :: Text -> Goal -> [(Expr Text, Builder)] -> Either String (Builder, Goal)
+stateFacts prefix = foldM add . ("",)
+  where
+    add (before, g) (prop, proof) = do
+      let name = freshProofName g (prefix <> T.pack (show (length [() | (old, _) <- goalHyps g, prefix `T.isPrefixOf` old])))
+      stated <- formula prop
+      pure (before <> "have " <> fromText name <> ": " <> stated <> " { " <> proof <> " }; ", g {goalHyps = goalHyps g <> [(name, HProp prop)]})
+
+propositionCode :: Expr Text -> Either String (Builder, Bool)
+propositionCode expression = case stripLocations expression of
+  Rel RelLt (Nat 0) value -> (,True) . render <$> termCT CVar value
+  Rel RelGt value (Nat 0) -> (,True) . render <$> termCT CVar value
+  _ -> (,False) . (\value -> "[[" <> value <> "]]") <$> formula expression
 
 goalEnv :: Knowledge -> TheoremInfo -> Goal -> Env
 goalEnv k info g = env {envSchemas = schemas, envScope = scope {Types.tsValues = values <> Types.tsValues scope}}
@@ -1980,6 +2989,96 @@ of the goal's theorem's own, a place of the goal's dictionary.
 -}
 typePredicate :: Knowledge -> Goal -> Ty -> Maybe Pred
 typePredicate k g = predicateOf (knowMembership k) (\j -> (\n -> Pred n []) <$> lookup (membershipSlot j) (zip (goalDict g) [n | Ref _ n <- placeRefs (goalDict g)]))
+
+{- | Instantiate a type parameter by its complete indexed type. Direct
+datatype contexts retain their separate membership and index hypotheses.
+-}
+exactTypePredicate :: Knowledge -> Goal -> Ty -> Maybe Pred
+exactTypePredicate k g = go
+  where
+    context = goalVars g <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+    go (TData name arguments indices) = do
+      (symbol, used) <- Map.lookup name (knowMembership k)
+      parameters <- traverse (\position -> go =<< lookup position (zip [0 ..] arguments)) used
+      let base = Pred symbol (map predicateParam parameters)
+      if null indices
+        then pure base
+        else do
+          functions <- indexFunctionCores (knowEnv k) name
+          guard (length functions == length indices)
+          values <- traverse (\index -> checkedIndexTerm k (knowEnv k) context index >>= either (const Nothing) Just . termCT CVar) indices
+          let variable = head [candidate | candidate <- iterate (<> "'") "exact_member", candidate `notElem` concatMap varsCT (predicateParam base : values)]
+              value = CVar variable
+              restrictions = [CSym "eq" [CSym function [value], bound] | (function, bound) <- zip functions values]
+          pure (predicateOver variable (foldr (\restriction rest -> CSym "conj" [restriction, rest]) (predicateAt base value) restrictions))
+    go ty = typePredicate k g ty
+
+{- | Substitute assigned type parameters strictly. A missing indexed
+predicate cannot degrade to unrestricted membership in a nested type.
+-}
+instantiatedPredicate :: Knowledge -> Goal -> Map Int Ty -> Ty -> Maybe Pred
+instantiatedPredicate k g assign = go
+  where
+    go (TData name arguments _) = do
+      (symbol, used) <- Map.lookup name (knowMembership k)
+      parameters <- traverse (\position -> go =<< lookup position (zip [0 ..] arguments)) used
+      pure (Pred symbol (map predicateParam parameters))
+    go (TParam parameter []) = Map.lookup parameter assign >>= exactTypePredicate k g
+    go TNat = Just anyPred
+    go _ = Nothing
+
+{- | Expose the ordinary equalities and memberships contained in an exact
+indexed predicate. Every derived fact is justified by a kernel lemma.
+-}
+exposeExactMemberships :: Goal -> (Builder, Goal)
+exposeExactMemberships initial = foldl expose ("", initial) (goalHyps initial)
+  where
+    expose current (name, hyp) = case stripLocations (hypProposition hyp) of
+      Rel RelLt (Nat 0) expression
+        | Right code@CSym {} <- termCT CVar expression -> case code of
+            CSym "conj" _ -> descend current name code
+            _ -> current
+      _ -> current
+    add current@(before, goal) stem proposition rendered proof =
+      case find ((== stripLocations (asEquation proposition)) . stripLocations . asEquation . hypProposition . snd) (goalHyps goal) of
+        Just (name, _) -> (name, current)
+        Nothing ->
+          let name = freshProofName goal stem
+           in (name, (before <> "have " <> fromText name <> ": " <> rendered <> " { " <> proof <> " }; ", goal {goalHyps = goalHyps goal <> [(name, HProp proposition)]}))
+    descend current name = \case
+      CSym "conj" [left, right] ->
+        let positive code = Rel RelLt (Nat 0) (fromCT code)
+            (leftName, first) = add current "ExactMember" (positive left) (equationText (CSym "lt" [CNum 0, left]) (CNum 1)) ("exact conjElim1 on " <> fromText name)
+            afterLeft = descend first leftName left
+            (rightName, second) = add afterLeft "ExactMember" (positive right) (equationText (CSym "lt" [CNum 0, right]) (CNum 1)) ("exact conjElim2 on " <> fromText name)
+         in descend second rightName right
+      CSym "eq" [left, right] -> snd (add current "ExactIndex" (Rel RelEq (fromCT left) (fromCT right)) (equationText left right) ("exact eqElim on " <> fromText name))
+      _ -> current
+
+{- | The caller instantiates a law's type parameter with its full indexed
+predicate. Restate that domain inside the rule premise, then derive its
+membership and index components before appealing to the instance law.
+-}
+lawDomainFacts :: Knowledge -> Goal -> QualName -> Ty -> Either String Builder
+lawDomainFacts k g _ actual | exactTypePredicate k g actual == typePredicate k g actual = Right ""
+lawDomainFacts k g qualified actual = do
+  law <- case Map.lookup qualified (envGlobals (knowEnv k)) of
+    Just (GLaw value) -> Right value
+    _ -> Left "the class law's source signature is unavailable"
+  let argumentTypes = map snd (lawBinders law)
+      dependencies = concatMap (concatMap Types.ixVars . Types.tyIndices) argumentTypes
+  values <- forM [(i, slot) | (i, slot) <- zip [0 :: Int ..] (valueSlots (lawSlots law)), "#d" <> T.pack (show i) `elem` dependencies] \(i, slot) ->
+    ("#d" <> T.pack (show i),) <$> methodEntryAt k g slot actual
+  let predicate = instantiatedPredicate k g (Map.singleton 0 actual)
+      variable source = fromMaybe (CVar (mangleVariable source)) (lookup source values)
+      callback = CCallback (CClosure ("law_environment" : ["law_argument_" <> T.pack (show i) | i <- [0 .. length argumentTypes - 1]]) (CNum 0) []) (CNum 0)
+  contract <- schemaContractUsing False (schemaAvoid g) variable predicate (const (CVar "?")) callback (foldr TArrow TNat argumentTypes)
+  let names = [name | i <- [0 :: Int ..], let name = "LawDomain" <> T.pack (show i), name `notElem` map fst (goalHyps g)]
+      named = zip names (scHyps contract)
+      local = g {goalHyps = goalHyps g <> named}
+      (exposed, _) = exposeExactMemberships local
+  stated <- traverse (hypText . snd) named
+  pure (mconcat ["have " <> fromText name <> ": " <> proposition <> " { assumption }; " | ((name, _), proposition) <- zip named stated] <> exposed)
 
 {- |
 The predicate the values of a type are members by, the predicates of type
@@ -2038,14 +3137,16 @@ theorem, the goal's own premise.
 -}
 premiseBlocks :: Knowledge -> Goal -> Span -> TheoremInfo -> Map Int Ty -> [(Expr Text, Ty)] -> Map Text CT -> Either EngineError Builder
 premiseBlocks k g sp t assign typed sigma = either (Left . EngineError sp) Right do
-  obs <- premiseObligations k g assign t
   args <- traverse (termCT CVar . fst) typed
   let values = map mangleVariable (thmValues t)
       (defined, _) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
       byBinder = Map.fromList (zip (thmBinders t) args)
       valueTerm i = substCT (byBinder <> sigma) (fromMaybe (CVar (values !! i)) (lookup i defined))
       variableTerm name = Map.findWithDefault (CVar (mangleVariable name)) (mangleVariable name) (byBinder <> sigma)
-      predicate = predicateOf (knowMembership k) (\i -> Map.lookup i assign >>= typePredicate k g)
+      predicate = instantiatedPredicate k g assign
+  obs <- forM [p | p <- thmPremises t, case p of { PSchema {} -> False; _ -> True }] \case
+    premise@PMethod {} -> methodPremiseObligation k g (thmSlots t) assign variableTerm valueTerm premise
+    premise -> premiseObligation k g assign t premise
   schemaObs <- forM [(position, ty) | PSchema position ty <- thmPremises t] \(position, ty) -> do
     callback <- maybe (Left "a schema theorem needs its callback argument") Right (listToMaybe (drop position args))
     OSchema <$> schemaContractUsing True (schemaAvoid g) variableTerm predicate valueTerm callback ty
@@ -2057,7 +3158,7 @@ comes from the certified rule, so erased phantom predicates need no guesses.
 -}
 schemaTheoremArguments :: Knowledge -> Goal -> TheoremInfo -> Map Int Ty -> [(Expr Text, Ty)] -> Map Text CT -> Either String Builder
 schemaTheoremArguments k g t assign typed sigma
-  | null schemas = Right ""
+  | null schemas && not (any methodPremise (thmPremises t)) && not refined = Right ""
   | otherwise = do
       args <- traverse (termCT CVar . fst) typed
       callbacks <- forM (zip [1 ..] schemas) \(serial, (position, ty)) -> do
@@ -2067,14 +3168,16 @@ schemaTheoremArguments k g t assign typed sigma
           CCallback CClosure {} _ -> Right "_"
           _ -> Left "a schema theorem argument has no fixed code"
         pure (schemaName serial, argument)
-      let predicates =
-            [ (name, parensB (render (predicateAt predicate (CVar "z_1"))))
-            | (slot, Ref _ name) <- zip (thmSlots t) (placeRefs (thmSlots t))
-            , isMembershipSlot slot
-            , Just actual <- [Map.lookup (slotParam slot) assign]
-            , Just predicate <- [typePredicate k g actual]
-            ]
-          parameters = filter (/= "schema_context") (Map.findWithDefault [] (thmCore t) (knowRuleMetas k))
+      methods <- forM [(slot, name) | (slot, Ref _ name) <- zip (thmSlots t) (placeRefs (thmSlots t)), not (isMembershipSlot slot)] \(slot, name) -> do
+        actual <- maybe (Left "a method contract's class type is not determined by the arguments") Right (Map.lookup (slotParam slot) assign)
+        entry <- methodEntryAt k g slot actual
+        let values = [CVar ("z_" <> T.pack (show i)) | i <- [1 .. slotArity slot]]
+        applied <- applyMethodEntry entry values
+        pure (if slotArity slot > 0 then name else valueVar name, parensB (render applied))
+      predicates <- forM [(name, actual) | (slot, Ref _ name) <- zip (thmSlots t) (placeRefs (thmSlots t)), isMembershipSlot slot, Just actual <- [Map.lookup (slotParam slot) assign]] \(name, actual) -> do
+        predicate <- maybe (Left "a theorem's exact indexed type predicate is unavailable") Right (exactTypePredicate k g actual)
+        pure (name, parensB (render (predicateAt predicate (CVar "z_1"))))
+      let parameters = filter (/= "schema_context") (Map.findWithDefault [] (thmCore t) (knowRuleMetas k))
           byBinder = Map.fromList (zip (thmBinders t) args)
           values = map mangleVariable (thmValues t)
           (defined, _) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
@@ -2084,17 +3187,32 @@ schemaTheoremArguments k g t assign typed sigma
           runtime value = value
           argument name
             | "z_" `T.isPrefixOf` name = fromText name
-            | otherwise = fromMaybe "_" (lookup name (predicates <> callbacks <> termArgs))
+            | otherwise = fromMaybe "_" (lookup name (predicates <> callbacks <> methods <> termArgs))
       pure (mconcat [" " <> argument name | name <- parameters])
   where
+    refined = any (\ty -> exactTypePredicate k g ty /= typePredicate k g ty) (Map.elems assign)
     schemas = [(position, ty) | PSchema position ty <- thmPremises t]
     parensB body = "(" <> body <> ")"
+    methodPremise PMethod {} = True
+    methodPremise _ = False
 
 -- | The obligations the premises of a theorem under constraints leave where it is appealed to, its type parameters at the types given.
 premiseObligations :: Knowledge -> Goal -> Map Int Ty -> TheoremInfo -> Either String [Obligation]
-premiseObligations k g assign t = forM [p | p <- thmPremises t, case p of { PSchema {} -> False; _ -> True }] \case
-  PLaw lq i -> OLaw lq <$> at i
-  PClosure mq i -> OClosure mq . siteOfType k g <$> at i
+premiseObligations k g assign t = traverse (premiseObligation k g assign t) [p | p <- thmPremises t, case p of PSchema {} -> False; _ -> True]
+
+premiseObligation :: Knowledge -> Goal -> Map Int Ty -> TheoremInfo -> Premise -> Either String Obligation
+premiseObligation k g assign t = \case
+  PLaw lq i -> (\ty -> OLaw lq ty True) <$> at i
+  PClosure mq i -> do
+    actual <- at i
+    if exactTypePredicate k g actual == typePredicate k g actual
+      then pure (OClosure mq (siteOfType k g actual))
+      else do
+        slot <- maybe (Left "a closure premise has no method dictionary entry") Right (find (\entry -> slotMethod entry == mq && slotParam entry == i) (thmSlots t))
+        ty <- dictionaryMethodType (knowEnv k) (thmSlots t) slot
+        ref <- maybe (Left "a closure premise has no dictionary reference") Right (lookup slot (zip (thmSlots t) (placeRefs (thmSlots t))))
+        methodPremiseObligation k g (thmSlots t) assign (CVar . mangleVariable) (const (CVar "?")) (PMethod mq i ty ref)
+  premise@PMethod {} -> methodPremiseObligation k g (thmSlots t) assign (CVar . mangleVariable) (const (CVar "?")) premise
   PSchema {} -> Left "internal: a schema contract needs its callback argument"
   where
     at i = maybe (Left (T.unpack (displayQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances")) Right (Map.lookup i assign)
@@ -2119,7 +3237,10 @@ appeal leaves.
 -}
 data Obligation
   = OMember !Pred !CT
-  | OLaw !QualName !Ty
+  | {- | The flag marks a rule premise with local law binders; False applies
+    the law directly to the current goal's values.
+    -}
+    OLaw !QualName !Ty !Bool
   | OClosure !QualName !Site
   | OSchema !SchemaContract
   | OEquation !CT !CT
@@ -2140,12 +3261,15 @@ obligationDepth = 64
 
 -- | An obligation discharged in a goal, by backtracking, since which proof is found does not matter.
 discharge :: Knowledge -> Goal -> Obligation -> Either String Builder
-discharge k g = solve Backtrack (obligations k g) obligationDepth
+discharge k initial obligation =
+  let (before, g) = exposeExactMemberships initial
+   in (before <>) <$> solve Backtrack (obligations k g) obligationDepth obligation
 
 proveSchemaContract :: Knowledge -> Goal -> SchemaContract -> Either String Builder
 proveSchemaContract k g contract = do
   stated <- traverse (hypText . snd) namedDomains
-  proof <- prove subgoal (scPost contract)
+  let (exposed, prepared) = exposeExactMemberships subgoal
+  proof <- (exposed <>) <$> prove prepared (scPost contract)
   pure (mconcat ["have " <> fromText name <> ": " <> prop <> " { assumption }; " | ((name, _), prop) <- zip namedDomains stated] <> proof)
   where
     locals = scLocals contract
@@ -2166,18 +3290,22 @@ proveSchemaContract k g contract = do
       Conn And a b -> (\x y -> "ConjR { " <> x <> " } { " <> y <> " }") <$> prove current a <*> prove current b
       Rel RelLt (Nat 0) member -> do
         code <- termCT CVar member
-        (predicate, value) <- maybe (Left "a callback result has no membership predicate") Right (splitMembership code)
-        case membershipProof k current predicate value of
-          Right proof -> Right proof
-          Left why -> do
-            let reductions = reductionsOf k value
-                reduced = lastTerm value reductions
-            proof <- either (const (Left why)) Right (membershipProof k current predicate reduced)
-            let steps = [(tactic, CSym "lt" [CNum 0, predicateAt predicate next]) | (tactic, next) <- reductions]
-            pure ("calc " <> render (CSym "lt" [CNum 0, code]) <> forth steps <> " = 1 by (" <> proof <> ")")
+        if isExact code then discharge k current (OEquation (CSym "lt" [CNum 0, code]) (CNum 1)) else proveMember current code
       prop -> case membershipCase k current {goalConcl = prop} of
         Right proof -> Right proof
         Left _ -> conclude k current (goalEquations current) prop
+    isExact (CSym "conj" _) = True
+    isExact _ = False
+    proveMember current code = do
+      (predicate, value) <- maybe (Left "a callback result has no membership predicate") Right (splitMembership code)
+      case membershipProof k current predicate value of
+        Right proof -> Right proof
+        Left why -> do
+          let reductions = reductionsOf k value
+              reduced = lastTerm value reductions
+          proof <- either (const (Left why)) Right (membershipProof k current predicate reduced)
+          let steps = [(tactic, CSym "lt" [CNum 0, predicateAt predicate next]) | (tactic, next) <- reductions]
+          pure ("calc " <> render (CSym "lt" [CNum 0, code]) <> forth steps <> " = 1 by (" <> proof <> ")")
 
 -- | Use a fixed callback's checked domain/result contract at actual values.
 schemaPremised :: Goal -> Obligation -> Maybe (Step Obligation Builder String)
@@ -2223,9 +3351,11 @@ schemaPremised g wanted =
       HProp prop -> case stripLocations prop of
         Rel RelLt (Nat 0) member -> do
           memberCT <- termCT CVar member
-          case splitMembership memberCT of
-            Just (p, t) -> Right (OMember p t)
-            Nothing -> uncurry OEquation <$> expressionEquation prop
+          case memberCT of
+            CSym "conj" _ -> uncurry OEquation <$> expressionEquation prop
+            _ -> case splitMembership memberCT of
+              Just (p, t) -> Right (OMember p t)
+              Nothing -> uncurry OEquation <$> expressionEquation prop
         _ -> uncurry OEquation <$> expressionEquation prop
 
 {- |
@@ -2244,14 +3374,14 @@ parameter, and at a data type the closure lemma of the instance's function,
 its premises in turn.
 -}
 obligations :: Knowledge -> Goal -> Database ObligationHead Obligation Builder String
-obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPremised g] none deep
+obligations k g = Database obligationHead byHead [assumed, anyMember, exactMember, schemaPremised g] none deep
   where
     env = knowEnv k
     obligationHead = \case
       OMember _ (CSym f _) -> OnTerm f
       OMember _ (CVar v) -> OnTerm v
       OMember _ _ -> OnNothing
-      OLaw lq _ -> OnLaw lq
+      OLaw lq _ _ -> OnLaw lq
       OClosure mq _ -> OnClosure mq
       OSchema {} -> OnNothing
       OEquation {} -> OnNothing
@@ -2264,8 +3394,29 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
       OSchema contract -> Just (either Refuse (Reduce [] . const) (proveSchemaContract k g contract))
       _ -> Nothing
     equationKnown = \case
+      OEquation (CSym "lt" [CNum 0, code]) (CNum 1) | Just result <- positive code -> Just result
       OEquation l r -> Just (either Refuse (Reduce [] . const) (indexEquation k g (goalEquations g) l r))
       _ -> Nothing
+    exactMember = \case
+      OMember predicate value | code@(CSym "conj" _) <- predicateAt predicate value -> positive code
+      _ -> Nothing
+    positive = \case
+      CSym "conj" [left, right] ->
+        Just
+          ( Reduce
+              [truth left, truth right]
+              ( \proofs ->
+                  "have " <> leftName <> ": " <> statement left <> " { " <> proofs !! 0 <> " }; have " <> rightName <> ": " <> statement right <> " { " <> proofs !! 1 <> " }; exact conjIntro on " <> leftName <> " " <> rightName
+              )
+          )
+      CSym "eq" [left, right] -> Just (Reduce [OEquation left right] (\proofs -> "have " <> equalityName <> ": " <> equationText left right <> " { " <> head proofs <> " }; exact eqIntro on " <> equalityName))
+      code | Just (predicate, value) <- splitMembership code -> Just (Reduce [OMember predicate value] head)
+      _ -> Nothing
+    leftName = fromText (freshProofName g "ExactLeft")
+    rightName = fromText (freshProofName g "ExactRight")
+    equalityName = fromText (freshProofName g "ExactEquality")
+    truth code = OEquation (CSym "lt" [CNum 0, code]) (CNum 1)
+    statement code = "((lt 0 " <> render code <> ") = 1)"
     assumed = \case
       OMember p t | hasMembership g p t -> Just (Reduce [] (const "assumption"))
       _ -> Nothing
@@ -2275,7 +3426,7 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
     -- A method of the goal's dictionary applied: the goal's premise stating its closure.
     premised f = \case
       OMember p t
-        | (name, argPs) : _ <- [(gpName gp, ps) | gp <- goalPremises g, Just (place, ps, result) <- [gpClosure gp], place == f, result == p] ->
+        | (name, argPs) : _ <- [(gpName gp, ps) | gp <- goalPremises g, Just (place, ps, result) <- [gpClosure gp], not (isJust (gpSchema gp)), place == f, result == p] ->
             Just (afterMemberships [(a, q) | (a, Just q) <- zip (operands t) argPs] [] (const ("exact " <> fromText name)))
       _ -> Nothing
     -- A constructor applied: its introduction, after the memberships of the fields its type checks, and the equations of indices of its entries.
@@ -2306,19 +3457,25 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
              in Just case (closureAppeal cl given args, premisesAt k g (goalEquations g) (closurePre cl) (closureValues cl) (zip names args)) of
                   (Left why, _) -> Refuse why
                   (_, Left why) -> Refuse why
-                  (Right (subs, appeal), Right (sigma, haves)) -> case preconditionsAt k g (Map.fromList (zip names args) <> sigma) (closureProps cl) of
+                  (Right (subs, appeal), Right (sigma, haves)) -> case do
+                    info <- maybe (Left "the closure's function metadata is unavailable") Right (find ((== f) . funCore) [fn | GFun fn <- Map.elems (envGlobals env)])
+                    actualProps <- functionPreconditions k g info (closureArgTys cl) args given (closureProps cl)
+                    propositionsAt k g (Map.fromList (zip names args) <> sigma) actualProps of
                     Left why -> Refuse why
                     Right props -> afterMemberships [(a, q) | (a, Just q) <- zip args argPs] subs (\rs -> haves <> props <> appeal rs)
       _ -> Nothing
     lawPremise = \case
-      OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (displayQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
+      OLaw lq (TParam j []) _ -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (displayQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
       _ -> Nothing
     -- The theorem proving the law at the instance for the head of the type; under a context, its premises at the type's arguments.
     lawInstance = \case
-      OLaw lq ty
+      OLaw lq ty localDomain
         | Just h <- headOf ty -> Just case lawTheorem lq h of
             Left why -> Refuse why
-            Right t' -> either Refuse (\subs -> Reduce subs (\rs -> "exact " <> fromText (thmCore t') <> blocks rs)) (premiseObligations k g (Map.fromList (zip [0 ..] (typeArgs ty))) t')
+            Right t' -> case (if localDomain then lawDomainFacts k g lq ty else Right "", premiseObligations k g (Map.fromList (zip [0 ..] (typeArgs ty))) t') of
+              (Left why, _) -> Refuse why
+              (_, Left why) -> Refuse why
+              (Right before, Right subs) -> Reduce subs (\rs -> before <> "exact " <> fromText (thmCore t') <> blocks rs)
       _ -> Nothing
     closureAny = \case
       OClosure _ SiteAny -> Just (Reduce [] (const "exact anyIsMember"))
@@ -2336,14 +3493,13 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
       _ -> Nothing
     -- The appeal to a closure lemma: its premises, the closures of its dictionary's methods, at the predicates its type parameters are at.
     closureAppeal cl given args = do
-      subs <- forM (closurePremisesOf cl) \case
-        PClosure mq i -> maybe (Left ("the predicate of the type parameter " <> show i <> " of a closure is not known")) (Right . OClosure mq . siteOfPred k g) (Map.lookup i given)
-        PLaw {} -> Left "internal: a law among the premises of a closure"
-        PSchema position ty -> do
-          callback <- maybe (Left "the callback argument is not given") Right (listToMaybe (drop position args))
-          info <- maybe (Left "the callback's enclosing function is not known") Right (find (\f -> functionLemma f "#closed" == closureLemma cl) [f | GFun f <- Map.elems (envGlobals env)])
-          OSchema <$> schemaContract g (predicateOf (knowMembership k) (`Map.lookup` given)) (functionValueAt env info (closureArgTys cl) args) callback ty
-      Right (subs, \rs -> "exact " <> fromText (closureLemma cl) <> blocks rs)
+      info <- maybe (Left "the closure's enclosing function is not known") Right (find (\f -> functionLemma f "#closed" == closureLemma cl) [f | GFun f <- Map.elems (envGlobals env)])
+      subs <- traverse (functionPremiseObligation k g info (closureArgTys cl) args given) (closurePremisesOf cl)
+      explicit <- if any explicitPremise (closurePremisesOf cl) then functionRuleArguments k g info (closureArgTys cl) args given (closureLemma cl) else Right ""
+      Right (subs, \rs -> "exact " <> fromText (closureLemma cl) <> explicit <> blocks rs)
+    explicitPremise PMethod {} = True
+    explicitPremise PLaw {} = True
+    explicitPremise _ = False
     -- The predicates a function's closure lemma needs of its arguments, at the
     -- predicates of the type parameters the result's gives: none when it does
     -- not give them all.
@@ -2393,7 +3549,7 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
       _ -> []
     none = \case
       OMember p t -> "the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function"
-      OLaw lq ty -> "the law " <> T.unpack (displayQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
+      OLaw lq ty _ -> "the law " <> T.unpack (displayQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
       OClosure mq _ -> "the closure of " <> T.unpack (displayQualName mq) <> " is not known there"
       OSchema {} -> "the fixed callback's typed closure contract could not be established"
       OEquation l r -> "the required equation " <> T.unpack (runBuilder (equationText l r)) <> " could not be established"
@@ -2465,8 +3621,22 @@ runTactics k info n g0 sp tacs0 = do
       Located tsp t : more -> case t of
         R.TIntros names -> introGoal tsp (map unLocated names) g more
         R.TIntro names -> introGoal tsp (map unLocated names) g more
+        R.TConstructor | Conn And left right <- stripLocations (goalConcl g) -> do
+          (proofs, rest) <- solveAll [g {goalConcl = left}, g {goalConcl = right}] more
+          case proofs of
+            [a, b] -> pure (Out ("ConjR { " <> outTactic a <> " } { " <> outTactic b <> " }") (outAux a <> outAux b), rest)
+            _ -> Left (EngineError tsp "internal: conjunction introduction needs two proofs")
+        R.TLeft | Conn Or left _ <- stripLocations (goalConcl g) -> do
+          (out, rest) <- goal g {goalConcl = left} more
+          pure (out {outTactic = "DisjR2; " <> outTactic out}, rest)
+        R.TRight | Conn Or _ right <- stripLocations (goalConcl g) -> do
+          (out, rest) <- goal g {goalConcl = right} more
+          pure (out {outTactic = "DisjR1; " <> outTactic out}, rest)
+        R.TExists witnesses -> existsGoal tsp witnesses g more
+        R.TObtain names expression -> obtainGoal tsp (map unLocated names) expression g more
         R.TRefl -> (\x -> (closed x, more)) <$> rflTactic k g tsp
         R.TAssumption -> Right (closed "assumption", more)
+        R.TContradiction -> (,more) . closed <$> either (Left . EngineError tsp) Right (refute k g)
         R.TSorry -> Left (EngineError tsp ("sorry: the goal is\n" <> T.unpack (renderGoal (knowEnv k) g)))
         R.TExact e -> (\ev -> (evidenceOut ev (evBefore ev <> exactAppeal ev), more)) <$> evidence k info g e
         R.TCong (Just e) -> (\ev -> (evidenceOut ev (evBefore ev <> congUnfolded k g ev), more)) <$> evidence k info g e
@@ -2485,10 +3655,11 @@ runTactics k info n g0 sp tacs0 = do
             Right (evidenceOut ev appeal, more)
         R.TCalc c -> (,more) <$> calcProof k info n g tsp c
         R.THave name annotation rhs -> do
-          prop <- case annotation of
+          (prop, views, sourceBindings) <- case annotation of
             Just rawProp -> do
               resolved <- either (\err -> let (esp, msg) = renderFixityError err in Left (EngineError esp msg)) Right (resolveExpr (knowFixities k) rawProp)
-              either (\(ElabError esp msg) -> Left (EngineError esp msg)) Right (runTC (elabProp (goalEnv k info g) (goalDict g) (goalVars g) resolved))
+              value <- checkedElaboration k g (goalEnv k info g) (elabProp (goalEnv k info g) (goalDict g) (goalVars g) resolved)
+              pure (value, goalQuantifierViews g, goalSourceBindings g)
             Nothing -> do
               ev <- case unLocated rhs of
                 R.RExpr e -> evidence k info g e
@@ -2496,15 +3667,16 @@ runTactics k info n g0 sp tacs0 = do
               let hyp = case lookup (evName ev) (goalHyps g) of
                     Just (HProp p) -> Just p
                     _ -> Nothing
-              maybe (Left (EngineError tsp "cannot infer this local proposition: write have h : P := proof")) (Right . normalizeFact k g) (evConclusion ev <|> hyp)
+              value <- maybe (Left (EngineError tsp "cannot infer this local proposition: write have h : P := proof")) (Right . normalizeFact k g) (evConclusion ev <|> hyp)
+              pure (value, goalQuantifierViews g <> evQuantifierViews ev, fromMaybe (goalSourceBindings g) (evSourceBindings ev))
           stated <- either (Left . EngineError tsp) Right (formula prop)
-          proof <- proveRhs k info n g {goalConcl = prop} rhs
+          proof <- proveRhs k info n g {goalConcl = prop, goalQuantifierViews = views, goalSourceBindings = sourceBindings} rhs
           let (line, col) = R.spanStart tsp
               core = "HaveL" <> T.pack (show line) <> "C" <> T.pack (show col)
               names = case name of
                 Nothing -> goalNames g
                 Just (Located _ source) -> (source, core) : [(s, h) | (s, h) <- goalNames g, s /= source]
-              extended = g {goalHyps = goalHyps g <> [(core, HProp prop)], goalNames = names}
+              extended = g {goalHyps = goalHyps g <> [(core, HProp prop)], goalNames = names, goalQuantifierViews = views, goalSourceBindings = sourceBindings}
               (ihPrep, specialized) = specializeIHs k extended
           (next, rest) <- goal specialized more
           pure
@@ -2522,30 +3694,331 @@ runTactics k info n g0 sp tacs0 = do
           out <- finish proofs
           Right (out, rest)
         _ -> Left (EngineError tsp "this tactic is not supported yet")
+    -- A bounded witness leaves its bound and its instantiated body to prove.
+    -- Both proofs are retained before appealing to the kernel's search lemma.
+    -- An existential witness is private to the auxiliary elimination theorem.
+    -- The kernel instantiates it with bounded search's least witness; finite
+    -- source values are the decoder's certified results at that index.
+    obtainGoal tsp names expression g more = do
+      ev <- evidence k info g expression
+      prop <- maybe (Left (EngineError tsp "obtain: the proof has no inferable proposition")) Right (evConclusion ev <|> case lookup (evName ev) (goalHyps g) of Just (HProp value) -> Just value; _ -> Nothing)
+      let initial = g {goalQuantifierViews = goalQuantifierViews g <> evQuantifierViews ev, goalSourceBindings = fromMaybe (goalSourceBindings g) (evSourceBindings ev)}
+      sourceView <- finiteView k info initial prop
+      case (names, stripLocations prop) of
+        (sourceName : hypothesisNames, Quant Exists _ (Just (relation, bound)) _ body) -> do
+          unless (length hypothesisNames == 1 || (maybe True (const False) sourceView && length hypothesisNames == 2)) $ Left (EngineError tsp "obtain: name the witness and its body hypothesis; a numeric witness may additionally name its bound")
+          let source = freshProofName initial (tacticName tsp "ObtainedValue")
+              eigen = freshProofName initial (tacticName tsp "SearchIndex")
+              factName = freshProofName initial (tacticName tsp "ExistentialFact")
+              boundName = freshProofName initial (tacticName tsp "ObtainedBound")
+              bodyName = freshProofName initial (tacticName tsp "ObtainedBody")
+              codeName = freshProofName initial (tacticName tsp "ObtainedCode")
+              limit = strictLimit relation bound
+              ty = maybe TNat (finiteElementType . viewDomain) sourceView
+              sourceBody = maybe (instantiate (const (Var source)) body) (scopedValue (Var source) . viewBody) sourceView
+              base = initial {goalHyps = goalHyps initial <> [(factName, HProp prop)]}
+              helper = thmCore info <> "_obtain_" <> source
+          facts <- liftAt tsp (valueFacts k info base (Var source) ty)
+          let typed = case (typePredicate k base ty, facts) of
+                (Just predicate, _ : indices) -> HMember predicate source : map HProp indices
+                _ -> map HProp facts
+              typedNames = [source <> "Type" <> T.pack (show j) | j <- [0 :: Int .. length typed - 1]]
+              boundFact = [(boundName, HProp (Rel RelLt (Var source) limit)) | maybe True (const False) sourceView]
+              bodySourceName = last hypothesisNames
+              boundSourceName = [(head hypothesisNames, boundName) | length hypothesisNames == 2]
+              context =
+                base
+                  { goalHyps = goalHyps base <> zip typedNames typed <> boundFact <> [(bodyName, HProp sourceBody)]
+                  , goalVars = (sourceName, (source, ty)) : [(name, value) | (name, value) <- goalVars base, name /= sourceName]
+                  , goalNames = (bodySourceName, bodyName) : boundSourceName <> [(name, value) | (name, value) <- goalNames base, name `notElem` hypothesisNames]
+                  }
+              userGoal = maybe context (\view -> bindSourceView (viewSource view) (Var source) ty context) sourceView
+          (proof, rest) <- goal userGoal more
+          declarationText <- liftAt tsp (auxiliaryDeclaration helper userGoal (outTactic proof))
+          limitCode <- liftAt tsp (termCT CVar limit)
+          (searchCode, _) <- liftAt tsp (propositionCode (instantiate (const (Var eigen)) body))
+          let witness = fromCT (CRaw (runBuilder ("(μ " <> fromText eigen <> " < " <> render limitCode <> ". " <> searchCode <> ")")))
+              witnessBound = Rel RelLt witness limit
+              decoded = maybe witness (scopedValue witness . finiteDecode . viewDomain) sourceView
+              instanceBody = instantiate (const witness) body
+              bounded = base {goalHyps = goalHyps base <> [(boundName, HProp witnessBound)]}
+          decoderProofs <- liftAt tsp (proveValueFacts k info bounded decoded ty)
+          (decoderFacts, _) <- liftAt tsp (stateFacts (source <> "Decoded") bounded decoderProofs)
+          arguments <- liftAt tsp (auxiliaryArguments userGoal [(source, decoded)])
+          existentialText <- liftAt tsp (formula prop)
+          boundText <- liftAt tsp (formula witnessBound)
+          bodyText <- liftAt tsp (formula instanceBody)
+          (bodyCode, ownCode) <- liftAt tsp (propositionCode instanceBody)
+          let codeToBody = if ownCode then "have " <> fromText bodyName <> ": " <> bodyText <> " { exact " <> fromText codeName <> " }; " else "reflect " <> fromText codeName <> " as " <> fromText bodyName <> "; "
+              tactic =
+                evBefore ev
+                  <> "have "
+                  <> fromText factName
+                  <> ": "
+                  <> existentialText
+                  <> " { "
+                  <> exactAppeal ev
+                  <> " }; "
+                  <> "exact existsUse _ "
+                  <> render limitCode
+                  <> " { have "
+                  <> fromText boundName
+                  <> ": "
+                  <> boundText
+                  <> " { assumption }; "
+                  <> "have "
+                  <> fromText codeName
+                  <> ": ((lt 0 "
+                  <> bodyCode
+                  <> ") = 1) { assumption }; "
+                  <> codeToBody
+                  <> decoderFacts
+                  <> "exact "
+                  <> fromText helper
+                  <> arguments
+                  <> " }"
+          pure (Out tactic (evAux ev <> outAux proof <> [(helper, runBuilder declarationText)]), rest)
+        _ -> Left (EngineError tsp "obtain: expected a bounded existential proposition and a witness name")
+    existsGoal tsp witnesses g more = do
+      source <- finiteView k info g (goalConcl g)
+      case (witnesses, source) of
+        (w : ws, Just view) | Quant Exists _ _ _ _ <- stripLocations (goalConcl g) -> do
+          let domain = viewDomain view
+          ((value, _), checked) <- typedArgExpected k info g w (finiteElementType domain)
+          (rank, decoded, roundtrip, bridge, ready) <- finiteWitness k info g tsp view value
+          let sourceBody = scopedValue value (viewBody view)
+              targetBody = scopedValue decoded (viewBody view)
+              bodyName = freshProofName ready (tacticName tsp "FiniteBody")
+              codeName = freshProofName ready (tacticName tsp "FiniteCode")
+              targetName = freshProofName ready (tacticName tsp "EnumerationCode")
+              sourceGoal = bindSourceView (viewSource view) value (finiteElementType domain) ready {goalConcl = sourceBody}
+              bodyTactics = [Located tsp (R.TExists ws) | not (null ws)] <> more
+          (bodyProof, rest) <- goal sourceGoal bodyTactics
+          stated <- liftAt tsp (formula sourceBody)
+          (sourceCode, ownCode) <- liftAt tsp (propositionCode sourceBody)
+          (targetCode, _) <- liftAt tsp (propositionCode targetBody)
+          limitCode <- liftAt tsp (termCT CVar (finiteBound domain))
+          rankCode <- liftAt tsp (termCT CVar rank)
+          let codeProof = if ownCode then fromText bodyName else fromText codeName
+              tactic =
+                outTactic checked
+                  <> outTactic bridge
+                  <> "have "
+                  <> fromText bodyName
+                  <> ": "
+                  <> stated
+                  <> " { "
+                  <> outTactic bodyProof
+                  <> " }; "
+                  <> (if ownCode then "" else "reify " <> fromText bodyName <> " as " <> fromText codeName <> "; ")
+                  <> "have "
+                  <> fromText targetName
+                  <> ": ((lt 0 "
+                  <> targetCode
+                  <> ") = 1) { calc (lt 0 "
+                  <> targetCode
+                  <> ") = (lt 0 "
+                  <> sourceCode
+                  <> ") by cong "
+                  <> fromText roundtrip
+                  <> " = 1 by exact "
+                  <> codeProof
+                  <> " }; "
+                  <> "exact muBelow _ "
+                  <> render limitCode
+                  <> " "
+                  <> render rankCode
+          pure (Out tactic (outAux checked <> outAux bridge <> outAux bodyProof), rest)
+        _ -> numericExists tsp witnesses g more
+    numericExists tsp witnesses g more = case (witnesses, stripLocations (goalConcl g)) of
+      (w : ws, Quant Exists _ (Just (rel, bound)) _ body) -> do
+        ((value, _), checked) <- typedArgExpected k info g w TNat
+        let limit = strictLimit rel bound
+            boundProp = Rel RelLt value limit
+            instanceProp = instantiate (const value) body
+            boundName = freshProofName g (tacticName tsp "WitnessBound")
+            bodyName = freshProofName g (tacticName tsp "WitnessBody")
+            codeName = freshProofName g (tacticName tsp "WitnessCode")
+        (boundProof, afterBound) <- goal g {goalConcl = boundProp} more
+        let bodyTactics = [Located tsp (R.TExists ws) | not (null ws)] <> afterBound
+        (bodyProof, rest) <- goal g {goalConcl = instanceProp, goalHyps = goalHyps g <> [(boundName, HProp boundProp)]} bodyTactics
+        boundText <- either (Left . EngineError tsp) Right (formula boundProp)
+        bodyText <- either (Left . EngineError tsp) Right (formula instanceProp)
+        valueCode <- either (Left . EngineError tsp) Right (termCT CVar value)
+        limitCode <- either (Left . EngineError tsp) Right (termCT CVar limit)
+        pure
+          ( Out
+              ( outTactic checked
+                  <> "have "
+                  <> fromText boundName
+                  <> ": "
+                  <> boundText
+                  <> " { "
+                  <> outTactic boundProof
+                  <> " }; "
+                  <> "have "
+                  <> fromText bodyName
+                  <> ": "
+                  <> bodyText
+                  <> " { "
+                  <> outTactic bodyProof
+                  <> " }; "
+                  <> "reify "
+                  <> fromText bodyName
+                  <> " as "
+                  <> fromText codeName
+                  <> "; "
+                  <> "exact muBelow _ "
+                  <> render limitCode
+                  <> " "
+                  <> render valueCode
+              )
+              (outAux checked <> outAux boundProof <> outAux bodyProof)
+          , rest
+          )
+      ([], _) -> Left (EngineError tsp "exists: supply a witness")
+      _ -> Left (EngineError tsp "exists: the goal is not a bounded existential proposition")
+    strictLimit Below bound = bound
+    strictLimit AtMost bound = App (Global (Ref RefBuiltin "S")) bound
+    tacticName tsp base =
+      let (line, col) = R.spanStart tsp
+       in base <> "L" <> T.pack (show line) <> "C" <> T.pack (show col)
     -- Name induction fields and hypotheses first, then introduce implications
-    -- reverted by an inner induction. The kernel checks each implication rule.
+    -- or bounded universals. A universal uses the ordinary kernel rule and
+    -- reifies the proved body; no quantified surface syntax reaches the kernel.
     introGoal tsp names g more = do
       let pending = length [() | (v, _) <- goalVars g, "#" `T.isPrefixOf` v]
           ihs = length [() | (v, _) <- goalNames g, "IH" `T.isPrefixOf` v]
           remaining = drop (pending + ihs) names
           renamed = introduce names g
-          (line, col) = R.spanStart tsp
-          prefix = "IntroL" <> T.pack (show line) <> "C" <> T.pack (show col) <> "N"
-          introduceOne (script, current) (i, source) = case stripLocations (goalConcl current) of
-            Arrow premise conclusion ->
-              let core = prefix <> T.pack (show i)
-               in Right
-                    ( script <> "ImplR as " <> fromText core <> "; "
-                    , current
+          prefix = tacticName tsp "Intro" <> "N"
+          introduceOne (wrap, current) (i, sourceName) = do
+            sourceView <- finiteView k info current (goalConcl current)
+            case (stripLocations (goalConcl current), sourceView) of
+              (Arrow premise conclusion, _) ->
+                let core = freshProofName current (prefix <> T.pack (show i))
+                    next =
+                      current
                         { goalHyps = goalHyps current <> [(core, HProp premise)]
-                        , goalNames = (source, core) : [(s, h) | (s, h) <- goalNames current, s /= source]
+                        , goalNames = (sourceName, core) : [(name, h) | (name, h) <- goalNames current, name /= sourceName]
                         , goalConcl = conclusion
                         }
-                    )
-            _ -> Left (EngineError tsp "intro: no implication remains to introduce")
-      (script, extended) <- foldM introduceOne ("", renamed) (zip [1 :: Int ..] remaining)
+                    wrapper out = wrap out {outTactic = "ImplR as " <> fromText core <> "; " <> outTactic out}
+                 in Right (wrapper, next)
+              (Quant Forall _ (Just (rel, bound)) _ body, Just view) -> do
+                let domain = viewDomain view
+                    source = freshProofName current ("q_source_" <> prefix <> T.pack (show i))
+                    ty = finiteElementType domain
+                    sourceProp = scopedValue (Var source) (viewBody view)
+                facts <- liftAt tsp (valueFacts k info current (Var source) ty)
+                let typed = case (typePredicate k current ty, facts) of
+                      (Just predicate, _ : indices) -> HMember predicate source : map HProp indices
+                      _ -> map HProp facts
+                    typedNames = [freshProofName current (source <> "Type" <> T.pack (show j)) | j <- [0 :: Int .. length typed - 1]]
+                    extended =
+                      bindSourceView
+                        (viewSource view)
+                        (Var source)
+                        ty
+                        current
+                          { goalHyps = goalHyps current <> zip typedNames typed
+                          , goalVars = (sourceName, (source, ty)) : [(name, entry) | (name, entry) <- goalVars current, name /= sourceName]
+                          , goalConcl = sourceProp
+                          }
+                    helper = thmCore info <> "_finite_" <> source
+                    eigen = freshProofName extended ("q_index_" <> prefix <> T.pack (show i))
+                    limit = strictLimit rel bound
+                    boundProp = Rel RelLt (Var eigen) limit
+                    bounded = current {goalHyps = goalHyps current <> [(eigen <> "Bound", HProp boundProp)], goalVars = (eigen, (eigen, TNat)) : goalVars current}
+                    decoded = scopedValue (Var eigen) (finiteDecode domain)
+                decoderProofs <- liftAt tsp (proveValueFacts k info bounded decoded ty)
+                (decoderFacts, _) <- liftAt tsp (stateFacts (eigen <> "Typed") bounded decoderProofs)
+                arguments <- liftAt tsp (auxiliaryArguments extended [(source, decoded)])
+                limitCode <- liftAt tsp (termCT CVar limit)
+                bodyText <- liftAt tsp ((\text -> "(" <> text <> ")") <$> formula (instantiate (const (Var eigen)) body))
+                let wrapper out = do
+                      decl <- liftAt tsp (auxiliaryDeclaration helper extended (outTactic out))
+                      let blocks = mconcat [" { exact " <> fromText (gpName premise) <> " }" | premise <- goalPremises current]
+                          bodyName = eigen <> "Body"
+                          codeName = eigen <> "Code"
+                          tactic =
+                            "exact belowIntro "
+                              <> fromText eigen
+                              <> " "
+                              <> render limitCode
+                              <> " { "
+                              <> decoderFacts
+                              <> "have "
+                              <> fromText bodyName
+                              <> ": "
+                              <> bodyText
+                              <> " { exact "
+                              <> fromText helper
+                              <> arguments
+                              <> " }; "
+                              <> "reify "
+                              <> fromText bodyName
+                              <> " as "
+                              <> fromText codeName
+                              <> "; exact "
+                              <> fromText codeName
+                              <> " }"
+                      wrap (Out tactic (outAux out <> [(helper, runBuilder decl)]))
+                pure (wrapper, extended)
+              (Quant Forall _ (Just (rel, bound)) _ body, Nothing) -> do
+                let eigen = freshProofName current ("q_" <> prefix <> T.pack (show i))
+                    limit = strictLimit rel bound
+                    instanceProp = instantiate (const (Var eigen)) body
+                    boundProp = Rel RelLt (Var eigen) limit
+                    boundName = eigen <> "Bound"
+                    bodyName = eigen <> "Body"
+                    codeName = eigen <> "Code"
+                    next0 =
+                      current
+                        { goalHyps = goalHyps current <> [(boundName, HProp boundProp)]
+                        , goalVars = (sourceName, (eigen, TNat)) : [(name, entry) | (name, entry) <- goalVars current, name /= sourceName]
+                        , goalConcl = instanceProp
+                        }
+                    next = foldl (\acc view -> bindSourceView view (Var eigen) TNat acc) next0 (sourceCandidates current)
+                limitCode <- liftAt tsp (termCT CVar limit)
+                boundText <- liftAt tsp (formula boundProp)
+                bodyText <- liftAt tsp ((\text -> "(" <> text <> ")") <$> formula instanceProp)
+                let wrapper out =
+                      wrap
+                        out
+                          { outTactic =
+                              "exact belowIntro "
+                                <> fromText eigen
+                                <> " "
+                                <> render limitCode
+                                <> " { "
+                                <> "have "
+                                <> fromText boundName
+                                <> ": "
+                                <> boundText
+                                <> " { assumption }; "
+                                <> "have "
+                                <> fromText bodyName
+                                <> ": "
+                                <> bodyText
+                                <> " { "
+                                <> outTactic out
+                                <> " }; "
+                                <> "reify "
+                                <> fromText bodyName
+                                <> " as "
+                                <> fromText codeName
+                                <> "; exact "
+                                <> fromText codeName
+                                <> " }"
+                          }
+                pure (wrapper, next)
+              _ -> Left (EngineError tsp "intro: no implication or bounded universal remains to introduce")
+      (wrap, extended) <- foldM introduceOne (Right, renamed) (zip [1 :: Int ..] remaining)
       (out, rest) <- goal extended more
-      pure (out {outTactic = script <> outTactic out}, rest)
+      (,rest) <$> wrap out
+    liftAt tsp = either (Left . EngineError tsp) Right
+    sourceCandidates current = sourceCandidatesFor current (goalConcl current)
     -- Each goal in turn, by the tactics left: a focused block solves one, anything else the first.
     solveAll [] rest = Right ([], rest)
     solveAll (c : cs) rest = do
@@ -2781,11 +4254,13 @@ unfoldRedex k t = projection t <|> redex t
       CStatic v -> fromMaybe (CStatic v) (lookup v s)
       CCallback code environment -> CCallback (instantiated s code) (instantiated s environment)
       CPartial f dictionary arity -> CPartial f (map (instantiated s) dictionary) arity
+      CIndexedPartial f captures arity prefixCount -> CIndexedPartial f (map (instantiated s) captures) arity prefixCount
       CClosure binders body captured -> CClosure binders (instantiated (filter ((`notElem` binders) . fst) s) body) (map (instantiated s) captured)
       CSym f args -> case lookup f s of
         Just (CStatic fn) -> CSym fn (map (instantiated s) args)
         -- A function with its dictionary, applied: to the arguments, then to the dictionary, as a call passes it.
         Just (CPartial fn dict _) -> CSym fn (map (instantiated s) args <> dict)
+        Just (CIndexedPartial fn captures _ prefixCount) -> CSym fn (take prefixCount captures <> map (instantiated s) args <> drop prefixCount captures)
         Just (CClosure binders body [])
           | length binders == length args ->
               instantiated (zip binders (map (instantiated s) args)) body
@@ -2827,7 +4302,7 @@ natInduction info g sp core = pure ([base, step], finish)
     dependentNames offset = [(s, hname (length kept + offset + i)) | (i, (h, _)) <- zip [1 ..] dependent, (s, h') <- goalNames g, h' == h]
     ihName = hname (length kept + 1)
     numbered = zip (map hname [1 ..])
-    base = Goal (numbered (map snd kept <> [HProp (at (Nat 0) p) | (_, p) <- dependent])) (at (Nat 0) (goalConcl g)) others (keptNames <> dependentNames 0) [] (goalDict g) (goalPremises g)
+    base = Goal (numbered (map snd kept <> [HProp (at (Nat 0) p) | (_, p) <- dependent])) (at (Nat 0) (goalConcl g)) others (keptNames <> dependentNames 0) [] (goalDict g) (goalPremises g) (mapSourceBindings (at (Nat 0)) (goalSourceBindings g)) (goalQuantifierViews g)
     step =
       Goal
         (numbered (map snd kept <> [HProp (at (Var eigen) motive)] <> [HProp (at successor p) | (_, p) <- dependent]))
@@ -2837,6 +4312,8 @@ natInduction info g sp core = pure ([base, step], finish)
         [(eigen, ihName)]
         (goalDict g)
         (goalPremises g)
+        (mapSourceBindings (at successor) (goalSourceBindings g))
+        (goalQuantifierViews g)
     tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
     auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
     finish outs = do
@@ -2909,7 +4386,7 @@ tupleInduction k info g sp applied cols positions = do
               | (ci, sh) <- zip [0 ..] selected
               , j <- [1 .. propCount sh]
               ]
-         in (ihs, Goal (zip (map hname [1 ..]) hyps) (at vals (goalConcl g)) vars (ihNames <> keptNames <> dependentNames <> propNames) [(ihKey u, ihCore j) | (j, u) <- zip [1 ..] ihs] (goalDict g) (goalPremises g))
+         in (ihs, Goal (zip (map hname [1 ..]) hyps) (at vals (goalConcl g)) vars (ihNames <> keptNames <> dependentNames <> propNames) [(ihKey u, ihCore j) | (j, u) <- zip [1 ..] ihs] (goalDict g) (goalPremises g) (mapSourceBindings (at vals) (goalSourceBindings g)) (goalQuantifierViews g))
       built = map caseGoal combos
       cases = map snd built
       finish outs = do
@@ -2969,7 +4446,7 @@ tupleInduction k info g sp applied cols positions = do
     atName = helperName "at"
     svars = [fresh ("v_tuple_s_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
     wvars = [fresh ("v_tuple_w_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
-    helperGoal concl = Goal [] concl [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols] [] [] (goalDict g) (goalPremises g)
+    helperGoal concl = Goal [] concl [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols] [] [] (goalDict g) (goalPremises g) (goalSourceBindings g) (goalQuantifierViews g)
     -- The motive at the components of a code, from what they are and the motive there.
     substExpr vs = foldr (\(c, v) -> Arrow (Rel RelEq (fromCT c) (fromCT v))) (Arrow (at vs motive) (at (comps n) motive)) (zip (comps n) vs)
     belowGoal = helperGoal (at (map CVar wvars) motive)
@@ -3237,8 +4714,10 @@ dataInduction k info _ g sp v _ = do
             ihNames = [(if length recursive == 1 then "IH" else "IH" <> T.pack (show i), ihCore i) | i <- [1 .. length recursive]]
             keptNames = [(s, hname (before + length ihs + i)) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
             vars = [("#" <> T.pack (show j), f) | (j, f) <- zip [0 :: Int ..] fields] <> [(nm, x) | (nm, x) <- goalVars g, fst x /= core]
-            concl = at (apps (Global (Ref RefConstructor (ctorCore c))) [Var fv | (fv, _) <- fields])
-         in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames <> propNames) (zip recursive (map ihCore [1 ..])) (goalDict g) (goalPremises g)
+            constructor = apps (Global (Ref RefConstructor (ctorCore c))) [Var fv | (fv, _) <- fields]
+            sourceReplace expression = expression >>= \name -> if name == core then constructor else Var name
+            concl = at constructor
+         in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames <> propNames) (zip recursive (map ihCore [1 ..])) (goalDict g) (goalPremises g) (mapSourceBindings sourceReplace (goalSourceBindings g)) (goalQuantifierViews g)
       cases = map caseGoal (dataCtors dat)
       -- The hypotheses about indices a case has, the statement's: introduced, since the user cannot name them.
       opened = map openIndices cases
@@ -3266,7 +4745,7 @@ dataInduction k info _ g sp v _ = do
        in (mconcat ["ImplR as " <> fromText h <> "; " | (h, _) <- new], cg {goalHyps = goalHyps cg <> new, goalConcl = concl})
 
     indexImplications e = case e of
-      At _ x -> indexImplications x
+      At sp x -> let (hs, c) = indexImplications x in (hs, At sp c)
       Arrow a b | isIndexEquation a -> let (as, c) = indexImplications b in (a : as, c)
       _ -> ([], e)
 
@@ -3295,7 +4774,7 @@ mkScript k appeal dat isAt fieldPred t memberHyp m motive reverted = do
   inversion <- inversionText
   branches <- forM (zip [0 ..] (dataCtors dat)) \(i, c) -> branch i c
   let split = splitDisj "I" branches
-      step = "have Q: (((lt 0 " <> render (isAt (CVar m)) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> fromText (dataLemma dat "inversion") <> " }; " <> split <> " }; exact impIntro"
+      step = "have Q: (((lt 0 " <> render (isAt (CVar m)) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> fromText (dataLemma dat "inversion") <> " on M }; " <> split <> " }; exact impIntro"
   finishText <- finishing
   pure
     ( "have C: ((lt 0 (imp "
@@ -3453,6 +4932,7 @@ fromCT = \case
   CRaw t -> Global (Ref RefBuiltin t)
   CStatic t -> Global (Ref RefStatic t)
   CPartial f dict n -> apps (Global (Ref (RefPartial n) f)) (map fromCT dict)
+  CIndexedPartial f captures n prefixCount -> apps (Global (Ref (RefIndexedPartial n prefixCount) f)) (map fromCT captures)
   CCallback (CStatic name) environment -> SchemaParameter THole (Ref RefStatic name) (fromCT environment)
   CCallback (CClosure binders body []) environment ->
     -- Preserve the original closed code and packed captures verbatim. Opening

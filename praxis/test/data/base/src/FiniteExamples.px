@@ -1,0 +1,84 @@
+module FiniteExamples where
+
+import "base" Data.Finite as D
+open D using (Finite)
+open D.Finite
+import "base" Data.Fin as F
+
+data Unit = Mk
+
+instance Finite Unit where
+  card = 1
+  code Mk = F.Fin.FZero {0}
+  decode i = Mk
+  decode-code Mk = rfl
+
+data Bool = False | True
+
+bool-from-nat : Nat -> Bool
+bool-from-nat 0 = False
+bool-from-nat (S n) = True
+
+-- Both 1 and 2 decode to True. Only decode (code x) = x is required.
+instance Finite Bool where
+  card = 3
+  code False = F.Fin.FZero {2}
+  code True = F.Fin.FSucc (F.Fin.FZero {1})
+  decode i = bool-from-nat (F.to-nat i)
+  decode-code False = rfl
+  decode-code True = rfl
+
+all-self : Finite a => ∀ (x : a), x = x
+all-self = by
+  intro x
+  rfl
+
+ordinal-self : ∀ (i : F.Fin n), i = i
+ordinal-self = by
+  intro i
+  rfl
+
+inhabited : ∃ (x : Bool), x = True
+inhabited = by
+  exists True
+  rfl
+
+nested : ∀ (x : Bool), ∃ (y : Bool), x = y
+nested = by
+  intro x
+  exists x
+  rfl
+
+empty : ∀ (i : F.Fin 0), ⊥
+empty = by
+  intro i
+  exact F.empty i
+
+-- A generic function exercises the Finite (Fin n) instance even though
+-- explicit quantifiers over Fin n use the direct numeric bridge.
+roundtrip : Finite a => a -> a
+roundtrip x = decode (code x)
+
+roundtrip-law : Finite a => (x : a) -> roundtrip x = x
+roundtrip-law x = calc
+  roundtrip x
+  = decode (code x)
+  = x := decode-code x
+
+ordinal-instance : (i : F.Fin n) -> roundtrip i = i
+ordinal-instance i = roundtrip-law i
+
+ordinal-result : (i : F.Fin n) -> roundtrip (roundtrip i) = roundtrip i
+ordinal-result i = roundtrip-law (roundtrip i)
+
+first-true : decode (F.Fin.FSucc (F.Fin.FZero {1})) = True
+first-true = rfl
+
+second-true : decode (F.Fin.FSucc (F.Fin.FSucc (F.Fin.FZero {0}))) = True
+second-true = rfl
+
+use-ordinal-self : (i : F.Fin n) -> i = i
+use-ordinal-self i = ordinal-self i
+
+use-all-self : (b : Bool) -> b = b
+use-all-self b = all-self b

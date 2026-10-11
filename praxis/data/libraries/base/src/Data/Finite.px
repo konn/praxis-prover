@@ -1,0 +1,22 @@
+module Data.Finite where
+
+import Data.Fin as F
+
+-- A finite presentation is a retraction from a finite ordinal.
+class Finite a where
+  card : Nat
+  code : a -> F.Fin card
+  decode : F.Fin card -> a
+  decode-code : (x : a) -> decode (code x) = x
+
+{-# BUILTIN FINITE Finite #-}
+{-# BUILTIN FINITE_CARD Finite.card #-}
+{-# BUILTIN FINITE_CODE Finite.code #-}
+{-# BUILTIN FINITE_DECODE Finite.decode #-}
+{-# BUILTIN FINITE_DECODE_CODE Finite.decode-code #-}
+
+instance Finite (F.Fin n) where
+  card {n} = n
+  code i = i
+  decode i = i
+  decode-code i = rfl

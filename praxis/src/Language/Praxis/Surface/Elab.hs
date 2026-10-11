@@ -43,6 +43,12 @@ module Language.Praxis.Surface.Elab (
   classClosure,
   valueVariables,
   closurePremises,
+  Resolution (..),
+  resolveMethod,
+  resolvedDictionaryEntry,
+  instanceAssignment,
+  instanceContext,
+  instanceClassContext,
 
   -- * Names of generated lemmas
   unfoldingNames,
@@ -53,6 +59,9 @@ module Language.Praxis.Surface.Elab (
   TC,
   Failure,
   runTC,
+  runTCWithRequirements,
+  requireDependency,
+  instantiateProofDictionary,
   inferTerm,
   inferTermWithObligations,
   inferTermWithHypotheses,
@@ -61,6 +70,10 @@ module Language.Praxis.Surface.Elab (
   elabProp,
   elabPropWithProofArguments,
   elabType,
+  quantifierType,
+  enterQuantifier,
+  FiniteDomain (..),
+  finiteDomain,
   extendCtx,
 
   -- * Errors
@@ -71,18 +84,21 @@ import Bound (Scope, Var (..), fromScope, instantiate, toScope)
 import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM, forM_, join, unless, when, zipWithM)
 import Control.Monad.State.Strict qualified as State
+import Control.Monad.Writer.Strict (WriterT (..), listen, tell)
 import Data.Bifunctor (first)
 import Data.Foldable (toList)
 import Data.Graph (SCC (..), stronglyConnComp)
 import Data.IntMap.Strict qualified as IM
 import Data.List (elemIndex, find, nub, nubBy, partition, zip4)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, maybeToList)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, listToMaybe, mapMaybe, maybeToList)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Void (Void, absurd, vacuous)
+import Data.Void (Void, absurd)
+import Language.Praxis.Surface.Builtin (BuiltinRole (..), builtinRoleName, registerBuiltin)
 import Language.Praxis.Surface.Core qualified as Core
+import Language.Praxis.Surface.Desugar (Dependency (..), Requirement (..), Requirements, requirement, requirements)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Index
@@ -90,6 +106,7 @@ import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Rename (RDecl (..), Renamed (..))
 import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
 import Language.Praxis.Surface.Shape
+import Language.Praxis.Surface.SourceView qualified as SourceView
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
@@ -102,9 +119,12 @@ import Text.Read (readMaybe)
 -- | A declaration, elaborated: what the driver encodes, compiles or proves, in order.
 data Item
   = -- | a data type, with its index functions when it is in the GADT style
-    IData !DataInfo !Span ![FunDef]
+    IData !DataInfo !Span ![FunDef] !Requirements !(Map.Map Text QualName)
   | IFun !FunDef
   | ITheorem !TheoremDef
+  | IClass !ClassInfo !Span ![Slot] ![PremiseDef] !Requirements !(Map.Map Text QualName)
+  | -- | A requested builtin registration, admitted by the checker in source order.
+    IBuiltin !(Located Text) !(Located QualName)
   | -- | a declaration which did not elaborate; the rest go on without it
     IFailed !ElabError
 
@@ -114,6 +134,10 @@ data FunDef = FunDef
   , fdResult :: !Ty
   , fdClauses :: ![FunClause]
   , fdSpan :: !Span
+  , fdRequirements :: !Requirements
+  , fdBuiltinScope :: !(Map.Map Text QualName)
+  , fdEvidenceSlots :: ![Slot]
+  , fdEvidencePremises :: ![PremiseDef]
   , fdImpossible :: ![Text]
   -- ^ the constructors its clauses omit, by their core names, impossible at the indices of its signature
   }
@@ -154,6 +178,8 @@ data TheoremDef = TheoremDef
   -- ^ its value parameters, the values its binders' indices mention, in the scope of its proposition before its binders
   , tdHypNames :: ![Text]
   -- ^ the names of the leading antecedents of its proposition, hypotheses a proof may name: the proofs a clause of a function binds
+  , tdRequirements :: !Requirements
+  , tdBuiltinScope :: !(Map.Map Text QualName)
   , tdIndexHyps :: ![(Int, Text, Ix)]
   -- ^ the indices of its binders' types: a binder's position, an index function by its core name, and the index over its value parameters
   }
@@ -202,30 +228,55 @@ data Failure
   = Refused !ElabError
   | Undetermined !ElabError
 
--- | Type checking: without unification variables, it has no state.
-type TC = Either Failure
+{- | Type checking without unification variables, retaining dependencies
+separately from its desugared syntax. A failed attempt discards its log.
+-}
+type TC = WriterT Requirements (Either Failure)
 
+-- | Run a caller which cannot retain or validate elaboration dependencies.
 runTC :: TC a -> Either ElabError a
-runTC = first \case
-  Refused err -> err
-  Undetermined err -> err
+runTC action = do
+  (value, needed) <- runTCWithRequirements action
+  case requirements needed of
+    [] -> pure value
+    firstRequirement : _ -> Left (ElabError (requirementSpan firstRequirement) "elaboration dependencies must be retained and checked before using the desugared syntax")
+
+-- | Run a caller responsible for retaining or validating every dependency.
+runTCWithRequirements :: TC a -> Either ElabError (a, Requirements)
+runTCWithRequirements = first failureError . runWriterT
+  where
+    failureError = \case
+      Refused err -> err
+      Undetermined err -> err
+
+requireDependency :: Span -> Dependency -> TC ()
+requireDependency span' = tell . requirement span'
+
+requireIndexDependencies :: Span -> Set.Set Text -> TC ()
+requireIndexDependencies sp = mapM_ (requireDependency sp . CertifiedDeclaration) . Set.toList
+
+requireIndexResult :: Span -> String -> Maybe (a, Set.Set Text) -> TC a
+requireIndexResult sp why = maybe (failAt sp why) (\(value, used) -> requireIndexDependencies sp used *> pure value)
+
+throwTC :: Failure -> TC a
+throwTC = WriterT . Left
 
 failAt :: Span -> String -> TC a
-failAt sp msg = Left (Refused (ElabError sp msg))
+failAt sp msg = throwTC (Refused (ElabError sp msg))
 
 -- | A term whose type is not determined where it stands, and what that leaves unresolved.
 undetermined :: Span -> String -> TC a
-undetermined sp msg = Left (Undetermined (ElabError sp msg))
+undetermined sp msg = throwTC (Undetermined (ElabError sp msg))
 
--- | The result, or, when the term is undetermined, why.
+-- | The result, or, when the term is undetermined, why. Refusals still fail.
 attempt :: TC a -> TC (Either ElabError a)
-attempt = \case
-  Left (Undetermined err) -> Right (Left err)
+attempt action = WriterT case runWriterT action of
+  Left (Undetermined err) -> Right (Left err, mempty)
   Left refused -> Left refused
-  Right x -> Right (Right x)
+  Right (value, needed) -> Right (Right value, needed)
 
 liftE :: Either ElabError a -> TC a
-liftE = first Refused
+liftE action = WriterT ((,mempty) <$> first Refused action)
 
 -- * Modules
 
@@ -285,7 +336,7 @@ elabModule fx env0 rn = withModules (walk envData decls [])
       Right (ps, body) -> case elabAlias fx (at owner e) n ps body of
         Left err -> (e, Map.insert (owner, unLocated n) err errs)
         Right a -> (e {envGlobals = Map.insert (aliasQual a) (GAlias a) (envGlobals e)}, errs)
-    (envData, dataItems) = foldl declareData (withAliases, Map.empty) dataDecls
+    (envData, _dataItems) = foldl declareData (withAliases, Map.empty) dataDecls
     declareData (e0, done) (owner, sp, d) =
       let e = at owner e0
           name = unLocated (R.dataName d)
@@ -307,9 +358,20 @@ elabModule fx env0 rn = withModules (walk envData decls [])
             R.DOpenImport {} -> walk env rest acc
             R.DModule {} -> walk env rest acc
             R.DPrivate {} -> walk env rest acc
-            R.DData dd -> walk env rest (reverse (Map.findWithDefault [IFailed (ElabError sp "internal: a data type not declared")] (owner, unLocated (R.dataName dd)) dataItems) <> acc)
+            -- The prepass permits recursive headers; the source-order pass
+            -- gives constructor proof terms their lexical builtin registry.
+            R.DData dd -> case elabDataDecl fx env (Map.lookup (owner, unLocated (R.dataName dd)) kindSigs) sp dd of
+              Left err -> walk env rest (IFailed err : acc)
+              Right (env', items) -> walk env' rest (reverse items <> acc)
             R.DTypeAlias n _ _ -> walk env rest (maybe acc (\err -> IFailed err : acc) (Map.lookup (owner, unLocated n) aliasErrors))
             R.DFixity {} -> walk env rest acc
+            R.DBuiltin role (Located targetSpan (QName qualifiers name)) ->
+              let target = qualifiers <> [name]
+               in if Map.notMember target (envGlobals env)
+                    then walk env rest (IFailed (ElabError targetSpan "a BUILTIN target must be declared before its registration") : acc)
+                    else case registerBuiltin (envBuiltins env) env (unLocated role) target of
+                      Left why -> walk env rest (IFailed (ElabError (location role) why) : acc)
+                      Right (registry, _) -> walk env {envBuiltins = registry} rest (IBuiltin role (Located targetSpan target) : acc)
             R.DKindSig (Located ksp n) _
               | (owner, n) `elem` dataNames -> walk env rest acc
               | otherwise -> walk env rest (IFailed (ElabError ksp ("a kind signature for no data type of this module: " <> T.unpack n)) : acc)
@@ -321,7 +383,9 @@ elabModule fx env0 rn = withModules (walk envData decls [])
               _ -> walk env rest (IFailed (ElabError sp "a clause with no signature for its name") : acc)
             R.DClass cd -> case elabClass fx env cd of
               Left err -> walk env rest (IFailed err : acc)
-              Right env' -> walk env' rest acc
+              Right env' -> case Map.lookup (qualify env [Ident (unLocated (R.className cd))]) (envGlobals env') of
+                Just (GClass cls) -> walk env' rest (classItem env' sp cls : acc)
+                _ -> walk env rest (IFailed (ElabError sp "internal: the elaborated class is unavailable") : acc)
             R.DInstance idl -> case elabInstance fx env sp idl of
               Left err -> walk env rest (IFailed err : acc)
               Right (env', items) -> walk env' rest (reverse items <> acc)
@@ -401,7 +465,9 @@ elabDataDecl fx env sig sp d
       unless (null (R.dataConstructors d)) $
         Left (ElabError (location (R.dataName d)) "a data type with a kind or indices gives its constructors by their signatures, after where")
       (params, indices, implicits) <- dataLayout fx env sig d
-      ctors <- forM (R.dataSignatures d) (elabConstructorSignature fx env d params indices implicits)
+      constructors <- forM (R.dataSignatures d) (elabConstructorSignature fx env d params indices implicits)
+      let ctors = map fst constructors
+          needed = foldMap snd constructors
       let name = Ident (unLocated (R.dataName d))
           q = qualify env [name]
           fnNames = [if length indices == 1 then "#idx" else "#idx-" <> T.pack (show p) | p <- [0 .. length indices - 1]]
@@ -411,11 +477,11 @@ elabDataDecl fx env sig sp d
           declare (e, fs) (p, n) = let (e', f) = addInstanceFunction e q (Ident n) (Scheme params [] (TArrow self (erase (indices !! p)))) 1 [] in (e', fs <> [f])
           (env2, fns) = foldl declare (env1, []) (zip [0 ..] fnNames)
       defs <- forM (zip [0 ..] fns) \(p, f) -> indexFunction env2 info fns p f sp
-      pure (foldl (\e fd -> registerUnfoldings (fdInfo fd) (fdClauses fd) e) env2 defs, [IData info sp defs])
+      pure (foldl (\e fd -> registerUnfoldings (fdInfo fd) (fdClauses fd) e) env2 defs, [IData info sp defs needed (envBuiltins env)])
   | otherwise = do
       (params, ctors) <- elabData fx env d
       let (env', info) = addData env (Ident (unLocated (R.dataName d))) params ctors
-      pure (env', [IData info sp []])
+      pure (env', [IData info sp [] mempty (envBuiltins env)])
   where
     gadtStyle =
       not (null (R.dataSignatures d))
@@ -603,7 +669,7 @@ its data type at distinct type variables, the type's parameters in order, and
 at indices which are patterns.  An implicit argument which is an index of a
 field is not stored: the index function of the field's type recovers it.
 -}
-elabConstructorSignature :: Fixities -> Env -> R.DataDecl -> [(Text, Kind)] -> [Ty] -> [DataBinder] -> (Located Segment, Located R.Expr) -> Either ElabError (Segment, [Ty], ConstructorSignature)
+elabConstructorSignature :: Fixities -> Env -> R.DataDecl -> [(Text, Kind)] -> [Ty] -> [DataBinder] -> (Located Segment, Located R.Expr) -> Either ElabError ((Segment, [Ty], ConstructorSignature), Requirements)
 elabConstructorSignature fx env d params indices binders (Located csp cname, sig0) = do
   sig <- resolved fx sig0
   let (parts, result) = gadtShape sig
@@ -680,16 +746,18 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
       (zip [0 :: Int ..] fieldParts)
   writtenIx <- forM indexArgs (elabIx env (tsValues scopeFields))
   -- Its proofs: each of a precondition over the implicit arguments and the named fields, in scope by their names.
-  proofs <- forM proofParts \(a, t) -> do
+  checkedProofs <- forM proofParts \(a, t) -> do
     let available = nImplicit + length [() | (_, field) <- take a explicitParts, not (isProp field)]
         proofScope = scopeFields {tsValues = [(v, i) | (v, i@(IxParam pos)) <- tsValues scopeFields, pos < available]}
         ctx = [(v, (pos, ty)) | (v, IxParam pos) <- tsValues proofScope, Just ty <- [lookup v (tsValueTys proofScope)]]
-    p <- runTC (elabProp env {envScope = proofScope} [] ctx t)
+    (p, needed) <- runTCWithRequirements (elabProp env {envScope = proofScope} [] ctx t)
     -- The membership predicate checks it as it checks an equation of indices: an equation, or a comparison, which is one.
     case stripLocations p of
       Rel r _ _ | r /= RelNe -> pure ()
       _ -> Left (ElabError (location t) (what <> ": a precondition of a constructor is an equation or a comparison, for now"))
-    pure (a, toScope (fmap B p))
+    pure ((a, toScope (fmap B p)), needed)
+  let proofs = map fst checkedProofs
+      needed = foldMap snd checkedProofs
   -- Its result's implicit indices, and the agreement of its type parameters, from the kinds of the indices written.
   let kinded s (j, x, a) = case ixType env scopeFields x of
         THole -> Right s
@@ -710,7 +778,7 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
       tele =
         [TeleEntry v ty (role e) | (e, (v, ty)) <- zip [0 ..] (zip implicitNames implicitTys)]
           <> [TeleEntry (maybe ("#" <> T.pack (show fi)) unLocated mn) ty (Explicit (nStored + fi)) | (fi, ((mn, _), ty)) <- zip [0 :: Int ..] (zip fieldParts fieldTys)]
-  pure (cname, [erase (implicitTys !! e) | e <- storedEs] <> map erase fieldTys, ConstructorSignature tele resultIx proofs)
+  pure ((cname, [erase (implicitTys !! e) | e <- storedEs] <> map erase fieldTys, ConstructorSignature tele resultIx proofs), needed)
   where
     isImplicit = \case
       SigImplicit {} -> True
@@ -763,6 +831,7 @@ closedKind t = if null (tyParams t) && all noParam (tyIndices t) then t else THo
       IxSucc x -> noParam x
       IxCon _ xs -> all noParam xs
       IxFun _ xs -> all noParam xs
+      IxPartial _ _ _ xs -> all noParam xs
       _ -> True
 
 {- |
@@ -825,7 +894,9 @@ indexFunction env info fns p f sp = do
     prepared <- either (Left . ElabError sp) Right (Core.elaborate env [] fieldTypes body)
     withoutProofs <- Core.traverseObligations (const (Left (ElabError sp "internal: index expression has a proof argument"))) prepared
     pure (FunClause [PCon (Ref RefConstructor (ctorCore c)) (map (PVar . Hint) fields)] (zip fields fieldTypes) withoutProofs sp)
-  pure (FunDef f [TData self [TParam i [] | i <- [0 .. length (dataParams info) - 1]] []] (erase (dataIndices info !! p)) clauses sp [])
+  let needed = foldMap (requirement sp . CertifiedDeclaration) (Set.unions (map (Core.indexDependencies . fcTerm) clauses))
+      completed = f {funRequirements = normalizeRequirements (funRequirements f <> needed)}
+  pure (FunDef completed [TData self [TParam i [] | i <- [0 .. length (dataParams info) - 1]] []] (erase (dataIndices info !! p)) clauses sp needed (envBuiltins env) [] [] [])
   where
     self = renderQualName (dataQual info)
     indexFnOf ty j = case ty of
@@ -882,27 +953,34 @@ elabClass fx env cd = do
       c : _ -> pure (classQual c)
       [] -> Left (ElabError qsp ("not a class: " <> T.unpack (displayQName q)))
   members <- forM (R.classMembers cd) \(Located msp m, ty0) -> (msp,m,) <$> resolved fx ty0
-  methods <- forM [x | x@(_, _, ty) <- members, not (isProp ty)] \(msp, m, ty) -> do
-    let params = a : filter (/= a) (nub (typeVariables env ty))
-    t <- elabType env params ty
-    let (args, result) = arrows t
-    unless (all firstOrder (result : args)) $ Left (ElabError msp "a method of functions: its arguments and its result are values, which are first-order")
-    unless (0 `elem` tyParams t) $ Left (ElabError msp ("the method does not mention the class's parameter " <> T.unpack a))
-    pure (m, Scheme [(p, KType) | p <- params] [] t, length args)
+  let className = qualify env [Ident (unLocated (R.className cd))]
+  methods <- foldM (member className a) [] [x | x@(_, _, ty) <- members, not (isProp ty)]
   let (env1, info) = addClass env (Ident (unLocated (R.className cd))) supers methods
-      slots = [Slot (methodQual m) 0 (methodArity m) | c <- classClosure env1 info, m <- classMethods c]
+      slots = [Slot (methodQual m) 0 (methodArity m) | c <- classClosure env1 info, m <- classMethods c] <> [membershipSlot 0]
+  classScope <- first (ElabError (location (R.className cd))) (dictionaryScope env1 slots (TyScope [a] [] []))
   -- A law: a statement over values of the parameter and of types over it, its methods the places of the class's dictionary.
   laws <- forM [x | x@(_, _, ty) <- members, isProp ty] \(msp, m, ty) -> do
     let (binders, body) = valueBinders ty
         names = map (unLocated . fst) binders
     unless (length names == length (nub names)) $ Left (ElabError msp "a law's values must have distinct names")
     binderTys <- forM binders \(Located nsp n, t) -> do
-      bty <- elabType env1 [a] t
+      bty <- elabTypeIn env1 classScope t
       unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a law quantifies over values, which are first-order"))
       pure (n, bty)
-    prop <- runTC (elabProp env1 slots [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body)
-    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots body)
+    (prop, needed) <- runTCWithRequirements (elabProp env1 {envScope = classScope} slots [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body)
+    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots a (withoutOwnClass info needed) (envBuiltins env) (SourceView.quantifierViews (classQual info <> [m]) (envBuiltins env) classScope ty) body)
   pure (addLaws (classQual info) laws env1)
+  where
+    withoutOwnClass cls = foldMap (\entry -> if requirementDependency entry == AdmittedClass (evidenceQName (classQual cls)) then mempty else requirement (requirementSpan entry) (requirementDependency entry)) . requirements
+    member className a preceding (msp, m, ty) = do
+      let params = a : filter (/= a) (nub (typeVariables env ty))
+          values = [(renderQualName (className <> [name]), methodIndex (className <> [name])) | (name, _, 0) <- preceding]
+          valueTypes = [(renderQualName (className <> [name]), schemeType sch) | (name, sch, 0) <- preceding]
+      t <- elabTypeIn env (TyScope params values valueTypes) ty
+      let (args, result) = arrows t
+      unless (all firstOrder (result : args)) $ Left (ElabError msp "a method of functions: its arguments and its result are values, which are first-order")
+      unless (null args || 0 `elem` tyParams t) $ Left (ElabError msp ("the method does not mention the class's parameter " <> T.unpack a))
+      pure (preceding <> [(m, Scheme [(p, KType) | p <- params] [] t, length args)])
 
 -- | A class after its superclasses, each once.
 classClosure :: Env -> ClassInfo -> [ClassInfo]
@@ -930,13 +1008,30 @@ elabInstance fx env sp idl = do
   ty0 <- resolved fx (R.instanceType idl)
   let vars = nub (typeVariables env ty0)
       className' = segmentText (last (classQual cls))
-  headTy <- elabType env vars ty0
+  let mentioned = typeIndexNames env ty0
+      indexNames' = [name | name <- nub (map fst mentioned), name `notElem` vars]
+      tentative = [(name, fromMaybe THole (lookup name mentioned)) | name <- indexNames']
+      scopeWith values' = TyScope vars [(name, IxParam i) | (i, (name, _)) <- zip [0 ..] values'] values'
+      runtime = [0 .. length indexNames' - 1]
+  headTy <- elabTypeIn env (scopeWith tentative) ty0
   headName <- case headTy of
     TNat -> pure "Nat"
-    TData dn args _ | args == [TParam i [] | i <- [0 .. length vars - 1]] -> pure dn
+    TData dn args indices | args == [TParam i [] | i <- [0 .. length vars - 1]], indices == map IxParam runtime -> pure dn
     _ -> Left (ElabError (location ty0) "an instance is for a data type applied to distinct type variables, or for Nat")
+  let kinds = case headTy of
+        TData datatype arguments indices
+          | dat : _ <- [dat | GData dat <- Map.elems (envGlobals env), renderQualName (dataQual dat) == datatype] ->
+              map (substScheme (length arguments, length indices) (Assignment (IM.fromList (zip [0 ..] arguments)) (IM.fromList (zip [0 ..] indices)))) (dataIndices dat)
+        _ -> []
+      values = zip indexNames' kinds
+      headScope = scopeWith values
+      headScheme = Scheme [(name, KType) | name <- vars] values
+  unless (length kinds == length indexNames' && all firstOrder kinds && all determined kinds) $
+    Left (ElabError (location ty0) "the instance head's index kinds are not determined")
   given <- constraintClasses env vars (R.instanceContext idl)
   full <- dictionaryOf env vars (R.instanceContext idl)
+  contextRequirements <- constraintRequirements env vars (R.instanceContext idl)
+  let instanceRequirements = requirement csp (AdmittedClass (evidenceQName (classQual cls))) <> contextRequirements
   let shortHead = last (T.splitOn "." headName)
       iq = qualify env [Ident (maybe (className' <> "-" <> shortHead) unLocated (R.instanceName idl))]
   when (Map.member (classQual cls, headName) (envInstances env)) $
@@ -949,55 +1044,141 @@ elabInstance fx env sp idl = do
   forM_ clauses \c -> case clauseHead c of
     Just n | n `elem` map methodName (classMethods cls) <> map (last . lawQual) (classLaws cls) -> pure ()
     _ -> Left (ElabError (location (R.clauseLhs c)) ("a clause for no method or law of " <> T.unpack className'))
-  let atType m = case methodScheme m of
-        Scheme mparams mvals mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) mvals (atInstance headTy (length vars) mty)
-      declare slotsOf (e, fs) m = let (e', f) = addInstanceFunction e iq (methodName m) (atType m) (methodArity m) (slotsOf m) in (e', fs <> [(m, f)])
-      register e fs laws = addInstance e (InstanceInfo iq (classQual cls) headName (Map.fromList [(methodQual m, f) | (m, f) <- fs]) laws)
-  -- Under a context, every method is elaborated over the whole dictionary
-  -- first, to see which places each uses, itself or through the others.
-  slotsOf <-
-    if null full
-      then pure (const [])
-      else do
-        let (env1, funs1) = foldl (declare (const full)) (env, []) (classMethods cls)
+  let atType slotsOf runtimeOf m = case methodScheme m of
+        Scheme mparams mvals mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) (values <> mvals) (atInstance headTy (length vars) (instanceDependencies cls iq (map IxParam . runtimeOf) (slotsOf m) slotsOf mty))
+      declare needed slotsOf runtimeOf (e, fs) m =
+        let (declared, function) = setFunRuntime (runtimeOf m) (addInstanceFunction e iq (methodName m) (atType slotsOf runtimeOf m) (methodArity m) (slotsOf m))
+            logical = nub (funSlots function <> full)
+            views = foldMap (SourceView.rhsQuantifierViews (funQual function) (envBuiltins env) headScope . R.clauseRhs) [c | c <- clauses, clauseHead c == Just (methodName m)]
+            (e', f) = rememberFunction logical (instanceRequirements <> Map.findWithDefault mempty (methodQual m) needed) views (declared, function)
+         in (e', fs <> [(m, f)])
+      register e fs laws = addInstance e (InstanceInfo iq (classQual cls) headName (headScheme headTy) full [(classQual contextClass, parameter) | (contextClass, parameter) <- given] (Map.fromList [(methodQual m, latest f) | (m, f) <- fs]) laws)
+        where
+          latest f = case Map.lookup (funQual f) (envGlobals e) of Just (GFun updated) -> updated; _ -> f
+  -- A dependency's dictionary appears in the indices of later methods.
+  -- Re-elaborate after pruning it so provisional captures cannot survive
+  -- as unused schema parameters in those later methods.
+  let inferSlots accumulated current = do
+        let currentSlots m = fst (Map.findWithDefault ([], []) (methodQual m) current)
+            currentRuntime m = snd (Map.findWithDefault ([], []) (methodQual m) current)
+            (env1, funs1) = foldl (declare Map.empty currentSlots currentRuntime) (env, []) (classMethods cls)
             env2 = register env1 funs1 Map.empty
-            siblings = Map.fromList [(funCore f, (methodQual m, funArity f)) | (m, f) <- funs1]
-        uses <- forM funs1 \(m, f) -> (methodQual m,) . placesUsed siblings (placeRefs full) <$> methodClauses clauses env2 m f
-        let reach = usedThrough (Map.fromList uses)
-        pure \m -> [s | (s, r) <- zip full (placeRefs full), r `Set.member` Map.findWithDefault Set.empty (methodQual m) reach]
-  let (env3, funs) = foldl (declare slotsOf) (env, []) (classMethods cls)
-  (env4, items) <- foldM (define clauses) (register env3 funs Map.empty, []) funs
+            siblings = Map.fromList [(funCore f, (methodQual m, length (funRuntime f) + funArity f)) | (m, f) <- funs1]
+        (_, uses) <-
+          foldM
+            ( \(earlier, accumulatedUses) (m, f) -> do
+                (bodies, _) <- methodClauses headScope headTy clauses earlier m f
+                let refs = placeRefs (funSlots f)
+                    original r = do
+                      slot <- lookup r (zip refs (funSlots f))
+                      lookup slot (zip full (placeRefs full))
+                    (own, called) = placesUsed siblings refs bodies
+                    -- A type index alone is not an operational argument. Keep
+                    -- only the head values used by code or retained obligations.
+                    usedValue i fc = case elemIndex i (funRuntime f) >>= \position -> listToMaybe (drop position (fcPatterns fc)) of
+                      Just (PVar (Hint name)) -> any (\position -> position `elem` toList (fcBody fc)) [position | (position, (bound, _)) <- zip [0 ..] (fcVars fc), name == bound]
+                      Just PWild -> False
+                      Just _ -> True
+                      Nothing -> True
+                    recovery i =
+                      listToMaybe
+                        [ dependencies
+                        | TData _ _ indices <- fst (arrows (schemeType (funScheme f)))
+                        , index <- indices
+                        , let (normalized, dependencies) = normalizeIndex earlier index
+                        , normalized == IxParam i
+                        ]
+                    recoverable i = isJust (recovery i)
+                    proofOnly i = not (recoverable i) && any (not . null . Core.obligations . fcTerm) bodies
+                    lastUsed = maximum (-1 : [i | i <- funRuntime f, any (usedValue i) bodies || proofOnly i])
+                    keptRuntime = take (lastUsed + 1) runtime
+                    conversionRequirements = foldMap (requirement sp . CertifiedDeclaration) (Set.unions [dependencies | i <- funRuntime f, i `notElem` keptRuntime, Just dependencies <- [recovery i]])
+                pure (registerUnfoldings f bodies earlier, accumulatedUses <> [(methodQual m, (mapMaybe original (own <> typeDictionaryRefs [schemeType (funScheme f)]), called), keptRuntime, conversionRequirements)])
+            )
+            (env2, [])
+            funs1
+        let reach = usedThrough (Map.fromList [(q, places) | (q, places, _, _) <- uses])
+            next = Map.fromList [(q, (retainDependencies env full [s | (s, r) <- zip full (placeRefs full), r `Set.member` Map.findWithDefault Set.empty q reach], indices)) | (q, _, indices, _) <- uses]
+            needed = Map.unionWith (<>) accumulated (Map.fromList [(q, dependencies) | (q, _, _, dependencies) <- uses])
+        if next == current then pure (next, needed) else inferSlots needed next
+  (selected, conversionRequirements) <- inferSlots Map.empty (Map.fromList [(methodQual m, (full, runtime)) | m <- classMethods cls])
+  let slotsOf m = fst (Map.findWithDefault ([], []) (methodQual m) selected)
+      runtimeOf m = snd (Map.findWithDefault ([], []) (methodQual m) selected)
+  -- Propagate erased dependencies through sibling calls before publishing
+  -- any implementation. Source spans and dependency identities form a finite
+  -- set, so recursive calls cannot grow this log without bound.
+  let inferRequirements current = do
+        let (declared, functions) = foldl (declare current slotsOf runtimeOf) (env, []) (classMethods cls)
+            chosen = register declared functions Map.empty
+        (_, discovered) <-
+          foldM
+            ( \(earlier, accumulated) (method, function) -> do
+                (bodies, needed) <- methodClauses headScope headTy clauses earlier method function
+                pure (registerUnfoldings function bodies earlier, accumulated <> [(methodQual method, normalizeRequirements (funRequirements function <> needed))])
+            )
+            (chosen, [])
+            functions
+        let next = Map.fromList discovered
+        if next == current then pure next else inferRequirements next
+  needed <- inferRequirements conversionRequirements
+  let (env3, funs) = foldl (declare needed slotsOf runtimeOf) (env, []) (classMethods cls)
+  (env4, items) <- foldM (define headScope headTy clauses) (register env3 funs Map.empty, []) funs
   -- Each law, a theorem at the instance's type, under its context.
-  (env5, lawItems, proved) <- foldM (prove headTy vars given full iq clauses) (env4, [], Map.empty) (classLaws cls)
+  (env5, lawItems, proved) <- foldM (prove headScope headTy vars values given full iq clauses) (env4, [], Map.empty) (classLaws cls)
   pure (register env5 funs proved, items <> lawItems)
   where
     clauseHead c = either (const Nothing) Just (resolveExpr fx (R.clauseLhs c)) >>= fmap fst . lhsParts
-    methodClauses clauses e m f = do
+    methodClauses headScope headTy clauses e m f = do
       let mine = [c | c <- clauses, clauseHead c == Just (last (methodQual m))]
           (args, result) = arrows (schemeType (funScheme f))
       when (null mine) $ Left (ElabError sp ("no clauses for the method " <> T.unpack (segmentText (last (methodQual m)))))
-      forM mine \c -> runTC (elabFunClause fx e f [] args result c)
-    define clauses (e, items) (m, f) = do
-      fcs <- methodClauses clauses e m f
+      let runtimeTypes = [snd (schemeValues (funScheme f) !! i) | i <- funRuntime f]
+      runTCWithRequirements (traverse (elabFunClause fx e {envScope = headScope, envClassDefaults = [(methodClass m, headTy)]} f runtimeTypes args result) mine)
+    define headScope headTy clauses (e, items) (m, f) = do
+      (fcs, bodyRequirements) <- methodClauses headScope headTy clauses e m f
       let (args, result) = arrows (schemeType (funScheme f))
-      pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f args result fcs sp [])])
-    prove headTy vars given full iq clauses (e, items, proved) l = do
+          runtimeTypes = [snd (schemeValues (funScheme f) !! i) | i <- funRuntime f]
+          needed = normalizeRequirements (funRequirements f <> bodyRequirements)
+          logical = functionEvidenceSlots e needed (logicalFunSlots f) (funSlots f)
+          premises = premisesFor e (classesOfSlots e logical) logical
+          (updated, function) = rememberFunction logical needed (funQuantifierViews f) (e, f)
+      pure (registerUnfoldings function fcs updated, items <> [IFun (FunDef function (runtimeTypes <> args) result fcs sp needed (envBuiltins e) logical premises [])])
+    prove headScope headTy vars values given full iq clauses (e, items, proved) l = do
       let lawSeg = last (lawQual l)
           mine = [c | c <- clauses, clauseHead c == Just lawSeg]
-          binderTys = [(n, atInstance headTy (length vars) t) | (n, t) <- lawBinders l]
-          ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
+      bindings <- forM (zip [0 ..] (valueSlots (lawSlots l))) \(i, slot) -> do
+        entry <- first (ElabError sp) (resolvedDictionaryEntry e full slot headTy)
+        index <- maybe (Left (ElabError sp "an instance law depends on a non-computational dictionary value")) Right (expressionIndex entry)
+        pure (i, index)
+      let specialize = mapIx (rewriteDictionaryIndices (`lookup` bindings)) . atInstance headTy (length vars)
+          binderTys = [(n, specialize t) | (n, t) <- lawBinders l]
+          ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] (values <> binderTys)]
+          typeBindings = [(lawTypeParameter l, headTy)]
+          scoped = e {envScope = headScope, envClassDefaults = [(lawClass l, headTy)], envTypeBindings = typeBindings, envBuiltins = lawBuiltinScope l}
       when (null mine) $ Left (ElabError sp ("no proof of the law " <> T.unpack (segmentText lawSeg)))
-      prop0 <- runTC (elabProp e full ctx0 (lawBody l))
-      -- Under the context: the places its statement uses, the membership
-      -- predicates of the type variables its values are of, and the premises they give.
-      let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
+      (prop0, statementRequirements) <- runTCWithRequirements $ do
+        requireDependency sp (AdmittedClass (evidenceQName (lawClass l)))
+        tell =<< either (\(ElabError esp why) -> failAt esp why) pure (constraintRequirements e vars (R.instanceContext idl))
+        replayRequirements scoped full sp [headTy] (lawRequirements l)
+        elabProp scoped full ctx0 (lawBody l)
+      -- Keep the indexed head universally quantified, with the same index
+      -- hypotheses as an ordinary theorem over its dependent binders.
+      let (full', kept) = theoremPlacesRequiring e statementRequirements full prop0 (map snd binderTys <> lawPremiseTypes e given full)
           prop = keepPlaces full' kept prop0
           premises = premisesFor e given kept
           q = iq <> [lawSeg]
-          (e1, info) = addTheorem e q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (Just (toScope (fmap B prop)))
-          e2 = addNamespaceMember iq lawSeg q e1
-      pcs <- forM mine \c -> runTC (elabProofClause fx e2 Nothing (map snd binderTys) (antecedentCount prop) c)
-      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys (toScope (fmap B prop)) pcs sp kept premises [] [] [])], Map.insert (lawQual l) info proved)
+          statement = toScope (fmap B prop)
+          (e1, info0) = addTheorem e q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (if null values then Just statement else Nothing)
+          indexHyps = [(i, fn, index) | (i, (_, TData dn _ indices)) <- zip [0 ..] binderTys, (fn, index) <- zip (indexFnsOf e dn) indices]
+          views =
+            SourceView.withTypeBindings typeBindings $
+              SourceView.withScope headScope (lawQuantifierViews l)
+                <> foldMap (SourceView.rhsQuantifierViews q (envBuiltins e) headScope . R.clauseRhs) mine
+          (indexed, info) = rememberTheoremViews views (setTheoremIndices indexHyps (map fst values) (if null values then Nothing else Just statement) (e1, info0))
+          e2 = addNamespaceMember iq lawSeg q indexed
+          valueSlots' = map (Just . (\(i, (_, ty)) -> (i, ty))) (zip [0 ..] values)
+      (pcs, patternRequirements) <- runTCWithRequirements (traverse (elabProofClause fx e2 {envScope = headScope, envClassDefaults = [(lawClass l, headTy)], envTypeBindings = typeBindings} (Just valueSlots') (map snd binderTys) (antecedentCount prop)) mine)
+      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys statement pcs sp kept premises values [] (statementRequirements <> patternRequirements) (envBuiltins e) indexHyps)], Map.insert (lawQual l) info proved)
 
 {- |
 The places of a dictionary the clauses of a method refer to themselves, and
@@ -1010,6 +1191,7 @@ placesUsed siblings refs = foldMap (go . fcBody)
     go :: Term.Term x -> ([Ref], [QualName])
     go = \case
       Term.Call (Ref (RefPartial _) n) _ | Just (q, _) <- Map.lookup n siblings -> ([], [q])
+      Term.Call (Ref (RefIndexedPartial _ prefix) n) as | Just (q, _) <- Map.lookup n siblings -> ([], [q]) <> foldMap go (take prefix as)
       Term.Call (Ref _ n) as | Just (q, arity) <- Map.lookup n siblings -> ([], [q]) <> foldMap go (take arity as)
       Term.Call r as -> ([r | r `elem` refs], []) <> foldMap go as
       Term.Parameter r environment -> ([r | r `elem` refs], []) <> go environment
@@ -1025,6 +1207,28 @@ usedThrough uses = go (Map.map (Set.fromList . fst) uses)
     go current =
       let next = Map.map (\(own, calls) -> Set.unions (Set.fromList own : [Map.findWithDefault Set.empty c current | c <- calls])) uses
        in if next == current then current else go next
+
+-- | Dependent members refer to the corresponding method of this instance.
+instanceDependencies :: ClassInfo -> QualName -> (MethodInfo -> [Ix]) -> [Slot] -> (MethodInfo -> [Slot]) -> Ty -> Ty
+instanceDependencies cls instanceName runtime callerSlots slotsOf = mapIx go
+  where
+    table =
+      [ (methodIndex (methodQual method), IxFun (mangleGlobal (map segmentRaw (instanceName <> [last (methodQual method)]))) (runtime method <> map capture (slotsOf method)))
+      | method <- classMethods cls
+      , methodArity method == 0
+      ]
+    capture slot = case givenPlace callerSlots (slotMethod slot) (slotParam slot) of
+      Just (Ref RefStatic name) -> IxSchema name
+      Just (Ref RefValueParam name) -> IxVar ("#d" <> name)
+      _ -> IxHole
+    go ix = case lookup ix table of
+      Just value -> value
+      Nothing -> case ix of
+        IxSucc x -> IxSucc (go x)
+        IxCon name xs -> IxCon name (map go xs)
+        IxFun name xs -> IxFun name (map go xs)
+        IxPartial name arity prefix xs -> IxPartial name arity prefix (map go xs)
+        other -> other
 
 -- | A method's type at an instance: the class's parameter the instance's type, over its @n@ variables, and the method's own variables after them.
 atInstance :: Ty -> Int -> Ty -> Ty
@@ -1045,14 +1249,41 @@ arrows = \case
 
 -- | Register a function's unfolding lemmas, one per clause, as members of its namespace: @f.unfold-C@, and @f.eq_i@.
 registerUnfoldings :: FunInfo -> [FunClause] -> Env -> Env
-registerUnfoldings info fcs env = foldl register env (zip3 [1 :: Int ..] (unfoldingNames env (map fcPatterns fcs)) fcs)
+registerUnfoldings info fcs env = foldl register withProjection (zip3 [1 :: Int ..] (unfoldingNames env (map fcPatterns fcs)) fcs)
   where
+    withProjection = env {envGlobals = Map.insert (funQual info) (GFun info {funProjection = functionProjection info fcs}) (envGlobals env)}
     register e (i, n, fc) =
       let binders' = map (mangleVariable . fst) (fcVars fc)
           alias = Ident ("eq_" <> T.pack (show i))
           (e1, thm) = addTheorem e (funQual info <> [Ident n]) binders' [] [] [] Nothing
           (e2, eqI) = addTheorem e1 (funQual info <> [alias]) binders' [] [] [] Nothing
        in addNamespaceMember (funQual info) alias (thmQual eqI) (addNamespaceMember (funQual info) (Ident n) (thmQual thm) e2)
+
+{- | Recognize only the equation that is already explicit in a completed
+first-order typed clause. Pattern positions count wildcards; variable positions
+do not. No constructor cases, callbacks, dictionaries, recursion, proof
+parameters or retained obligations participate in this conversion rule.
+-}
+functionProjection :: FunInfo -> [FunClause] -> Maybe Int
+functionProjection info [clause]
+  | null (funSlots info)
+  , null (funProofs info)
+  , null (Core.obligations (fcTerm clause))
+  , Set.null (Core.indexDependencies (fcTerm clause))
+  , let (arguments, result) = arrows (schemeType (funScheme info))
+        runtime = [snd (schemeValues (funScheme info) !! i) | i <- funRuntime info]
+        patterns' = fcPatterns clause
+  , all firstOrder (result : runtime <> arguments)
+  , length arguments == funArity info
+  , length patterns' == length runtime + length arguments
+  , all variablePattern patterns'
+  , Term.Variable variable <- fcBody clause =
+      lookup variable [(binder, position) | (position, (pattern', binder)) <- zip [0 ..] (zip patterns' (scanl (+) 0 (map patternVariables patterns'))), PVar {} <- [pattern']]
+  where
+    variablePattern PVar {} = True
+    variablePattern PWild = True
+    variablePattern _ = False
+functionProjection _ _ = Nothing
 
 {- |
 Why a method is not resolved where it is used: the type its class is at is
@@ -1062,11 +1293,12 @@ no instance, or no constraint, gives it there.
 data Unresolved = Pending !String | Refusal !String
 
 -- | What a method is where it is used: the function of an instance, with the dictionary its context takes there, or a place of the dictionary given.
-data Resolution = AtInstance !FunInfo ![Expr Void] | AtPlace !Ref
+data Resolution = AtInstance !FunInfo ![(Ix, Ty)] ![Expr Ix] | AtPlace !Ref
 
 -- | An instance's function passed on as the parameter of a schema: itself, or, taking a dictionary, applied to it.
-parameterOf :: FunInfo -> [Expr a] -> Expr a
-parameterOf f dict
+parameterOf :: FunInfo -> [Expr a] -> [Expr a] -> Expr a
+parameterOf f runtime dict
+  | not (null runtime) = apps (Global (Ref (RefIndexedPartial (funArity f) (length runtime)) (funCore f))) (runtime <> dict)
   | null dict = Global (Ref RefStatic (funCore f))
   | otherwise = apps (Global (Ref (RefPartial (funArity f)) (funCore f))) dict
 
@@ -1083,12 +1315,56 @@ methodAt env givens m t = solve (Coherent overlap) (methodDatabase env givens) m
   where
     overlap (m', _) = Refusal ("two instances give " <> T.unpack (segmentText (last (methodQual m'))) <> " there")
 
+-- | Resolve a method at an explicitly selected class type, retaining indexed captures.
+resolveMethod :: Env -> [Slot] -> MethodInfo -> Ty -> Either String Resolution
+resolveMethod env slots member = either (\case Pending why -> Left why; Refusal why -> Left why) Right . methodAt env slots member
+
+-- | The selected dictionary value, with each runtime index still scoped as an Ix.
+resolvedDictionaryEntry :: Env -> [Slot] -> Slot -> Ty -> Either String (Expr Ix)
+resolvedDictionaryEntry env slots slot ty = do
+  member <- case Map.lookup (slotMethod slot) (envGlobals env) of
+    Just (GMethod info) -> Right info
+    _ -> Left "a dictionary place names no method"
+  selected <- resolveMethod env slots member ty
+  dependencies <- forM (methodDependencies member) \(name, _) -> do
+    dependency <- case Map.lookup name (envGlobals env) of
+      Just (GMethod info) -> Right info
+      _ -> Left "a dependent class method is not in scope"
+    entry <- dictionaryEntry (Slot name 0 0) <$> resolveMethod env slots dependency ty
+    index <- maybe (Left "a dependent dictionary value has no first-order index") Right (expressionIndex entry)
+    pure (name, index)
+  template <- methodTypeWith (`lookup` dependencies) member
+  pure (Dictionary (atInstance ty 1 template) (dictionaryEntry slot selected))
+
+-- | Match an instance's complete head, preserving both type and value parameters.
+instanceAssignment :: InstanceInfo -> Ty -> Either String Assignment
+instanceAssignment instance' ty =
+  let scheme = instScheme instance'
+      n = (length (schemeParams scheme), length (schemeValues scheme))
+   in maybe (Left "the selected instance does not match the complete indexed type") Right (matchTy n (schemeType scheme) ty emptyAssignment)
+
+-- | Every premise of an instance context at a particular indexed head.
+instanceContext :: Env -> InstanceInfo -> Ty -> Either String [(Slot, Ty)]
+instanceContext _ instance' ty = do
+  assignment <- instanceAssignment instance' ty
+  let scheme = instScheme instance'
+      n = (length (schemeParams scheme), length (schemeValues scheme))
+  pure [(slot, substScheme n assignment (TParam (slotParam slot) [])) | slot <- instContext instance']
+
+-- | Every declared class constraint, including those with no method slots.
+instanceClassContext :: InstanceInfo -> Ty -> Either String [(QualName, Ty)]
+instanceClassContext instance' ty = do
+  assignment <- instanceAssignment instance' ty
+  let scheme = instScheme instance'
+      n = (length (schemeParams scheme), length (schemeValues scheme))
+  pure [(cls, substScheme n assignment (TParam parameter [])) | (cls, parameter) <- instClassContext instance']
+
 {- |
 The dictionary a function takes at the types of its parameters: each place,
 its method at the type the place's parameter is at — for an instance's
 function, the arguments of the instance's type.
 -}
-dictionaryAt :: Env -> [Slot] -> FunInfo -> [Ty] -> Either Unresolved [Expr Void]
+dictionaryAt :: Env -> [Slot] -> FunInfo -> [Ty] -> Either Unresolved [Expr Ix]
 dictionaryAt env givens f targs = do
   goals <- dictionaryGoals env f targs
   zipWith dictionaryEntry (funSlots f) <$> traverse (uncurry (methodAt env givens)) goals
@@ -1103,12 +1379,45 @@ dictionaryGoals env f targs = forM (funSlots f) \s -> do
   pure (m, ty)
 
 -- | A place of a dictionary, its method resolved: a method taking arguments passed as the parameter of a schema, one taking none as a value.
-dictionaryEntry :: Slot -> Resolution -> Expr Void
+dictionaryEntry :: Slot -> Resolution -> Expr Ix
 dictionaryEntry s = \case
   AtPlace ref -> Global ref
-  AtInstance g gdict
-    | slotArity s > 0 -> parameterOf g gdict
-    | otherwise -> apps (Global (Ref RefFunction (funCore g))) gdict
+  AtInstance g captures gdict
+    | slotArity s > 0 -> parameterOf g runtime gdict
+    | otherwise -> apps (Global (Ref RefFunction (funCore g))) (runtime <> gdict)
+    where
+      runtime = [Typed ty [] [] (Var index) | (index, ty) <- captures]
+
+-- | A first-order resolved dictionary value, represented in type indices.
+expressionIndex :: Expr Ix -> Maybe Ix
+expressionIndex expression = case expression of
+  Var index -> Just index
+  At _ value -> expressionIndex value
+  Typed _ _ _ value -> expressionIndex value
+  Dictionary _ value -> expressionIndex value
+  Nat n -> Just (IxNat n)
+  _ -> case spine expression of
+    (Global (Ref RefValueParam name), []) -> Just (IxVar ("#d" <> name))
+    (Global (Ref RefStatic name), []) -> Just (IxSchema name)
+    (Global (Ref (RefPartial arity) name), captures) -> IxPartial name arity 0 <$> traverse expressionIndex captures
+    (Global (Ref (RefIndexedPartial arity prefix) name), captures) -> IxPartial name arity prefix <$> traverse expressionIndex captures
+    (Global (Ref RefBuiltin "S"), [value]) -> IxSucc <$> expressionIndex value
+    (Global (Ref kind name), arguments)
+      | kind `elem` [RefBuiltin, RefFunction, RefConstructor] ->
+          (if kind == RefConstructor then IxCon else IxFun) name <$> traverse expressionIndex arguments
+    _ -> Nothing
+
+-- | Replace runtime dictionary indices while retaining all ordinary variables.
+rewriteDictionaryIndices :: (Int -> Maybe Ix) -> Ix -> Ix
+rewriteDictionaryIndices at = go
+  where
+    go original@(IxVar name)
+      | Just i <- T.stripPrefix "#d" name >>= readMaybe . T.unpack = fromMaybe original (at i)
+    go (IxSucc x) = IxSucc (go x)
+    go (IxCon name xs) = IxCon name (map go xs)
+    go (IxFun name xs) = IxFun name (map go xs)
+    go (IxPartial name arity prefix xs) = IxPartial name arity prefix (map go xs)
+    go x = x
 
 -- | How deep instances under contexts may nest where a method is resolved.
 methodDepth :: Int
@@ -1139,18 +1448,23 @@ methodDatabase env givens = Database headOfType clauses [] none deep
       HeadHole -> [\(m, _) -> Just (Refuse (Pending ("the type " <> nameOf m <> " is used at is ambiguous")))]
       HeadArrow -> [\(m, _) -> Just (Refuse (Refusal (nameOf m <> " at a function type")))]
     instanceAt h (m, t) = do
-      f <- Map.lookup (methodClass m, h) (envInstances env) >>= Map.lookup (methodQual m) . instFunctions
-      pure case dictionaryGoals env f (typeArguments t) of
-        Left why -> Refuse why
-        Right goals -> Reduce goals (AtInstance f . zipWith dictionaryEntry (funSlots f))
+      instance' <- Map.lookup (methodClass m, h) (envInstances env)
+      f <- Map.lookup (methodQual m) (instFunctions instance')
+      pure case instanceAssignment instance' t of
+        Left why -> Refuse (Refusal why)
+        Right assignment ->
+          let scheme = instScheme instance'
+              n = (length (schemeParams scheme), length (schemeValues scheme))
+              types = [substScheme n assignment (TParam i []) | i <- [0 .. fst n - 1]]
+              captures = [(fromMaybe IxHole (IM.lookup i (asValues assignment)), substScheme n assignment kind) | i <- funRuntime f, let kind = snd (schemeValues scheme !! i)]
+           in case dictionaryGoals env f types of
+                Left why -> Refuse why
+                Right goals -> Reduce goals (AtInstance f captures . zipWith dictionaryEntry (funSlots f))
     given (m, t) = case t of
       TParam j _ -> Just (maybe (Refuse (Refusal (nameOf m <> " at a type variable: it needs a constraint " <> classOf m <> " on the variable"))) (\r -> Reduce [] (const (AtPlace r))) (givenPlace givens (methodQual m) j))
       _ -> Nothing
     none (m, t) = Refusal ("no instance of " <> classOf m <> " for " <> shortTy t <> ", where " <> nameOf m <> " is used")
     deep (m, _) = Refusal ("the instances giving " <> nameOf m <> " nest deeper than " <> show methodDepth)
-    typeArguments = \case
-      TData _ ts _ -> ts
-      _ -> []
     shortTy = \case
       TData dn _ _ -> T.unpack (last (T.splitOn "." dn))
       t -> renderTy [] t
@@ -1190,6 +1504,10 @@ elabTypeIn env sc le@(Located sp e) = case e of
       forM_ (take 1 late) \x -> Left (ElabError (location x) "an implicit argument, in braces, comes before the explicit ones")
       case q of
         QName [] (Ident n)
+          | Just actual <- lookup n (envTypeBindings env) -> do
+              noImplicits imps
+              unless (null args) $ Left (ElabError hsp "a specialized class parameter is a complete first-order type")
+              pure actual
           | Just i <- elemIndex n (tsTypes sc) -> noImplicits imps *> (TParam i <$> traverse (elabTypeIn env sc) args)
           | n `elem` ["Nat", "nat"] && null args -> noImplicits imps *> pure TNat
         _ -> case [t | g <- resolve env q, Just t <- [typeScheme g]] of
@@ -1243,11 +1561,13 @@ elabIx env vals le@(Located sp e) = case e of
     QName [] (Op o) | Just f <- lookup o arithmetic -> (\a b -> IxFun f [a, b]) <$> elabIx env vals l <*> elabIx env vals r
     q -> applied osp q [l, r]
   _ -> case rawSpine le of
-    (Located hsp (R.EName q), args) -> case q of
-      QName [] (Ident n)
-        | Just x <- lookup n vals, null args -> pure x
-        | n `elem` ["S", "suc"], [a] <- args -> IxSucc <$> elabIx env vals a
-      _ -> applied hsp q args
+    (Located hsp (R.EName q), args)
+      | null args, Just x <- lookup (case q of QName path name -> renderQualName (path <> [name])) vals -> pure x
+      | otherwise -> case q of
+          QName [] (Ident n)
+            | Just x <- lookup n vals, null args -> pure x
+            | n `elem` ["S", "suc"], [a] <- args -> IxSucc <$> elabIx env vals a
+          _ -> applied hsp q args
     _ -> Left (ElabError sp "an index: a value, a numeral, S, or a constructor or a function applied")
   where
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
@@ -1321,13 +1641,14 @@ elabDecl fx env sp name ty0 clauses = do
       constraints = outer <> inner
       (binders, body) = statementBinders rest
       signed = map snd binders <> [body | not (isProp body)]
+      annotated = quantifierAnnotations body
       typeImplicits = [n | (n, mt) <- implicits, maybe True isTypeExpr mt]
       valueImplicits = [(n, t) | (n, Just t) <- implicits, not (isTypeExpr t)]
-      freeVars = nub (concatMap (typeVariables env) (signed <> map snd valueImplicits))
+      freeVars = nub (concatMap (typeVariables env) (signed <> map snd valueImplicits) <> concat [filter (`notElem` local) (typeVariables env annotation) | (local, annotation) <- annotated])
       params = [(n, KType) | n <- typeImplicits] <> [(v, KType) | v <- freeVars, v `notElem` typeImplicits, v `notElem` map fst valueImplicits]
       paramNames = map fst params
       -- The values the indices of its types mention which nothing binds: implicit value parameters, of the types of the indices they stand at.
-      mentioned = concatMap (typeIndexNames env) (signed <> map snd valueImplicits)
+      mentioned = concatMap (typeIndexNames env) (signed <> map snd valueImplicits) <> concat [filter ((`notElem` local) . fst) (typeIndexNames env annotation) | (local, annotation) <- annotated]
       bound = paramNames <> map fst valueImplicits <> map (unLocated . fst) binders
       freeValues = [v | v <- nub (map fst mentioned), v `notElem` bound]
   -- The declared values' types, in the scope of all the values, whose indices they may mention.
@@ -1337,7 +1658,10 @@ elabDecl fx env sp name ty0 clauses = do
     unless (firstOrder vty) $ Left (ElabError (location t) ("the implicit value " <> T.unpack n <> " is of a first-order type"))
     pure (n, vty)
   let values = valueTys <> [(v, fromMaybe TNat (listToMaybe [t | (w, t) <- mentioned, w == v, t /= THole])) | v <- freeValues]
-      scope = TyScope paramNames [(v, IxParam i) | (i, (v, _)) <- zip [0 ..] values] values
+      basicScope = TyScope paramNames [(v, IxParam i) | (i, (v, _)) <- zip [0 ..] values] values
+  full <- dictionaryOf env paramNames constraints
+  contextRequirements <- constraintRequirements env paramNames constraints
+  scope <- first (ElabError sp) (dictionaryScope env full basicScope)
   if isProp body
     then do
       -- Statement lowering names each value by its binder. Distinct values
@@ -1347,13 +1671,12 @@ elabDecl fx env sp name ty0 clauses = do
         bty <- elabTypeIn env scope t
         unless (argumentType bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " must be a value or a fixed function schema over first-order values"))
         pure (n, bty)
-      full <- dictionaryOf env paramNames constraints
       given <- constraintClasses env paramNames constraints
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] (values <> binderTys)]
-      prop0 <- runTC (elabPropWithProofArguments env {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
+      (prop0, statementRequirements) <- runTCWithRequirements (tell contextRequirements >> elabPropWithProofArguments env {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
-      let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
+      let (full', kept) = theoremPlacesRequiring env statementRequirements full prop0 (map snd binderTys <> lawPremiseTypes env given full)
           prop = keepPlaces full' kept prop0
           premises = premisesFor env given kept <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd binderTys)]
           q = qualify env [name]
@@ -1361,7 +1684,8 @@ elabDecl fx env sp name ty0 clauses = do
       let (env0, info0) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (if null values then Just (toScope (fmap B clean)) else Nothing)
           -- The indices of its binders' types, which its statement states of them.
           indexHyps = [(k, fn, x) | (k, (_, TData dn _ xs@(_ : _))) <- zip [0 ..] binderTys, (fn, x) <- zip (indexFnsOf env dn) xs]
-          (env', info) = setTheoremIndices indexHyps (map fst values) (if null values then Nothing else Just (toScope (fmap B clean))) (env0, info0)
+          views = declarationViews env q scope ty clauses
+          (env', info) = rememberTheoremViews views (setTheoremIndices indexHyps (map fst values) (if null values then Nothing else Just (toScope (fmap B clean))) (env0, info0))
       -- The implicit parameters a clause may give in braces, in the order the signature has them:
       -- each a value, by its position and its type, matched on as a binder is; or a type, whose name does not matter.
       let declared = map fst implicits
@@ -1370,21 +1694,23 @@ elabDecl fx env sp name ty0 clauses = do
             map valueSlot declared
               <> [Nothing | (n, _) <- params, n `notElem` declared]
               <> [valueSlot n | n <- map fst values, n `notElem` declared]
-      pcs <- forM clauses \c -> runTC (elabProofClause fx env (Just implicitSlots) (map snd binderTys) (antecedentCount prop) c)
+      (pcs, patternRequirements) <- runTCWithRequirements (traverse (elabProofClause fx env (Just implicitSlots) (map snd binderTys) (antecedentCount prop)) clauses)
       case [pcSpan pc | length pcs > 1, pc <- pcs, PAbsurd `elem` (pcValuePats pc <> pcPatterns pc)] of
         asp : _ -> Left (ElabError asp "an absurd clause is its theorem's only clause, for now")
         [] -> pure ()
-      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises values [] indexHyps))
+      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises values [] (statementRequirements <> patternRequirements) (envBuiltins env) indexHyps))
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       -- Its domains, as written: types, and propositions, the preconditions its proofs are of.
       let (domains, resultE) = rawArrows body
           proofPositions = [i | (i, d) <- zip [0 ..] domains, isProp d]
           valueCtx = [(v, (i, t)) | (i, (v, t)) <- zip [0 :: Int ..] values]
-      full <- dictionaryOf env paramNames constraints
       domainTys <- forM [d | d <- domains, not (isProp d)] (elabTypeIn env scope)
       resultTy <- elabTypeIn env scope resultE
-      props <- forM [d | d <- domains, isProp d] \d -> toScope . fmap B <$> runTC (elabProp env {envScope = scope} full valueCtx d)
+      (props, signatureRequirements) <- runTCWithRequirements $ do
+        tell contextRequirements
+        forM [d | d <- domains, isProp d] \d -> toScope . fmap B <$> elabProp env {envScope = scope} full valueCtx d
+      given <- constraintClasses env paramNames constraints
       let fty = foldr TArrow resultTy domainTys
       -- The implicit values its clauses bind, {n}, in order: taken at runtime, before its arguments.
       boundImplicits <- fmap (maximum . (0 :)) . forM clauses $ \(R.Clause lhs0 _) -> do
@@ -1398,19 +1724,26 @@ elabDecl fx env sp name ty0 clauses = do
           runtime = [0 .. boundImplicits - 1]
           runtimeTys = [snd (values !! i) | i <- runtime]
           scheme = Scheme params values fty
-          (env1, info1) = setFunProofs proofs (setFunRuntime runtime (addFunction env name scheme (length args) full))
+          views = declarationViews env (qualify env [name]) scope ty clauses
+          (env1, info1) = rememberFunction full signatureRequirements views (setFunProofs proofs (setFunRuntime runtime (addFunction env name scheme (length args) full)))
       unless (firstOrder result && all argumentType args) $ Left (ElabError (location body) "a function returns a first-order value; its arguments are values or fixed function schemas over values")
       forM_ (zip runtime runtimeTys) \(i, t) ->
         when (t == THole) $ Left (ElabError sp ("the type of the implicit value " <> T.unpack (fst (values !! i)) <> " is not known; write it, {" <> T.unpack (fst (values !! i)) <> " : T}"))
-      fcs1 <- forM clauses \c -> runTC (elabFunClause fx env1 {envScope = scope} info1 runtimeTys args result c)
+      (fcs1, clauseRequirements) <- runTCWithRequirements (traverse (elabFunClause fx env1 {envScope = scope} info1 runtimeTys args result) clauses)
       -- The function takes the places of its dictionary its clauses use; each proof its clauses give is an obligation.
-      let (used, fcs) = pruneDictionary info1 fcs1
-          (env2, info) = setFunProofs proofs (setFunRuntime runtime (addFunction env name scheme (length args) used))
+      let needed = signatureRequirements <> clauseRequirements
+          (used, fcs) = pruneDictionary env1 info1 fcs1
+          renamed = renamePlaces full used
+          checkedScheme = scheme {schemeType = mapTypeGlobals renamed (schemeType scheme), schemeValues = [(v, mapTypeGlobals renamed t) | (v, t) <- schemeValues scheme]}
+          evidenceSlots = functionEvidenceSlots env needed full used
+          evidencePremises = premisesFor env given evidenceSlots
+          savedProofs = [(position, toScope (keepPlaces full evidenceSlots (fromScope proposition))) | (position, proposition) <- proofs]
+          (env2, info) = rememberFunction evidenceSlots needed views (setFunProofs savedProofs (setFunRuntime runtime (addFunction env name checkedScheme (length args) used)))
       case [fcSpan fc | length fcs > 1, fc <- fcs, PAbsurd `elem` fcPatterns fc] of
         asp : _ -> Left (ElabError asp "an absurd clause is its function's only clause, for now")
         [] -> pure ()
       impossible <- coverage (runtimeTys <> args) fcs
-      pure (registerUnfoldings info fcs env2, IFun (FunDef info (runtimeTys <> args) result fcs sp impossible))
+      pure (registerUnfoldings info fcs env2, IFun (FunDef info (map (mapTypeGlobals renamed) (runtimeTys <> args)) (mapTypeGlobals renamed result) fcs sp needed (envBuiltins env) evidenceSlots evidencePremises impossible))
   where
     checkBinder seen (Located nsp n)
       | n `elem` seen = Left (ElabError nsp ("the variable " <> T.unpack n <> " is bound twice"))
@@ -1465,6 +1798,12 @@ dictionaryOf env params cs = do
       lawful = nub [i | (cls, i) <- given, any (not . null . classLaws) (classClosure env cls)]
   pure (methods <> map membershipSlot lawful)
 
+-- | Admission of a source constraint survives pruning its entire dictionary.
+constraintRequirements :: Env -> [Text] -> [R.TyConstraint] -> Either ElabError Requirements
+constraintRequirements env parameters constraints = do
+  classes <- constraintClasses env parameters constraints
+  pure (foldMap (\((Located sp _, _), (cls, _)) -> requirement sp (AdmittedClass (evidenceQName (classQual cls)))) (zip constraints classes))
+
 -- | The classes constraints put on a signature's type parameters, each with the parameter it constrains.
 constraintClasses :: Env -> [Text] -> [R.TyConstraint] -> Either ElabError [(ClassInfo, Int)]
 constraintClasses env params cs = forM cs \(Located qsp q, Located vsp v) -> do
@@ -1489,47 +1828,47 @@ premisesFor env given kept = laws <> closures
     -- The type parameters a class with laws constrains, whose predicate is kept: what laws and closures are about.
     lawful = [i | i <- nub [j | (cls, j) <- given, any (not . null . classLaws) (classClosure env cls)], membershipSlot i `elem` kept]
     laws =
-      [ PremiseDef (PLaw (lawQual l) i) (map (atParam i . snd) (lawBinders l)) (toScope (mapGlobals (\r -> Map.findWithDefault r r table) body))
+      [ PremiseDef (PLaw (lawQual l) i) (map (renameDictionaryType table . atParam i . snd) (lawBinders l)) (toScope (mapGlobals (\r -> Map.findWithDefault r r table) body))
       | i <- lawful
       , l <- nubBy (\x y -> lawQual x == lawQual y) [l | (cls, j) <- given, j == i, c <- classClosure env cls, l <- classLaws c]
       , let body = fromScope (lawProp l)
-            mine = [(s, r) | (s, r) <- zip (lawSlots l) (placeRefs (lawSlots l)), r `elem` globalsOf body]
+            mine = [(s, r) | (s, r) <- zip (lawSlots l) (placeRefs (lawSlots l)), r `elem` (globalsOf body <> typeDictionaryRefs (map snd (lawBinders l)))]
       , Just table <- [Map.fromList <$> traverse (\(s, r) -> (r,) <$> lookup s {slotParam = i} places) mine]
       ]
-    closures =
-      [ PremiseDef (PClosure (slotMethod s) i) (map (atParam i) args) (toScope (Rel RelLt (Nat 0) (App (Global isRef) (apps (Global r) [Var (B k) | k <- [0 .. length args - 1]]))))
-      | (s, r) <- places
-      , not (isMembershipSlot s)
-      , let i = slotParam s
-      , i `elem` lawful
-      , Just isRef <- [lookup (membershipSlot i) places]
-      , Just (GMethod m) <- [Map.lookup (slotMethod s) (envGlobals env)]
-      , let (args, result) = arrows (schemeType (methodScheme m))
-      , result == TParam 0 []
-      ]
+    closures = methodPremises env kept (`elem` lawful)
 
-{- |
-The closures of the methods of a dictionary, at the type parameters whose
-predicates it has: for each method returning its class's parameter, of a
-class which a class with laws extends, that its results are members.  What
-the closure lemma of a function under constraints takes as premises.
+{- | Full contracts of the dictionary methods available to generated function
+obligations. Indexed results retain both membership and their exact indices.
 -}
 closurePremises :: Env -> [Slot] -> [PremiseDef]
-closurePremises env slots =
-  [ PremiseDef (PClosure (slotMethod s) i) (map (atParam i) args) (toScope (Rel RelLt (Nat 0) (App (Global isRef) (apps (Global r) [Var (B k) | k <- [0 .. length args - 1]]))))
-  | (s, r) <- places
-  , not (isMembershipSlot s)
-  , let i = slotParam s
-  , Just isRef <- [lookup (membershipSlot i) places]
-  , Just (GMethod m) <- [Map.lookup (slotMethod s) (envGlobals env)]
-  , lawful (methodClass m)
-  , let (args, result) = arrows (schemeType (methodScheme m))
-  , result == TParam 0 []
-  ]
+closurePremises env slots = methodPremises env slots (const True)
+
+methodPremises :: Env -> [Slot] -> (Int -> Bool) -> [PremiseDef]
+methodPremises env slots allowed = concatMap contract places
   where
     places = zip slots (placeRefs slots)
     classes = [c | GClass c <- Map.elems (envGlobals env)]
     lawful q = or [q `elem` map classQual closure && any (not . null . classLaws) closure | c <- classes, let closure = classClosure env c]
+    contract (slot, ref)
+      | not (isMembershipSlot slot)
+      , let parameter = slotParam slot
+      , allowed parameter
+      , Just isRef <- lookup (membershipSlot parameter) places
+      , Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env)
+      , lawful (methodClass method)
+      , Right ty <- dictionaryMethodType env slots slot =
+          let (domains, result) = arrows ty
+           in case result of
+                TParam i []
+                  | i == parameter ->
+                      [ PremiseDef
+                          (PClosure (slotMethod slot) parameter)
+                          domains
+                          (toScope (Rel RelLt (Nat 0) (App (Global isRef) (apps (Global ref) [Var (B k) | k <- [0 .. length domains - 1]]))))
+                      ]
+                TData {} -> [PremiseDef (PMethod (slotMethod slot) parameter ty ref) [] (toScope Top)]
+                _ -> []
+      | otherwise = []
 
 -- | A type over a class's parameter at a type parameter of a theorem: the class's parameter that one, and a type variable of a method's own no data type.
 atParam :: Int -> Ty -> Ty
@@ -1556,8 +1895,8 @@ the whole; the places kept renumbered, and the recursive calls passing on
 those alone.  The code of an instance of a schema is recognised by the calls
 of its parameters, so a schema must use each of them.
 -}
-pruneDictionary :: FunInfo -> [FunClause] -> ([Slot], [FunClause])
-pruneDictionary info fcs = (kept, map prune fcs)
+pruneDictionary :: Env -> FunInfo -> [FunClause] -> ([Slot], [FunClause])
+pruneDictionary env info fcs = (kept, map prune fcs)
   where
     full = funSlots info
     self = funCore info
@@ -1565,8 +1904,9 @@ pruneDictionary info fcs = (kept, map prune fcs)
     arity = length (funRuntime info) + funArity info
     refs = placeRefs full
     used = nub (concatMap (usedIn . fcBody) fcs)
-    keep = [r `elem` used | r <- refs]
-    kept = [s | (s, True) <- zip full keep]
+    initially = [s | (s, r) <- zip full refs, r `elem` used || r `elem` typeDictionaryRefs [schemeType (funScheme info)]]
+    kept = retainDependencies env full initially
+    keep = [s `elem` kept | s <- full]
     renumber = Map.fromList (zip [r | (r, True) <- zip refs keep] (placeRefs kept))
     prune fc = fc {fcTerm = Core.mapComputation rewrite (fcTerm fc)}
     usedIn :: Term.Term x -> [Ref]
@@ -1596,13 +1936,59 @@ its values mentions, added after the dictionary's when no constraint gave
 one; with the dictionary so extended.  Its values have their memberships by
 those predicates, the parameters' own, which an appeal instantiates.
 -}
-theoremPlaces :: [Slot] -> Expr a -> [Ty] -> ([Slot], [Slot])
-theoremPlaces full0 prop0 tys = (full, kept)
+theoremPlaces :: Env -> [Slot] -> Expr a -> [Ty] -> ([Slot], [Slot])
+theoremPlaces env full0 prop0 tys = (full, kept)
   where
     vars = nub (concatMap valueVariables tys)
     full = full0 <> [membershipSlot i | i <- vars, membershipSlot i `notElem` full0]
     used = globalsOf prop0
-    kept = [s | (s, r) <- zip full (placeRefs full), r `elem` used || (isMembershipSlot s && slotParam s `elem` vars)]
+    kept = retainDependencies env full [s | (s, r) <- zip full (placeRefs full), r `elem` used || r `elem` typeDictionaryRefs tys || (isMembershipSlot s && slotParam s `elem` vars)]
+
+{- | Dependencies in types retain the same dictionary values as their computations.
+Keeping preceding value places preserves the indices recorded in checked types.
+-}
+retainDependencies :: Env -> [Slot] -> [Slot] -> [Slot]
+retainDependencies env full initial =
+  let close current =
+        let more = nub (current <> [dependency | slot <- current, Just (GMethod method) <- [Map.lookup (slotMethod slot) (envGlobals env)], (name, _) <- methodDependencies method, dependency <- full, slotMethod dependency == name, slotParam dependency == slotParam slot])
+         in if more == current then current else close more
+      needed = close initial
+      lastValue = maximum (-1 : [i | (i, slot) <- zip [0 :: Int ..] (valueSlots full), slot `elem` needed])
+      prefix = take (lastValue + 1) (valueSlots full)
+   in [slot | slot <- full, slot `elem` needed || slot `elem` prefix]
+
+typeDictionaryRefs :: [Ty] -> [Ref]
+typeDictionaryRefs types = concatMap (concatMap indexRefs . tyIndices) types
+  where
+    indexRefs = \case
+      IxVar name | Just number <- T.stripPrefix "#d" name -> [Ref RefValueParam number]
+      IxSchema name -> [Ref RefStatic name]
+      IxSucc index -> indexRefs index
+      IxCon _ xs -> concatMap indexRefs xs
+      IxFun _ xs -> concatMap indexRefs xs
+      IxPartial _ _ _ xs -> concatMap indexRefs xs
+      _ -> []
+
+{- | Law binders can use earlier nullary methods as dependent indices.
+Their logical slots survive theorem pruning even when the law's equation
+alone does not mention those values. Computational function pruning stays
+independent of these proof-only dependencies.
+-}
+lawPremiseTypes :: Env -> [(ClassInfo, Int)] -> [Slot] -> [Ty]
+lawPremiseTypes env given slots =
+  [ renameDictionaryType table (atParam parameter ty)
+  | (cls, parameter) <- given
+  , parent <- classClosure env cls
+  , law <- classLaws parent
+  , (_, ty) <- lawBinders law
+  , let table = Map.fromList [(ref, actual) | (slot, ref) <- zip (lawSlots law) (placeRefs (lawSlots law)), Just actual <- [lookup slot {slotParam = parameter} (zip slots (placeRefs slots))]]
+  ]
+
+{- | The indices in a typed law and its proposition share the same dictionary
+renaming. Static schema captures are references too, not ordinary names.
+-}
+renameDictionaryType :: Map.Map Ref Ref -> Ty -> Ty
+renameDictionaryType table = mapTypeGlobals (\r -> Map.findWithDefault r r table)
 
 -- | The type parameters a type mentions at kind @Type@, whose predicates the memberships of its values may take.
 valueVariables :: Ty -> [Int]
@@ -1615,9 +2001,12 @@ valueVariables = \case
 
 -- | A statement over the places of a dictionary, over those kept alone, renumbered.
 keepPlaces :: [Slot] -> [Slot] -> Expr a -> Expr a
-keepPlaces full kept = mapGlobals (\r -> Map.findWithDefault r r renumber)
+keepPlaces full kept = mapGlobals (renamePlaces full kept)
+
+renamePlaces :: [Slot] -> [Slot] -> Ref -> Ref
+renamePlaces full kept ref = Map.findWithDefault ref ref renumber
   where
-    renumber = Map.fromList (zip [r | (s, r) <- zip full (placeRefs full), s `elem` kept] (placeRefs kept))
+    renumber = Map.fromList [(old, new) | (slot, old) <- zip full (placeRefs full), Just new <- [lookup slot (zip kept (placeRefs kept))]]
 
 {- |
 The names of the unfolding lemmas of a function, one per clause: @unfold-@
@@ -1654,13 +2043,12 @@ implicitBinders = \case
   Located _ (R.EPi (R.Binder True ns mt) body) -> let (more, b) = implicitBinders body in ([(unLocated n, mt) | n <- ns] <> more, b)
   e -> ([], e)
 
--- | Value binders in front, @(x : T) ->@, and @∀ (x : T),@ at the top: their names and types.
+{- | Rank-1 value binders in front, @(x : T) ->@. Explicit quantifiers
+always remain proposition syntax and use finite-domain elaboration.
+-}
 valueBinders :: Located R.Expr -> ([(Located Text, Located R.Expr)], Located R.Expr)
 valueBinders = \case
   Located _ (R.EPi (R.Binder False ns (Just t)) body) -> let (more, b) = valueBinders body in ([(n, t) | n <- ns] <> more, b)
-  Located _ (R.EQuant R.Forall bs Nothing body)
-    | all (\(R.Binder _ _ t) -> isJust t) bs ->
-        let (more, b) = valueBinders body in ([(n, t) | R.Binder _ ns mt <- bs, t <- maybeToList mt, n <- ns] <> more, b)
   e -> ([], e)
 
 {- |
@@ -1717,7 +2105,10 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     Located psp _ -> failAt psp "a proof is matched by a name or by _: a proposition has no constructors"
   -- The implicit values it takes at runtime, each matched by a pattern, or by none; what one
   -- matches on holds of the value parameter it is, where the explicit patterns are matched.
-  let implicit' = implicit <> replicate (length runtimeTys - length implicit) (Located (location lhs) R.EWildcard)
+  let defaultImplicit i = case envClassDefaults env of
+        _ : _ | i < length (schemeValues (funScheme info)) -> R.EName (QName [] (Ident (fst (schemeValues (funScheme info) !! i))))
+        _ -> R.EWildcard
+      implicit' = implicit <> [Located (location lhs) (defaultImplicit i) | i <- [length implicit .. length runtimeTys - 1]]
   (ipats, ivars, iproofs, s0) <- patterns env (zip runtimeTys implicit')
   s1 <-
     foldM
@@ -1749,52 +2140,63 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       envBody = env {envScope = scope {tsValues = [(v, IxVar v) | v <- aliases] <> [(v, applyIx refined x) | (v, x) <- tsValues scope, v `notElem` aliases]}, envSchemas = schemas}
   let varIndex v = lookup v (zip (map fst vars) [0 ..])
       namedContext = [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] vars]
-      valueExpr i = indexTermIn envBody namedContext (applyIx refined (IxParam i))
-      ownProp prop
-        | all (isJust . valueExpr) [i | B i <- toList (fromScope prop)] = Just (instantiate (fromMaybe Hole . valueExpr) (fmap absurd prop))
-        | otherwise = Nothing
+      valueExpr i = indexTermInWithDependencies envBody namedContext (applyIx refined (IxParam i))
+      ownProp prop = do
+        values <- traverse (\i -> (i,) <$> valueExpr i) (nub [i | B i <- toList (fromScope prop)])
+        pure (instantiate (fromMaybe Hole . fmap fst . (`lookup` values)) (fmap absurd prop), foldMap (snd . snd) values)
       -- A precondition of a constructor matched, at the clause's variables: a value parameter by the clause's term for it.
-      boundProp q = join <$> traverse boundVar q
+      boundProp q = do
+        values <- traverse boundVar q
+        pure (values >>= fst, foldMap snd values)
       boundVar v
         | Just i <- T.stripPrefix "$" v >>= readMaybe . T.unpack = valueExpr i
         | v == "?" = Nothing
-        | otherwise = Var <$> varIndex v
-      own = [(h, p) | (Just h, (_, prop)) <- zip proofNames (funProofs info), Just p <- [ownProp prop]] <> [(h, p) | (Just h, q) <- boundProofs, Just p <- [boundProp q]]
+        | otherwise = (\i -> (Var i, Set.empty)) <$> varIndex v
+      ownRecorded = [(h, p, used) | (Just h, (_, prop)) <- zip proofNames (funProofs info), Just (p, used) <- [ownProp prop]] <> [(h, p, used) | (Just h, q) <- boundProofs, Just (p, used) <- [boundProp q]]
+      own = [(h, p) | (h, p, _) <- ownRecorded]
+      contextRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (foldMap (\(_, _, used) -> used) ownRecorded))
+  tell contextRequirements
   -- A clause with an absurd pattern has no right side, and is never reached: its code is 0.
   when (any nestedAbsurd pats) $ failAt (location lhs) "an absurd pattern, (), stands for a whole argument, for now"
-  body <- case rhs of
+  (body, bodyRequirements) <- listen $ case rhs of
     R.RAbsurd
       | PAbsurd `elem` pats -> pure (Nat 0)
       | otherwise -> failAt (location lhs) "a clause needs a right side, = …, unless one of its patterns is absurd, ()"
     _ | PAbsurd `elem` pats -> failAt rsp "a clause with an absurd pattern, (), has no right side: nothing matches it"
     R.RExpr e -> do
       e' <- liftE (resolved fx e)
-      fst <$> elabTerm (CollectProofArguments [(name, fmap (fst . (vars !!)) prop) | (name, prop) <- own]) envBody (funSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' (applyTy refined result)
+      fst <$> elabTerm (CollectProofArguments [(name, fmap (fst . (vars !!)) prop) | (name, prop) <- own]) envBody (logicalFunSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' (applyTy refined result)
     _ -> failAt rsp "a function's clause is a term, not a proof"
-  -- Each proof the body gives is an obligation: its proposition, under the clause's own
-  -- preconditions, named by its proof patterns, a theorem proved by what was written.
-  let obligation serial (prop, raw) =
-        let (l, col) = R.spanStart (location raw)
-            q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col) <> "-" <> T.pack (show serial))]
-            indices =
-              [ Rel RelEq projection term
-              | (i, (_, TData dn _ xs)) <- zip [0 ..] vars
-              , (fn, x) <- zip (indexFnsOf env dn) xs
-              , Just term <- [indexTermIn envBody namedContext x]
-              , let projection = App (Global (Ref RefFunction fn)) (Var i)
-              , term /= projection
-              ]
-            statement = foldr Arrow (foldr (Arrow . snd) prop own) indices
-            (slots, _) = theoremPlaces (funSlots info) statement (map snd vars)
-            premises = closurePremises env slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd vars)]
-            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots (map pdPremise premises) Nothing [] [] Nothing
-            pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] []
-         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) []
   prepared <-
     either (failAt rsp) pure $
       if PAbsurd `elem` pats
         then Core.emptyBranch (applyTy refined result)
         else Core.elaborateNamed envBody (funSlots info) vars body
+  let coreRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (Core.indexDependencies prepared))
+      indexFacts =
+        [ (Rel RelEq projection term, used)
+        | (i, (_, TData dn _ xs)) <- zip [0 ..] vars
+        , (fn, x) <- zip (indexFnsOf env dn) xs
+        , Just (term, used) <- [indexTermInWithDependencies envBody namedContext x]
+        , let projection = App (Global (Ref RefFunction fn)) (Var i)
+        , term /= projection
+        ]
+      indexRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (foldMap snd indexFacts))
+  tell coreRequirements
+  unless (null (Core.obligations prepared)) (tell indexRequirements)
+  -- Each proof the body gives is an obligation: its proposition, under the clause's own
+  -- preconditions, named by its proof patterns, a theorem proved by what was written.
+  let obligation serial (prop, raw) =
+        let (l, col) = R.spanStart (location raw)
+            q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col) <> "-" <> T.pack (show serial))]
+            indices = map fst indexFacts
+            statement = foldr Arrow (foldr (Arrow . snd) prop own) indices
+            needed = funRequirements info <> bodyRequirements <> coreRequirements <> contextRequirements <> indexRequirements
+            (slots, _) = theoremPlacesRequiring env needed (logicalFunSlots info) statement (map snd vars)
+            premises = premisesFor env (classesOfSlots env slots) slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd vars)]
+            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots (map pdPremise premises) Nothing [] [] (funQuantifierViews info <> SourceView.quantifierViews q (envBuiltins env) (envScope envBody) raw) Nothing
+            pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] []
+         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) needed (envBuiltins env) []
   let numbered = State.evalState (Core.traverseObligations (\o -> State.state (\i -> (obligation i o, i + 1))) prepared) (0 :: Int)
   pure (FunClause pats vars numbered (R.spanning (location lhs) rsp))
 
@@ -1819,6 +2221,7 @@ paramsOf = \case
   IxSucc x -> paramsOf x
   IxCon _ xs -> concatMap paramsOf xs
   IxFun _ xs -> concatMap paramsOf xs
+  IxPartial _ _ _ xs -> concatMap paramsOf xs
   _ -> []
 
 -- | The index a pattern stands for, where it stands for one: its variables the clause's.
@@ -1849,12 +2252,15 @@ elabProofClause fx env slots binderTys hypotheses (R.Clause lhs0 rhs) = do
   unless (length explicit >= nb && length explicit <= nb + hypotheses) $
     failAt (location lhs) ("the theorem quantifies over " <> show nb <> " values" <> (if hypotheses > 0 then ", then has " <> show hypotheses <> " hypotheses a clause may name" else "") <> "; the clause has " <> show (length explicit) <> " patterns")
   -- What is in braces, each at its parameter: a value's pattern kept by its position, a type's name dropped; a law's braces are not read.
+  let implicit' = case (slots, envClassDefaults env) of
+        (Just ss, _ : _) -> implicit <> [Located (location lhs) (R.EName (QName [] (Ident name))) | (Just (i, _), name) <- drop (length implicit) (zip ss (map fst (tsValueTys (envScope env)))), i >= 0]
+        _ -> implicit
   valueArgs <- case slots of
     Nothing -> pure []
     Just ss -> do
-      unless (length implicit <= length ss) $
+      unless (length implicit' <= length ss) $
         failAt (location lhs) ("the theorem has " <> show (length ss) <> " implicit parameters, and the clause gives " <> show (length implicit))
-      fmap catMaybes . forM (zip ss implicit) $ \case
+      fmap catMaybes . forM (zip ss implicit') $ \case
         (Just (i, t), p) -> pure (Just (i, t, p))
         (Nothing, p) -> Nothing <$ named "an implicit type is named by a variable or _: a type is not matched on" p
   hypNamesGiven <- forM (drop nb explicit) (named "a hypothesis is named by a variable or _: a proposition has no constructors")
@@ -2165,6 +2571,11 @@ parameters.
 -}
 data AppHead a = AppHead
   { ahParams :: !(Int, Int)
+  , ahTypeImplicits :: ![Int]
+  , ahRecordIndices :: !Bool
+  {- ^ method-local dependency placeholders are not the selected function's value parameters
+  ^ explicit type selectors before value implicits, currently the class type
+  -}
   , ahDomains :: ![Ty]
   , ahResult :: !Ty
   , ahImplicits :: ![(Int, Ty)]
@@ -2175,13 +2586,24 @@ data AppHead a = AppHead
   -- ^ the positions of its arguments which are proofs, each with its proposition at the parameters found
   , ahProofShapes :: ![(Int, Expr Int)]
   -- ^ the same propositions over value parameters, for inference from named proofs
+  , ahRefine :: Assignment -> TC Assignment
+  -- ^ fill dependent dictionary indices after the class type is determined
   , ahApply :: Assignment -> TC ([Expr a] -> Expr a)
   }
 
 -- Proof erasure is permitted only when the caller retains and certifies
 -- the resulting obligations. Public term elaboration cannot silently discard them; callers
 -- collecting obligations must return them or emit their core derivations.
-data ProofArguments = NoProofArguments | CollectProofArguments [(Text, Expr Text)]
+data ProofArguments
+  = NoProofArguments
+  | CollectProofArguments [(Text, Expr Text)]
+  | CollectWithoutTransport [(Text, Expr Text)]
+
+proofHypotheses :: ProofArguments -> Maybe [(Text, Expr Text)]
+proofHypotheses = \case
+  NoProofArguments -> Nothing
+  CollectProofArguments hypotheses -> Just hypotheses
+  CollectWithoutTransport hypotheses -> Just hypotheses
 
 {- | Infer value parameters from the type of a named proof. This is only a
 bidirectional hint: the proof itself is retained and checked after inference.
@@ -2229,23 +2651,40 @@ determined more of its domain, and the application is undetermined itself
 when none do.
 -}
 elabTerm :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
-elabTerm proofArguments env givens ctx le@(Located sp _) expected =
-  case elabTermDirect proofArguments env givens ctx le expected of
+elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
+  case runWriterT (elabTermDirect proofArguments env givens ctx le expected) of
     Right result -> Right result
     Left original -> case proofArguments of
-      CollectProofArguments (_ : _)
+      CollectProofArguments hypotheses
         | expected /= THole
-        , Right (value, actual) <- elabTermDirect proofArguments env givens ctx le THole
+        , Right ((_, inferred), inferenceRequirements) <- runWriterT (elabTermDirect proofArguments env givens ctx le (erase expected))
+        , Just hint <- fillTypes inferred expected
+        , Right ((value, actual), needed) <- runWriterT (elabTermDirect proofArguments env givens ctx le hint)
         , Just target <- completeTypes actual expected
         , Just pairs@(_ : _) <- transportIndices actual target
-        , Just propositions <- traverse (\(x, y) -> Rel RelEq <$> indexTermIn env ctx x <*> indexTermIn env ctx y) pairs ->
+        , not (null hypotheses) || all possible pairs
+        , Just converted <-
+            traverse
+              ( \(x, y) -> do
+                  (left, fromLeft) <- indexTermInWithDependencies env ctx x
+                  (right, fromRight) <- indexTermInWithDependencies env ctx y
+                  pure (Rel RelEq left right, fromLeft <> fromRight)
+              )
+              pairs ->
             let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
-             in Right (At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | prop <- propositions]), target)
+                prerequisites = foldMap (requirement sp . CertifiedDeclaration) (Set.toList (foldMap snd converted))
+             in Right ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | (prop, _) <- converted]), target), inferenceRequirements <> needed <> prerequisites)
       _ -> Left original
   where
     -- A proof can determine an index before an ordinary argument determines
     -- its element type. Fill those type holes before collecting the index
     -- equalities, preserving every index of a type inferred for a hole.
+    possible (IxNat x, IxNat y) = x == y
+    possible _ = True
+    fillTypes THole target = Just target
+    fillTypes (TData name ts indices) (TData other us _)
+      | name == other, length ts == length us = TData name <$> zipWithM fillTypes ts us <*> pure indices
+    fillTypes source _ = Just source
     completeTypes source THole = Just source
     completeTypes (TData name ts _) (TData other us indices)
       | name == other, length ts == length us = TData name <$> zipWithM completeTypes ts us <*> pure indices
@@ -2319,22 +2758,25 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
           arity = length (ahDomains h) + length proofAt
           -- The arguments at its domains; those at its propositions are proofs.
           termArgs = [a | (i, a) <- zip [0 ..] args, i `notElem` map fst proofAt]
+          (typeImplicits, valueImplicits) = splitAt (length (ahTypeImplicits h)) imps
       -- Values are first-order: a function or a constructor is applied in full, never passed or returned.
       when (length args < arity) $ failAt sp ("applied to " <> show (length args) <> " of its " <> show arity <> " arguments: a function is not a value, so it is applied in full")
       case drop arity args of
         extra : _ -> failAt (location extra) "applied to too many arguments"
         [] -> pure ()
-      case drop (length (ahImplicits h)) imps of
+      case drop (length (ahImplicits h)) valueImplicits of
         extra : _
           | null (ahImplicits h) -> failAt (location extra) "an implicit argument, where there is none to give"
           | otherwise -> failAt (location extra) ("applied to " <> show (length imps) <> " implicit arguments, where it takes " <> show (length (ahImplicits h)))
         [] -> pure ()
       -- The implicit arguments given, in braces; then the parameters the type expected fixes, then those the arguments do.
-      given <- foldM (implicitArg n) emptyAssignment (zip (ahImplicits h) imps)
+      selectedTypes <- forM (zip (ahTypeImplicits h) typeImplicits) \(i, argument') -> (i,) <$> liftE (elabTypeIn env (envScope env) argument')
+      given <- foldM (implicitArg n) emptyAssignment {asTypes = IM.fromList selectedTypes} (zip (ahImplicits h) valueImplicits)
       s0 <- maybe (failAt sp (mismatch env expected (substScheme n given (ahResult h)))) pure (matchTy n (ahResult h) expected given)
       let hinted = foldl (proofHint n args) s0 (ahProofShapes h)
       (s1, done, pending) <- foldM (argument (ahDependent h) n) (hinted, IM.empty, []) (zip3 [0 :: Int ..] (ahDomains h) termArgs)
-      (s2, done') <- settle (ahDependent h) n s1 done pending
+      (settled, done') <- settle (ahDependent h) n s1 done pending
+      s2 <- ahRefine h settled
       -- Each proof, against its proposition at what the application found: kept in the
       -- term, for the proof to be checked there, and erased from the code.
       proofs <- forM proofAt \(i, prop) -> (\p -> (i, ProofArg p (Irrelevant (args !! i)))) <$> prop s2
@@ -2344,15 +2786,19 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       apply <- ahApply h s2
       t <- agree env sp expected (substScheme n s2 (ahResult h))
       unless (firstOrder t) $ failAt sp "a function-valued result is not a first-order value"
-      let terms = [done' IM.! j | j <- [0 .. length (ahDomains h) - 1]]
-          inOrder i ts
+      terms <-
+        if asTypes s2 == asTypes settled && asValues s2 == asValues settled
+          then pure [done' IM.! j | j <- [0 .. length (ahDomains h) - 1]]
+          else forM (zip (ahDomains h) termArgs) \(domain, argument') ->
+            fst <$> elabTerm proofArguments env givens ctx argument' (substScheme n s2 domain)
+      let inOrder i ts
             | i >= arity = []
             | Just p <- lookup i proofs = p : inOrder (i + 1) ts
             | x : ts' <- ts = x : inOrder (i + 1) ts'
             | otherwise = []
-      pure (At (Irrelevant sp) (Typed t [substScheme n s2 (TParam i []) | i <- [0 .. fst n - 1]] (IM.toList (asValues s2)) (apply (inOrder (0 :: Int) terms))), t)
+      pure (At (Irrelevant sp) (Typed t [substScheme n s2 (TParam i []) | i <- [0 .. fst n - 1]] (if ahRecordIndices h then IM.toList (asValues s2) else []) (apply (inOrder (0 :: Int) terms))), t)
     proofHint n args s (pos, shape)
-      | CollectProofArguments hypotheses <- proofArguments
+      | Just hypotheses <- proofHypotheses proofArguments
       , Located _ (R.EName (QName [] (Ident name))) <- stripParen (args !! pos)
       , Just actual <- lookup name hypotheses =
           fromMaybe s (matchProposition (snd n) shape actual s)
@@ -2386,7 +2832,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         [] -> pure (s', done')
         (_, _, _, _, why) : _
           | progress -> settle deps n s' done' left
-          | otherwise -> Left (Undetermined why)
+          | otherwise -> throwTC (Undetermined why)
     again deps n (s, done, left, progress) entry@(i, d, a, tried, _)
       | dom == tried = pure (s, done, left <> [entry], progress)
       | otherwise =
@@ -2408,35 +2854,113 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         _ -> pure (plain (0, 0) [] t (Var v))
       R.EName (QName [] (Ident x))
         | Just ix <- lookup x (tsValues (envScope env))
-        , Just value <- valueIndex ix ->
+        , Just (value, used) <- runWriterT (valueIndex ix) -> do
+            requireIndexDependencies hsp used
             let ty = case value of Typed t _ _ _ -> t; _ -> ixType env (envScope env) ix
-             in pure (plain (0, 0) [] ty value)
+            pure (plain (0, 0) [] ty value)
       R.EName q -> resolveHead hsp q
       R.ENat k -> pure (plain (0, 0) [] TNat (Nat k))
       R.EParen x -> (\(e', t) -> plain (0, 0) [] t e') <$> elabTerm proofArguments env givens ctx x THole
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
-    plain n doms res hd = AppHead n doms res [] [] [] [] (const (pure (apps hd)))
+    plain n doms res hd = AppHead n [] True doms res [] [] [] [] pure (const (pure (apps hd)))
     -- A value parameter of the enclosing signature, where the clause has it as a variable.
-    valueParam i = listToMaybe [v | (v, IxParam j) <- tsValues (envScope env), j == i] >>= \v -> Var . fst <$> lookup v ctx
+    valueParam i = listToMaybe [v | (v, IxParam j) <- tsValues (envScope env), j == i] >>= \v -> (\(a, ty) -> Typed ty [] [] (Var a)) <$> lookup v ctx
     -- The value found for a parameter of the head's type, as a term of what is in scope.
-    valueAt s i = IM.lookup i (asValues s) >>= valueIndex
+    valueAt s i = indexMaybe (IM.lookup i (asValues s)) >>= valueIndex
+    indexMaybe value = WriterT ((,mempty) <$> value)
     -- An index known from a typed value has a computational witness: its
     -- generated index projection. The membership/index contracts justify it.
-    valueIndex =
-      ixToExprWith
-        (\v -> (Var . fst <$> lookup v ctx) <|> recovered (IxVar v))
-        (\i -> valueParam i <|> recovered (IxParam i))
+    -- Materialized indices cross the same explicit typing boundary as source
+    -- arguments. Annotate each nested computation from its declaration, not
+    -- just the outer value supplied to an indexed instance.
+    valueIndex = valueIndexAs THole
+    valueIndexAs hint index = fst <$> indexValue hint index
+    indexValue hint index = case index of
+      IxNat k -> pure (Nat k, TNat)
+      IxSucc x -> indexApplication (Ref RefBuiltin "S") (0, 0) emptyAssignment [TNat] TNat [x]
+      IxFun name xs | name `elem` ["add", "sub", "mul", "pow"] -> indexApplication (Ref RefBuiltin name) (0, 0) emptyAssignment [TNat, TNat] TNat xs
+      IxFun name xs | f : _ <- [f | GFun f <- Map.elems (envGlobals env), funCore f == name] -> do
+        let scheme = funScheme f
+            runtime = funRuntime f
+            n = (length (schemeParams scheme), length (schemeValues scheme))
+            (domains, result) = arrows (schemeType scheme)
+            offset = length runtime + length domains
+            entries = drop offset xs
+            values = [value | (slot, value) <- zip (funSlots f) entries, slotArity slot == 0]
+            replace = mapIx (rewriteDictionaryIndices (\i -> listToMaybe (drop i values)))
+            seed = emptyAssignment {asValues = IM.fromList (zip runtime xs)}
+        dictionary <- indexMaybe (either (const Nothing) Just (traverse (dictionaryMethodType env (funSlots f)) (funSlots f)))
+        indexApplication (Ref RefFunction name) n seed (map replace ([snd (schemeValues scheme !! i) | i <- runtime] <> domains <> dictionary)) (replace result) xs
+      IxCon name xs
+        | Just c <- ctorByCore env name
+        , Just dat <- dataOfCtor env c -> do
+            let sig = ctorSignature c
+                n = (length (dataParams dat), length (constructorTele sig))
+                valueAtPosition j = listToMaybe (drop j xs)
+                values = [(i, value) | (i, entry) <- zip [0 ..] (constructorTele sig), j <- case teRole entry of Explicit j -> [j]; Stored j -> [j]; _ -> [], Just value <- [valueAtPosition j]]
+                result = TData (renderQualName (dataQual dat)) [TParam i [] | i <- [0 .. fst n - 1]] (constructorResult sig)
+            indexApplication (Ref RefConstructor name) n emptyAssignment {asValues = IM.fromList values} (constructorValueTypes c) result xs
+      IxSchema name | hint /= THole -> pure (Dictionary hint (Global (Ref RefStatic name)), hint)
+      IxPartial name arity prefix xs | hint /= THole -> do
+        captured <- traverse valueIndex xs
+        pure (Dictionary hint (apps (Global (Ref (if prefix == 0 then RefPartial arity else RefIndexedPartial arity prefix) name)) captured), hint)
+      _ -> do
+        value <- rawValueIndex index
+        let actual = case value of
+              Typed ty _ _ _ -> ty
+              _ -> case index of
+                IxVar name -> maybe hint snd (lookup name ctx)
+                _ -> hint
+        pure (Typed actual [] [] value, actual)
+      where
+        indexApplication ref n seed domains result indices = do
+          unless (length domains == length indices) (indexMaybe Nothing)
+          start <- indexMatch n result hint seed
+          (found, done) <- foldM (argumentIndex n) (start, []) (zip domains indices)
+          let ty = substScheme n found result
+          terms <- traverse (\(domain, original, checked, actual) -> if substScheme n found domain == actual then pure checked else valueIndexAs (substScheme n found domain) original) done
+          pure (Typed ty [substScheme n found (TParam i []) | i <- [0 .. fst n - 1]] (IM.toList (asValues found)) (apps (Global ref) terms), ty)
+        argumentIndex n (found, done) (domain, original) = do
+          (value, actual) <- indexValue (substScheme n found domain) original
+          next <- indexMatch n domain actual found
+          pure (next, done <> [(domain, original, value, actual)])
+        indexMatch n wanted actual assigned = do
+          let (wanted', fromWanted) = normalizeTypeIndices env wanted
+              (actual', fromActual) = normalizeTypeIndices env actual
+              assignedTypes = fmap (normalizeTypeIndices env) (asTypes assigned)
+              assignedValues = fmap (normalizeIndex env) (asValues assigned)
+              normalized = Assignment (fmap fst assignedTypes) (fmap fst assignedValues)
+          matched <- indexMaybe (matchTy n wanted' actual' normalized)
+          tell (fromWanted <> fromActual <> foldMap snd assignedTypes <> foldMap snd assignedValues)
+          pure matched
+    rawValueIndex index = do
+      values <- indexMaybe (ixToExprWith (fmap Var . variable) (fmap Var . parameter) index)
+      tell (foldMap snd values)
+      pure (values >>= fst)
+      where
+        withoutDependencies = fmap (,Set.empty)
+        variable v = withoutDependencies (((\(a, ty) -> Typed ty [] [] (Var a)) <$> lookup v ctx) <|> dictionaryValue v) <|> recovered (IxVar v)
+        parameter i = withoutDependencies (valueParam i) <|> recovered (IxParam i)
+    dictionaryValue v = do
+      name <- T.stripPrefix "#d" v
+      slot <- lookup (Ref RefValueParam name) (zip (placeRefs givens) givens)
+      ty <- either (const Nothing) Just (dictionaryMethodType env givens slot)
+      pure (Typed ty [] [] (Global (Ref RefValueParam name)))
     recovered wanted =
       listToMaybe
-        [ Typed
-            (substParams ts (dataIndices dat !! j))
-            []
-            []
-            (App (Global (Ref RefFunction fn)) (Typed ty [] [] (Var v)))
+        [ ( Typed
+              (substParams ts (dataIndices dat !! j))
+              []
+              []
+              (App (Global (Ref RefFunction fn)) (Typed ty [] [] (Var v)))
+          , fromActual <> fromWanted
+          )
         | (_, (v, ty@(TData dn ts indices))) <- ctx
         , dat <- [d | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn]
         , (j, (index, fn)) <- zip [0 ..] (zip indices (indexFnsOf env dn))
-        , normIx index == normIx wanted
+        , let (actual, fromActual) = normalizeIndex env index
+              (target, fromWanted) = normalizeIndex env wanted
+        , actual == target
         ]
     resolveHead hsp q = case builtin q of
       Just b -> pure b
@@ -2457,32 +2981,52 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
             | otherwise -> typed hsp g
     typed hsp = \case
       GFun f -> do
-        let n = (length (schemeParams (funScheme f)), length (schemeValues (funScheme f)))
-            (doms, res) = splitArrows (funArity f) (schemeType (funScheme f))
+        let valueCount = length (schemeValues (funScheme f))
+            n = (length (schemeParams (funScheme f)), valueCount + length (valueSlots (funSlots f)))
+            abstractDictionary = rewriteDictionaryIndices (\i -> Just (IxParam (valueCount + i)))
+            (doms, res) = splitArrows (funArity f) (mapIx abstractDictionary (schemeType (funScheme f)))
             fn = Global (Ref RefFunction (funCore f))
+            refine s = do
+              dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]])
+              let values = [entry | (slot, entry) <- zip (funSlots f) dict, slotArity slot == 0]
+                  used = concatMap ixVars (tyIndices (schemeType (funScheme f)))
+              foldM
+                ( \assigned (i, entry) -> case expressionIndex entry of
+                    Just value -> pure assigned {asValues = IM.insert (valueCount + i) value (asValues assigned)}
+                    Nothing | ("#d" <> T.pack (show i)) `notElem` used -> pure assigned
+                    Nothing -> failAt hsp "a dependent dictionary value is not a first-order index"
+                )
+                s
+                (zip [0 ..] values)
             -- The implicit values it takes at runtime, as found: terms of what is in scope.
-            passed s = forM (funRuntime f) \i -> case valueAt s i of
-              Just x -> pure (Typed (substScheme n s (snd (schemeValues (funScheme f) !! i))) [] [] x)
+            passed s = forM (funRuntime f) \i -> case runWriterT (indexMaybe (IM.lookup i (asValues s)) >>= valueIndexAs (substScheme n s (snd (schemeValues (funScheme f) !! i)))) of
+              Just (x, used) -> requireIndexDependencies hsp used *> pure (Typed (substScheme n s (snd (schemeValues (funScheme f) !! i))) [] [] x)
               Nothing -> failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> " is not determined here, as a value")
             -- Its preconditions at the parameters found: the propositions its proofs are of.
             proofAt =
               [ ( pos
                 , \s -> do
-                    forM_ [i | B i <- toList (fromScope prop)] \i ->
-                      when (isNothing (valueAt s i)) $
-                        failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> ", which its precondition mentions, is not determined here")
-                    pure (instantiate (fromMaybe Hole . valueAt s) (fmap absurd prop))
+                    values <- forM (nub [i | B i <- toList (fromScope prop)]) \i -> do
+                      value <- requireIndexResult hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> ", which its precondition mentions, is not determined here") (runWriterT (valueAt s i))
+                      pure (i, value)
+                    let actualTypes = [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]
+                    replayRequirements env givens hsp actualTypes (funRequirements f)
+                    instantiateProofDictionary env givens ctx hsp (funProofSlots f) actualTypes (instantiate (fromMaybe Hole . (`lookup` values)) (fmap absurd prop))
                 )
               | (pos, prop) <- funProofs f
               ]
-        pure $ AppHead n doms res (zip [0 ..] (map snd (schemeValues (funScheme f)))) [] proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- funProofs f] \s -> do
+        pure $ AppHead n [] True doms res (zip [0 ..] (map snd (schemeValues (funScheme f)))) [] proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- funProofs f] refine \s -> do
+          let actualTypes = [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]
+          replayRequirements env givens hsp actualTypes (funRequirements f)
           pre <- passed s
           if null (funSlots f)
             then pure (\as -> apps fn (pre <> as))
             else do
               -- Its dictionary at the types its parameters are at, after its arguments.
-              dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]])
-              pure \as -> apps fn (pre <> as <> zipWith (\slot entry -> Dictionary (dictionaryType slot [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]) (vacuous entry)) (funSlots f) dict)
+              let types = [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]
+              dict <- resolution (dictionaryAt env givens f types)
+              entries <- typedDictionary (funSlots f) types dict
+              pure \as -> apps fn (pre <> as <> entries)
       GCtor c -> case dataOfCtor env c of
         Just d -> do
           let n = length (dataParams d)
@@ -2500,17 +3044,17 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
               proofAt =
                 [ ( a
                   , \s -> do
-                      forM_ [i | B i <- toList (fromScope prop)] \i ->
-                        when (isNothing (valueAt s i)) $
-                          failAt hsp ("the argument " <> T.unpack (teName (tele !! i)) <> " of " <> cname <> ", which its precondition mentions, is not determined here")
-                      pure (instantiate (fromMaybe Hole . valueAt s) (fmap absurd prop))
+                      values <- forM (nub [i | B i <- toList (fromScope prop)]) \i -> do
+                        value <- requireIndexResult hsp ("the argument " <> T.unpack (teName (tele !! i)) <> " of " <> cname <> ", which its precondition mentions, is not determined here") (runWriterT (valueAt s i))
+                        pure (i, value)
+                      pure (instantiate (fromMaybe Hole . (`lookup` values)) (fmap absurd prop))
                   )
                 | (a, prop) <- constructorProofs g
                 ]
-          pure $ AppHead (n, length tele) doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- constructorProofs g] \s -> do
+          pure $ AppHead (n, length tele) [] True doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- constructorProofs g] pure \s -> do
             stored <- forM [(k, pos, en) | (pos, en@(TeleEntry _ _ (Stored k))) <- zip [0 ..] tele] \(k, pos, en) ->
-              case IM.lookup pos (asValues s) >>= valueIndex of
-                Just x -> pure (k, Typed (substScheme (n, length tele) s (teType en)) [] [] x)
+              case runWriterT (indexMaybe (IM.lookup pos (asValues s)) >>= valueIndex) of
+                Just (x, used) -> requireIndexDependencies hsp used *> pure (k, Typed (substScheme (n, length tele) s (teType en)) [] [] x)
                 Nothing -> failAt hsp ("the implicit argument " <> T.unpack (teName en) <> " of " <> cname <> " is not determined here, as a value")
             -- Its fields, the implicit arguments stored before them; its proofs after, kept for their obligations and erased from the code.
             pure \as ->
@@ -2519,15 +3063,43 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         Nothing -> failAt sp "internal: a constructor of no data type"
       -- A method: the function of the instance for the type its class is at, or a place of the dictionary given.
       GMethod m -> do
-        let n = (length (schemeParams (methodScheme m)), 0)
-            (doms, res) = splitArrows (methodArity m) (schemeType (methodScheme m))
+        requireDependency hsp (AdmittedClass (evidenceQName (methodClass m)))
+        let dependencies = methodDependencies m
+            n = (length (schemeParams (methodScheme m)), length dependencies)
+        template <- either (failAt hsp) pure (methodTypeWith (\q -> IxParam <$> lookup q (zip (map fst dependencies) [0 ..])) m)
+        let (doms, res) = splitArrows (methodArity m) template
+            refine s = do
+              ty <- case substScheme n s (TParam 0 []) of
+                THole -> case nub [t | (cls, t) <- envClassDefaults env, cls == methodClass m] of
+                  [t] -> pure t
+                  _ -> case nub [TParam (slotParam slot) [] | slot <- givens, slotMethod slot == methodQual m] of
+                    [t] -> pure t
+                    _ -> undetermined hsp "the class type of a nullary method is ambiguous: provide an explicit class type or a determining argument"
+                t -> pure t
+              let assigned = s {asTypes = IM.insert 0 ty (asTypes s)}
+              foldM (dependency ty) assigned (zip [0 ..] dependencies)
+            dependency ty s (i, (q, _)) = do
+              method <- case Map.lookup q (envGlobals env) of
+                Just (GMethod member) -> pure member
+                _ -> failAt hsp "a dependent class member is not in scope"
+              selected <- resolution (methodAt env givens method ty)
+              ix <- case selected of
+                AtPlace (Ref RefValueParam name) -> pure (IxVar ("#d" <> name))
+                other -> maybe (failAt hsp "a dependent class member needs a first-order dictionary value") pure (expressionIndex (dictionaryEntry (Slot q 0 0) other))
+              pure s {asValues = IM.insert i ix (asValues s)}
         when (fst n == 0) $ failAt hsp "internal: a method of no class"
-        pure $ AppHead n doms res [] [] [] [] \s ->
-          ( \case
-              AtPlace r -> apps (Global r)
-              AtInstance f dict -> \as -> apps (Global (Ref RefFunction (funCore f))) (as <> zipWith (\slot entry -> Dictionary (dictionaryType slot [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]) (vacuous entry)) (funSlots f) dict)
-          )
-            <$> resolution (methodAt env givens m (substScheme n s (TParam 0 [])))
+        pure $ AppHead n [0] False doms res [] [] [] [] refine \s -> do
+          selected <- resolution (methodAt env givens m (substScheme n s (TParam 0 [])))
+          case selected of
+            AtPlace r -> pure (apps (Global r))
+            AtInstance f captures dict -> do
+              let classType = substScheme n s (TParam 0 [])
+                  headArguments = case classType of TData _ ts _ -> ts; _ -> []
+                  types = headArguments <> [substScheme n s (TParam i []) | i <- [1 .. fst n - 1]]
+              replayRequirements env givens hsp types (funRequirements f)
+              entries <- typedDictionary (funSlots f) types dict
+              runtime <- forM captures \(index, ty) -> Typed ty [] [] <$> requireIndexResult hsp "an instance index is not a scoped value" (runWriterT (valueIndexAs ty index))
+              pure \as -> apps (Global (Ref RefFunction (funCore f))) (runtime <> as <> entries)
       GTheorem t -> failAt sp (T.unpack (displayQualName (thmQual t)) <> " is a theorem, not a term")
       GLaw l -> failAt sp (T.unpack (displayQualName (lawQual l)) <> " is a law, not a term")
       GData d -> failAt sp (T.unpack (displayQualName (dataQual d)) <> " is a type, not a term")
@@ -2535,13 +3107,14 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       GClass c -> failAt sp (T.unpack (displayQualName (classQual c)) <> " is a class, not a term")
       GInstance i -> failAt sp (T.unpack (displayQualName (instQual i)) <> " is an instance, not a term")
       GModule m -> failAt sp (T.unpack (displayQualName (modQual m)) <> " is a module, not a term")
-    dictionaryType slot types
-      | isMembershipSlot slot = TArrow (at (slotParam slot)) TNat
-      | Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env) =
-          substScheme (length (schemeParams (methodScheme method)), 0) emptyAssignment {asTypes = IM.singleton 0 (at (slotParam slot))} (schemeType (methodScheme method))
-      | otherwise = foldr TArrow TNat (replicate (slotArity slot) TNat)
-      where
-        at i = fromMaybe TNat (listToMaybe (drop i types))
+    typedDictionary slots types entries = forM (zip slots entries) \(slot, entry) -> do
+      template <- either (failAt sp) pure (dictionaryMethodType env slots slot)
+      let values = [value | (place, value) <- zip slots entries, slotArity place == 0]
+          at i = listToMaybe (drop i values) >>= expressionIndex
+          instantiated = substScheme (length types, 0) emptyAssignment {asTypes = IM.fromList (zip [0 ..] types)} template
+          ty = mapIx (rewriteDictionaryIndices at) instantiated
+      scoped <- requireIndexResult sp "a dictionary captures an index with no scoped value" (runWriterT (join <$> traverse valueIndex entry))
+      pure (Dictionary ty scoped)
     -- A method not resolved: undetermined while its type is not known, else refused.
     resolution :: Either Unresolved r -> TC r
     resolution = either (\case Pending why -> undetermined sp why; Refusal why -> failAt sp why) pure
@@ -2557,7 +3130,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       QName [] (Ident x) | x `elem` ["S", "suc"] -> Just (plain (0, 0) [TNat] TNat (Global (Ref RefBuiltin "S")))
       QName [] (Op o) | Just core <- lookup o arithmetic -> Just (plain (0, 0) [TNat, TNat] TNat (Global (Ref RefBuiltin core)))
       -- absurd p, p a proof of what cannot be: a value of any type.
-      QName [] (Ident "absurd") -> Just (AppHead (1, 0) [] (TParam 0 []) [] [] [(0, const (pure Bottom))] [] (const (pure (\case [ProofArg _ raw] -> Absurd raw; _ -> Hole))))
+      QName [] (Ident "absurd") -> Just (AppHead (1, 0) [] True [] (TParam 0 []) [] [] [(0, const (pure Bottom))] [] pure (const (pure (\case [ProofArg _ raw] -> Absurd raw; _ -> Hole))))
       _ -> Nothing
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
 
@@ -2588,7 +3161,7 @@ elabPropWithProofArguments = elabProposition (CollectProofArguments [])
 elabProposition :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> TC (Expr a)
 elabProposition proofArguments env givens ctx (Located sp e) =
   At (Irrelevant sp) <$> case e of
-    R.EParen x -> stripLocations <$> elabProposition proofArguments env givens ctx x
+    R.EParen x -> elabProposition proofArguments env givens ctx x
     R.EInfix op l r
       | Just rel <- relation (opText op) ->
           if rel `elem` [RelLt, RelLe, RelGt, RelGe]
@@ -2609,18 +3182,25 @@ elabProposition proofArguments env givens ctx (Located sp e) =
     R.EName (QName [] (Op "⊥")) -> pure Bottom
     R.EQuant q bs (Just (bop, bound)) body -> do
       bound' <- check bound TNat
-      let names = [unLocated n | R.Binder _ ns _ <- bs, n <- ns]
-          rel = if opText bop `elem` ["≤", "<="] then AtMost else Below
-      stripLocations <$> quantified q rel body ctx bound' names
-    R.EQuant {} -> failAt sp "an unbounded quantifier inside a proposition: only bounded ones, ∀ x < t, may stand there (rank 1)"
+      let rel = if opText bop `elem` ["≤", "<="] then AtMost else Below
+      numericQuantifier proofArguments env givens ctx q rel bound' bs body
+    R.EQuant q bs Nothing body -> finiteQuantifier proofArguments env givens ctx q bs body
     _ -> failAt sp "a proposition: an equation, a comparison, or propositions joined by connectives"
   where
     infer x = elabTerm proofArguments env givens ctx x THole
     check x ty = fst <$> elabTerm proofArguments env givens ctx x ty
     -- A side of an equation at the other's type, or else at it erased: codes are compared, whatever the indices of their types.
-    codeOf x t = case check x t of
-      Left (Refused _) -> check x (erase t)
+    codeOf x t = WriterT case runWriterT (direct t) of
+      Left (Refused _) -> case runWriterT (direct (erase t)) of
+        Left (Refused _) -> runWriterT (check x (erase t))
+        checked -> checked
       checked -> checked
+      where
+        -- Probing the other's result indices must not cast nested arguments
+        -- to satisfy those indices. If a nested conversion is necessary,
+        -- collect its evidence only after erasing the outer comparison type.
+        direct ty = fst <$> elabTermDirect withoutTransport env givens ctx x ty
+        withoutTransport = maybe NoProofArguments CollectWithoutTransport (proofHypotheses proofArguments)
     relation = \case
       o | o `elem` ["≡", "="] -> Just RelEq
       o | o `elem` ["≠", "/="] -> Just RelNe
@@ -2634,10 +3214,506 @@ elabProposition proofArguments env givens ctx (Located sp e) =
       o | o `elem` ["∨", "\\/"] -> Just Or
       o | o `elem` ["↔", "<->"] -> Just Iff
       _ -> Nothing
-    -- The names bound one inside the other, each below the same bound, the body innermost.
-    quantified :: Quantifier -> BoundRel -> Located R.Expr -> Ctx b -> Expr b -> [Text] -> TC (Expr b)
-    quantified q rel body c bnd = \case
-      [] -> elabProposition proofArguments env givens c body
-      n : ns -> do
-        inner <- quantified q rel body (extendCtx n TNat c) (fmap F bnd) ns
-        pure (Quant q (Hint n) (Just (rel, bnd)) Nothing (toScope inner))
+
+{- | A type annotation under the current value binders. Names assigned by
+enterQuantifier distinguish shadowed source variables in dependent indices.
+-}
+quantifierType :: Env -> Ctx a -> Located R.Expr -> TC Ty
+quantifierType env ctx ty = liftE (elabTypeIn env scope ty)
+  where
+    original = envScope env
+    missing = [(name, valueTy) | (name, (_, valueTy)) <- ctx, name `notElem` map fst (tsValues original)]
+    scope =
+      original
+        { tsValues = tsValues original <> [(name, IxVar name) | (name, _) <- missing]
+        , tsValueTys = tsValueTys original <> missing
+        }
+
+{- | The source name still resolves as a term; its index identity is fresh.
+Both entries bind the same de Bruijn variable, so substitution is structural.
+-}
+enterQuantifier :: Env -> Ctx a -> Located Text -> Ty -> (Env, Ctx (Var () a))
+enterQuantifier env ctx (Located sp source) ty =
+  ( env
+      { envScope = scope'
+      , envTypeBindings = [(name, rewriteType value) | (name, value) <- envTypeBindings env, name /= source]
+      }
+  , (identity, (B (), frozenType))
+      : (source, (B (), frozenType))
+      : [(rename name, (F value, rewriteType valueTy)) | (name, (value, valueTy)) <- ctx]
+  )
+  where
+    scope = envScope env
+    (line, column) = R.spanStart sp
+    identity = "#quant:" <> T.pack (show line) <> ":" <> T.pack (show column) <> ":" <> T.pack (show (length ctx))
+    outerIdentity = identity <> ":outer"
+    rename name = if name == source then outerIdentity else name
+    rewrite = \case
+      IxVar name | name == source -> IxVar outerIdentity
+      IxSucc value -> IxSucc (rewrite value)
+      IxCon name values -> IxCon name (map rewrite values)
+      IxFun name values -> IxFun name (map rewrite values)
+      IxPartial name arity prefix values -> IxPartial name arity prefix (map rewrite values)
+      other -> other
+    rewriteType = mapIx rewrite
+    frozenType = rewriteType ty
+    scope' =
+      scope
+        { tsTypes = [if name == source then "#shadowed:" <> T.pack (show i) else name | (i, name) <- zip [0 :: Int ..] (tsTypes scope)]
+        , tsValues = [(source, IxVar identity), (identity, IxVar identity)] <> [(rename name, rewrite value) | (name, value) <- tsValues scope]
+        , tsValueTys = [(source, frozenType), (identity, frozenType)] <> [(rename name, rewriteType value) | (name, value) <- tsValueTys scope]
+        }
+
+{- | Numeric bounds apply outside every binder in their group. Written
+annotations are checked, never silently discarded.
+-}
+numericQuantifier :: ProofArguments -> Env -> [Slot] -> Ctx a -> Quantifier -> BoundRel -> Expr a -> [R.Binder] -> Located R.Expr -> TC (Expr a)
+numericQuantifier proofArguments env givens ctx quantifier relation bound binders body = groups env ctx bound binders
+  where
+    groups :: Env -> Ctx b -> Expr b -> [R.Binder] -> TC (Expr b)
+    groups current context limit = \case
+      [] -> elabProposition proofArguments current givens context body
+      R.Binder implicit names annotation : rest -> do
+        when implicit $ failAt (location body) "a quantified value binder cannot be implicit"
+        forM_ annotation \written -> do
+          actual <- quantifierType current context written
+          unless (actual == TNat) $ failAt (location written) "a numerically bounded quantifier must bind Nat values"
+        namesAt current context limit names rest
+    namesAt :: Env -> Ctx b -> Expr b -> [Located Text] -> [R.Binder] -> TC (Expr b)
+    namesAt current context limit names rest = case names of
+      [] -> groups current context limit rest
+      name : more -> do
+        let (inside, context') = enterQuantifier current context name TNat
+        inner <- namesAt inside context' (fmap F limit) more rest
+        pure (At (Irrelevant (location name)) (Quant quantifier (Hint (unLocated name)) (Just (relation, limit)) Nothing (toScope inner)))
+
+{- | Each finite binder is an ordinary numeric quantifier over its bounded decoder.
+Later binder groups are elaborated under the earlier source values, then the
+source variables are capture-safely replaced by their decoding terms.
+-}
+finiteQuantifier :: ProofArguments -> Env -> [Slot] -> Ctx a -> Quantifier -> [R.Binder] -> Located R.Expr -> TC (Expr a)
+finiteQuantifier proofArguments env givens ctx quantifier binders body = groups env ctx binders
+  where
+    groups :: Env -> Ctx b -> [R.Binder] -> TC (Expr b)
+    groups current context = \case
+      [] -> elabProposition proofArguments current givens context body
+      R.Binder implicit names annotation : rest -> do
+        when implicit $ failAt (location body) "a quantified value binder cannot be implicit"
+        written <- maybe (failAt (location body) "a finite quantifier requires an explicit type for every binder") pure annotation
+        ty <- quantifierType current context written
+        unless (firstOrder ty) $ failAt (location written) "a finite quantifier ranges over first-order values"
+        namesAt current context ty names rest
+    namesAt :: Env -> Ctx b -> Ty -> [Located Text] -> [R.Binder] -> TC (Expr b)
+    namesAt current context ty names rest = case names of
+      [] -> groups current context rest
+      name : more -> do
+        domain <- finiteDomain current givens context (location name) ty
+        let limit = finiteBound domain
+            decode = finiteDecode domain
+        let (inside, context') = enterQuantifier current context name ty
+            frozenType = maybe ty snd (lookup (unLocated name) context')
+        inner <- namesAt inside context' frozenType more rest
+        let decoded = inner >>= \case B () -> decode; F value -> Var (F value)
+        pure (At (Irrelevant (location name)) (Quant quantifier (Hint (unLocated name)) (Just (Below, limit)) Nothing (toScope decoded)))
+
+{- | A plan retained outside Expr, available to source-aware proof tactics.
+The bound variable of finiteDecode is a numeric ordinal; the bound
+variable of finiteRank is a source value of finiteElementType.
+-}
+data FiniteDomain a = FiniteDomain
+  { finiteElementType :: !Ty
+  , finiteBound :: !(Expr a)
+  , finiteDecode :: !(Expr (Var () a))
+  , finiteRank :: !(Expr (Var () a))
+  , finiteOrdinal :: !(Expr (Var () a))
+  , finiteSelect :: !(Expr (Var () a))
+  , finiteCoverage :: !(Maybe QualName)
+  , finiteBuiltinBindings :: !(Map.Map Text QualName)
+  }
+
+{- | A finite domain's bound and decoder. The decoder's bound variable is a
+Nat below the bound, not the source value. Bridge certificates establish
+both membership/index soundness and coverage before this translation is
+admitted by the checker.
+-}
+finiteDomain :: Env -> [Slot] -> Ctx a -> Span -> Ty -> TC (FiniteDomain a)
+finiteDomain env givens ctx sp ty = do
+  fin <- roleName BuiltinFin
+  if case ty of TData name [] [_] -> name == renderQualName fin; _ -> False
+    then do
+      bridge
+      fromNat <- roleFunction BuiltinFinFromNat
+      toNat <- roleFunction BuiltinFinToNat
+      limit <- case ty of
+        TData _ [] [index] -> materialize index
+        _ -> failAt sp "internal: the Fin quantifier has no bound"
+      pure (FiniteDomain ty limit (call fromNat [Var (B ()), fmap F limit] []) (call toNat [fmap F limit] [Var (B ())]) (Var (B ())) (Var (B ())) Nothing (envBuiltins env))
+    else do
+      bridge
+      fromNat <- roleFunction BuiltinFinFromNat
+      finiteClass <- roleName BuiltinFinite
+      card <- roleMethod BuiltinFiniteCard
+      code <- roleMethod BuiltinFiniteCode
+      decode <- roleMethod BuiltinFiniteDecode
+      coverage <- roleName BuiltinFiniteDecodeCode
+      requireClass [] finiteClass ty
+      limit <- methodValue card
+      encoded <- methodApplication code
+      select <- methodApplication decode
+      toNat <- roleFunction BuiltinFinToNat
+      let ordinal = call fromNat [Var (B ()), fmap F limit] []
+          decoded = select >>= \case B () -> ordinal; F value -> Var (F value)
+      pure (FiniteDomain ty limit decoded (call toNat [fmap F limit] [encoded]) encoded select (Just coverage) (envBuiltins env))
+  where
+    materialize index = requireIndexResult sp "the finite domain's index is not available as a value in this scope" (indexTermInWithDependencies env ctx index)
+    roleName role = do
+      let name = builtinRoleName role
+      target <- maybe (failAt sp ("a finite quantifier requires an earlier checked BUILTIN " <> T.unpack name <> " registration")) pure (Map.lookup name (envBuiltins env))
+      requireDependency sp (RegisteredBuiltin name (asQName target))
+      pure target
+    roleFunction role = do
+      target <- roleName role
+      case Map.lookup target (envGlobals env) of
+        Just (GFun function) -> requireFunction function *> pure function
+        _ -> failAt sp "a registered finite operation is not an ordinary function"
+    roleMethod role = do
+      target <- roleName role
+      case Map.lookup target (envGlobals env) of
+        Just (GMethod method) -> pure method
+        _ -> failAt sp "a registered finite operation is not a class method"
+    roleTheorem role = do
+      target <- roleName role
+      case Map.lookup target (envGlobals env) of
+        Just (GTheorem theorem) -> requireDependency sp (CertifiedDeclaration (thmCore theorem))
+        _ -> failAt sp "a registered numeric bridge is not a theorem"
+    bridge = do
+      _ <- roleFunction BuiltinFinFromNat
+      _ <- roleFunction BuiltinFinToNat
+      mapM_ roleTheorem [BuiltinFinToNatBound, BuiltinFinFromToNat, BuiltinFinToFromNat]
+    methodValue method = do
+      entry <- either (failAt sp) pure (resolvedDictionaryEntry env givens (Slot (methodQual method) 0 (methodArity method)) ty)
+      join <$> traverse materialize entry
+    methodApplication method = do
+      selected <- either (failAt sp) pure (resolveMethod env givens method ty)
+      case selected of
+        AtPlace ref -> pure (App (Global ref) (Var (B ())))
+        AtInstance function captures entries -> do
+          prefix <- forM captures \(index, captureType) -> Typed captureType [] [] <$> materialize index
+          dictionary <- traverse (fmap join . traverse materialize) entries
+          pure (apps (Global (Ref RefFunction (funCore function))) (map (fmap F) prefix <> [Var (B ())] <> map (fmap F) dictionary))
+    requireClass = requireClassEvidence env givens sp
+    requireFunction = requireFunctionEvidence sp
+    asQName = evidenceQName
+    call function values arguments = apps (Global (Ref RefFunction (funCore function))) ([values !! i | i <- funRuntime function] <> arguments)
+
+{- | Type annotations under proposition quantifiers, paired with the local
+values already in scope there. Signature inference uses these annotations
+without promoting locally bound indices to implicit value parameters.
+-}
+quantifierAnnotations :: Located R.Expr -> [([Text], Located R.Expr)]
+quantifierAnnotations = go []
+  where
+    go bound (Located _ expression) = case expression of
+      R.EParen inner -> go bound inner
+      R.ENot inner -> go bound inner
+      R.EArrow left right -> go bound left <> go bound right
+      R.EInfix _ left right -> go bound left <> go bound right
+      R.EQuant _ binders _ body -> bind bound binders body
+      R.EPi (R.Binder _ names annotation) body -> maybe [] (go bound) annotation <> go (bound <> map unLocated names) body
+      R.EConstrained _ body -> go bound body
+      _ -> []
+    bind bound [] body = go bound body
+    bind bound (R.Binder _ names annotation : rest) body =
+      [(bound, ty) | ty <- maybeToList annotation]
+        <> bind (bound <> map unLocated names) rest body
+
+-- | Canonical names are always nonempty; all callers use Env declarations.
+evidenceQName :: QualName -> QName
+evidenceQName name = QName (init name) (last name)
+
+{- | An implementation's checked body and the exact output contracts needed
+by finite decoding. A successful body alone is insufficient.
+-}
+requireFunctionEvidence :: Span -> FunInfo -> TC ()
+requireFunctionEvidence sp function = do
+  requireDependency sp (CertifiedDeclaration (funCore function))
+  let result = snd (arrows (schemeType (funScheme function)))
+  when (result /= TNat) $ requireDependency sp (CertifiedDeclaration (lemma "#closed"))
+  case result of
+    TData _ _ (_ : _) -> requireDependency sp (CertifiedDeclaration (lemma "#index"))
+    _ -> pure ()
+  where
+    lemma suffix = mangleGlobal (map segmentRaw (funQual function) <> [suffix])
+
+{- | Requiring the original context of the selected instance retains its law
+premises even if a method's computational dictionary pruned them. These
+are evidence dependencies of this selected dictionary, not a blanket ban
+on finite quantification elsewhere in the module.
+-}
+requireClassEvidence :: Env -> [Slot] -> Span -> [(QualName, Ty)] -> QualName -> Ty -> TC ()
+requireClassEvidence env givens sp seen className actual
+  | (className, actual) `elem` seen = failAt sp "the finite dictionary's evidence depends on itself"
+  | length seen >= methodDepth = failAt sp "the finite dictionary's evidence dependencies nest too deeply"
+  | otherwise = do
+      cls <- case Map.lookup className (envGlobals env) of
+        Just (GClass found) -> pure found
+        _ -> failAt sp "a finite dictionary dependency refers to no class"
+      requireDependency sp (AdmittedClass (evidenceQName className))
+      let visited = (className, actual) : seen
+      mapM_ (\parent -> requireClassEvidence env givens sp visited parent actual) (classSuperclasses cls)
+      case actual of
+        TParam parameter [] -> do
+          requireDependency sp (MembershipEntry parameter)
+          forM_ (classMethods cls) \method -> do
+            let name = methodQual method
+                slot = Slot name parameter (methodArity method)
+            unless (slot `elem` givens) $ failAt sp "a finite quantifier needs the class's complete dictionary in this scope"
+            requireDependency sp (DictionaryEntry (evidenceQName name) parameter (methodArity method))
+            case snd (arrows (schemeType (methodScheme method))) of
+              TNat -> pure ()
+              TParam 0 [] -> requireDependency sp (ClosurePremise (evidenceQName name) parameter)
+              _ -> requireDependency sp (MethodPremise (evidenceQName name) parameter)
+          forM_ (classLaws cls) \law -> requireDependency sp (LawPremise (evidenceQName (lawQual law)) parameter)
+        _ -> do
+          headName <- case actual of
+            TNat -> pure "Nat"
+            TData name _ _ -> pure name
+            _ -> failAt sp "a finite quantifier's type has no concrete instance"
+          instanceInfo <- maybe (failAt sp ("finite quantifier evidence requires an instance of " <> T.unpack (displayQualName className) <> " for " <> renderTy [] actual)) pure (Map.lookup (className, headName) (envInstances env))
+          _ <- either (failAt sp) pure (instanceAssignment instanceInfo actual)
+          forM_ (classMethods cls) \method ->
+            case Map.lookup (methodQual method) (instFunctions instanceInfo) of
+              Just function -> requireFunctionEvidence sp function
+              Nothing -> failAt sp "a finite dictionary does not implement one of its methods"
+          forM_ (classLaws cls) \law ->
+            case Map.lookup (lawQual law) (instLaws instanceInfo) of
+              Just theorem -> requireDependency sp (CertifiedDeclaration (thmCore theorem))
+              Nothing -> failAt sp "a finite dictionary has no proof of one of its laws"
+          context <- either (failAt sp) pure (instanceClassContext instanceInfo actual)
+          forM_ context \(class', target) -> requireClassEvidence env givens sp visited class' target
+
+{- | A saved precondition's evidence is instantiated at the same actual types
+as its proposition. Retaining raw parameter positions at applications
+would accidentally assume the caller's unrelated dictionary.
+-}
+replayRequirements :: Env -> [Slot] -> Span -> [Ty] -> Requirements -> TC ()
+replayRequirements env givens callSpan arguments saved = forM_ (requirements saved) \required -> do
+  let dependency = requirementDependency required
+      keep = requireDependency callSpan dependency
+      actual parameter = maybe (failAt callSpan "a finite precondition's type argument is not determined") pure (lookup parameter (zip [0 ..] arguments))
+      methodClassAt name parameter = do
+        method <- case Map.lookup (qualName name) (envGlobals env) of
+          Just (GMethod found) -> pure found
+          _ -> failAt callSpan "a finite precondition refers to an unavailable method"
+        target <- actual parameter
+        requireClassEvidence env givens callSpan [] (methodClass method) target
+  case dependency of
+    RegisteredBuiltin {} -> keep
+    CertifiedDeclaration {} -> keep
+    AdmittedClass {} -> keep
+    DictionaryEntry name parameter _ -> methodClassAt name parameter
+    ClosurePremise name parameter -> methodClassAt name parameter
+    MethodPremise name parameter -> methodClassAt name parameter
+    LawPremise name parameter -> do
+      law <- case Map.lookup (qualName name) (envGlobals env) of
+        Just (GLaw found) -> pure found
+        _ -> failAt callSpan "a finite precondition refers to an unavailable law"
+      target <- actual parameter
+      requireClassEvidence env givens callSpan [] (lawClass law) target
+    MembershipEntry parameter -> actual parameter >>= membership
+  where
+    qualName (QName path name) = path <> [name]
+    membership = \case
+      TNat -> pure ()
+      TParam parameter [] -> requireDependency callSpan (MembershipEntry parameter)
+      TData name types _ -> do
+        case [datatype | GData datatype <- Map.elems (envGlobals env), renderQualName (dataQual datatype) == name] of
+          [datatype] -> requireDependency callSpan (CertifiedDeclaration (dataIs datatype))
+          _ -> failAt callSpan "a finite precondition's instantiated type is unavailable"
+        mapM_ membership types
+      _ -> failAt callSpan "a finite precondition's membership type is not determined"
+
+{- | Places needed by evidence may be absent from the desugared computation:
+code, in particular, witnesses coverage but is not used by decoding.
+-}
+requirementSlots :: Env -> Requirements -> [Slot]
+requirementSlots env saved = nub (concatMap slots (requirements saved))
+  where
+    qualName (QName path name) = path <> [name]
+    method name parameter = case Map.lookup (qualName name) (envGlobals env) of
+      Just (GMethod info) -> [Slot (methodQual info) parameter (methodArity info)]
+      _ -> []
+    slots required = case requirementDependency required of
+      DictionaryEntry name parameter arity -> [Slot (qualName name) parameter arity]
+      MembershipEntry parameter -> [membershipSlot parameter]
+      ClosurePremise name parameter -> membershipSlot parameter : method name parameter
+      MethodPremise name parameter -> membershipSlot parameter : method name parameter
+      LawPremise name parameter -> case Map.lookup (qualName name) (envGlobals env) of
+        Just (GLaw law) -> membershipSlot parameter : [slot {slotParam = parameter} | slot <- lawSlots law]
+        _ -> []
+      _ -> []
+
+{- | Late proof syntax can use the enclosing finite constraint even when the
+statement is a tautology. Keep that complete dictionary without demanding
+any global protocol certificate until finite syntax actually occurs.
+-}
+finiteRetentionSlots :: Env -> [Slot] -> [Slot]
+finiteRetentionSlots env full = case Map.lookup "FINITE" (envBuiltins env) >>= (`Map.lookup` envGlobals env) of
+  Just (GClass cls) ->
+    let names = [methodQual method | parent <- classClosure env cls, method <- classMethods parent]
+        parameters = nub [slotParam slot | slot <- full, slotMethod slot `elem` names]
+     in [slot | slot <- full, slotParam slot `elem` parameters, slotMethod slot `elem` names || isMembershipSlot slot]
+  _ -> []
+
+{- | Preserve the ordinary computation's places plus its proof dependencies.
+The old theoremPlaces remains as the no-new-evidence wrapper where useful.
+-}
+theoremPlacesRequiring :: Env -> Requirements -> [Slot] -> Expr a -> [Ty] -> ([Slot], [Slot])
+theoremPlacesRequiring env saved full0 proposition types = (full, retainDependencies env full (ordinary <> forced))
+  where
+    forced = requirementSlots env saved <> finiteRetentionSlots env full0
+    full1 = full0 <> [slot | slot <- forced, slot `notElem` full0]
+    (full, ordinary) = theoremPlaces env full1 proposition types
+
+-- Reusable finite preconditions need their logical dictionary instantiated at
+-- call sites. This helper is generic ordinary-expression substitution; it has
+-- no finite-specific Core representation.
+
+data MethodReplacement a = MethodReplacement
+  { replacementArity :: !Int
+  , replacementHead :: !Ref
+  , replacementPrefix :: ![Expr a]
+  , replacementSuffix :: ![Expr a]
+  , replacementValue :: !(Expr a)
+  }
+  deriving stock (Functor)
+
+{- | A saved proposition's dictionary is distinct from the function's runtime
+dictionary. Applying a captured concrete method uses captures before the
+source arguments and dictionary values after them; treating the callback
+as an ordinary partially applied symbol would reorder those arguments.
+-}
+instantiateProofDictionary :: Env -> [Slot] -> Ctx a -> Span -> [Slot] -> [Ty] -> Expr a -> TC (Expr a)
+instantiateProofDictionary env givens ctx sp proofSlots types proposition = do
+  replacements <- fmap Map.fromList . forM [(slot, ref) | (slot, ref) <- zip proofSlots (placeRefs proofSlots), not (isMembershipSlot slot)] $ \(slot, ref) -> do
+    method <- case Map.lookup (slotMethod slot) (envGlobals env) of
+      Just (GMethod found) -> pure found
+      _ -> failAt sp "a proof precondition refers to an unavailable method"
+    actual <- maybe (failAt sp "a proof precondition's dictionary type is not determined") pure (lookup (slotParam slot) (zip [0 ..] types))
+    selected <- either (failAt sp) pure (resolveMethod env givens method actual)
+    entry <- either (failAt sp) pure (resolvedDictionaryEntry env givens slot actual)
+    value <- join <$> traverse materialize entry
+    replacement <- case selected of
+      AtPlace target -> pure (MethodReplacement (slotArity slot) target [] [] value)
+      AtInstance function captures dictionary -> do
+        prefix <- forM captures \(index, ty) -> Typed ty [] [] <$> materialize index
+        suffix <- traverse (fmap join . traverse materialize) dictionary
+        pure (MethodReplacement (slotArity slot) (Ref RefFunction (funCore function)) prefix suffix value)
+    pure (ref, replacement)
+  walk replacements proposition
+  where
+    materialize index = requireIndexResult sp "a proof precondition's dictionary index is not available as a value" (indexTermInWithDependencies env ctx index)
+    walk :: Map.Map Ref (MethodReplacement b) -> Expr b -> TC (Expr b)
+    walk table expression = case expression of
+      At source child -> At source <$> walk table child
+      Typed ty arguments indices child -> Typed ty arguments indices <$> walk table child
+      Dictionary ty child -> Dictionary ty <$> walk table child
+      _
+        | (Global ref, args) <- spine expression
+        , Just replacement <- Map.lookup ref table -> do
+            arguments <- traverse (walk table) args
+            if length arguments == replacementArity replacement
+              then pure (apps (Global (replacementHead replacement)) (replacementPrefix replacement <> arguments <> replacementSuffix replacement))
+              else
+                if null arguments
+                  then pure (replacementValue replacement)
+                  else failAt sp "a dictionary method in a proof precondition must be fully applied or passed as a fixed callback"
+      Var value -> pure (Var value)
+      Global ref -> pure (Global ref)
+      Nat value -> pure (Nat value)
+      App function argument -> App <$> walk table function <*> walk table argument
+      Transport ty value proofs -> Transport ty <$> walk table value <*> traverse (walk table) proofs
+      SchemaParameter ty ref environment -> SchemaParameter ty ref <$> walk table environment
+      SchemaClosure ty child -> SchemaClosure ty <$> walk table child
+      SchemaPacked hints body environment -> do
+        when (any (`Map.member` table) (globalsOf (fromScope body))) $
+          failAt sp "a reusable proof precondition cannot capture its dictionary inside closed callback code"
+        SchemaPacked hints body <$> walk table environment
+      Lam hints body -> Lam hints <$> scoped table body
+      Case scrutinee alternatives -> Case <$> walk table scrutinee <*> traverse (\(pattern', body) -> (pattern',) <$> scoped table body) alternatives
+      If condition yes no -> If <$> walk table condition <*> walk table yes <*> walk table no
+      Pi hint implicit domain body -> Pi hint implicit <$> walk table domain <*> scoped table body
+      Arrow left right -> Arrow <$> walk table left <*> walk table right
+      Quant quantifier hint bound annotation body ->
+        Quant quantifier hint <$> traverse (\(relation, value) -> (relation,) <$> walk table value) bound <*> traverse (walk table) annotation <*> scoped table body
+      Rel relation left right -> Rel relation <$> walk table left <*> walk table right
+      Conn connective left right -> Conn connective <$> walk table left <*> walk table right
+      Not body -> Not <$> walk table body
+      Top -> pure Top
+      Bottom -> pure Bottom
+      Universe -> pure Universe
+      Hole -> pure Hole
+      ProofArg proposition' source -> (`ProofArg` source) <$> walk table proposition'
+      Absurd source -> pure (Absurd source)
+    scoped :: Map.Map Ref (MethodReplacement b) -> Scope c Expr b -> TC (Scope c Expr b)
+    scoped table body = toScope <$> walk (fmap F <$> table) (fromScope body)
+
+{- | Retain a reusable contract in the environment before its clauses are
+elaborated, so recursive calls replay the same obligation templates.
+-}
+rememberFunction :: [Slot] -> Requirements -> SourceView.QuantifierViews -> (Env, FunInfo) -> (Env, FunInfo)
+rememberFunction slots needed views (env, info) =
+  (env {envGlobals = Map.insert (funQual updated) (GFun updated) (envGlobals env)}, updated)
+  where
+    updated =
+      info
+        { funProofSlots = slots
+        , funRequirements = needed
+        , funBuiltinScope = envBuiltins env
+        , funQuantifierViews = views
+        }
+
+rememberTheoremViews :: SourceView.QuantifierViews -> (Env, TheoremInfo) -> (Env, TheoremInfo)
+rememberTheoremViews views (env, info) =
+  (env {envGlobals = Map.insert (thmQual updated) (GTheorem updated) (envGlobals env)}, updated)
+  where
+    updated = info {thmQuantifierViews = views}
+
+{- | A declaration's proof source is retained by owner and source span. The
+quantifier trace remains separate from fully desugared propositions.
+-}
+declarationViews :: Env -> QualName -> TyScope -> Located R.Expr -> [R.Clause] -> SourceView.QuantifierViews
+declarationViews env owner scope signature clauses =
+  SourceView.withTypeBindings (envTypeBindings env) $
+    SourceView.quantifierViews owner (envBuiltins env) scope signature
+      <> foldMap (SourceView.rhsQuantifierViews owner (envBuiltins env) scope . R.clauseRhs) clauses
+
+{- | Full logical evidence is allowed to mention methods that the runtime
+function never calls. Never force those methods into funSlots: the schema
+compiler requires its static parameters to occur computationally.
+-}
+functionEvidenceSlots :: Env -> Requirements -> [Slot] -> [Slot] -> [Slot]
+functionEvidenceSlots env saved full runtime =
+  nub (runtime <> retainDependencies env full (runtime <> requirementSlots env saved <> finiteRetentionSlots env full))
+
+{- | An already elaborated class contributes a checking boundary even though
+its laws are contracts and get actual proofs only at instances.
+-}
+classItem :: Env -> Span -> ClassInfo -> Item
+classItem env sp cls = IClass cls sp slots premises needed (envBuiltins env)
+  where
+    slots = nub ([Slot (methodQual method) 0 (methodArity method) | parent <- classClosure env cls, method <- classMethods parent] <> [membershipSlot 0])
+    premises = premisesFor env [(cls, 0)] slots
+    needed = foldMap lawRequirements (classLaws cls) <> foldMap (requirement sp . AdmittedClass . evidenceQName) (classSuperclasses cls)
+
+-- | The class assumptions represented by a logical dictionary.
+classesOfSlots :: Env -> [Slot] -> [(ClassInfo, Int)]
+classesOfSlots env slots =
+  [ (cls, parameter)
+  | (name, parameter) <- nub [(methodClass method, slotParam slot) | slot <- slots, Just (GMethod method) <- [Map.lookup (slotMethod slot) (envGlobals env)]]
+  , Just (GClass cls) <- [Map.lookup name (envGlobals env)]
+  ]
+
+-- | Stabilize reusable logs, including the transitive closure of sibling calls.
+normalizeRequirements :: Requirements -> Requirements
+normalizeRequirements = foldMap (\entry -> requirement (requirementSpan entry) (requirementDependency entry)) . Set.toAscList . Set.fromList . requirements

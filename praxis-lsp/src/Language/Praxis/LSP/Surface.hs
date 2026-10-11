@@ -383,6 +383,7 @@ declIndex cx (RDecl owner (Located _ d)) = case d of
     let dd = DataDecl n ps Nothing [] []
      in dataIndex cx owner dd <> expr cx TypeMode (parameterLocals cx owner dd) body
   DKindSig (Located ksp n) k -> refer cx ksp (owner <> [Ident n]) <> kindIndex cx Map.empty k
+  DBuiltin (Located rsp _) (Located nsp target) -> keywordBefore cx rsp "BUILTIN" <> token rsp SemanticTokenTypes_Keyword [] <> qualified cx nsp (segments target)
   DClass cd -> classIndex cx owner cd
   DInstance idl -> instanceIndex cx owner idl
   _ -> mempty

@@ -70,21 +70,22 @@ import Language.Praxis.PRA.Signature (Signature)
 import Language.Praxis.PRA.Tactic qualified as PRA
 import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, renderSchemaTacticError, schemaScope)
+import Language.Praxis.Surface.Builtin qualified as Builtin
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.Core qualified as SurfaceCore
 import Language.Praxis.Surface.Core.Pretty qualified as CorePretty
-import Language.Praxis.Surface.CoreText (CT (..), termCT)
+import Language.Praxis.Surface.CoreText (CT (..))
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
-import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), Hyp (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
-import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), QualName, TheoremInfo (..), displayQualName, emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
+import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), classEvidenceName, displayQualName, emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Evidence qualified as Evidence
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
 import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), Renamed, ScopeError (..), moduleExports, renameModule)
-import Language.Praxis.Surface.Syntax (Expr (..), RelOp (..), stripLocations)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span (..))
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ty (..))
@@ -189,6 +190,8 @@ own starts from 'initialBuild'.
 data Build = Build
   { buildCore :: !Core
   , buildEnv :: !Env
+  , buildCheckedDeclarations :: !(Set QualName)
+  -- ^ declarations whose entire checking step, including generated contracts, succeeded
   , buildMembers :: !(Map Text [(Int, FieldPred)])
   , buildIndexEqs :: !(Map Text [(CT, CT)])
   -- ^ the equations of indices the branch of each constructor checks, by its core name, then its preconditions
@@ -203,7 +206,7 @@ data Build = Build
 
 -- | A build before any module: the prelude, whose definitions and the core's builtins unfold as a module's own functions do.
 initialBuild :: Prelude -> Build
-initialBuild p = Build (initialCore p) emptyEnv Map.empty Map.empty Map.empty [Unfolding n l r | (n, l, r) <- preludeUnfoldings p] Map.empty Map.empty Map.empty
+initialBuild p = Build (initialCore p) emptyEnv Set.empty Map.empty Map.empty Map.empty [Unfolding n l r | (n, l, r) <- preludeUnfoldings p] Map.empty Map.empty Map.empty
 
 -- * Checking
 
@@ -252,6 +255,8 @@ checkModule specsOf build imports name file src = case parseModule file src of
 
 data Run = Run
   { runCore :: !Core
+  , runBuiltins :: !Builtin.BuiltinRegistry
+  , runCheckedDeclarations :: !(Set QualName)
   , runReports :: ![Report]
   , runText :: ![Text]
   , runCertified :: ![Text]
@@ -263,7 +268,7 @@ data Run = Run
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
   , runIndexSpecs :: !(Map Text IndexSpec)
-  , runObligations :: ![(TheoremInfo, [Text], CT, CT, [(CT, CT)])]
+  , runObligations :: ![(TheoremInfo, Goal)]
   -- ^ the certified obligations of the function whose lemmas are being proved
   }
 
@@ -273,6 +278,8 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
     start =
       Run
         { runCore = buildCore build0
+        , runBuiltins = envBuiltins (buildEnv build0)
+        , runCheckedDeclarations = buildCheckedDeclarations build0
         , runReports = reverse reports0
         , runText = []
         , runCertified = []
@@ -288,7 +295,8 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
       ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r)) Nothing
       , Build
           { buildCore = runCore r
-          , buildEnv = env
+          , buildEnv = activeEnv r
+          , buildCheckedDeclarations = runCheckedDeclarations r
           , buildMembers = runMembers r
           , buildIndexEqs = runIndexEqs r
           , buildProps = runProps r
@@ -303,9 +311,70 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
 
     step r = \case
       IFailed (ElabError sp msg) -> report sp SevError msg r
-      IData info sp fns -> encode info sp fns r
-      IFun fd -> either id (finishFunction fd) (defineFunction fd r)
-      ITheorem td -> proveAndCertify r td
+      IData info sp fns needed _ ->
+        requireEvidence r [] [] (needed <> foldMap fdRequirements fns) $ completed (dataQual info) r (encode info sp fns r)
+      IFun fd ->
+        requireEvidence r (fdEvidenceSlots fd) (fdEvidencePremises fd) (fdRequirements fd) $
+          completed (funQual (fdInfo fd)) r (either id (finishFunction fd) (defineFunction fd r))
+      ITheorem td ->
+        requireEvidence r (tdSlots td) (tdPremises td) (tdRequirements td) $
+          completed (thmQual (tdInfo td)) r (proveAndCertify r td)
+      IClass info _ slots premises requirements _ ->
+        requireEvidence r slots premises requirements $
+          r {runCheckedDeclarations = Set.union (runCheckedDeclarations r) (Set.fromList (classQual info : map methodQual (classMethods info) <> map lawQual (classLaws info)))}
+      IBuiltin role target -> register role target r
+
+    -- Run this gate before code generation or proof erasure: dependencies of
+    -- even an unused local fact must already have succeeded, never its owner.
+    requireEvidence r slots premises requirements success =
+      case Evidence.validateRequirements (Evidence.Evidence (runBuiltins r) (knownDeclarations r) slots (map pdPremise premises)) requirements of
+        Left (sp, why) -> report sp SevError why r
+        Right () -> success
+
+    knownDeclarations r =
+      Set.fromList (map T.pack (Map.keys (coreCertificates (runCore r))))
+        <> Set.fromList
+          [ coreName
+          | name <- Set.toList (runCheckedDeclarations r)
+          , Just global <- [Map.lookup name (envGlobals env)]
+          , coreName <- case global of
+              GFun function -> [funCore function]
+              GData datatype -> [dataIs datatype]
+              GClass cls -> [classEvidenceName (classQual cls)]
+              _ -> []
+          ]
+
+    -- Only successful registrations are visible to proofs or subsequent modules.
+    activeEnv r = env {envBuiltins = runBuiltins r}
+
+    -- A body or membership definition may remain after a generated contract
+    -- fails. Such a declaration is not an admissible builtin implementation.
+    completed name before after
+      | errors after == errors before = after {runCheckedDeclarations = Set.insert name (runCheckedDeclarations after)}
+      | otherwise = after
+      where
+        errors = length . filter ((== SevError) . reportSeverity) . runReports
+
+    register (Located roleSpan role) (Located targetSpan target) r =
+      case Builtin.registerBuiltin (runBuiltins r) (activeEnv r) role target of
+        Left err -> report roleSpan SevError err r
+        Right (registry, _) -> case admit target r of
+          Left err -> report targetSpan SevError err r
+          Right () -> r {runBuiltins = registry}
+
+    admit target r = case Map.lookup target (envGlobals env) of
+      Just (GData info) -> checked (Map.member (renderQualName (dataQual info)) (coreMembership core))
+      Just (GFun info) -> checked (Map.member (funCore info) (coreBodies core))
+      Just (GTheorem info) -> checked (Map.member (T.unpack (thmCore info)) (coreCertificates core))
+      Just (GClass _) -> checked True
+      Just (GMethod _) -> checked True
+      Just (GLaw _) -> checked True
+      _ -> Left "a BUILTIN target must be a checked declaration"
+      where
+        core = runCore r
+        checked structuralEvidence
+          | target `Set.member` runCheckedDeclarations r && structuralEvidence = Right ()
+          | otherwise = Left ("BUILTIN target " <> T.unpack (displayQualName target) <> " has not completed checking successfully before this registration")
 
     {- A data type: the codes of its constructors; its index functions, by
     which its membership predicate checks the indices of its constructors'
@@ -382,16 +451,13 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
 
     funName fd = T.unpack (displayQualName (funQual (fdInfo fd)))
 
-    -- The obligations of a function certified: each lemma's name, its variables, the equation it concludes, and its hypotheses, the clause's preconditions, as equations.
+    -- Retain each certified obligation with its complete sequent, including
+    -- quantified preconditions which an equation-only view would omit.
     obligationFacts r fd =
-      [ (tdInfo td, thmBinders (tdInfo td), l, rhs, hyps)
+      [ (tdInfo td, gl)
       | td <- fdObligations fd
       , Map.member (T.unpack (thmCore (tdInfo td))) (coreLemmas (runCore r))
       , Right gl <- [statementGoal (coreMembership (runCore r)) td]
-      , Rel RelEq a b <- [stripLocations (asEquation (goalConcl gl))]
-      , Right l <- [termCT CVar a]
-      , Right rhs <- [termCT CVar b]
-      , let hyps = [(hl, hr) | (_, HProp p) <- goalHyps gl, Rel RelEq a' b' <- [stripLocations (asEquation p)], Right hl <- [termCT CVar a'], Right hr <- [termCT CVar b']]
       ]
 
     -- A theorem, or the obligation a proof in a function's clause is: proved, and certified.
@@ -402,7 +468,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
     -- The lemmas of the library a proof may cite by name: those certified, but the modules' own, which are mangled.
-    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"])
+    knowledge r = Knowledge (activeEnv r) fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"]) (knownDeclarations r)
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of

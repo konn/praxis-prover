@@ -24,6 +24,7 @@ module Language.Praxis.PRA.PrimitiveRecursion.Function (
   extendKernelEnv,
   unionKernelEnv,
   lookupDefinition,
+  validateFunction,
   functionProgram,
   opaqueCalls,
   programFunction,
@@ -228,6 +229,17 @@ lookupDefinition (KernelEnv env) (DefId ident) = case Map.lookup ident env of
   Just (Definition (_ :: DefId m) body) -> case testEquality (sNat @n) (sNat @m) of
     Just Refl -> Right body
     Nothing -> Left (DefinitionArityMismatch ident (natVal (Proxy @n)) (natVal (Proxy @m)))
+
+{- | Check references and their arities without expanding checked definitions.
+Abstract schema parameters are permitted, as in 'evalFunctionM'.
+-}
+validateFunction :: (KnownNat n) => KernelEnv -> Function n -> Either KernelError ()
+validateFunction (KernelEnv env) = mapM_ check . references . functionProgram
+  where
+    check (ident, arity) = case Map.lookup ident env of
+      Nothing -> Left (UnknownDefinition ident)
+      Just (Definition (_ :: DefId k) _) ->
+        unless (arity == natVal (Proxy @k)) (Left (DefinitionArityMismatch ident arity (natVal (Proxy @k))))
 
 references :: (KnownNat n) => Program n -> [(Text, Natural)]
 references = \case

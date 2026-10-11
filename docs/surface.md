@@ -159,8 +159,8 @@ instance Monoid (List a) where
   mempty = Nil
 ```
 
-A class has one parameter, methods and laws. Its methods are first-order
-signatures, each mentioning the parameter. Its laws are statements over
+A class has one parameter, methods and laws. Its methods have first-order
+signatures; methods taking arguments must mention the parameter. Its laws are statements over
 values of the parameter and of types over it:
 
 ```
@@ -170,11 +170,37 @@ class Pointed a where
   plus-zero : (x : a) -> plus x zero ≡ x
 ```
 
+Method signatures may depend on preceding nullary members of the same
+dictionary. For example, given an indexed vector type:
+
+```haskell
+class Sized a where
+  card : Nat
+  enumeration : Vec card a
+```
+
+`enumeration` carries the cardinality supplied by that same `Sized a`
+dictionary. Forward references in method signatures are rejected. A nullary
+member such as `card` need not mention `a` in its result type; its use must
+still select a unique dictionary. With two possible `Sized` dictionaries,
+an unqualified `card` is ambiguous; `card {a}` explicitly selects the
+dictionary for `a`. Inside an instance, an otherwise undetermined class
+type defaults to that instance's head. Dictionary pruning retains the values
+needed by dependent signatures, and Praxis Core checks these indices against
+the actual dictionary arguments.
+
 Its superclasses constrain the same parameter. A method or a law is a
 top-level name, as in Haskell, and a member of its class's namespace.
 
-An instance is for a data type applied to distinct type variables, or for
-`Nat`. It is the only instance of its class for that type; it comes after an
+An instance is for a data type applied to distinct type and index variables,
+or for `Nat`. For example, `instance Sized (Fin n)` covers every `n`; a
+specialized head such as `Fin 0` is rejected. Index variables retain their
+declared types and are available in the method and law clauses, including
+through explicit implicit patterns such as `card {n} = n`.
+Unused runtime indices are pruned. Passing a method with arguments as a
+dictionary requires its runtime captures to be closed; passing a nullary
+member as a value has no such restriction.
+It is the only instance of its class for that type; it comes after an
 instance of each superclass for it; it defines every method by clauses, as a
 function is defined; and it proves every law by clauses, as a theorem is
 proved. Each method of an instance is a function of the instance,
@@ -280,6 +306,45 @@ applied to members: what a law applied at them needs. An appeal at an
 instance holds by the instance's proofs of the laws. A law applies to
 arguments, whose type gives the instance; and a proof may use the laws
 about the methods its statement uses, which fix the functions they are at.
+
+## Builtin registrations
+
+`{-# BUILTIN ROLE name #-}` connects a compiler role to an ordinary,
+previously declared definition. It introduces no axiom. The checker validates
+the exact signature and the role's earlier registrations, and activates the
+binding only after the target completes checking. A compiled body with a
+failed proof obligation or generated contract is insufficient. A role cannot
+be registered twice or rebound, including across imported modules.
+
+The builtin roles include the following:
+
+| Role | Required declaration |
+| --- | --- |
+| `FIN` | An inductive type with one `Nat` index |
+| `VEC` | An inductive type with a `Nat` index followed by one type parameter |
+| `FIN_FROM_NAT` | Conversion from `k`, given `k < n`, to `Fin n` |
+| `FIN_TO_NAT` | Conversion from `Fin n` to `Nat` |
+| `FIN_TO_NAT_BOUND` | A certified theorem that the conversion is less than `n` |
+| `FIN_FROM_TO_NAT` | A certified theorem that converting an ordinal to `Nat` and back returns it |
+| `FIN_TO_FROM_NAT` | A certified theorem that converting a bounded numeral to an ordinal and back returns it |
+| `VEC_LOOKUP` | `Fin n -> Vec n a -> a` |
+| `FINITE` | The finite class |
+| `FINITE_CARD` | Its `card : Nat` method |
+| `FINITE_CODE` | Its `code : a -> Fin card` method |
+| `FINITE_DECODE` | Its `decode : Fin card -> a` method |
+| `FINITE_DECODE_CODE` | Its law `decode (code x) = x` |
+
+The dependent member signatures and retraction law must use the same registered
+class and cardinality. The bridge theorems must have exactly the required
+statements, without extra assumptions. Names alone do not establish these
+properties: the PRA kernel checks the ordinary proofs. A role declaration is
+surface elaboration metadata; it creates no special Praxis Core expression.
+
+The finite interface requires only the round trip from an element through
+its code and back. Different ordinals may decode to the same element, so
+`card` is an upper bound on the number of elements. A vector enumeration and
+lookup are not prerequisites of the finite roles. When useful, an enumeration
+can be built separately by tabulating `decode`.
 
 ## Types
 
@@ -434,6 +499,8 @@ is a variable; against a numeral, `k` is refused, as nothing solves it. A
 proposition among a constructor's arguments, `Exists : (k : nat) -> n + S k =
 m -> ELt n m`, is a precondition: a proof its code does not store, over the
 implicit arguments and the named fields, an equation or a comparison for now.
+Constructor preconditions do not admit quantified propositions; the finite
+quantifier syntax applies to theorem propositions and function preconditions.
 Building with the constructor gives a proof of it, checked as an obligation
 as a function's precondition is; the membership of a code checks it as it
 checks an equation of indices, so a pattern names it, `Exists k h`, and `h`
@@ -613,10 +680,104 @@ precedence, so `xs <> Nil ≡ xs` needs no parentheses; connectives take
 Lean's precedences, `¬` 40, `∧` 35 and `∨` 30 to the right, `↔` 20; the
 arrow binds loosest.
 
-A theorem may quantify over values only in front, `(xs : List a) -> …` or
-`∀ (xs : List a), …`: its statement is Π₁, as PRA's theorems are. A
-quantifier elsewhere must be bounded. Σ₁ statements, `∃ y, A` at the top,
-proved by a witness term, are planned (see below).
+Numeric bounded quantifiers may occur anywhere in a proposition: under
+negation, in either side of an implication, or nested with other quantifiers.
+They do not require prenex form. If a numeric binder has a written type,
+that type must be `Nat`: `∀ (i : Nat) < n, P` checks the annotation.
+
+A typed quantifier without a numeric bound ranges over a finite type:
+`∀ (x : T), P` or `∃ (x : T), P`. The same rule applies at the beginning
+of a theorem and inside a proposition. For example, with the finite protocol
+registered:
+
+```haskell
+all-indices : ∀ (i : Fin n), i = i
+nested : (∃ (i : Fin 3), i = i) -> ∀ (j : Fin 2), j = j
+under-negation : ¬ (∃ (i : Fin 0), i = i)
+generic : Finite a => ∀ (x : a), x = x
+```
+
+Applying a finite universal theorem can infer its domain from the supplied
+value. For example, `all-indices i` infers `n` from `i : Fin n`, and
+`generic True` selects the finite instance for the type of `True`. Each
+argument is checked against the instantiated domain; a proved index equality
+can supply the usual transport between indexed types.
+
+Each typed binder needs an explicit first-order type. Later binder groups
+may depend on earlier values, as in `∀ n < 3, ∀ (i : Fin n), P`.
+Names in one group share the type as it was before that group: in
+`(n : Nat) -> ∀ (n m : Fin n), P`, both finite bounds refer to the
+outer `n`, even though the first finite binder shadows its name.
+
+The leading arrow binder `(xs : List a) -> P` still quantifies over an
+arbitrary value of `List a`, with the Π₁ reading of a PRA theorem. Use this
+form for types which need not be finite. Explicit `∀ (xs : List a), P`
+is no longer a synonym for that binder: it requires a finite-domain
+instance, just as it would inside `P`. Unbounded numeric existential
+statements `∃ y, P` remain unsupported.
+
+### Finite domains
+
+The registered `Fin n` type has a direct translation using its certified
+conversions to and from a number below `n`. It does not require a `Finite`
+instance. Other finite types use this ordinary class and its ordinary law:
+
+```haskell
+class Finite a where
+  card : Nat
+  code : a -> Fin card
+  decode : Fin card -> a
+  decode-code : (x : a) -> decode (code x) = x
+```
+
+The `BUILTIN` registrations above select these declarations. Both dependent
+method types use the `card` of the same dictionary. `code` chooses a bounded
+ordinal for each element, and the law proves that decoding this ordinal
+returns the original element. This makes `a` a retract of `Fin card`.
+No law `code (decode i) = i` is required: several ordinals may decode to the
+same element, and `card` need not be the number of distinct elements.
+
+Write `c = card` and `d = decode` for the selected dictionary. Both
+quantifiers range over the numbers below `c` and replace the source variable
+by the corresponding decoded value:
+
+```text
+∀ (x : T), P x   ↦   ∀ j < c, P (d (from-nat j))
+∃ (x : T), P x   ↦   ∃ j < c, P (d (from-nat j))
+```
+
+For `Fin n`, the bound is `n` and the replacement is just `from-nat j`.
+The bound supplies that conversion's required inequality. At a zero bound,
+the universal proposition is true and the existential is false; no element
+of the empty domain is constructed. Checked type contracts and the
+`decode-code` law justify this translation equally under negation and
+implication. The translation inserts neither a vector nor a search; a
+library may implement `decode` using a vector if that is convenient.
+
+An instance must supply primitive recursive `code` and `decode` functions.
+Finiteness is not inferred from the presence of an inductive declaration:
+`List Bool`, for example, has lists of unbounded length. Indexed families
+such as `Fin n` can be finite for each index without having one finite
+bound for all indices. Quantification bounded by a subterm or subtree relation remains separate
+from this finite-type protocol.
+
+Generic use of an indexed finite instance currently requires its non-nullary
+dictionary methods to have no open runtime captures. The `Fin n` instance
+meets this restriction because its identity methods need no captured `n`.
+An instance whose coding or decoding method must capture a local index is
+rejected; closed-index uses can still be supported.
+
+Registrations must already be available where the proposition is written,
+including in a local `have` or a function precondition. Later pragmas cannot
+change earlier proof syntax. A failed roundtrip proof, method body or
+required generated contract prevents the finite domain from being used,
+even when the resulting proposition is a tautology or an unused local fact.
+The [checked finite examples](../praxis/test/data/base/src/FiniteExamples.px)
+cover `Fin 0`, generic domains and duplicate decoded values.
+These obligations are retained before proof erasure; the full details are
+in [elaboration.md](elaboration.md#finite-quantifier-desugaring).
+
+### Proof arguments in propositions
 
 The final relation in a theorem statement may call a function that needs
 evidence. Leading implication antecedents provide the hypotheses for that
@@ -678,9 +839,16 @@ focused blocks, and a bare proof term, `by IH`, which closes the goal by the
 term or else by congruence. A goal reported — by `sorry`, when unsolved, or
 when a `calc` does not prove it — is over the names the clause and `intro`
 gave its variables, not the eigenvariables the core introduces for them, `e_0`.
+`constructor` splits a conjunction, while `left` and `right` select a
+disjunction branch. `contradiction` handles impossible index equalities.
+For finite quantifiers, `intro` names a decoded source element, `exists`
+(`use`) takes a source element as witness, and `obtain` extracts a source
+element and its property. A numeric `exists` additionally requires a proof
+that its witness satisfies the bound. Universal hypotheses and theorems can
+be applied to a source element with `exact h x`.
+
 The grammar also accepts `apply`, `rw [e, ← e'] at
-h`, `unfold`, `simp only`, `constructor`, `left`, `right`, `exfalso`,
-`contradiction`, `cases`, `obtain`, `exists`/`use`, `show`, `revert`,
+h`, `unfold`, `simp only`, `exfalso`, `cases`, `show`, `revert`,
 `clear`, `by_cases`, `try`, `repeat`, `first`, `all_goals`, `any_goals`, `<;>`
 and `case`; their translations are the next step of the engine.
 

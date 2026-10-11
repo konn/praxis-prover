@@ -34,9 +34,16 @@ module Language.Praxis.Surface.Env (
   TeleEntry (..),
   Role (..),
   FunInfo (..),
+  logicalFunSlots,
   TheoremInfo (..),
   ClassInfo (..),
+  classEvidenceName,
   MethodInfo (..),
+  methodIndex,
+  methodTypeWith,
+  dictionaryMethodType,
+  dictionaryIndex,
+  dictionaryScope,
   LawInfo (..),
   InstanceInfo (..),
   ModuleInfo (..),
@@ -88,24 +95,33 @@ module Language.Praxis.Surface.Env (
   dataOfCtor,
   indexFunctionCores,
   indexTermIn,
+  indexTermInWithDependencies,
+  normalizeIndex,
+  normalizeTypeIndices,
   displayName,
 ) where
 
 import Bound (Scope)
 import Control.Applicative ((<|>))
-import Data.List (isPrefixOf)
+import Control.Monad (forM)
+import Data.IntMap.Strict qualified as IM
+import Data.List (isPrefixOf, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
+import Language.Praxis.Surface.Desugar (Requirements)
 import Language.Praxis.Surface.Index (ixToExprWith)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
+import Language.Praxis.Surface.SourceView (QuantifierViews)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..))
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope (..), emptyScope, normIx, renderTyWithOrder)
+import Language.Praxis.Surface.Types (Assignment (..), Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope (..), emptyAssignment, emptyScope, ixVars, mapIx, normIx, renderTyWithOrder, substScheme, tyIndices)
 
 -- * Globals
 
@@ -113,20 +129,79 @@ import Language.Praxis.Surface.Types (Ix (..), Kind, Parameter (..), Scheme (..)
 be recovered by the certified index projection of a value that carries it.
 -}
 indexTermIn :: Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a)
-indexTermIn env ctx = ixToExprWith variable parameter
+indexTermIn env ctx = fmap fst . scopedIndexTerm (\index -> (normIx index, Set.empty)) env ctx
+
+-- | Recover an index together with the declarations used to convert its type.
+indexTermInWithDependencies :: Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a, Set Text)
+indexTermInWithDependencies env = scopedIndexTerm (normalizeIndex env) env
+
+scopedIndexTerm :: (Ix -> (Ix, Set Text)) -> Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a, Set Text)
+scopedIndexTerm normalize env ctx index = do
+  scoped <- ixToExprWith (fmap Var . variable) (fmap Var . parameter) index
+  pure (scoped >>= fst, foldMap snd scoped)
   where
-    variable v = (Var . fst <$> lookup v ctx) <|> recovered (IxVar v)
+    local name = (\(value, _) -> (Var value, Set.empty)) <$> lookup name ctx
+    variable name = local name <|> dictionaryValue name <|> recovered (IxVar name)
+    dictionaryValue name = do
+      position <- T.stripPrefix "#d" name
+      if T.null position || not (T.all (`elem` ("0123456789" :: String)) position)
+        then Nothing
+        else Just (Global (Ref RefValueParam position), Set.empty)
     parameter i =
-      (listToMaybe [v | (v, IxParam j) <- tsValues (envScope env), i == j] >>= \v -> Var . fst <$> lookup v ctx)
+      (listToMaybe [name | (name, IxParam j) <- tsValues (envScope env), i == j] >>= local)
         <|> recovered (IxParam i)
     recovered wanted =
       listToMaybe
-        [ App (Global (Ref RefFunction fn)) (Var v)
-        | (_, (v, TData dn _ indices)) <- ctx
+        [ (App (Global (Ref RefFunction fn)) (Var value), fromActual <> fromWanted)
+        | (_, (value, TData dn _ indices)) <- ctx
         , Just fns <- [indexFunctionCores env dn]
         , (ix, fn) <- zip indices fns
-        , normIx ix == normIx wanted
+        , let (actual, fromActual) = normalize ix
+              (expected, fromWanted) = normalize wanted
+        , actual == expected
         ]
+
+{- | Reduce only direct argument projections discovered in typed definitions.
+The accompanying core names are proof prerequisites, including projections
+used beneath constructors and in discarded arguments. Each rewrite selects
+a strict subterm, so conversion neither evaluates recursion nor needs fuel.
+-}
+normalizeIndex :: Env -> Ix -> (Ix, Set Text)
+normalizeIndex env = go
+  where
+    go (IxSucc x) = let (y, used) = go x in (normIx (IxSucc y), used)
+    go (IxCon name xs) = let (ys, used) = children xs in (IxCon name ys, used)
+    go (IxFun name xs) =
+      let (ys, used) = children xs
+       in case [f | GFun f <- Map.elems (envGlobals env), funCore f == name] of
+            f : _
+              | Just position <- funProjection f
+              , null (funSlots f)
+              , null (funProofs f)
+              , length ys == length (funRuntime f) + funArity f
+              , position >= 0
+              , Just chosen <- listToMaybe (drop position ys) ->
+                  (chosen, Set.insert name used)
+            _ -> (normIx (IxFun name ys), used)
+    go (IxPartial name arity prefix xs) = let (ys, used) = children xs in (IxPartial name arity prefix ys, used)
+    go x = (normIx x, Set.empty)
+    children xs = let (ys, uses) = unzip (map go xs) in (ys, Set.unions uses)
+
+-- | Convert indices while preserving the type structure and collecting every prerequisite.
+normalizeTypeIndices :: Env -> Ty -> (Ty, Set Text)
+normalizeTypeIndices env = go
+  where
+    go (TParam i arguments) = let (as, used) = types arguments in (TParam i as, used)
+    go (TData name arguments indices) =
+      let (as, fromArguments) = types arguments
+          (is, fromIndices) = unzip (map (normalizeIndex env) indices)
+       in (TData name as is, fromArguments <> Set.unions fromIndices)
+    go (TArrow domain result) =
+      let (a, fromDomain) = go domain
+          (r, fromResult) = go result
+       in (TArrow a r, fromDomain <> fromResult)
+    go ty = (ty, Set.empty)
+    types arguments = let (as, uses) = unzip (map go arguments) in (as, Set.unions uses)
 
 {- |
 A qualified name as its segments: the library the module belongs to, when
@@ -278,13 +353,26 @@ data FunInfo = FunInfo
   the proposition it is of, over its value parameters — a precondition,
   which an application gives a proof of, and its code does not take
   -}
+  , funProofSlots :: ![Slot]
+  -- ^ logical dictionary of proof preconditions, separate from runtime slots
+  , funRequirements :: !Requirements
+  -- ^ dependencies of reusable proof preconditions, captured before erasure
+  , funBuiltinScope :: !(Map Text QualName)
+  -- ^ the source registry used by the preconditions and their proof views
+  , funQuantifierViews :: !QuantifierViews
   , funRuntime :: ![Int]
   {- ^ the value parameters it takes at runtime, by position, before its
   arguments: the implicit values its clauses bind, which an application
   finds from the types and passes
   -}
+  , funProjection :: !(Maybe Int)
+  -- ^ a completed typed clause directly returns this operational argument
   }
   deriving stock (Show)
+
+-- | Runtime entries retain their numbering; logical evidence follows them.
+logicalFunSlots :: FunInfo -> [Slot]
+logicalFunSlots info = nub (funSlots info <> funProofSlots info)
 
 {- |
 A place of a function's dictionary: a method of a class at one of the
@@ -338,6 +426,7 @@ results are members of the parameter's type.
 data Premise
   = PLaw !QualName !Int
   | PClosure !QualName !Int
+  | PMethod !QualName !Int !Ty !Ref
   | PSchema !Int !Ty
   deriving stock (Show, Eq)
 
@@ -366,10 +455,16 @@ data TheoremInfo = TheoremInfo
   -- ^ the indices of its binders' types: a binder's position, an index function by its core name, and the index over its value parameters
   , thmValues :: ![Text]
   -- ^ its value parameters, by name, which its binders' indices mention
+  , thmQuantifierViews :: !QuantifierViews
+  -- ^ source provenance for explicit finite quantifiers, separate from Core
   , thmProp :: !(Maybe (Scope Int Expr Void))
   -- ^ its proposition, over its value parameters then its binders, when it has value parameters
   }
   deriving stock (Show)
+
+-- | A reserved metadata key, available only after the whole class checks.
+classEvidenceName :: QualName -> Text
+classEvidenceName name = mangleGlobal (map segmentRaw name <> ["#class"])
 
 -- | A class: its superclasses, by their qualified names, its methods, in order, and its laws.
 data ClassInfo = ClassInfo
@@ -394,6 +489,11 @@ data LawInfo = LawInfo
   -- ^ its proposition, over the binders, its methods the places of 'lawSlots'
   , lawSlots :: ![Slot]
   -- ^ the dictionary of the class at its parameter: each method of it and of its superclasses
+  , lawTypeParameter :: !Text
+  -- ^ original class parameter name, specialized lexically at an instance
+  , lawRequirements :: !Requirements
+  , lawBuiltinScope :: !(Map Text QualName)
+  , lawQuantifierViews :: !QuantifierViews
   , lawBody :: !(Located R.Expr)
   -- ^ its proposition as written, which an instance elaborates at its type
   }
@@ -408,8 +508,64 @@ data MethodInfo = MethodInfo
   , methodClass :: !QualName
   , methodScheme :: !Scheme
   , methodArity :: !Int
+  , methodDependencies :: ![(QualName, Ty)]
+  -- ^ earlier nullary members whose values occur in this method's type
   }
   deriving stock (Show)
+
+-- | A dependent member's stable name before selecting a dictionary.
+methodIndex :: QualName -> Ix
+methodIndex q = IxVar ("#method:" <> renderQualName q)
+
+-- | A runtime dictionary value as an index; its name survives ordinary index lowering.
+dictionaryIndex :: Int -> Ix
+dictionaryIndex i = IxVar ("#d" <> T.pack (show i))
+
+{- | Instantiate every dependency using the same dictionary as the method.
+Missing dependencies are errors, never unconstrained index holes.
+-}
+methodTypeWith :: (QualName -> Maybe Ix) -> MethodInfo -> Either String Ty
+methodTypeWith at method = do
+  replacements <- forM (methodDependencies method) \(q, _) ->
+    maybe (Left ("the dictionary does not provide dependent member " <> T.unpack (displayQualName q))) (Right . (methodIndex q,)) (at q)
+  let rewrite x = case lookup x replacements of
+        Just value -> value
+        Nothing -> case x of
+          IxSucc y -> IxSucc (rewrite y)
+          IxCon name ys -> IxCon name (map rewrite ys)
+          IxFun name ys -> IxFun name (map rewrite ys)
+          IxPartial name arity prefix ys -> IxPartial name arity prefix (map rewrite ys)
+          other -> other
+  pure (mapIx rewrite (schemeType (methodScheme method)))
+
+-- | Put uniquely selected nullary methods in scope as dependent indices.
+dictionaryScope :: Env -> [Slot] -> TyScope -> Either String TyScope
+dictionaryScope env slots scope = do
+  values <- forM unique \(i, slot) -> do
+    ty <- dictionaryMethodType env slots slot
+    pure (renderQualName (slotMethod slot), dictionaryIndex i, ty)
+  pure
+    scope
+      { tsValues = tsValues scope <> [(name, ix) | (name, ix, _) <- values]
+      , tsValueTys = tsValueTys scope <> [(name, ty) | (name, _, ty) <- values]
+      }
+  where
+    nullary = zip [0 ..] (valueSlots slots)
+    unique = [(i, slot) | (i, slot) <- nullary, length [() | (_, other) <- nullary, slotMethod other == slotMethod slot] == 1]
+
+{- | The complete type of a dictionary place, including indices from its
+preceding values. A dependency must be present at this same type parameter.
+-}
+dictionaryMethodType :: Env -> [Slot] -> Slot -> Either String Ty
+dictionaryMethodType env slots slot
+  | isMembershipSlot slot = Right (TArrow (TParam (slotParam slot) []) TNat)
+  | Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env) = do
+      ty <- methodTypeWith dependency method
+      let scheme = methodScheme method
+      pure (substScheme (length (schemeParams scheme), length (schemeValues scheme)) emptyAssignment {asTypes = IM.singleton 0 (TParam (slotParam slot) [])} ty)
+  | otherwise = Left "a dictionary place refers to no method"
+  where
+    dependency q = dictionaryIndex <$> lookup q [(slotMethod s, i) | (i, s) <- zip [0 ..] (valueSlots slots), slotParam s == slotParam slot]
 
 {- |
 An instance: its class, the head of the type it is for — the qualified name
@@ -420,6 +576,12 @@ data InstanceInfo = InstanceInfo
   { instQual :: !QualName
   , instClass :: !QualName
   , instHead :: !Text
+  , instScheme :: !Scheme
+  -- ^ the complete instance head, including universally quantified value indices
+  , instContext :: ![Slot]
+  -- ^ the original dictionary slots, including places needed only by laws
+  , instClassContext :: ![(QualName, Int)]
+  -- ^ the declared class constraints, retained even for classes without methods
   , instFunctions :: !(Map QualName FunInfo)
   , instLaws :: !(Map QualName TheoremInfo)
   -- ^ the theorem proving each law of the class at the instance's type, by the law's qualified name
@@ -491,6 +653,12 @@ data Env = Env
   -- ^ every core name, with the surface name it stands for
   , envInstances :: !(Map (QualName, Text) InstanceInfo)
   -- ^ each instance, by its class and the head of its type: one for each
+  , envBuiltins :: !(Map Text QualName)
+  -- ^ checked builtin roles and the globals registered for them
+  , envTypeBindings :: ![(Text, Ty)]
+  -- ^ lexical specialization of a class law's original type parameter
+  , envClassDefaults :: ![(QualName, Ty)]
+  -- ^ the instance currently elaborated supplies a class type for ambiguous nullary methods
   , envSchemas :: ![(Text, Ref, Ty)]
   -- ^ local fixed callbacks: source binder, schema reference and source signature
   , envScope :: !TyScope
@@ -499,7 +667,7 @@ data Env = Env
 
 -- | No module, and nothing known: what a build starts from.
 emptyEnv :: Env
-emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty [] emptyScope
+emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty Map.empty [] [] [] emptyScope
 
 {- |
 The environment a module of the name given is elaborated in, with the
@@ -508,7 +676,7 @@ environment given — the globals, namespaces, instances and display names of
 the modules before it.
 -}
 moduleEnv :: QualName -> [QualName] -> Env -> Env
-moduleEnv q visible env = env {envModule = q, envVisible = visible, envSchemas = [], envScope = emptyScope}
+moduleEnv q visible env = env {envModule = q, envVisible = visible, envTypeBindings = [], envClassDefaults = [], envSchemas = [], envScope = emptyScope}
 
 -- | A name of the module, qualified.
 qualify :: Env -> [Segment] -> QualName
@@ -559,7 +727,7 @@ addFunction :: Env -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)
 addFunction env name sch arity slots = (env', info)
   where
     q = qualify env [name]
-    info = FunInfo q sch arity (coreOf q) slots [] []
+    info = FunInfo q sch arity (coreOf q) slots [] [] mempty Map.empty mempty [] Nothing
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)
@@ -592,7 +760,7 @@ it, with the types of its values when its statement gives them memberships.
 addTheorem :: Env -> QualName -> [Text] -> [Ty] -> [Slot] -> [Premise] -> Maybe (Scope Int Expr Void) -> (Env, TheoremInfo)
 addTheorem env q binders membered slots premises statement = (env', info)
   where
-    info = TheoremInfo q (coreOf q) binders membered slots premises statement [] [] Nothing
+    info = TheoremInfo q (coreOf q) binders membered slots premises statement [] [] mempty Nothing
     env' =
       env
         { envGlobals = Map.insert q (GTheorem info) (envGlobals env)
@@ -604,7 +772,13 @@ addClass :: Env -> Segment -> [QualName] -> [(Segment, Scheme, Int)] -> (Env, Cl
 addClass env name supers methods = (env', info)
   where
     q = qualify env [name]
-    info = ClassInfo q supers [MethodInfo (q <> [m]) q sch arity | (m, sch, arity) <- methods] []
+    info = ClassInfo q supers (members [] methods) []
+    members _ [] = []
+    members previous ((m, sch, arity) : rest) =
+      let used = concatMap ixVars (tyIndices (schemeType sch))
+          dependencies = [(methodQual prior, schemeType (methodScheme prior)) | prior <- previous, methodArity prior == 0, IxVar indexName <- [methodIndex (methodQual prior)], indexName `elem` used]
+          member = MethodInfo (q <> [m]) q sch arity dependencies
+       in member : members (previous <> [member]) rest
     env' =
       env
         { envGlobals = foldr (\m -> Map.insert (methodQual m) (GMethod m)) (Map.insert q (GClass info) (envGlobals env)) (classMethods info)
@@ -632,7 +806,7 @@ addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> [Slot] -> 
 addInstanceFunction env instance' method sch arity slots = (env', info)
   where
     q = instance' <> [method]
-    info = FunInfo q sch arity (coreOf q) slots [] []
+    info = FunInfo q sch arity (coreOf q) slots [] [] mempty Map.empty mempty [] Nothing
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)

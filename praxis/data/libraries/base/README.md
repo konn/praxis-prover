@@ -54,7 +54,8 @@ reverse-twice xs = L.reverse-reverse xs
 | --- | --- |
 | `Data.Nat` | Builtin natural arithmetic laws; exponentiation `^^`; total quotient `/` and remainder `%`, with division algorithm and remainder bound |
 | `Data.Nat.Order` | Builtin linear ordering laws; addition and multiplication monotonicity; inductive `PLt`/`PLeq` and gap-based `ELt`/`ELeq`, with both round-trip laws and conversions to and from builtin comparisons |
-| `Data.Fin` | Inductive `Fin n` and bounded-natural `EFin n`, conversions and both inverse laws, bounds, weakening and ordinal reversal |
+| `Data.Fin` | Inductive `Fin n` and bounded-natural `EFin n`, conversions and both inverse laws, bounds, weakening and ordinal reversal; checked finite-quantifier bridge registrations |
+| `Data.Finite` | The `Finite a` retraction class, its surface builtin registrations, and the instance for `Fin n` |
 | `Data.List` | `Nil`, `(::)`, `(<>)`, map, length, replication, reversal, take/drop, concatenation, sum/product, class-schema fold and algebraic proofs |
 | `Data.Vec` | Length-indexed `Vec n a`, head/tail, map, bounded take, replication, lookup/tabulate with inverse laws, reversal, append and list conversions |
 
@@ -69,6 +70,15 @@ operations; the library provides their Surface proofs.
 `to-efin` and `from-efin` preserve the ordinal; `from-to-efin` and
 `to-from-efin` prove equality after both round trips. The proofs compare the
 values themselves, not just their projections to natural numbers.
+
+`Finite a` supplies `card`, `code : a -> Fin card`, `decode : Fin card -> a`,
+and the law `decode (code x) = x`. It needs no converse law: several ordinals
+may decode to one value, so `card` may exceed the number of distinct values.
+Typed quantifiers such as `∀ (x : a), P` and `∃ (x : a), P` use this checked
+retraction, including inside larger propositions. Direct quantification over
+`Fin n` uses the numeric bridge from `Data.Fin` without an instance.
+See the [checked finite examples](../../../test/data/base/src/FiniteExamples.px)
+for imports, instance definitions and proofs.
 
 `Vec` puts the length first: `Vec n a`. Its `append` returns `Vec (n + m) a`
 for arguments of lengths `n` and `m`. The implementation uses `cast` with a

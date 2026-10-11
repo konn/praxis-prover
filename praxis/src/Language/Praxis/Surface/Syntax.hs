@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {- |
 The resolved syntax of the surface language: every name is either a global
 reference, 'Global', or a variable, and every binder is locally nameless.
@@ -34,6 +36,7 @@ module Language.Praxis.Surface.Syntax (
   isProofArg,
   dropProofs,
   mapGlobals,
+  mapTypeGlobals,
   globalsOf,
 
   -- * Patterns
@@ -51,10 +54,11 @@ import Control.Monad (ap)
 import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1, showsPrec1)
 import Data.List (elemIndex)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.Surface.Syntax.Raw (Located, Quantifier (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ix, Ty)
+import Language.Praxis.Surface.Types (Ix (..), Ty, mapIx)
 import Numeric.Natural (Natural)
 import Text.Show (showListWith)
 
@@ -105,6 +109,8 @@ data RefKind
     takes before that dictionary's values
     -}
     RefPartial !Int
+  | -- | a schema capturing runtime values before its arguments and dictionary values after them
+    RefIndexedPartial !Int !Int
   deriving stock (Show, Eq, Ord)
 
 -- | A global name, fully qualified by its module and namespaces: @Data.List.List.Nil@.
@@ -341,6 +347,21 @@ isProofArg = \case
 dropProofs :: [Expr a] -> [Expr a]
 dropProofs = filter (not . isProofArg)
 
+-- | Rename global computations and dictionary places inside dependent types.
+mapTypeGlobals :: (Ref -> Ref) -> Ty -> Ty
+mapTypeGlobals f = mapIx (mapIndexGlobals f)
+
+mapIndexGlobals :: (Ref -> Ref) -> Ix -> Ix
+mapIndexGlobals f = go
+  where
+    go (IxVar name) | Just position <- T.stripPrefix "#d" name = IxVar ("#d" <> refName (f (Ref RefValueParam position)))
+    go (IxSchema name) = IxSchema (refName (f (Ref RefStatic name)))
+    go (IxSucc x) = IxSucc (go x)
+    go (IxCon name xs) = IxCon (refName (f (Ref RefConstructor name))) (map go xs)
+    go (IxFun name xs) = IxFun (refName (f (Ref RefFunction name))) (map go xs)
+    go (IxPartial name arity prefix xs) = IxPartial (refName (f (Ref (if prefix == 0 then RefPartial arity else RefIndexedPartial arity prefix) name))) arity prefix (map go xs)
+    go x = x
+
 -- | Every global reference replaced as the function says, under binders too.
 mapGlobals :: (Ref -> Ref) -> Expr a -> Expr a
 mapGlobals f = go
@@ -352,11 +373,11 @@ mapGlobals f = go
       Nat n -> Nat n
       App g x -> App (go g) (go x)
       At sp e -> At sp (go e)
-      Typed t ts is e -> Typed t ts is (go e)
-      Dictionary t e -> Dictionary t (go e)
-      Transport t e ps -> Transport t (go e) (map go ps)
-      SchemaParameter t r e -> SchemaParameter t (f r) (go e)
-      SchemaClosure t e -> SchemaClosure t (go e)
+      Typed t ts is e -> Typed (mapTypeGlobals f t) (map (mapTypeGlobals f) ts) [(i, mapIndexGlobals f x) | (i, x) <- is] (go e)
+      Dictionary t e -> Dictionary (mapTypeGlobals f t) (go e)
+      Transport t e ps -> Transport (mapTypeGlobals f t) (go e) (map go ps)
+      SchemaParameter t r e -> SchemaParameter (mapTypeGlobals f t) (f r) (go e)
+      SchemaClosure t e -> SchemaClosure (mapTypeGlobals f t) (go e)
       SchemaPacked hs b e -> SchemaPacked hs (hoistScope go b) (go e)
       Lam hs b -> Lam hs (hoistScope go b)
       Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]

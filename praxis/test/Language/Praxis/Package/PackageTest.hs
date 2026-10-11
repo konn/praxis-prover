@@ -133,13 +133,19 @@ buildTests =
         results <- either assertFailure pure =<< checkProject p "test/data/base"
         errorsOf results @?= []
         let baseModules = [renderName (mrModule r) | r <- results, componentId (mrComponent r) == "base"]
-            clients = [mrChecked r | r <- results, componentId (mrComponent r) == "base-client"]
-        sort baseModules @?= ["Data.Fin", "Data.List", "Data.Nat", "Data.Nat.Order", "Data.Vec"]
+            clients = [mrChecked r | r <- results, componentId (mrComponent r) == "base-client", renderName (mrModule r) == "Main"]
+            examples = [mrChecked r | r <- results, componentId (mrComponent r) == "base-client", renderName (mrModule r) == "FiniteExamples"]
+        sort baseModules @?= ["Data.Fin", "Data.Finite", "Data.List", "Data.Nat", "Data.Nat.Order", "Data.Vec"]
         case clients of
           [client] -> do
             let required = ["addition", "subtraction", "multiplication", "exponentiation", "power-precedence", "power-associativity", "quotient", "remainder", "zero-divisor", "zero-modulus", "division-algorithm", "order-witness", "lax-order-witness", "strict-peano-roundtrip", "strict-gap-roundtrip", "lax-peano-roundtrip", "lax-gap-roundtrip", "finite-bound", "list-monoid", "list-reversal", "list-split", "vector-length", "vector-append-length", "vector-reversal", "vector-list", "list-operators", "list-fold", "finite-roundtrip", "bounded-roundtrip", "vector-lookup", "remainder-bound", "power-monotone", "strict-product", "subtraction-monotone"]
             mapM_ (\name -> assertBool (T.unpack name) (("Main." <> name) `elem` checkedTheorems client)) required
-          _ -> assertFailure "expected one base-client module"
+          _ -> assertFailure "expected one base-client Main module"
+        case examples of
+          [example] -> do
+            let required = ["all-self", "ordinal-self", "inhabited", "nested", "empty", "roundtrip-law", "ordinal-instance", "ordinal-result", "use-ordinal-self", "use-all-self", "first-true", "second-true"]
+            mapM_ (\name -> assertBool (T.unpack name) (("FiniteExamples." <> name) `elem` checkedTheorems example)) required
+          _ -> assertFailure "expected the checked finite quantifier examples"
     , testCase "a project: its libraries each after its dependencies, every module certified, imports across libraries and packages, two modules of one name told apart" $ do
         p <- either assertFailure pure prelude
         results <- either assertFailure pure =<< checkProject p "test/data/project"

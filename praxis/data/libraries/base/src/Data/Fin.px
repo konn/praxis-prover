@@ -101,6 +101,14 @@ from-nat-to-nat (FSucc i) = by
   have ih := from-nat-to-nat i
   cong
 
+-- Surface finite quantifiers use these checked declarations.
+{-# BUILTIN FIN Fin #-}
+{-# BUILTIN FIN_FROM_NAT from-nat #-}
+{-# BUILTIN FIN_TO_NAT to-nat #-}
+{-# BUILTIN FIN_TO_NAT_BOUND to-nat-lt #-}
+{-# BUILTIN FIN_FROM_TO_NAT from-nat-to-nat #-}
+{-# BUILTIN FIN_TO_FROM_NAT to-nat-from-nat #-}
+
 -- An alternative presentation retains the ordinal as a builtin natural and
 -- certifies its bound; the proof is erased, but checked by membership.
 data EFin (n : Nat) where

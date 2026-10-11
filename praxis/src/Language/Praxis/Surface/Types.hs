@@ -115,6 +115,10 @@ data Ix
   | IxSucc !Ix
   | IxCon !Text ![Ix]
   | IxFun !Text ![Ix]
+  | -- | a fixed schema supplied to a computation appearing in an index
+    IxSchema !Text
+  | -- | a schema with source arity, runtime prefix count and captured arguments
+    IxPartial !Text !Int !Int ![Ix]
   deriving stock (Show, Eq, Ord)
 
 {- |
@@ -188,6 +192,7 @@ determined = \case
       IxSucc x -> determinedIx x
       IxCon _ xs -> all determinedIx xs
       IxFun _ xs -> all determinedIx xs
+      IxPartial _ _ _ xs -> all determinedIx xs
       _ -> True
 
 -- | A type with its indices erased: what the core's encoding of its values is by.
@@ -244,6 +249,8 @@ renderIxAt values = go
       IxFun f [x, y] | Just o <- lookup f arithmetic -> paren (d > 0) (go 1 x <> " " <> o <> " " <> go 1 y)
       IxFun f [] -> short f
       IxFun f xs -> paren (d > 1) (unwords (short f : map (go 2) xs))
+      IxSchema name -> "{" <> short name <> "}"
+      IxPartial name arity prefix xs -> "{partial " <> short name <> " " <> show arity <> "/" <> show prefix <> " " <> unwords (map (go 2) xs) <> "}"
     arithmetic = [("add", "+"), ("sub", "-"), ("mul", "*"), ("pow", "^")] :: [(Text, String)]
 
 short :: Text -> String
@@ -274,6 +281,7 @@ normIx = \case
   IxSucc x -> succIx (normIx x)
   IxCon c xs -> IxCon c (map normIx xs)
   IxFun f xs -> arith f (map normIx xs)
+  IxPartial f n k xs -> IxPartial f n k (map normIx xs)
   x -> x
   where
     arith f xs = case (f, xs) of
@@ -302,6 +310,7 @@ ixVars = \case
   IxSucc x -> ixVars x
   IxCon _ xs -> concatMap ixVars xs
   IxFun _ xs -> concatMap ixVars xs
+  IxPartial _ _ _ xs -> concatMap ixVars xs
   _ -> []
 
 -- | Every index of a type rewritten by the function given, the indices of its arguments' too.
@@ -329,6 +338,7 @@ instValues vs = go
       IxSucc x -> IxSucc (go x)
       IxCon c xs -> IxCon c (map go xs)
       IxFun f xs -> IxFun f (map go xs)
+      IxPartial f arity prefix xs -> IxPartial f arity prefix (map go xs)
       x -> x
 
 -- * Comparison
@@ -393,6 +403,7 @@ mergeIx a b = go (normIx a) (normIx b)
       (IxNat k, IxSucc y') | k > 0 -> succIx <$> go (IxNat (k - 1)) y'
       (IxCon c xs, IxCon c' ys) | c == c', length xs == length ys -> IxCon c <$> zipWithM go xs ys
       (IxFun f xs, IxFun f' ys) | f == f', length xs == length ys -> IxFun f <$> zipWithM go xs ys
+      (IxPartial f n k xs, IxPartial g m l ys) | f == g, n == m, k == l, length xs == length ys -> IxPartial f n k <$> zipWithM go xs ys
       _ | x == y -> Just x
       _ -> Nothing
 
@@ -454,6 +465,7 @@ matchIx m p0 t0 s = go (normIx p0) (normIx t0) s
       (IxNat k, IxSucc t') | k > 0 -> go (IxNat (k - 1)) t' acc
       (IxCon c ps, IxCon c' ts) | c == c', length ps == length ts -> foldM (\a (x, y) -> go x y a) acc (zip ps ts)
       (IxFun f ps, IxFun f' ts) | f == f', length ps == length ts -> foldM (\a (x, y) -> go x y a) acc (zip ps ts)
+      (IxPartial f n k ps, IxPartial g o l ts) | f == g, n == o, k == l, length ps == length ts -> foldM (\a (x, y) -> go x y a) acc (zip ps ts)
       _ | p == t -> Just acc
       _ -> Nothing
 
@@ -484,4 +496,5 @@ substScheme (n, m) s = go
       IxSucc x -> IxSucc (ix x)
       IxCon c xs -> IxCon c (map ix xs)
       IxFun f xs -> IxFun f (map ix xs)
+      IxPartial f arity prefix xs -> IxPartial f arity prefix (map ix xs)
       x -> x
