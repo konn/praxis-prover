@@ -449,6 +449,96 @@ clash, once unfolded, is refuted; an appeal proves the equations the
 theorem's hypotheses need of its arguments, as an application of a function
 does its index premises.
 
+### Finite quantifier desugaring
+
+Typed finite quantifiers are surface syntax. `Syntax.Raw.EQuant` is lowered
+in `Elab` before Praxis Core is constructed. Its result contains only ordinary
+numeric `Quant` nodes, function applications and resolved dictionaries;
+neither Praxis Core nor the PRA kernel has a finite-quantifier or builtin-role
+node. Explicit `∀ (x : T), P` uses this rule at every position. The leading
+rank-1 binder `(x : T) -> P` remains the existing theorem value binder.
+
+For the registered `Fin n`, the translation of `Q (i : Fin n), P i` is
+`Q j < n, P (from-nat j)`, where `Q` is either quantifier. The three registered
+bridge theorems certify the bound of `to-nat`, `from-nat (to-nat i) = i`,
+and `to-nat (from-nat j) = j` under `j < n`. The converter's checked output
+contracts provide membership and the required index. This path does not
+need a `Finite (Fin n)` instance.
+
+For a general `Finite T` dictionary, let `c` be its bound,
+`code : T -> Fin c` its coding method and `decode : Fin c -> T` its
+decoding method. Define `d j = decode (from-nat j)`. The translation is
+`Q j < c, P (d j)`. The checked method contracts establish that decoding
+an ordinal produces a value of `T`; the law `decode (code x) = x` establishes
+coverage. The numerical rank of `x` is `to-nat (code x)`. The bridge and
+roundtrip law prove that this rank is below `c` and that decoding it returns
+`x`. These two facts give an equivalence for both quantifiers, not merely
+an implication, so the translation preserves arbitrary propositional
+contexts.
+
+Only `decode (code x) = x` is required. Different ordinals can decode to the
+same element, and `code (decode i) = i` need not hold. Thus `c` is a bound
+on the cardinality, not necessarily the exact cardinality. The primitive
+protocol requires no vector, enumeration object, lookup function or compiler
+inserted search. Those are possible library implementations of the two
+methods, not additional obligations of finite desugaring.
+
+A zero bound selects no decoder application. No total function from `Nat`
+to an empty source type is assumed: the converter's source contract needs
+a proof of the bound, and the numeric quantifier supplies it only for its
+in-range positions. The primitive recursive code may have an irrelevant
+default outside that contract.
+
+Each group of source binders elaborates its type before binding any name
+in that group. Later groups see the preceding source values. Internal index
+identities and capture-safe substitution preserve this distinction when
+names shadow outer values. Numeric bounded annotations are checked as
+`Nat`; a different written type cannot be erased silently.
+
+**Admission and dependencies.** `BUILTIN` pragmas identify existing ordinary
+declarations and are validated against their exact dependent signatures and
+law statements. The elaborator records a provisional registry in source
+order so it can resolve later syntax. The checker activates only the
+registrations whose targets and prerequisites have completed checking,
+including every generated contract and supplied proof. Datatype headers
+may be predeclared for recursive name resolution; this does not count as
+successful datatype admission. Classes also receive a separate admission marker
+only after their laws and prerequisites pass. Explicit class constraints retain
+that dependency even when all dictionary methods are unused or erased.
+
+Finite desugaring writes a separate requirements log. It records the exact
+role-to-declaration bindings, concrete implementation and theorem
+certificates, or the dictionary slots and law/typed-method premises needed
+at a type parameter. Declarations retain this log before expressions and
+proof arguments are erased. Functions retain reusable templates for both
+their signatures and their clauses; applications specialize the templates
+to the selected types and dictionaries. Instance siblings propagate their
+dependencies to a finite fixed point. Repeated requirements are deduplicated,
+so recursion cannot grow the log indefinitely.
+
+Checking a declaration and elaborating late proof syntax use its source
+registry snapshot intersected with the verified registry, matching both
+role and target. The same applies to class-law templates specialized at
+an instance. A later registration cannot authorize earlier source, and a
+failed or circular roundtrip proof cannot authorize even a tautological
+finite proposition. An unrelated certified finite dictionary remains usable
+inside an operation or proof: dependencies are tracked per use, rather than
+disabling finite syntax throughout the implementation of the protocol.
+
+Source quantifier views are also metadata, indexed by declaration and
+binder span with their lexical type and registry scopes. A proof tactic
+must reconstruct the decoder and match the complete lowered bound and body
+before using such a view. An ordinary numeric quantifier is never interpreted
+as finite merely because its body happens to call a registered function.
+Reused theorems specialize these views at their type, value and dictionary
+arguments; each application retains its own source scope. Emitted numeric
+binders are freshened against enclosing binders and free names.
+
+Constructor preconditions retain their separate restriction to equations
+and comparisons. Their permitted terms retain desugaring dependencies,
+but a quantified constructor precondition is rejected because the datatype
+membership encoding does not yet support that form.
+
 ### Type synonyms
 
 A type synonym records an ordered parameter telescope and a checked,
@@ -540,8 +630,10 @@ The proof is three inductions over finite objects.
    one solution.
 2. *Propositions.* `⟦tr A⟧(e∘ρ) ⇔ ⟦A⟧ρ`. By induction on `A`: `≡` and `≠` by
    (I), since `e` is injective at each type; comparisons and bounded
-   quantifiers range over ℕ on both sides; the connectives are the same. It
-   is an equivalence, so it holds under `¬` and `→` at any depth.
+   numeric quantifiers range over ℕ on both sides; typed finite quantifiers
+   use the bounded decoder equivalence established above. The connectives
+   are the same. It is an equivalence, so it holds under `¬` and `→` at any
+   depth.
 3. *The sequent.* The kernel's soundness gives the numeric instance at `e∘ρ`,
    the rule's predicates at those of the types its type parameters stand
    for. Its membership hypotheses hold there by (M), its equations of
@@ -578,7 +670,10 @@ entries. It does not check the fields of a higher-kinded parameter, of
 indices of a later type, so it may be wider than the codes of a type. It
 appears only as a hypothesis on a theorem's values, where a wider predicate
 gives the core statement more instances, not fewer: sound, and incomplete
-where a statement needs the finer typing.
+where a statement needs the finer typing. This one-way membership fact is
+not an exact recognizer of source values and cannot serve by itself as an
+existential guard. Finite quantifiers instead use the checked bounded
+decoder and roundtrip law above.
 
 ### Testing the translation
 
@@ -742,6 +837,16 @@ term metavariables, proved once by the same chain as any function's. An
 appeal, by `exact`, `cong` or `rfl`, instantiates them at the methods of
 instances.
 
+The logical dictionary is recorded separately from this pruned runtime
+dictionary. A finite precondition or erased local proof can require a
+coding method, roundtrip law and membership predicate which the function's code
+never calls. `funProofSlots` and the declaration's evidence premises retain
+these entries without adding unused parameters to a primitive recursive
+schema. Runtime slots keep their numbering as the prefix of the logical
+table. Generated obligations retain the full propositions, including nested
+quantifiers, and their logical context; an equation-only projection is not
+a replacement for these hypotheses.
+
 For adequacy, a function under constraints at a known type denotes the
 function its clauses define with the instances' methods in place of the
 classes'. Premise (U) holds for its core term, an instance of its schema, as
@@ -830,8 +935,10 @@ has premises over variables of their own (see [pra-and-prf.md](pra-and-prf.md)):
 
 In the proof, a law applied at values of the variable is its premise,
 `exact law_1`, and the membership of a method's result the closure premise
-(`Engine.membershipProof`). A law about a method the statement does not use
-is no premise: an appeal could not tell which function it is at. An appeal
+(`Engine.membershipProof`). A law about a method absent from both the statement and its elaboration
+dependencies is no premise. Finite desugaring retains the complete selected
+dictionary for its coverage and typed-method premises, including a coding method
+which does not occur in the translated predicate. An appeal
 at an instance, `plus-zero-twice xs` at `List Nat`, instantiates the
 membership predicate by `List.is`, or by the prelude's `anyIs n = 1` at
 `Nat`, and discharges the premises. It uses the instance's proofs of the
