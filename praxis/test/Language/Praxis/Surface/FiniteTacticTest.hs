@@ -135,6 +135,111 @@ finiteTacticTests =
         , "use : 0 = 0 -> True = True"
         , "use h = by exact all h True"
         ]
+    , succeeds
+        "a finite universal argument determines an implicit ordinal bound"
+        [ "all : ∀ (i : Fin n), i = i"
+        , "all = by intro i; rfl"
+        , "use : (i : Fin n) -> i = i"
+        , "use i = all i"
+        ]
+    , succeeds
+        "a finite universal argument determines its generic dictionary"
+        [ "all : Finite a => ∀ (x : a), x = x"
+        , "all = by intro x; rfl"
+        , "use : (b : Bool) -> b = b"
+        , "use b = all b"
+        ]
+    , succeeds
+        "two finite arguments consistently specialize one generic domain"
+        [ "all : Finite a => ∀ (x y : a), x = x ∧ y = y"
+        , "all = by intro x y; constructor; rfl; rfl"
+        , "use : (b c : Bool) -> b = b ∧ c = c"
+        , "use b c = all b c"
+        ]
+    , succeeds
+        "finite inference preserves explicit proof antecedent routing"
+        [ "all : Finite a => 0 = 0 -> ∀ (x : a), x = x"
+        , "all h = by intro x; rfl"
+        , "use : (b : Bool) -> 0 = 0 -> b = b"
+        , "use b h = all h b"
+        ]
+    , succeeds
+        "grouped finite inference freezes the shared annotation before shadowing"
+        [ "all : ∀ (n i : Fin n), n = n ∧ i = i"
+        , "all = by intro x y; constructor; rfl; rfl"
+        , "use : (x y : Fin n) -> x = x ∧ y = y"
+        , "use x y = all x y"
+        ]
+    , succeeds
+        "later finite arguments infer independent index parameters"
+        [ "all : ∀ (b : Bool) (i : Fin n) (j : Fin m), j = j"
+        , "all = by intro b i j; rfl"
+        , "use : (b : Bool) -> (i : Fin n) -> (j : Fin m) -> j = j"
+        , "use b i j = all b i j"
+        ]
+    , succeeds
+        "a later finite domain can depend on an earlier element"
+        [ "all : ∀ (i : Fin n) (j : Fin (rank i)), j = j"
+        , "all = by intro i j; rfl"
+        , "use : ∀ (i : Fin n) (j : Fin (rank i)), j = j"
+        , "use = by intro i j; exact all i j"
+        ]
+    , succeeds
+        "finite inference distinguishes callee and caller type parameters"
+        [ "all : Finite a => ∀ (x : a), x = x"
+        , "all = by intro x; rfl"
+        , "use : (Finite a, Finite b) => (seed : a) -> (value : b) -> value = value"
+        , "use seed value = all value"
+        ]
+    , succeeds
+        "finite inference distinguishes callee and caller index parameters"
+        [ "all : ∀ (i : Fin n), i = i"
+        , "all = by intro i; rfl"
+        , "use : (seed : Fin n) -> (value : Fin m) -> value = value"
+        , "use seed value = all value"
+        ]
+    , succeeds
+        "finite inference preserves explicit transport to a fixed domain"
+        [ "all : ∀ (i : Fin 1), i = i"
+        , "all = by intro i; rfl"
+        , "use : (i : Fin n) -> n = 1 -> i = i"
+        , "use i h = all i"
+        ]
+    , succeeds
+        "finite inference retains expected types for constructor arguments"
+        [ "all : ∀ (i : Fin 2), i = i"
+        , "all = by intro i; rfl"
+        , "use : FZero {1} = FZero {1}"
+        , "use = all FZero"
+        ]
+    , rejects
+        "an unresolved finite argument cannot be silently discarded"
+        [ "all : ∀ (i : Fin n), i = i"
+        , "all = by intro i; rfl"
+        , "bad : ∀ (i : Fin 1), i = i"
+        , "bad = all True"
+        ]
+    , rejects
+        "finite arguments cannot infer inconsistent ordinal bounds"
+        [ "all : ∀ (i j : Fin n), i = i ∧ j = j"
+        , "all = by intro i j; constructor; rfl; rfl"
+        , "bad : (i : Fin 1) -> (j : Fin 2) -> i = i ∧ j = j"
+        , "bad i j = all i j"
+        ]
+    , rejects
+        "finite inference does not accept an unrelated explicit antecedent"
+        [ "all : Finite a => 0 = 0 -> ∀ (x : a), x = x"
+        , "all h = by intro x; rfl"
+        , "bad : (b : Bool) -> 1 = 1 -> b = b"
+        , "bad b h = all h b"
+        ]
+    , rejects
+        "finite inference leaves numeric universal bound checking intact"
+        [ "all : ∀ (i : Nat) < 2, i = i"
+        , "all = by intro i; rfl"
+        , "bad : 3 = 3"
+        , "bad = all 3"
+        ]
     , testCase "identical spans in imported theorems keep their source scopes" $ do
         library <- either assertFailure pure prelude
         let check build imports file source = checkModule (\_ _ -> []) build imports Nothing file source
@@ -177,3 +282,10 @@ finiteTacticTests =
       library <- either assertFailure pure prelude
       let checked = checkSource library "finite-tactics.px" ("module FiniteQ where\n" <> finitePrelude <> T.unlines declarations)
       [message | Report _ SevError message <- checkedReports checked] @?= ([] :: [Text])
+
+    rejects label declarations = testCase label $ do
+      library <- either assertFailure pure prelude
+      let checked = checkSource library "finite-tactics.px" ("module FiniteQ where\n" <> finitePrelude <> T.unlines declarations)
+      assertBool "the source theorem failed" ("FiniteQ.all" `elem` checkedTheorems checked)
+      assertBool "the invalid application was certified" ("FiniteQ.bad" `notElem` checkedTheorems checked)
+      assertBool "the invalid application had no diagnostic" (any ((== SevError) . reportSeverity) (checkedReports checked))

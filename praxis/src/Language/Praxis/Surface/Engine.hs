@@ -2274,11 +2274,10 @@ evidence k info g le = case spineOf le of
               (defined, pre) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
           premisesAt k g (goalEquations g) pre [v | (i, v) <- zip [0 ..] values, i `notElem` map fst defined] (zip (thmBinders t) args)
     -- What a theorem with value parameters concludes at its arguments: each value parameter the index of an argument, or found from one.
-    statementAt sp t typed sigma = case (sourceStatement, theoremValuesAt t typed sigma) of
+    statementAt sp t typed sigma assigned = case (sourceStatement, theoremValuesAt t typed sigma) of
       (Just sc, Just known) -> do
         let nv = length (thmValues t)
             instantiated = instantiate (\i -> if i < nv then fromCT (known !! i) else fst (typed !! (i - nv))) (fmap absurd sc)
-            assigned = assignment (thmMembered t) (map snd typed)
             count = 1 + maximum (-1 : map slotParam (thmSlots t))
             types = [Map.findWithDefault (TParam i []) i assigned | i <- [0 .. count - 1]]
         if sourceViews
@@ -2314,6 +2313,66 @@ evidence k info g le = case spineOf le of
           bases = Map.fromList [(qvOwner view, lexical view) | view <- quantifierViewsList scoped]
           bindings = goalSourceBindings g
        in (scoped, bindings {sourceApplications = bases <> sourceApplications bindings})
+    -- A finite binder may be the only occurrence determining a theorem's
+    -- type or index parameters. Read its checked source annotation before
+    -- selecting premises; elimination still reconstructs the entire lowered
+    -- quantifier and validates the actual value against that domain.
+    quantifiedAssignments sp t typed initial arguments = case thmStatement t <|> thmProp t of
+      Nothing -> Right (initial, False)
+      Just statement -> do
+        let (antecedents, conclusion) = implications (instantiate (const Hole) (fmap absurd statement))
+            remaining = skipProofs antecedents arguments
+        learned <- infer [] initial conclusion remaining
+        pure (learned, boundedUniversal conclusion && not (null remaining))
+      where
+        skipProofs (_ : rest) (arg : args)
+          | Just name <- proofName arg
+          , Just core <- lookup name (goalNames g)
+          , Just (HProp _) <- lookup core (goalHyps g) =
+              skipProofs rest args
+        skipProofs _ args = args
+        proofName (Located _ (R.EName (QName [] (Ident name)))) = Just name
+        proofName (Located _ (R.EParen inner)) = proofName inner
+        proofName _ = Nothing
+        infer _ known _ [] = Right known
+        infer earlier known proposition (arg : args) = case stripLocations proposition of
+          Quant Forall _ (Just _) Nothing body -> case candidates proposition of
+            [] -> Right known
+            [view] -> do
+              let ordinary = [(name, value) | name <- qvParameters view, Just value <- [lookup (mangleVariable name) (zip (thmBinders t) typed)]]
+                  previous = [(unLocated name, value) | name <- qvDomainBinders view, Just value <- [lookup (location name) earlier]]
+                  original = qvScope view
+                  sourceValues = reverse previous <> ordinary
+                  avoid = schemaAvoid g <> map fst (Types.tsValues original) <> concatMap (foldr (:) [] . fst . snd) sourceValues
+                  fresh i = head [name | name <- iterate (<> "'") ("#finite-inference-" <> T.pack (show i)), name `notElem` avoid]
+                  entries = [(name, (fresh i, value, ty)) | (i, (name, (value, ty))) <- zip [0 :: Int ..] sourceValues]
+                  bindings = [(name, IxVar core) | (name, (core, _, _)) <- entries]
+                  scope = original {Types.tsValues = bindings <> filter ((`notElem` map fst bindings) . fst) (Types.tsValues original), Types.tsValueTys = [(name, ty) | (name, (_, _, ty)) <- entries] <> filter ((`notElem` map fst bindings) . fst) (Types.tsValueTys original)}
+                  env = (knowEnv k) {envScope = scope, envTypeBindings = qvTypeBindings view, envBuiltins = Required.builtinScope (qvBuiltins view) (envBuiltins (knowEnv k))}
+                  context = [(name, (core, ty)) | (name, (core, _, ty)) <- entries]
+                  replacement name = listToMaybe [value | (_, (core, value, _)) <- entries, core == name]
+                  actualIndex index@(IxVar name) = maybe index (either (const index) id . expressionIndex) (replacement name)
+                  actualIndex (IxSucc index) = IxSucc (actualIndex index)
+                  actualIndex (IxCon name indices) = IxCon name (map actualIndex indices)
+                  actualIndex (IxFun name indices) = IxFun name (map actualIndex indices)
+                  actualIndex (IxPartial name arity prefix indices) = IxPartial name arity prefix (map actualIndex indices)
+                  actualIndex index = index
+                  parameters = (length (Types.tsTypes original), length (thmValues t))
+              written <- checkedElaboration k g env (quantifierType env context (qvDomain view))
+              let domain = Types.mapIx actualIndex written
+              ((value, actual), _) <- case typedArg k info g arg of
+                Right checked -> Right checked
+                Left original ->
+                  let expected = instantiateSchemaTypes parameters known domain
+                   in if Types.determined expected then typedFiniteArgument k info g arg expected else Left original
+              let learned = fromMaybe known (Types.matchTy parameters domain actual known)
+              infer ((qvSpan view, (value, domain)) : earlier) learned (instantiate (const Hole) body) args
+            _ -> Left (EngineError sp "a theorem's finite binder has ambiguous source provenance")
+          _ -> Right known
+        candidates proposition = nub [view | at <- locations proposition, view <- quantifierViewCandidates at (thmQuantifierViews t), qvQuantifier view == R.Forall, not (qvNumeric view)]
+        locations (At (Irrelevant at) inside) = at : locations inside
+        locations (Typed _ _ _ inside) = locations inside
+        locations _ = []
     theorem sp t args
       | thmQual t == thmQual info = named <$> recursive sp (implicitsOf le) args
       | otherwise = do
@@ -2324,7 +2383,7 @@ evidence k info g le = case spineOf le of
                 maybe (Left (EngineError sp "a theorem argument does not have its declared type")) Right (Types.matchTy parameters (binders !! position) actual known)
           ordinary <- forM [(position, arg) | (position, arg, ty) <- numbered, null (fst (schemaArrows ty))] \(position, arg) -> (position,) <$> typedArg k info g arg
           partial <- foldM (\known (position, ((_, actual), _)) -> learn known position actual) Types.emptyAssignment ordinary
-          (inferred, callbacks) <-
+          (ordinaryInferred, callbacks) <-
             foldM
               ( \(known, done) (position, arg, ty) -> do
                   checked <- typedArgExpected k info g arg (instantiateSchemaTypes parameters known ty)
@@ -2336,7 +2395,8 @@ evidence k info g le = case spineOf le of
           checked <- forM [0 .. length numbered - 1] \position -> maybe (Left (EngineError sp "an argument was not elaborated")) Right (lookup position (ordinary <> callbacks))
           let typed = map fst checked
               checks = map snd checked
-              assign = assignment (thmMembered t) (map snd typed)
+          (inferred, boundedArguments) <- quantifiedAssignments sp t typed ordinaryInferred (drop (length (thmBinders t)) args)
+          let assign = assignment (thmMembered t) (map snd typed) <> Map.fromList (IM.toList (Types.asTypes inferred))
               membered = \case
                 TData _ _ _ -> True
                 TParam i [] -> membershipSlot i `elem` thmSlots t
@@ -2362,7 +2422,7 @@ evidence k info g le = case spineOf le of
           eq <- case thmStatement t of
             Just sc | any isMembershipSlot (thmSlots t) -> equationOf sp sc (placesAt t assign) typed (length (thmMembered t))
             _ -> Right Nothing
-          statement <- statementAt sp t typed sigma
+          statement <- statementAt sp t typed sigma assign
           let (views, bindings) = theoremSource t typed sigma assign
               conclusion = snd . implications <$> statement
               initial = Evidence (thmCore t) (mconcat (map outTactic checks) <> pre <> idx) (statics <> post) eq (concatMap outAux checks) conclusion (Just bindings) views
@@ -2370,7 +2430,10 @@ evidence k info g le = case spineOf le of
             then do
               arguments <- proofArguments sp (maybe [] (fst . implications) statement) (drop (length (thmBinders t)) args)
               quantifiedEvidence k info g sp initial arguments
-            else Right initial
+            else
+              if boundedArguments
+                then Left (EngineError sp "the bounded theorem's parameters cannot be inferred from its supplied arguments")
+                else Right initial
     -- The place of the goal's dictionary for a method at one of its type parameters.
     goalPlace s = lookup s (zip (goalDict g) (placeRefs (goalDict g)))
     -- The places of a theorem's dictionary at the instances its arguments give: the goal's at its type parameters, the instances' functions at known types.
@@ -2449,7 +2512,9 @@ quantifiedEvidence k info g sp ev (argument : rest) = do
     Quant Forall _ (Just (relation, bound)) _ body -> do
       let limit = case relation of Below -> bound; AtMost -> App (Global (Ref RefBuiltin "S")) bound
           ty = maybe TNat (finiteElementType . viewDomain) source
-      ((value, _), checked) <- typedArgExpected k info local argument ty
+      ((value, _), checked) <- case source of
+        Nothing -> typedArgExpected k info local argument ty
+        Just _ -> typedFiniteArgument k info local argument ty
       (rank, target, result, bridge, ready, roundtrip) <- case source of
         Nothing -> do
           let boundProp = Rel RelLt value limit
@@ -2459,10 +2524,11 @@ quantifiedEvidence k info g sp ev (argument : rest) = do
         Just view -> do
           (rank, decoded, equation, before, extended) <- finiteWitness k info local sp view value
           pure (rank, scopedValue decoded (viewBody view), scopedValue value (viewBody view), before, bindSourceView (viewSource view) value ty extended, Just equation)
-      let factName = freshProofName ready "UniversalFact"
-          targetName = freshProofName ready "UniversalCode"
-          resultName = freshProofName ready "UniversalResultCode"
-          conclusionName = freshProofName ready "UniversalResult"
+      let prefix = head [candidate | candidate <- iterate (<> "x") "Universal", all (not . T.isPrefixOf candidate) (map fst (goalHyps ready) <> sequentVars ready)]
+          factName = prefix <> "Fact"
+          targetName = prefix <> "Code"
+          resultName = prefix <> "ResultCode"
+          conclusionName = prefix <> "Result"
       factText <- liftResult (formula prop)
       rankCode <- liftResult (termCT CVar rank)
       limitCode <- liftResult (termCT CVar limit)
@@ -2473,9 +2539,9 @@ quantifiedEvidence k info g sp ev (argument : rest) = do
             Nothing -> "exact " <> fromText targetName
             Just equality -> "calc (lt 0 " <> resultCode <> ") = (lt 0 " <> targetCode <> ") by cong " <> fromText equality <> " = 1 by exact " <> fromText targetName
           before =
-            outTactic checked
+            evBefore ev
+              <> outTactic checked
               <> outTactic bridge
-              <> evBefore ev
               <> "have "
               <> fromText factName
               <> ": "
@@ -2509,6 +2575,40 @@ quantifiedEvidence k info g sp ev (argument : rest) = do
 
 typedArg :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError ((Expr Text, Ty), Out)
 typedArg k info g e0 = typedArgExpected k info g e0 THole
+
+-- A reusable finite proposition substitutes an implicit bound by the checked
+-- index projection recovering it. The caller may still name that bound by its
+-- original parameter. Compare those two representations only after recovering
+-- both as checked terms and proving any remaining index equalities. The finite
+-- bridge then proves the full value contract.
+typedFiniteArgument :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Ty -> Either EngineError ((Expr Text, Ty), Out)
+typedFiniteArgument k info g argument expected = case typedArgExpected k info g argument expected of
+  Right checked -> Right checked
+  Left original -> do
+    (value@(_, actual), checked) <- typedArg k info g argument
+    case (materialize actual, materialize expected) of
+      (Just left, Just right)
+        | sameShape left right
+        , Just proofs <- traverse (uncurry indexProof) (zip (Types.tyIndices left) (Types.tyIndices right)) ->
+            Right (value, checked {outTactic = outTactic checked <> mconcat proofs})
+      _ -> Left original
+  where
+    env = goalEnv k info g
+    context = goalVars g <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+    sameShape (TData name parameters indices) (TData name' parameters' indices') = name == name' && length indices == length indices' && length parameters == length parameters' && and (zipWith sameShape parameters parameters')
+    sameShape (TParam parameter arguments) (TParam parameter' arguments') = parameter == parameter' && length arguments == length arguments' && and (zipWith sameShape arguments arguments')
+    sameShape (TArrow argument result) (TArrow argument' result') = sameShape argument argument' && sameShape result result'
+    sameShape TNat TNat = True
+    sameShape _ _ = False
+    indexProof left right = do
+      a <- checkedIndexTerm k env context left >>= either (const Nothing) Just . termCT CVar
+      b <- checkedIndexTerm k env context right >>= either (const Nothing) Just . termCT CVar
+      proof <- either (const Nothing) Just (indexEquation k g (goalEquations g) a b)
+      pure ("Cut (" <> equationText a b <> ") { " <> proof <> " } { skip }; ")
+    materialize ty = do
+      indices <- traverse (\index -> checkedIndexTerm k env context index >>= either (const Nothing) (Just . Types.normIx) . expressionIndex) (Types.tyIndices ty)
+      let replacements = zip (Types.tyIndices ty) indices
+      pure (Types.mapIx (\index -> fromMaybe index (lookup index replacements)) ty)
 
 typedArgExpected :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Ty -> Either EngineError ((Expr Text, Ty), Out)
 typedArgExpected k info g e0 expected = do
@@ -2614,11 +2714,22 @@ finiteView k info g expression = case stripLocations expression of
     reconstruct quantifier bound body source = do
       unless (qvQuantifier source == quantifier) $ Left (EngineError (qvSpan source) "the source quantifier kind changed")
       let base = goalEnv k info g
-          env = base {envScope = qvScope source, envTypeBindings = qvTypeBindings source, envBuiltins = Required.builtinScope (qvBuiltins source) (envBuiltins (knowEnv k))}
+          env = base {envScope = qvScope source, envTypeBindings = [(name, sourceType ty) | (name, ty) <- qvTypeBindings source], envBuiltins = Required.builtinScope (qvBuiltins source) (envBuiltins (knowEnv k))}
           prefix = freshProofName g "quantifier_source_"
           baseEntries = [(name, (prefix <> "base_" <> T.pack (show j), value, ty)) | (j, (name, (value, ty))) <- zip [0 :: Int ..] (Map.findWithDefault (sourceBase (goalSourceBindings g)) (qvOwner source) (sourceApplications (goalSourceBindings g)))]
           entries binders = [(unLocated name, (prefix <> "bound_" <> T.pack (show j), value, ty)) | (j, name) <- zip [0 :: Int ..] binders, Just (value, ty) <- [Map.lookup (qvOwner source, location name) (sourceQuantifiers (goalSourceBindings g))]]
-          context binders = reverse [(name, (core, ty)) | (name, (core, _, ty)) <- entries binders] <> [(name, (core, ty)) | (name, (core, _, ty)) <- baseEntries] <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+          -- Earlier source values keep their lexical index identities until
+          -- the whole view is substituted. Inserting caller names here would
+          -- let a later source binder capture them.
+          sourceIndices = [(actual, original) | (name, (_, value, _)) <- baseEntries, Just original <- [lookup name (Types.tsValues (qvScope source))], Right actual <- [expressionIndex value]]
+          sourceIndex index | Just original <- lookup index sourceIndices = original
+          sourceIndex (IxSucc index) = IxSucc (sourceIndex index)
+          sourceIndex (IxCon name indices) = IxCon name (map sourceIndex indices)
+          sourceIndex (IxFun name indices) = IxFun name (map sourceIndex indices)
+          sourceIndex (IxPartial name arity prefixCount indices) = IxPartial name arity prefixCount (map sourceIndex indices)
+          sourceIndex index = index
+          sourceType = Types.mapIx sourceIndex
+          context binders = reverse [(name, (core, sourceType ty)) | (name, (core, _, ty)) <- entries binders] <> [(name, (core, sourceType ty)) | (name, (core, _, ty)) <- baseEntries] <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
           substitutions binders = Map.fromList [(core, value) | (_, (core, value, _)) <- entries binders <> baseEntries]
           replace binders name = Map.findWithDefault (Var name) name (substitutions binders)
           domainContext = context (qvDomainBinders source)

@@ -536,6 +536,13 @@ Reused theorems specialize these views at their type, value and dictionary
 arguments; each application retains its own source scope. Emitted numeric
 binders are freshened against enclosing binders and free names.
 
+Supplied finite arguments can determine a reused theorem's type and index
+parameters even when there are no ordinary value binders. Source annotations
+guide this inference; the checker still reconstructs the complete lowered
+proposition and validates every argument and its finite-domain evidence.
+Inference cannot discard an argument when a bounded conclusion remains
+unresolved. Explicit proof antecedents are matched before finite values.
+
 Constructor preconditions retain their separate restriction to equations
 and comparisons. Their permitted terms retain desugaring dependencies,
 but a quantified constructor precondition is rejected because the datatype

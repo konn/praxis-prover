@@ -76,3 +76,9 @@ first-true = rfl
 
 second-true : decode (F.Fin.FSucc (F.Fin.FSucc (F.Fin.FZero {0}))) = True
 second-true = rfl
+
+use-ordinal-self : (i : F.Fin n) -> i = i
+use-ordinal-self i = ordinal-self i
+
+use-all-self : (b : Bool) -> b = b
+use-all-self b = all-self b

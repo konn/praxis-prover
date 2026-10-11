@@ -697,6 +697,12 @@ under-negation : ¬ (∃ (i : Fin 0), i = i)
 generic : Finite a => ∀ (x : a), x = x
 ```
 
+Applying a finite universal theorem can infer its domain from the supplied
+value. For example, `all-indices i` infers `n` from `i : Fin n`, and
+`generic True` selects the finite instance for the type of `True`. Each
+argument is checked against the instantiated domain; a proved index equality
+can supply the usual transport between indexed types.
+
 Each typed binder needs an explicit first-order type. Later binder groups
 may depend on earlier values, as in `∀ n < 3, ∀ (i : Fin n), P`.
 Names in one group share the type as it was before that group: in

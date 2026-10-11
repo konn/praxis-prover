@@ -143,7 +143,7 @@ buildTests =
           _ -> assertFailure "expected one base-client Main module"
         case examples of
           [example] -> do
-            let required = ["all-self", "ordinal-self", "inhabited", "nested", "empty", "roundtrip-law", "ordinal-instance", "ordinal-result", "first-true", "second-true"]
+            let required = ["all-self", "ordinal-self", "inhabited", "nested", "empty", "roundtrip-law", "ordinal-instance", "ordinal-result", "use-ordinal-self", "use-all-self", "first-true", "second-true"]
             mapM_ (\name -> assertBool (T.unpack name) (("FiniteExamples." <> name) `elem` checkedTheorems example)) required
           _ -> assertFailure "expected the checked finite quantifier examples"
     , testCase "a project: its libraries each after its dependencies, every module certified, imports across libraries and packages, two modules of one name told apart" $ do
