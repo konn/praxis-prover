@@ -3,11 +3,15 @@
 
 Two terms are definitionally equal when they denote the same numeral under every
 assignment of their free variables, /for reasons the evaluator can see/.  The
-check proceeds in two stages:
+check starts with two stages:
 
 1. on-the-nose syntactic equality, which is cheap and settles the common case;
 2. otherwise both sides are partially evaluated ('normalize') and the results
    are compared.
+
+With a checked definition environment, a bounded structural comparison also
+tries unfolding names and compositions before partial evaluation. It can
+recognize shared computations without evaluating their recursive calls.
 
 Partial evaluation runs the ordinary primitive-recursive evaluator
 ('evalPRFCodeM') on 'Term' itself: applications whose recursion argument is not
@@ -45,9 +49,14 @@ module Language.Praxis.PRA.Equality (
 ) where
 
 import Control.Exception (displayException)
+import Control.Monad (zipWithM)
+import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT (..), runExceptT)
 import Control.Monad.Trans.State.Strict (State, evalState, state)
+import Data.Sized qualified as SV
 import Data.Void (absurd)
+import GHC.TypeNats (KnownNat)
+import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as F
 import Language.Praxis.PRA.Syntax
 import Numeric.Natural
@@ -132,11 +141,56 @@ normalizeIn env fuel = flip evalState fuel . runExceptT . go
       xs <- traverse go args
       ExceptT (F.evalFunctionM spend App env f xs)
 
--- | Environment-aware conversion. Only the PRA interpreter is consulted.
+{- | Environment-aware conversion. First compare through definitions,
+composition and projections without evaluating recursive applications. This
+recognizes an alias of an expensive closed expression without computing its
+numeral. Ordinary budgeted normalization remains the fallback.
+-}
 defEqIn :: (Eq a) => F.KernelEnv -> Fuel -> Term a -> Term a -> Either F.KernelError Bool
 defEqIn env fuel s t
   | s == t = Right True
-  | otherwise = (==) <$> normalizeIn env fuel s <*> normalizeIn env fuel t
+  | otherwise = do
+      shared <- flip evalState structuralFuel (runExceptT (structural s t))
+      if shared
+        then True <$ (validate s >> validate t)
+        else (==) <$> normalizeIn env fuel s <*> normalizeIn env fuel t
+  where
+    -- A projection or a constant may discard arguments during this search.
+    -- Such arguments must still have well-formed definition references.
+    validate (App f xs) = F.validateFunction env f >> mapM_ validate xs
+    validate _ = pure ()
+    -- This preliminary search is bounded even when normalization is unlimited.
+    structuralFuel = Limited (case fuel of Limited n -> min 1024 n; Unlimited -> 1024)
+    structural left right
+      | left == right = pure True
+      | otherwise = do
+          available <- lift spend
+          if not available
+            then pure False
+            else case (left, right) of
+              (App (F.Primitive PR.Succ) xs, Lit n)
+                | n > 0 -> structural (SV.head xs) (Lit (n - 1))
+              (Lit n, App (F.Primitive PR.Succ) ys)
+                | n > 0 -> structural (Lit (n - 1)) (SV.head ys)
+              (App f xs, App g ys)
+                | F.SomeFunction f == F.SomeFunction g -> and <$> zipWithM structural (SV.toList xs) (SV.toList ys)
+              _ -> do
+                next <- ExceptT (pure (shallow left))
+                case next of
+                  Just left' -> structural left' right
+                  Nothing -> do
+                    other <- ExceptT (pure (shallow right))
+                    maybe (pure False) (structural left) other
+    shallow (App f xs) = unfoldProgram (F.functionProgram f) xs
+    shallow _ = pure Nothing
+    unfoldProgram :: (KnownNat n) => F.Program n -> PR.V n (Term a) -> Either F.KernelError (Maybe (Term a))
+    unfoldProgram program args = case program of
+      F.Call ident -> Just . (\body -> App (F.programFunction body) args) <$> F.lookupDefinition env ident
+      F.Comp f gs -> pure (Just (App (F.programFunction f) (fmap (\g -> App (F.programFunction g) args) gs)))
+      F.Base (PR.Comp f gs) -> pure (Just (App (F.Primitive f) (fmap (\g -> App (F.Primitive g) args) gs)))
+      F.Base (PR.Proj i) -> pure (Just (SV.sIndex i args))
+      F.Base PR.Zero -> pure (Just (Lit 0))
+      _ -> pure Nothing
 
 {- | Decides definitional equality of two terms under the 'defaultFuel'.
 

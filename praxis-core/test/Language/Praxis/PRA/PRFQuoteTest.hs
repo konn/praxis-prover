@@ -210,6 +210,33 @@ prfQuoteTests =
         inferConclusionIn env productExample @?= Right (mempty :|- (App PR.mul (Lit 3 SV.:< Lit 4 SV.:< SV.Nil) === Lit 12) :: Sequent String)
         inferConclusionIn env (additionZero :: Proof String) @?= Right (mempty :|- (App PR.add (Var "n" SV.:< Lit 0 SV.:< SV.Nil) === Var "n"))
         assertBool "the default checker cannot resolve named arithmetic" (isLeft (inferConclusion (productExample :: Proof String)))
+    , testCase "conversion recognizes aliases without evaluating large closed numerals" $ do
+        env <- expectRight (Sig.signatureKernelEnv imported)
+        let alias = App cube (Lit 1_000_000 SV.:< SV.Nil) :: Term String
+            body = App PR.pow (Lit 1_000_000 SV.:< Lit 3 SV.:< SV.Nil)
+            different = App PR.pow (Lit 999_999 SV.:< Lit 3 SV.:< SV.Nil)
+        defEqIn env (Limited 32) alias body @?= Right True
+        defEqIn env (Limited 32) body alias @?= Right True
+        defEqIn env (Limited 32) alias different @?= Right False
+        defEqIn env (Limited 0) alias body @?= Right False
+    , testCase "structural conversion still checks definition identities and arities" $ do
+        original <- expectRight (Sig.signatureKernelEnv imported)
+        let discard = F.DefId "discard" :: F.DefId 1
+        env <- expectRight (F.extendKernelEnv original [F.Definition discard (F.Base PR.Zero)])
+        let body = App PR.pow (Lit 1_000_000 SV.:< Lit 3 SV.:< SV.Nil) :: Term String
+            missing = App (F.Defined (F.DefId "missing")) SV.Nil :: Term String
+        defEqIn env (Limited 32) missing body @?= Left (F.UnknownDefinition "missing")
+        defEqIn env (Limited 32) (App (F.Defined discard) (missing SV.:< SV.Nil)) (Lit 0)
+          @?= Left (F.UnknownDefinition "missing")
+        let inline = App (F.Inline (F.Comp (F.Base PR.Zero) (F.Call (F.DefId "missing") SV.:< SV.Nil))) SV.Nil :: Term String
+        defEqIn env (Limited 32) inline (Lit 0) @?= Left (F.UnknownDefinition "missing")
+        case cube of
+          F.Defined (F.DefId name) -> do
+            let wrongArity = App (F.Defined (F.DefId name)) SV.Nil
+                opaque = App (F.Abstract (F.DefId name)) (Lit 1_000_000 SV.:< SV.Nil)
+            defEqIn env (Limited 32) wrongArity body @?= Left (F.DefinitionArityMismatch name 0 1)
+            defEqIn env (Limited 32) opaque body @?= Right False
+          _ -> assertFailure "cube should be a named definition"
     , testCase "distinct identities are not equal merely because their bodies agree" $ do
         let a = App (F.Defined (F.DefId "one" :: F.DefId 0)) SV.Nil :: Term String
             b = App (F.Defined (F.DefId "two" :: F.DefId 0)) SV.Nil :: Term String
