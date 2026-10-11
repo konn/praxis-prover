@@ -1,18 +1,26 @@
-# Elaboration: from the surface language to the kernel
+# Elaboration: from Praxis Surface through Praxis Core to Copra
 
 This document explains how a module of the surface language
-([surface.md](surface.md)) becomes definitions and certified theorems of the
-core ([kernel.md](kernel.md), [pra-and-prf.md](pra-and-prf.md)), why a
+([surface.md](surface.md)) elaborates into Praxis Core and becomes Copra
+definitions and certified theorems
+([kernel.md](kernel.md), [pra-and-prf.md](pra-and-prf.md)), why a
 certified theorem means what the user wrote, and the invariants that keep
 the translation sound and fast. The code is in
 `praxis/src/Language/Praxis/Surface/`.
 
+Praxis Core is the explicit typed intermediate language. Copra is the
+internal codename for the subsequent PRA kernel language, implemented in
+`praxis-copra`; the user-facing system remains Praxis. The pipeline is
+Praxis Surface → Praxis Core → Copra → PRA kernel checking. Below, arithmetic
+terms, statements and tactics described as "core" belong to Copra; references
+to Praxis Core and `Surface.Core` mean the typed intermediate language.
+
 ## The trust architecture
 
-The surface layer produces proofs and statements. It emits text in the concrete
-syntax of praxis-core — `prf` equations for definitions and `pra`
-declarations for lemmas and theorems — and hands it to the core's own parsers
-and checker:
+The surface layer produces proofs and statements through the explicit Praxis
+Core boundary. Its generators emit Copra text — `prf` equations for definitions
+and `pra` declarations for lemmas and theorems — which is parsed into the
+structured admission APIs of `praxis-copra` and checked:
 
 - definitions go through `PrimitiveRecursion.Environment.compileDefinitions`
   and `extendEnvironment`, which elaborate them to kernel programs and
@@ -49,14 +57,14 @@ fixities and the resolution of names give a statement the meaning its author
 intended. Every proof assistant shares this last step; `praxis check
 --dump-pra` prints each core statement that was certified, for inspection.
 
-## Names in the core
+## Names in Copra
 
-The surface names things the core syntax cannot spell (`Data.List.(<>)`,
-`append-nil`), and the core parser reads a name the signature defines as that
+The surface names things the Copra syntax cannot spell (`Data.List.(<>)`,
+`append-nil`), and the Copra parser reads a name the signature defines as that
 symbol before any variable. `Mangle` therefore maps every surface name into a
 namespace of its own: globals to `u_…`, variables to `v_…`, with an injective
 escape (`_s` separates segments, `_d` is a dash, `_x<hex>_` any other
-character). Nothing in praxis-core or the prelude starts with `u_` or `v_`, so
+character). Nothing in praxis-copra or the prelude starts with `u_` or `v_`, so
 a surface variable called `at` or `add` is never taken for a symbol.
 `demangle` turns core messages back into surface names.
 
@@ -102,7 +110,7 @@ rule histAt (k h : var) (t j : term) (Γ : ctx) (f(k, h) : term)
 ```
 
 `Surface.Prelude` embeds both files and certifies them at run time, over the
-library of praxis-core.
+library of praxis-copra.
 
 ## Data types
 

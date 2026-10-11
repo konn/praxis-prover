@@ -65,7 +65,7 @@ library
     lsp,
     lsp-types,
     praxis,
-    praxis-core,
+    praxis-copra,
     text,
 
 executable praxis-lsp

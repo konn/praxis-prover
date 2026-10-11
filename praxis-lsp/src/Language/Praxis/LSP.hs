@@ -16,7 +16,7 @@ variable or a keyword of the tactic language, and a definition to go to,
 in the document or in a module it imports.
 
 A @.pra@ document is read over the 'builtin' signature, with the lemmas of the
-library of praxis-core, "Language.Praxis.PRA.Library", and the unfolding
+library of praxis-copra, "Language.Praxis.PRA.Library", and the unfolding
 lemmas of 'builtin' in scope and each declaration a lemma for those after it,
 as the quasiquoter reads it with those lemmas in scope; every declaration is checked, and a failure is a
 diagnostic at the tactic which failed, a @sorry@

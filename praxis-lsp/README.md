@@ -20,7 +20,7 @@ is a word only in tactic position — and a definition to go to, in the
 document or in the module it imports.
 
 A `.pra` document is read over the `builtin` signature, with the lemmas of the
-library of praxis-core, `src-pra/lemmas.pra`, and the unfolding
+library of praxis-copra, `src-pra/lemmas.pra`, and the unfolding
 lemmas of `builtin` in scope and each declaration a lemma for those after it,
 as the quasiquoter reads it. Every declaration is checked as it is edited: a
 tactic which fails is an error at its position,

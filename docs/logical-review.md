@@ -33,7 +33,7 @@ Thus an appeal could combine the old function inside a lambda with its new
 instance outside it. That is not a legitimate substitution instance of the
 proved sequent.
 
-The complete [regression](../praxis-core/test/data/schematic-contradiction.pra)
+The complete [regression](../praxis-copra/test/data/schematic-contradiction.pra)
 first proves the valid schematic equation
 
 ```text
@@ -302,11 +302,11 @@ and the index constraint with a concrete solution.
 
 Executed validation after the repairs:
 
-- `cabal test praxis-core --offline`: 389 tests and 38 doctest examples pass.
+- `cabal test praxis-copra --offline`: 389 tests and 38 doctest examples pass.
 - `cabal test praxis --offline`: 67 tests pass.
 - `cabal test praxis-lsp --offline`: 19 tests pass.
 - `cabal build all --offline`: passes.
-- `cabal check` in `praxis-core`: exits successfully, with existing package
+- `cabal check` in `praxis-copra`: exits successfully, with existing package
   metadata and version-bound warnings.
 - Fourmolu and Cabal Gild checks pass for the changed source and package file.
 

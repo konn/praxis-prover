@@ -190,7 +190,7 @@ same name.
 
 Two libraries may expose modules of one name, and both may be in scope:
 their globals are distinct, by the library heading their canonical names
-(§ Names), down to the core, where `u_lists_sData_sList_sList_sis` and
+(§ Names), down to Copra, where `u_lists_sData_sList_sList_sis` and
 `u_other_sData_sList_sList_sis` are two predicates.
 
 ### Order
@@ -198,7 +198,7 @@ their globals are distinct, by the library heading their canonical names
 A project is checked library by library, each after those it depends on,
 and within a library module by module, each after those it imports. Modules
 importing one another, directly or through others, are refused, at their
-imports. The whole project is checked against one core: each module's
+imports. The whole project is checked against one Copra environment: each module's
 definitions and certified lemmas extend it for the modules after, and a
 module names another's only through its imports.
 
@@ -224,7 +224,7 @@ An unqualified name is resolved, in order, as
 4. otherwise as written: a constructor found by the type expected of it,
    among the constructors of the data types of the file and of the modules
    imported, or the only one of that name among them; a builtin, `S`,
-   `absurd`; a lemma of the core's library, by its name; a hypothesis; a
+   `absurd`; a lemma of Copra's library, by its name; a hypothesis; a
    type variable in a signature; or nothing, which elaboration reports.
 
 A qualified name is resolved through its first segments: a namespace in
@@ -262,4 +262,4 @@ three directives, library-qualified imports, the build in dependency and
 import order, `praxis check` over projects, and the language server within
 packages. Planned: executables, tests and benchmarks as components; a
 repository of packages, with a solver; hidden modules; parameterised
-modules; and imports of the core's `.pra` and `.prf` files as modules.
+modules; and imports of Copra's `.pra` and `.prf` files as modules.

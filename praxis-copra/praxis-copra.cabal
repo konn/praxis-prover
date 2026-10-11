@@ -1,7 +1,7 @@
 cabal-version: 3.4
-name: praxis-core
+name: praxis-copra
 version: 0.1.0.0
-description: Please see the README on GitHub at <https://github.com/konn/praxis/praxis-core#readme>
+description: Please see the README on GitHub at <https://github.com/konn/praxis/tree/main/praxis-copra#readme>
 homepage: https://github.com/konn/praxis#readme
 bug-reports: https://github.com/konn/praxis/issues
 author: Hiromi ISHII
@@ -25,11 +25,11 @@ extra-source-files:
 source-repository head
   type: git
   location: https://github.com/konn/praxis
-  subdir: praxis-core
+  subdir: praxis-copra
 
 common defaults
-  autogen-modules: Paths_praxis_core
-  other-modules: Paths_praxis_core
+  autogen-modules: Paths_praxis_copra
+  other-modules: Paths_praxis_copra
   ghc-options:
     -Wall
     -Wcompat
@@ -128,7 +128,7 @@ library
     Language.Praxis.PRA.Proof.Internal
     Language.Praxis.TH.Internal
 
-executable praxis-core
+executable praxis-copra
   import: defaults
   hs-source-dirs: app
   main-is: Main.hs
@@ -139,9 +139,9 @@ executable praxis-core
     -rtsopts
     -with-rtsopts=-N
 
-  build-depends: praxis-core
+  build-depends: praxis-copra
 
-test-suite praxis-core-test
+test-suite praxis-copra-test
   import: defaults
   type: exitcode-stdio-1.0
   main-is: Test.hs
@@ -176,7 +176,7 @@ test-suite praxis-core-test
     ghc-typelits-knownnat,
     hashable,
     lens,
-    praxis-core,
+    praxis-copra,
     recursion-schemes,
     sized,
     tasty,
@@ -185,7 +185,7 @@ test-suite praxis-core-test
     text,
     type-natural,
 
-test-suite praxis-core-doctest
+test-suite praxis-copra-doctest
   import: defaults
   type: exitcode-stdio-1.0
   hs-source-dirs: doctest
@@ -198,4 +198,4 @@ test-suite praxis-core-doctest
 
   build-depends:
     doctest-parallel,
-    praxis-core,
+    praxis-copra,

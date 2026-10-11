@@ -1,5 +1,5 @@
 -- Generic lemmas about the prelude, certified at run time over the library of
--- praxis-core by Language.Praxis.Surface.Prelude.
+-- praxis-copra by Language.Praxis.Surface.Prelude.
 
 theorem hdCons : |- hd (cons a b) = a
 by calc hd (cons a b) = godelPi1 (pair a b) = a by exact pi1Pair

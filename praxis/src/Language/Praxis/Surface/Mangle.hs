@@ -9,7 +9,7 @@ reads a name the signature has as that symbol before any variable, so a
 surface variable called @at@ or @add@ would be taken for the prelude's or the
 builtin's.  Every name the surface hands to the core is therefore mangled
 into a namespace of its own: symbols and lemmas start with @u_@, variables
-with @v_@, and nothing of praxis-core or of the prelude does.
+with @v_@, and nothing of praxis-copra or of the prelude does.
 
 Within a name, letters and digits stand for themselves and every other
 character is an escape starting with an underscore: @_s@ separates the

@@ -4,7 +4,10 @@
 
 Keep the PRA calculus unchanged. Elaborate the existing surface fragment into
 Praxis Core, an explicit typed intermediate language with dictionary arguments
-and evidence; lower it to primitive-recursive definitions and checked PRA derivations.
+and evidence; lower it to Copra, the internal PRA kernel language of
+primitive-recursive definitions and checked PRA derivations in `praxis-copra`.
+Praxis Core remains the name of the typed intermediate language; Copra names
+the arithmetic layer that follows it.
 Ordinary data declarations and indexed declarations use the same constructor
 signature. Recovering an erased proof field means applying a certified
 membership elimination lemma, never extracting a derivation from a number.
@@ -132,7 +135,7 @@ statements; they are not a formal adequacy proof of the whole source language.
   and containers, rebuilding from a theorem application, impossible branches,
   invalid evidence, mixed GADT recursion, implicit pattern and proof inference,
   independent replay of a GADT projection proof, and readable core dumps.
-- `cabal test praxis-core`: 401 tests and 38 doctests passed.
+- `cabal test praxis-copra`: 401 tests and 38 doctests passed.
 - `cabal test praxis-lsp`: 25 tests passed.
 - HLS: both the explicit core and downstream LSP module checked successfully.
 - Fourmolu checks pass; `cabal-gild` refreshed the module lists.

@@ -1,7 +1,9 @@
-# The PRA kernel language: `prf` definitions and `pra` proofs
+# Copra: the PRA kernel language of `prf` definitions and `pra` proofs
 
-praxis-core has two concrete languages over the kernel of
-[kernel.md](kernel.md): `prf`, in which primitive recursive functions are
+Copra is the internal codename for the PRA kernel language, implemented in
+`praxis-copra`. It is separate from Praxis Core, the typed intermediate
+language in the user-facing Praxis system. Its two concrete frontends sit
+over the kernel of [kernel.md](kernel.md): `prf`, in which primitive recursive functions are
 *defined* by equations, and `pra`, in which theorems and derived rules are
 *stated* as sequents and *proved* by a small tactic language. `prf` produces
 kernel definitions, which the kernel environment checks for references,
@@ -9,6 +11,9 @@ arities and acyclicity. Primitive `pra` proof steps are kernel-checked;
 appeals to previously certified lemmas rely additionally on the declaration
 certifier's substitution and side-condition checks, as described in
 [kernel.md](kernel.md).
+
+The source extensions remain `.prf` and `.pra`, and the Haskell modules remain
+under `Language.Praxis.PRA`.
 
 ## `prf`: functions by equations
 

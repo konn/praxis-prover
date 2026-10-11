@@ -1,4 +1,12 @@
-# praxis-core
+# praxis-copra
+
+Copra is the internal codename for Praxis's PRA kernel language: `prf`
+primitive-recursive definitions and `pra` arithmetic proofs. This package
+provides both frontends, their quasiquoters, and the trusted PRA kernel.
+The user-facing system is Praxis; Praxis Core is its separate typed
+intermediate language, which lowers to Copra before PRA kernel checking.
+Copra keeps the `.prf` and `.pra` file extensions and the
+`Language.Praxis.PRA` Haskell namespace.
 
 ## Defining primitive-recursive functions
 
@@ -276,7 +284,7 @@ quantifiers it was written with. `reflect` turns the truth of a code,
 `0 < ⟦A⟧` or `⟦A⟧ = 1`, into `A`, on the goal or on a hypothesis,
 `reflect H as K`, and `reify` does the converse.
 
-The library of praxis-core, `src-pra/lemmas.pra`, proves the order and
+The library of praxis-copra, `src-pra/lemmas.pra`, proves the order and
 arithmetic lemmas such proofs need, the reflection lemmas `reflect` and
 `reify` appeal to, the introduction and use of the quantifiers, `belowIntro`,
 `belowUse` and `existsUse`, the properties of the bounded search, `muLe`,

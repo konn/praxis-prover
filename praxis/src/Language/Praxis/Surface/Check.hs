@@ -24,7 +24,7 @@ before, which is sound, a lemma being a lemma.
 The core is the only judge.  The driver never builds a proof term of its
 own; it reads the core's verdict on the text it generated, which it keeps,
 so that what was certified can be inspected, and checked again, with the
-tools of praxis-core.
+tools of praxis-copra.
 -}
 module Language.Praxis.Surface.Check (
   -- * Reports

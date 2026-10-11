@@ -1,4 +1,4 @@
-# Changelog for `praxis-core`
+# Changelog for `praxis-copra`
 
 All notable changes to this project will be documented in this file.
 
@@ -185,6 +185,10 @@ and this project adheres to the
 
 ### Changed
 
+- Renamed the kernel package and executable to `praxis-copra`. Copra is the
+  internal codename for the PRA kernel language; the user-facing Praxis name,
+  separate Praxis Core intermediate language, `.pra` and `.prf` syntax, and
+  `Language.Praxis.PRA` modules retain their names.
 - Errors are dedicated types rather than `String`s, each rendered for a human
   by `displayException`: `KernelError` in
   `Language.Praxis.PRA.PrimitiveRecursion.Function`, `ElaborationError` and

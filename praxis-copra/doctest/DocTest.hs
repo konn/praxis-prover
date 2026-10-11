@@ -4,4 +4,4 @@ import System.Environment (getArgs)
 import Test.DocTest (mainFromCabal)
 
 main :: IO ()
-main = mainFromCabal "praxis-core" =<< getArgs
+main = mainFromCabal "praxis-copra" =<< getArgs

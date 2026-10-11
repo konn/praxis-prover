@@ -2,13 +2,13 @@
 
 ## Project Structure & Module Organization
 
-Praxis is a Cabal multi-package Haskell project. `praxis-core/` contains primitive-recursive arithmetic syntax, proofs, and utilities under `src/Language/Praxis/PRA/` and `src/Data/`. The higher-level `praxis/` package is the user-facing layer. Each package keeps executables in `app/` and tests in `test/`; `praxis-core/doctest/` runs documentation examples. Shared build configuration lives in `cabal.project`, while CI support is under `.github/workflows/` and `ci/scripts/`. Do not commit generated `dist-newstyle/` content.
+Praxis is a Cabal multi-package Haskell project. `praxis-copra/` contains primitive-recursive arithmetic syntax, proofs, and utilities under `src/Language/Praxis/PRA/` and `src/Data/`. The higher-level `praxis/` package is the user-facing layer. Each package keeps executables in `app/` and tests in `test/`; `praxis-copra/doctest/` runs documentation examples. Shared build configuration lives in `cabal.project`, while CI support is under `.github/workflows/` and `ci/scripts/`. Do not commit generated `dist-newstyle/` content.
 
 ## Build, Test, and Development Commands
 
-- `cabal build praxis-core` and `cabal build praxis` build each package.
-- `cabal test praxis-core` and `cabal test praxis` run package tests, including core doctests.
-- `cabal run praxis` or `cabal run praxis-core` launches an executable.
+- `cabal build praxis-copra` and `cabal build praxis` build each package.
+- `cabal test praxis-copra` and `cabal test praxis` run package tests, including core doctests.
+- `cabal run praxis` or `cabal run praxis-copra` launches an executable.
 - `fourmolu --mode inplace <file.hs>` formats changed Haskell files using `fourmolu.yaml`.
 - `bash ci/scripts/cabal-check-packages.sh` performs the package checks used by CI.
 

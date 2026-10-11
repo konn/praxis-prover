@@ -1,5 +1,5 @@
 -- Examples of the bounded quantifiers and of reflection, over the library of
--- praxis-core, src-pra/lemmas.pra, whose lemmas are in scope: the tests
+-- praxis-copra, src-pra/lemmas.pra, whose lemmas are in scope: the tests
 -- certify them.
 
 -- ∀ i < t. A is holdsBelow at the code of A, so belowIntro proves it.

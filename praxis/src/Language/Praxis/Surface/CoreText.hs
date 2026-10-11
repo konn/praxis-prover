@@ -5,13 +5,13 @@ The text of core terms and formulas, as the generated definitions and proofs
 spell them.
 
 The surface language hands the core its definitions and proofs as text in
-the concrete syntax of praxis-core — the @prf@ equations and the @pra@
+the concrete syntax of praxis-copra — the @prf@ equations and the @pra@
 declarations — and lets the core's own parsers read them.  Every name in
 that text is a symbol of the signature or a mangled surface name
 ("Language.Praxis.Surface.Mangle"), and every application is parenthesised,
 so the text means exactly the term it was built from whatever the fixities
 of the core.  The same text can be printed for inspection and checked again
-by the tools of praxis-core.
+by the tools of praxis-copra.
 
 The text is written with the builders of "Data.Text.Builder.Linear", and
 run once where a piece of it is finished — a declaration, or the text of a

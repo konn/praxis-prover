@@ -3,10 +3,12 @@
 The surface language is what a user of praxis writes: modules of data types,
 functions defined by pattern matching, and theorems proved by clauses, by
 calculations or by tactics, in a syntax close to Agda and Haskell. It lives in
-the `praxis` package. Every definition becomes a primitive recursive
-definition of the core, and every proof a declaration of
-the core's `pra` language, checked by its declaration certifier. That the
-core statement preserves the surface statement's meaning is a separate
+the `praxis` package. It elaborates into Praxis Core, the explicit typed
+intermediate language, then lowers to Copra, the internal PRA kernel language
+in `praxis-copra`. Every definition becomes a primitive recursive `prf`
+definition, and every proof a `pra` declaration checked by its declaration
+certifier and the PRA kernel. That the resulting arithmetic statement
+preserves the surface statement's meaning is a separate
 adequacy obligation — see [elaboration.md](elaboration.md) for how, and
 [kernel.md](kernel.md) for what
 the kernel checks.
@@ -44,14 +46,14 @@ append-nil-tactically {a} xs = by
 source ──Lexer/Parser──▶ raw syntax (named, operators unassociated)
        ──Fixity─────────▶ operators associated by the module's fixities, and the imports'
        ──Rename─────────▶ scope resolved: imports, openings, nested modules, privacy; every global by its canonical name
-       ──Elab───────────▶ resolved syntax (bound scopes), types checked, items
-       ──Encode/Compile─▶ prf equations + generated lemmas (core text)
-       ──Engine─────────▶ theorem proofs as pra declarations (core text)
-       ──Check──────────▶ the core compiles and certifies, in order
+       ──Elab───────────▶ resolved syntax and Praxis Core (explicit typed intermediate language)
+       ──Encode/Compile─▶ prf equations + generated lemmas (Copra)
+       ──Engine─────────▶ theorem proofs as pra declarations (Copra)
+       ──Check──────────▶ Copra definitions and proofs certified by the PRA kernel, in order
 ```
 
 Each stage is a module of `Language.Praxis.Surface`: `Lexer`, `Parser` and
-`Syntax.Raw`; `Fixity`; `Rename`, the scope checker; `Syntax`, `Types`, `Env` and `Elab`; `Encode`,
+`Syntax.Raw`; `Fixity`; `Rename`, the scope checker; `Syntax`, `Types`, `Env`, `Elab` and `Core`; `Encode`,
 `Compile`, `CoreText` and `Mangle`; `Engine`; `Check`, the driver, with
 `Prelude`, the definitions and lemmas every module is compiled against.
 
@@ -874,7 +876,7 @@ lt-of-plt ZeroSucc = rfl
 lt-of-plt (SuccSucc p) = lt-of-plt p
 ```
 
-A lemma of the library praxis-core certifies, or of the prelude, is cited by
+A lemma of the library praxis-copra certifies, or of the prelude, is cited by
 its name, applied to hypotheses, which it takes in order: `ltTrans nltm mltk`
 proves `n < k` from `nltm : n < m` and `mltk : m < k`. A name of the module
 comes first.

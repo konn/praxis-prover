@@ -5,13 +5,13 @@ The prelude of the surface language: what every module is compiled and
 checked against.
 
 Its definitions, @src-pra/prelude.prf@, extend the signature 'builtin' of
-praxis-core with the projections @hd@ and @tl@, which stop at once on a code
+praxis-copra with the projections @hd@ and @tl@, which stop at once on a code
 that is not a successor, the history @hist@ of a function and
 course-of-values recursion @cvrec@: a structurally recursive function of the
 surface language is an instance of @cvrec@, its recursive calls looked up in
 the history.  Its lemmas, @src-pra/prelude.pra@, state what the proofs the
 surface language generates appeal to, @histAt@ first of all; they are
-certified here, with the library of praxis-core and the unfolding lemmas of
+certified here, with the library of praxis-copra and the unfolding lemmas of
 the definitions in scope, when the prelude is first needed.
 -}
 module Language.Praxis.Surface.Prelude (
@@ -74,7 +74,7 @@ data Prelude = Prelude
   , preludeSignature :: !Signature
   , preludeEnv :: !Env
   , preludeCertificates :: !(Map String Certificate)
-  {- ^ the lemmas of praxis-core's library, the unfolding lemmas of the
+  {- ^ the lemmas of praxis-copra's library, the unfolding lemmas of the
   definitions, and the prelude's own lemmas, each certified
   -}
   }

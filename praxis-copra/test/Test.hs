@@ -33,7 +33,7 @@ main :: IO ()
 main =
   defaultMain $
     testGroup
-      "praxis-core"
+      "praxis-copra"
       [ replayTests
       , certificateTests
       , prfQuoteTests
