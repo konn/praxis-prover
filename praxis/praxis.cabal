@@ -145,6 +145,8 @@ test-suite praxis-test
     Language.Praxis.Surface.EvidenceTest
     Language.Praxis.Surface.FiniteElaborationTest
     Language.Praxis.Surface.FiniteFixtures
+    Language.Praxis.Surface.FiniteQuantifierTest
+    Language.Praxis.Surface.FiniteTacticTest
     Language.Praxis.Surface.IndexedInstanceTest
     Language.Praxis.Surface.MethodContractTest
     Language.Praxis.Surface.ParserTest

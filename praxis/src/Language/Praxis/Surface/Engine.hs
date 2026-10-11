@@ -32,6 +32,8 @@ proof terms (@by IH@: @exact@, or else congruence), @assumption@ and
 module Language.Praxis.Surface.Engine (
   -- * Goals
   Goal (..),
+  SourceBindings,
+  initialSourceBindings,
   GoalPremise (..),
   Hyp (..),
   renderGoal,
@@ -66,7 +68,8 @@ module Language.Praxis.Surface.Engine (
   indexSpec,
 ) where
 
-import Bound (abstract, instantiate, toScope)
+import Bound (Var (..), abstract, instantiate, toScope)
+import Bound qualified
 import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM, forM_, guard, join, unless, zipWithM)
 import Data.Char (isAlphaNum)
@@ -82,15 +85,18 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, fromUnboundedDec, runBuilder)
 import Data.Void (absurd)
+import Language.Praxis.Surface.Builtin (BuiltinRole (..), builtinRoleName)
 import Language.Praxis.Surface.Compile (functionLemma, ownDictionary, ruleBinders)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), atPositions, ctorLemma, dataLemma)
 import Language.Praxis.Surface.Env
+import Language.Praxis.Surface.Evidence qualified as Required
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Match
 import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
+import Language.Praxis.Surface.SourceView
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
@@ -125,6 +131,9 @@ data Goal = Goal
   -}
   , goalPremises :: ![GoalPremise]
   -- ^ the premises of that rule, which the goal's proof may appeal to
+  , goalSourceBindings :: !SourceBindings
+  , goalQuantifierViews :: !QuantifierViews
+  -- ^ Source provenance, used only after reconstructing the current quantifier.
   }
 
 {- |
@@ -316,7 +325,7 @@ statementGoal membership td = do
   (prop, _) <- Term.prepareProposition (statementInstance td)
   let (antecedents, conclusion) = implications prop
   premises <- renderPremises True predicate binderCores (either (const (CVar "?")) id . termCT CVar . valueTerm) (tdPremises td)
-  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> indexHyps <> map HProp antecedents)] conclusion vars hypNames [] (tdSlots td) premises)
+  pure (Goal [(hname i, h) | (i, h) <- zip [1 ..] (members <> indexHyps <> map HProp antecedents)] conclusion vars hypNames [] (tdSlots td) premises (initialSourceBindings vars) (thmQuantifierViews (tdInfo td)))
   where
     binderCores = [mangleVariable n | (n, _) <- tdBinders td]
     valueCores = [mangleVariable n | (n, _) <- tdValues td]
@@ -820,7 +829,7 @@ specGoal k fd spec = do
       applied = functionApplication fd
       hyps = [HMember p v | (v, Just p) <- zip cores (map predicate (fdArgs fd))] <> map HProp (specPre spec cores)
   premises <- either (Left . EngineError (fdSpan fd)) Right (renderPremises True predicate cores (functionValueTerm k fd) (specPremises spec (knowEnv k) dict <> functionSchemaPremises fd))
-  pure (Goal (zip (map hname [1 ..]) hyps) (specPost spec cores applied) (zip names (zip cores (fdArgs fd))) [] [] dict premises)
+  pure (Goal (zip (map hname [1 ..]) hyps) (specPost spec cores applied) (zip names (zip cores (fdArgs fd))) [] [] dict premises (initialSourceBindings (zip names (zip cores (fdArgs fd)))) (funQuantifierViews (fdInfo fd)))
 
 {- |
 A specification proved by the skeleton every lemma of a function shares: by
@@ -1737,7 +1746,7 @@ nameByClause td pc g0 =
 -- | A proposition's implications, as hypotheses and a conclusion.
 implications :: Expr a -> ([Expr a], Expr a)
 implications = \case
-  At _ e -> implications e
+  At sp e -> let (hs, c) = implications e in (hs, At sp c)
   Arrow a b -> let (hs, c) = implications b in (a : hs, c)
   e -> ([], e)
 
@@ -1825,10 +1834,13 @@ data Evidence = Evidence
   -- ^ auxiliary declarations used by proofs supplied as term arguments
   , evConclusion :: !(Maybe (Expr Text))
   -- ^ what a lemma concludes at its arguments, where its value parameters are known there
+  , evSourceBindings :: !(Maybe SourceBindings)
+  , evQuantifierViews :: !QuantifierViews
+  -- ^ The conclusion's declaration-scoped source provenance.
   }
 
 named :: Text -> Evidence
-named n = Evidence n "" "" Nothing [] Nothing
+named n = Evidence n "" "" Nothing [] Nothing Nothing mempty
 
 -- | Keep auxiliary declarations when an appeal becomes a proof.
 evidenceOut :: Evidence -> Builder -> Out
@@ -1992,9 +2004,15 @@ evidence :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineE
 evidence k info g le = case spineOf le of
   (Located sp (R.EName q), args) -> case q of
     QName [] (Ident w)
-      | null args, Just h <- lookup w (goalNames g) -> Right (named h)
+      | Just h <- lookup w (goalNames g)
+      , null args || maybe False boundedUniversal (hypothesis h) ->
+          quantifiedEvidence k info g sp (named h) args
     _ -> case resolve (knowEnv k) q of
-      GTheorem t : _ -> theorem sp t args
+      GTheorem t : _ -> do
+        initial <- theorem sp t (take (length (thmBinders t)) args)
+        if maybe False boundedUniversal (evConclusion initial)
+          then quantifiedEvidence k info g sp initial (drop (length (thmBinders t)) args)
+          else Right initial
       GLaw l : _ -> do
         checked <- traverse (typedArg k info g) args
         let typed = map fst checked
@@ -2006,7 +2024,7 @@ evidence k info g le = case spineOf le of
             -- The law's methods, the goal's places for them at j.
             let table = Map.fromList <$> traverse (\(s, r) -> (r,) <$> goalPlace s {slotParam = j}) (zip (lawSlots l) (placeRefs (lawSlots l)))
             eq <- equationOf sp (lawProp l) table typed (length (lawBinders l))
-            Right (Evidence name (mconcat (map outTactic checks) <> pre) "" eq (concatMap outAux checks) Nothing)
+            Right (Evidence name (mconcat (map outTactic checks) <> pre) "" eq (concatMap outAux checks) Nothing Nothing (lawQuantifierViews l))
           Just ty
             | Just h <- headOf ty -> do
                 inst <- maybe (Left (EngineError sp ("no instance of " <> T.unpack (displayQualName (lawClass l)) <> " for " <> T.unpack h))) Right (Map.lookup (lawClass l, h) (envInstances (knowEnv k)))
@@ -2022,10 +2040,16 @@ evidence k info g le = case spineOf le of
             hs <- forM args \case
               Located _ (R.EName (QName [] (Ident h))) | Just c <- lookup h (goalNames g) -> Right c
               Located asp _ -> Left (EngineError asp "a lemma of the library is applied to hypotheses, by their names")
-            Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing [] Nothing)
+            Right (Evidence w "" (if null hs then "" else " on " <> unwordsB (map fromText hs)) Nothing [] Nothing Nothing mempty)
       _ -> Left (EngineError sp ("not a hypothesis or a lemma: " <> T.unpack (displayQName q)))
   (Located sp _, _) -> Left (EngineError sp "a proof term: a hypothesis or a lemma, applied")
   where
+    hypothesis name = case lookup name (goalHyps g) of
+      Just (HProp proposition) -> Just proposition
+      _ -> Nothing
+    boundedUniversal proposition = case stripLocations proposition of
+      Quant Forall _ (Just _) Nothing _ -> True
+      _ -> False
     -- The indices a theorem's binders must have, at the arguments given: found, and stated where no hypothesis does; with the value parameters they give.
     indexPremises sp t typed
       | null (thmIndexHyps t) = Right (Map.empty, "")
@@ -2093,7 +2117,7 @@ evidence k info g le = case spineOf le of
           eq <- case thmStatement t of
             Just sc | any isMembershipSlot (thmSlots t) -> equationOf sp sc (placesAt t assign) typed (length (thmMembered t))
             _ -> Right Nothing
-          Right (Evidence (thmCore t) (mconcat (map outTactic checks) <> pre <> idx) (statics <> post) eq (concatMap outAux checks) (conclusionAt t typed sigma))
+          Right (Evidence (thmCore t) (mconcat (map outTactic checks) <> pre <> idx) (statics <> post) eq (concatMap outAux checks) (conclusionAt t typed sigma) Nothing (thmQuantifierViews t))
     -- The place of the goal's dictionary for a method at one of its type parameters.
     goalPlace s = lookup s (zip (goalDict g) (placeRefs (goalDict g)))
     -- The places of a theorem's dictionary at the instances its arguments give: the goal's at its type parameters, the instances' functions at known types.
@@ -2157,6 +2181,79 @@ headOf = \case
 checked before its proof arguments may be erased. Cut keeps each obligation
 in the final derivation even if later computation does not use it.
 -}
+
+{- | Eliminate bounded universals at source values. The finite branch uses
+coverage to transport the decoded enumeration member back to that value.
+-}
+quantifiedEvidence :: Knowledge -> TheoremInfo -> Goal -> Span -> Evidence -> [Located R.Expr] -> Either EngineError Evidence
+quantifiedEvidence _ _ _ _ ev [] = Right ev
+quantifiedEvidence k info g sp ev (argument : rest) = do
+  prop <- maybe (Left (EngineError sp "the applied hypothesis has no proposition")) Right (evConclusion ev <|> case lookup (evName ev) (goalHyps g) of Just (HProp p) -> Just p; _ -> Nothing)
+  let withViews = g {goalQuantifierViews = goalQuantifierViews g <> evQuantifierViews ev}
+      local = withViews {goalConcl = prop}
+  source <- finiteView k info local prop
+  case stripLocations prop of
+    Quant Forall _ (Just (relation, bound)) _ body -> do
+      let limit = case relation of Below -> bound; AtMost -> App (Global (Ref RefBuiltin "S")) bound
+          ty = maybe TNat (finiteElementType . viewDomain) source
+      ((value, _), checked) <- typedArgExpected k info local argument ty
+      (rank, target, result, bridge, ready, roundtrip) <- case source of
+        Nothing -> do
+          let boundProp = Rel RelLt value limit
+          proof <- liftResult (conclude k local (goalEquations local) (asEquation boundProp))
+          (before, extended) <- liftResult (stateFacts (freshProofName local "UniversalBound") local [(boundProp, proof)])
+          pure (value, instantiate (const value) body, instantiate (const value) body, closed before, foldl (\current view -> bindSourceView view value TNat current) extended (sourceCandidatesFor local prop), Nothing)
+        Just view -> do
+          (rank, decoded, equation, before, extended) <- finiteWitness k info local sp view value
+          pure (rank, scopedValue decoded (viewBody view), scopedValue value (viewBody view), before, bindSourceView (viewSource view) value ty extended, Just equation)
+      let factName = freshProofName ready "UniversalFact"
+          targetName = freshProofName ready "UniversalCode"
+          resultName = freshProofName ready "UniversalResultCode"
+          conclusionName = freshProofName ready "UniversalResult"
+      factText <- liftResult (formula prop)
+      rankCode <- liftResult (termCT CVar rank)
+      limitCode <- liftResult (termCT CVar limit)
+      (targetCode, _) <- liftResult (propositionCode target)
+      (resultCode, ownCode) <- liftResult (propositionCode result)
+      resultText <- liftResult (formula result)
+      let transport = case roundtrip of
+            Nothing -> "exact " <> fromText targetName
+            Just equality -> "calc (lt 0 " <> resultCode <> ") = (lt 0 " <> targetCode <> ") by cong " <> fromText equality <> " = 1 by exact " <> fromText targetName
+          before =
+            outTactic checked
+              <> outTactic bridge
+              <> evBefore ev
+              <> "have "
+              <> fromText factName
+              <> ": "
+              <> factText
+              <> " { "
+              <> exactAppeal ev
+              <> " }; "
+              <> "have "
+              <> fromText targetName
+              <> ": ((lt 0 "
+              <> targetCode
+              <> ") = 1) { exact belowElim _ "
+              <> render limitCode
+              <> " "
+              <> render rankCode
+              <> " }; "
+              <> "have "
+              <> fromText resultName
+              <> ": ((lt 0 "
+              <> resultCode
+              <> ") = 1) { "
+              <> transport
+              <> " }; "
+              <> (if ownCode then "have " <> fromText conclusionName <> ": " <> resultText <> " { exact " <> fromText resultName <> " }; " else "reflect " <> fromText resultName <> " as " <> fromText conclusionName <> "; ")
+          next = Evidence conclusionName before "" Nothing (evAux ev <> outAux checked <> outAux bridge) (Just result) (Just (goalSourceBindings ready)) (goalQuantifierViews ready)
+      quantifiedEvidence k info ready {goalHyps = goalHyps ready <> [(conclusionName, HProp result)]} sp next rest
+    _ -> Left (EngineError sp "the applied hypothesis is not a bounded universal proposition")
+  where
+    liftResult :: Either String a -> Either EngineError a
+    liftResult = either (Left . EngineError sp) Right
+
 typedArg :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError ((Expr Text, Ty), Out)
 typedArg k info g e0 = typedArgExpected k info g e0 THole
 
@@ -2164,7 +2261,7 @@ typedArgExpected :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Ty -> 
 typedArgExpected k info g e0 expected = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
   let hypotheses = [(name, surfaceNames g prop) | (name, h) <- goalNames g, Just (HProp prop) <- [lookup h (goalHyps g)]]
-  (prepared, ty) <- either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTermExpectedWithHypotheses hypotheses (goalEnv k info g) (goalDict g) (goalVars g) e expected))
+  (prepared, ty) <- checkedElaboration k g (goalEnv k info g) (inferTermExpectedWithHypotheses hypotheses (goalEnv k info g) (goalDict g) (goalVars g) e expected)
   checked <-
     Term.traverseObligations
       ( \(prop, raw) -> do
@@ -2180,6 +2277,286 @@ typedArgExpected k info g e0 expected = do
       prepared
   let checks = Term.obligations checked
   pure ((Term.toExpr (Term.computation checked), ty), Out (mconcat (map outTactic checks)) (concatMap outAux checks))
+
+{- | Elaborating after declaration checking must discharge the same dependency
+log as initial elaboration. In particular, proof arguments cannot erase a
+finite enumeration's adequacy requirements.
+-}
+checkedElaboration :: Knowledge -> Goal -> Env -> TC a -> Either EngineError a
+checkedElaboration k g env action = do
+  (value, required) <- either (\(ElabError sp why) -> Left (EngineError sp why)) Right (runTCWithRequirements action)
+  let available =
+        Required.Evidence
+          { Required.evidenceBuiltins = envBuiltins env
+          , Required.evidenceDeclarations = knowCheckedDeclarations k <> Map.keysSet (knowRuleMetas k)
+          , Required.evidenceSlots = goalDict g
+          , Required.evidencePremises = map gpPremise (goalPremises g)
+          }
+  either (\(sp, why) -> Left (EngineError sp why)) Right (Required.validateRequirements available required)
+  pure value
+
+{- | A source binder's meaning, retained independently of user-facing renaming.
+The raw views themselves contain no mutable proof context.
+-}
+data SourceBindings = SourceBindings
+  { sourceBase :: ![(Text, (Expr Text, Ty))]
+  , sourceQuantifiers :: !(Map ([Segment], Span) (Expr Text, Ty))
+  }
+
+initialSourceBindings :: Ctx Text -> SourceBindings
+initialSourceBindings vars = SourceBindings [(name, (Var core, ty)) | (name, (core, ty)) <- vars] Map.empty
+
+{- | Matching includes the complete decoded body and bound. A span merely
+selects candidates; it never establishes that a transformed goal retains
+the semantics of its original source binder.
+-}
+data FiniteView = FiniteView
+  { viewSource :: !QuantifierView
+  , viewDomain :: !(FiniteDomain Text)
+  , viewBody :: !(Expr (Var () Text))
+  }
+
+finiteView :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Either EngineError (Maybe FiniteView)
+finiteView k info g expression = case stripLocations expression of
+  Quant quantifier _ (Just (Below, bound)) _ body -> do
+    let candidates = nub (concatMap (`quantifierViewCandidates` goalQuantifierViews g) (locations expression))
+        finiteCandidates = [view | view <- candidates, not (qvNumeric view)]
+        tried = [(view, reconstruct quantifier bound body view) | view <- finiteCandidates]
+        matches = [found | (_, Right found) <- tried]
+    case matches of
+      [found] -> pure (Just found)
+      [] | null finiteCandidates -> pure Nothing
+      [] -> case [err | (_, Left err) <- tried] of
+        err : _ -> Left err
+        [] -> Left (EngineError R.noSpan "the finite quantifier's source scope is unavailable")
+      _ -> Left (EngineError (qvSpan (head finiteCandidates)) "the finite quantifier has ambiguous source provenance")
+  _ -> pure Nothing
+  where
+    locations (At (Irrelevant sp) inner) = sp : locations inner
+    locations (Typed _ _ _ inner) = locations inner
+    locations _ = []
+    reconstruct quantifier bound body source = do
+      unless (qvQuantifier source == quantifier) $ Left (EngineError (qvSpan source) "the source quantifier kind changed")
+      let base = goalEnv k info g
+          env = base {envScope = qvScope source, envTypeBindings = qvTypeBindings source, envBuiltins = Required.builtinScope (qvBuiltins source) (envBuiltins (knowEnv k))}
+          prefix = freshProofName g "quantifier_source_"
+          baseEntries = [(name, (prefix <> "base_" <> T.pack (show j), value, ty)) | (j, (name, (value, ty))) <- zip [0 :: Int ..] (sourceBase (goalSourceBindings g))]
+          entries binders = [(unLocated name, (prefix <> "bound_" <> T.pack (show j), value, ty)) | (j, name) <- zip [0 :: Int ..] binders, Just (value, ty) <- [Map.lookup (qvOwner source, location name) (sourceQuantifiers (goalSourceBindings g))]]
+          context binders = reverse [(name, (core, ty)) | (name, (core, _, ty)) <- entries binders] <> [(name, (core, ty)) | (name, (core, _, ty)) <- baseEntries] <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+          substitutions binders = Map.fromList [(core, value) | (_, (core, value, _)) <- entries binders <> baseEntries]
+          replace binders name = Map.findWithDefault (Var name) name (substitutions binders)
+          domainContext = context (qvDomainBinders source)
+          bodyContext = context (qvBodyBinders source)
+      ty <- checkedElaboration k g env (quantifierType env domainContext (qvDomain source))
+      original <- checkedElaboration k g env (finiteDomain env (goalDict g) domainContext (qvSpan source) ty)
+      let valueIndex ix = case indexTermIn env domainContext ix of
+            Just value -> either (const ix) id (expressionIndex (value >>= replace (qvDomainBinders source)))
+            Nothing -> ix
+          actualType = Types.mapIx valueIndex ty
+          domain =
+            original
+              { finiteElementType = actualType
+              , finiteBound = finiteBound original >>= replace (qvDomainBinders source)
+              , finiteDecode = finiteDecode original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
+              , finiteRank = finiteRank original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
+              , finiteOrdinal = finiteOrdinal original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
+              , finiteSelect = finiteSelect original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
+              }
+          (inside, context') = enterQuantifier env bodyContext (qvBinder source) ty
+          alias = "#quantifier-domain"
+          bodyEnv = inside {envTypeBindings = (alias, maybe actualType (snd . snd) (find ((== unLocated (qvBinder source)) . fst) context')) : envTypeBindings inside}
+          written = case unLocated (qvBody source) of
+            R.EQuant q (binder : rest) Nothing rhs
+              | not (null (qvSameGroup source)) ->
+                  (qvBody source) {unLocated = R.EQuant q (binder {R.binderType = Just (Located (qvSpan source) (R.EName (QName [] (Ident alias))))} : rest) Nothing rhs}
+            _ -> qvBody source
+      resolved <- either (\err -> let (sp, why) = renderFixityError err in Left (EngineError sp why)) Right (resolveExpr (knowFixities k) written)
+      originalBody <- checkedElaboration k g bodyEnv (elabProp bodyEnv (goalDict g) context' resolved)
+      let rawBody = originalBody >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvBodyBinders source) value)
+      let decoded = rawBody >>= \case B () -> finiteDecode domain; F value -> Var (F value)
+          actual = Bound.fromScope body
+      unless (finiteBound domain == bound && decoded == actual) $
+        Left (EngineError (qvSpan source) "the finite quantifier's source view no longer matches its lowered proposition")
+      pure (FiniteView source domain rawBody)
+
+sourceCandidatesFor :: Goal -> Expr a -> [QuantifierView]
+sourceCandidatesFor g = go
+  where
+    go (At (Irrelevant sp) inner) = quantifierViewCandidates sp (goalQuantifierViews g) <> go inner
+    go (Typed _ _ _ inner) = go inner
+    go _ = []
+
+-- Auxiliary goals retain the names used by their generated proof scripts.
+auxiliaryDeclaration :: Text -> Goal -> Builder -> Either String Builder
+auxiliaryDeclaration name g tactic = do
+  statement <- goalSequent g
+  parameters <- ruleParams g
+  aliases <- forM (zip [1 ..] (goalHyps g)) \(position, (old, hyp)) ->
+    if old == hname position
+      then pure ""
+      else do
+        rendered <- hypText hyp
+        pure ("have " <> fromText old <> ": " <> rendered <> " { exact " <> fromText (hname position) <> " }; ")
+  pure ("rule " <> fromText name <> ruleBinders parameters (sequentVars g) <> schemaContextBinder g <> mconcat [" " <> gpBinder premise | premise <- goalPremises g] <> " : " <> statement <> "\nby " <> mconcat aliases <> tactic)
+
+auxiliaryArguments :: Goal -> [(Text, Expr Text)] -> Either String Builder
+auxiliaryArguments g values = do
+  parameters <- ruleParams g
+  ordinary <- traverse (termCT CVar . (\name -> fromMaybe (Var name) (lookup name values))) (sequentVars g)
+  pure (staticArgs parameters <> mconcat [" (" <> render value <> ")" | value <- ordinary] <> mconcat [" { exact " <> fromText (gpName premise) <> " }" | premise <- goalPremises g])
+
+bindSourceView :: QuantifierView -> Expr Text -> Ty -> Goal -> Goal
+bindSourceView view variable ty g = g {goalSourceBindings = bindings {sourceQuantifiers = Map.insert (qvOwner view, qvSpan view) (variable, ty) (sourceQuantifiers bindings)}}
+  where
+    bindings = goalSourceBindings g
+
+{- | Structural proof transformations update source substitutions alongside
+their ordinary propositions. Matching still rechecks the complete view.
+-}
+mapSourceBindings :: (Expr Text -> Expr Text) -> SourceBindings -> SourceBindings
+mapSourceBindings replace bindings =
+  bindings
+    { sourceBase = [(name, (replace value, ty)) | (name, (value, ty)) <- sourceBase bindings]
+    , sourceQuantifiers = fmap (\(value, ty) -> (replace value, ty)) (sourceQuantifiers bindings)
+    }
+
+{- | Choose names against both hypotheses and variables, including repeated
+invocations of a tactic located at the same source span.
+-}
+freshProofName :: Goal -> Text -> Text
+freshProofName g base = head [name | name <- iterate (<> "'") base, name `notElem` used]
+  where
+    used = map fst (goalHyps g) <> sequentVars g <> map (fst . snd) (goalVars g)
+
+scopedValue :: Expr a -> Expr (Var () a) -> Expr a
+scopedValue value body = body >>= \case B () -> value; F outer -> Var outer
+
+{- | A first-order value's membership and exact indices. The result is a
+conjunction of ordinary propositions, with no source quantifier marker.
+-}
+valueContract :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Ty -> Either String SchemaContract
+valueContract k info g value ty = do
+  term <- termCT CVar value
+  let env = goalEnv k info g
+      materialize ix = indexTermIn env (goalVars g) ix >>= either (const Nothing) Just . termCT CVar
+      variable name = fromMaybe (CVar name) (materialize (IxVar name))
+      parameter i = fromMaybe (CVar "?") (materialize (IxParam i))
+      callback = CCallback (CClosure [freshProofName g "value_environment"] term []) (CNum 0)
+  validateMethodPredicates (typePredicate k g) ty
+  contract <- schemaContractUsing True (schemaAvoid g <> varsCT term) variable (typePredicate k g) parameter callback ty
+  unless ("?" `notElem` foldr (:) [] (scPost contract)) $ Left "a finite value's dependent index is not available in this proof context"
+  pure contract
+
+valueFacts :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Ty -> Either String [Expr Text]
+valueFacts k info g value ty = parts . scPost <$> valueContract k info g value ty
+  where
+    parts Top = []
+    parts (Conn And x y) = parts x <> parts y
+    parts prop = [prop]
+
+proveValueFacts :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Ty -> Either String [(Expr Text, Builder)]
+proveValueFacts k info g value ty = do
+  contract <- valueContract k info g value ty
+  forM (parts (scPost contract)) \prop -> (prop,) <$> proveSchemaContract k g contract {scPost = prop}
+  where
+    parts Top = []
+    parts (Conn And x y) = parts x <> parts y
+    parts prop = [prop]
+
+{- | Registered bridge certificates are ordinary checked theorems. Their
+selection is explicit plan metadata; generated names are never inspected.
+-}
+finiteBridge :: Knowledge -> FiniteDomain Text -> BuiltinRole -> Either String TheoremInfo
+finiteBridge k domain role = do
+  name <- maybe (Left "the finite proof bridge has no registration") Right (Map.lookup (builtinRoleName role) (finiteBuiltinBindings domain))
+  case Map.lookup name (envGlobals (knowEnv k)) of
+    Just (GTheorem theorem) | thmCore theorem `Set.member` (knowCheckedDeclarations k <> Map.keysSet (knowRuleMetas k)) -> Right theorem
+    _ -> Left "the finite proof bridge theorem has not been checked"
+
+-- Indexed bridge certificates state the recovered index of their argument.
+-- Transport that statement using the exact index contract already proved.
+finiteBridgeProof :: Knowledge -> Goal -> TheoremInfo -> Expr Text -> Expr Text -> Either String Builder
+finiteBridgeProof k g theorem ordinal desired = do
+  proposition <- maybe (Left "the registered finite bridge has no proposition") Right (thmProp theorem <|> thmStatement theorem)
+  argument <- termCT CVar ordinal
+  let names = map mangleVariable (thmValues theorem)
+      (defined, _) = indexHypotheses (thmBinders theorem) names (thmIndexHyps theorem)
+      arguments = Map.fromList (zip (thmBinders theorem) [argument])
+  values <- forM [0 .. length names - 1] \i -> maybe (Left "the registered finite bridge has an unrecoverable value parameter") (Right . fromCT . substCT arguments) (lookup i defined)
+  let allValues = values <> [ordinal]
+      actual = snd (implications (instantiate (allValues !!) (fmap absurd proposition)))
+      ev = (named (thmCore theorem)) {evConclusion = Just actual}
+  pure (fromMaybe (exactAppeal ev) (lemmaBridge k g {goalConcl = desired} ev))
+
+{- | The bridge from a source witness back to its finite ordinal. All
+facts are proved from registered certificates and typed method contracts.
+-}
+finiteWitness :: Knowledge -> TheoremInfo -> Goal -> Span -> FiniteView -> Expr Text -> Either EngineError (Expr Text, Expr Text, Text, Out, Goal)
+finiteWitness k info g sp view value = liftResult do
+  let domain = viewDomain view
+      limit = finiteBound domain
+      rank = scopedValue value (finiteRank domain)
+      ordinal = scopedValue value (finiteOrdinal domain)
+      decoded = scopedValue rank (finiteDecode domain)
+      selected = scopedValue ordinal (finiteSelect domain)
+      prefix = head [candidate | candidate <- iterate (<> "x") "FiniteWitness", all (not . T.isPrefixOf candidate) (map fst (goalHyps g))]
+  fin <- maybe (Left "the finite ordinal type is not registered") Right (Map.lookup (builtinRoleName BuiltinFin) (finiteBuiltinBindings domain))
+  boundIndex <- expressionIndex limit
+  valueProofs <- proveValueFacts k info g value (finiteElementType domain)
+  (valuesBefore, valueGoal) <- stateFacts (prefix <> "Value") g valueProofs
+  ordinalProofs <- proveValueFacts k info valueGoal ordinal (TData (renderQualName fin) [] [boundIndex])
+  (ordinalBefore, ordinalGoal) <- stateFacts (prefix <> "Ordinal") valueGoal ordinalProofs
+  boundLemma <- finiteBridge k domain BuiltinFinToNatBound
+  boundProof <- finiteBridgeProof k ordinalGoal boundLemma ordinal (Rel RelLt rank limit)
+  (boundBefore, bounded) <- stateFacts (prefix <> "Bound") ordinalGoal [(Rel RelLt rank limit, boundProof)]
+  fromNatName <- maybe (Left "the finite ordinal constructor is not registered") Right (Map.lookup (builtinRoleName BuiltinFinFromNat) (finiteBuiltinBindings domain))
+  fromNat <- case Map.lookup fromNatName (envGlobals (knowEnv k)) of
+    Just (GFun function) -> Right function
+    _ -> Left "the finite ordinal constructor is not a function"
+  let converted = apps (Global (Ref RefFunction (funCore fromNat))) [[rank, limit] !! position | position <- funRuntime fromNat]
+  inverseLemma <- finiteBridge k domain BuiltinFinFromToNat
+  inverseProof <- finiteBridgeProof k bounded inverseLemma ordinal (Rel RelEq converted ordinal)
+  (inverseBefore, inverseGoal) <- stateFacts (prefix <> "Inverse") bounded [(Rel RelEq converted ordinal, inverseProof)]
+  selectedCT <- termCT CVar selected
+  decodedCT <- termCT CVar decoded
+  valueCT <- termCT CVar value
+  coverage <- traverse (\law -> discharge k inverseGoal (OLaw law (finiteElementType domain))) (finiteCoverage domain)
+  let inverseName = prefix <> "Inverse0"
+      roundtripName = prefix <> "Roundtrip0"
+      roundtrip = case coverage of
+        Nothing -> "exact " <> fromText inverseName
+        Just proof -> "calc " <> render decodedCT <> " = " <> render selectedCT <> " by cong " <> fromText inverseName <> " = " <> render valueCT <> " by (" <> proof <> ")"
+  (roundtripBefore, ready) <- stateFacts (prefix <> "Roundtrip") inverseGoal [(Rel RelEq decoded value, roundtrip)]
+  pure (rank, decoded, roundtripName, closed (valuesBefore <> ordinalBefore <> boundBefore <> inverseBefore <> roundtripBefore), ready)
+  where
+    liftResult :: Either String a -> Either EngineError a
+    liftResult = either (Left . EngineError sp) Right
+
+{- | Reify an ordinary first-order expression as an index without guessing
+source variable names. The checked type supplies the meaning of each name.
+-}
+expressionIndex :: Expr Text -> Either String Ix
+expressionIndex expression = case spine expression of
+  (Var value, []) -> Right (IxVar value)
+  (Nat value, []) -> Right (IxNat value)
+  (Global (Ref RefValueParam name), []) -> Right (IxVar ("#d" <> name))
+  (Global (Ref RefBuiltin "S"), [value]) -> IxSucc <$> expressionIndex value
+  (Global ref, arguments) -> (if refKind ref == RefConstructor then IxCon else IxFun) (refName ref) <$> traverse expressionIndex arguments
+  _ -> Left "the finite bound cannot be represented as an index"
+
+stateFacts :: Text -> Goal -> [(Expr Text, Builder)] -> Either String (Builder, Goal)
+stateFacts prefix = foldM add . ("",)
+  where
+    add (before, g) (prop, proof) = do
+      let name = freshProofName g (prefix <> T.pack (show (length [() | (old, _) <- goalHyps g, prefix `T.isPrefixOf` old])))
+      stated <- formula prop
+      pure (before <> "have " <> fromText name <> ": " <> stated <> " { " <> proof <> " }; ", g {goalHyps = goalHyps g <> [(name, HProp prop)]})
+
+propositionCode :: Expr Text -> Either String (Builder, Bool)
+propositionCode expression = case stripLocations expression of
+  Rel RelLt (Nat 0) value -> (,True) . render <$> termCT CVar value
+  Rel RelGt value (Nat 0) -> (,True) . render <$> termCT CVar value
+  _ -> (,False) . (\value -> "[[" <> value <> "]]") <$> formula expression
 
 goalEnv :: Knowledge -> TheoremInfo -> Goal -> Env
 goalEnv k info g = env {envSchemas = schemas, envScope = scope {Types.tsValues = values <> Types.tsValues scope}}
@@ -2721,8 +3098,22 @@ runTactics k info n g0 sp tacs0 = do
       Located tsp t : more -> case t of
         R.TIntros names -> introGoal tsp (map unLocated names) g more
         R.TIntro names -> introGoal tsp (map unLocated names) g more
+        R.TConstructor | Conn And left right <- stripLocations (goalConcl g) -> do
+          (proofs, rest) <- solveAll [g {goalConcl = left}, g {goalConcl = right}] more
+          case proofs of
+            [a, b] -> pure (Out ("ConjR { " <> outTactic a <> " } { " <> outTactic b <> " }") (outAux a <> outAux b), rest)
+            _ -> Left (EngineError tsp "internal: conjunction introduction needs two proofs")
+        R.TLeft | Conn Or left _ <- stripLocations (goalConcl g) -> do
+          (out, rest) <- goal g {goalConcl = left} more
+          pure (out {outTactic = "DisjR2; " <> outTactic out}, rest)
+        R.TRight | Conn Or _ right <- stripLocations (goalConcl g) -> do
+          (out, rest) <- goal g {goalConcl = right} more
+          pure (out {outTactic = "DisjR1; " <> outTactic out}, rest)
+        R.TExists witnesses -> existsGoal tsp witnesses g more
+        R.TObtain names expression -> obtainGoal tsp (map unLocated names) expression g more
         R.TRefl -> (\x -> (closed x, more)) <$> rflTactic k g tsp
         R.TAssumption -> Right (closed "assumption", more)
+        R.TContradiction -> (,more) . closed <$> either (Left . EngineError tsp) Right (refute k g)
         R.TSorry -> Left (EngineError tsp ("sorry: the goal is\n" <> T.unpack (renderGoal (knowEnv k) g)))
         R.TExact e -> (\ev -> (evidenceOut ev (evBefore ev <> exactAppeal ev), more)) <$> evidence k info g e
         R.TCong (Just e) -> (\ev -> (evidenceOut ev (evBefore ev <> congUnfolded k g ev), more)) <$> evidence k info g e
@@ -2741,10 +3132,11 @@ runTactics k info n g0 sp tacs0 = do
             Right (evidenceOut ev appeal, more)
         R.TCalc c -> (,more) <$> calcProof k info n g tsp c
         R.THave name annotation rhs -> do
-          prop <- case annotation of
+          (prop, views, sourceBindings) <- case annotation of
             Just rawProp -> do
               resolved <- either (\err -> let (esp, msg) = renderFixityError err in Left (EngineError esp msg)) Right (resolveExpr (knowFixities k) rawProp)
-              either (\(ElabError esp msg) -> Left (EngineError esp msg)) Right (runTC (elabProp (goalEnv k info g) (goalDict g) (goalVars g) resolved))
+              value <- checkedElaboration k g (goalEnv k info g) (elabProp (goalEnv k info g) (goalDict g) (goalVars g) resolved)
+              pure (value, goalQuantifierViews g, goalSourceBindings g)
             Nothing -> do
               ev <- case unLocated rhs of
                 R.RExpr e -> evidence k info g e
@@ -2752,15 +3144,16 @@ runTactics k info n g0 sp tacs0 = do
               let hyp = case lookup (evName ev) (goalHyps g) of
                     Just (HProp p) -> Just p
                     _ -> Nothing
-              maybe (Left (EngineError tsp "cannot infer this local proposition: write have h : P := proof")) (Right . normalizeFact k g) (evConclusion ev <|> hyp)
+              value <- maybe (Left (EngineError tsp "cannot infer this local proposition: write have h : P := proof")) (Right . normalizeFact k g) (evConclusion ev <|> hyp)
+              pure (value, goalQuantifierViews g <> evQuantifierViews ev, fromMaybe (goalSourceBindings g) (evSourceBindings ev))
           stated <- either (Left . EngineError tsp) Right (formula prop)
-          proof <- proveRhs k info n g {goalConcl = prop} rhs
+          proof <- proveRhs k info n g {goalConcl = prop, goalQuantifierViews = views, goalSourceBindings = sourceBindings} rhs
           let (line, col) = R.spanStart tsp
               core = "HaveL" <> T.pack (show line) <> "C" <> T.pack (show col)
               names = case name of
                 Nothing -> goalNames g
                 Just (Located _ source) -> (source, core) : [(s, h) | (s, h) <- goalNames g, s /= source]
-              extended = g {goalHyps = goalHyps g <> [(core, HProp prop)], goalNames = names}
+              extended = g {goalHyps = goalHyps g <> [(core, HProp prop)], goalNames = names, goalQuantifierViews = views, goalSourceBindings = sourceBindings}
               (ihPrep, specialized) = specializeIHs k extended
           (next, rest) <- goal specialized more
           pure
@@ -2778,30 +3171,333 @@ runTactics k info n g0 sp tacs0 = do
           out <- finish proofs
           Right (out, rest)
         _ -> Left (EngineError tsp "this tactic is not supported yet")
+    -- A bounded witness leaves its bound and its instantiated body to prove.
+    -- Both proofs are retained before appealing to the kernel's search lemma.
+    -- An existential witness is private to the auxiliary elimination theorem.
+    -- The kernel instantiates it with bounded search's least witness; finite
+    -- source values are the decoder's certified results at that index.
+    obtainGoal tsp names expression g more = do
+      ev <- evidence k info g expression
+      prop <- maybe (Left (EngineError tsp "obtain: the proof has no inferable proposition")) Right (evConclusion ev <|> case lookup (evName ev) (goalHyps g) of Just (HProp value) -> Just value; _ -> Nothing)
+      let initial = g {goalQuantifierViews = goalQuantifierViews g <> evQuantifierViews ev, goalSourceBindings = fromMaybe (goalSourceBindings g) (evSourceBindings ev)}
+      sourceView <- finiteView k info initial prop
+      case (names, stripLocations prop) of
+        (sourceName : hypothesisNames, Quant Exists _ (Just (relation, bound)) _ body) -> do
+          unless (length hypothesisNames == 1 || (maybe True (const False) sourceView && length hypothesisNames == 2)) $ Left (EngineError tsp "obtain: name the witness and its body hypothesis; a numeric witness may additionally name its bound")
+          let source = freshProofName initial (tacticName tsp "ObtainedValue")
+              eigen = freshProofName initial (tacticName tsp "SearchIndex")
+              factName = freshProofName initial (tacticName tsp "ExistentialFact")
+              boundName = freshProofName initial (tacticName tsp "ObtainedBound")
+              bodyName = freshProofName initial (tacticName tsp "ObtainedBody")
+              codeName = freshProofName initial (tacticName tsp "ObtainedCode")
+              limit = strictLimit relation bound
+              ty = maybe TNat (finiteElementType . viewDomain) sourceView
+              sourceBody = maybe (instantiate (const (Var source)) body) (scopedValue (Var source) . viewBody) sourceView
+              base = initial {goalHyps = goalHyps initial <> [(factName, HProp prop)]}
+              helper = thmCore info <> "_obtain_" <> source
+          facts <- liftAt tsp (valueFacts k info base (Var source) ty)
+          let typed = case (typePredicate k base ty, facts) of
+                (Just predicate, _ : indices) -> HMember predicate source : map HProp indices
+                _ -> map HProp facts
+              typedNames = [source <> "Type" <> T.pack (show j) | j <- [0 :: Int .. length typed - 1]]
+              boundFact = [(boundName, HProp (Rel RelLt (Var source) limit)) | maybe True (const False) sourceView]
+              bodySourceName = last hypothesisNames
+              boundSourceName = [(head hypothesisNames, boundName) | length hypothesisNames == 2]
+              context =
+                base
+                  { goalHyps = goalHyps base <> zip typedNames typed <> boundFact <> [(bodyName, HProp sourceBody)]
+                  , goalVars = (sourceName, (source, ty)) : [(name, value) | (name, value) <- goalVars base, name /= sourceName]
+                  , goalNames = (bodySourceName, bodyName) : boundSourceName <> [(name, value) | (name, value) <- goalNames base, name `notElem` hypothesisNames]
+                  }
+              userGoal = maybe context (\view -> bindSourceView (viewSource view) (Var source) ty context) sourceView
+          (proof, rest) <- goal userGoal more
+          declarationText <- liftAt tsp (auxiliaryDeclaration helper userGoal (outTactic proof))
+          params <- liftAt tsp (ruleParams userGoal)
+          limitCode <- liftAt tsp (termCT CVar limit)
+          (searchCode, _) <- liftAt tsp (propositionCode (instantiate (const (Var eigen)) body))
+          let witness = fromCT (CRaw (runBuilder ("(μ " <> fromText eigen <> " < " <> render limitCode <> ". " <> searchCode <> ")")))
+              witnessBound = Rel RelLt witness limit
+              decoded = maybe witness (scopedValue witness . finiteDecode . viewDomain) sourceView
+              instanceBody = instantiate (const witness) body
+              bounded = base {goalHyps = goalHyps base <> [(boundName, HProp witnessBound)]}
+          decoderProofs <- liftAt tsp (proveValueFacts k info bounded decoded ty)
+          (decoderFacts, _) <- liftAt tsp (stateFacts (source <> "Decoded") bounded decoderProofs)
+          arguments <- liftAt tsp (auxiliaryArguments userGoal [(source, decoded)])
+          existentialText <- liftAt tsp (formula prop)
+          boundText <- liftAt tsp (formula witnessBound)
+          bodyText <- liftAt tsp (formula instanceBody)
+          (bodyCode, ownCode) <- liftAt tsp (propositionCode instanceBody)
+          let blocks = mconcat [" { exact " <> fromText (gpName premise) <> " }" | premise <- goalPremises base]
+              codeToBody = if ownCode then "have " <> fromText bodyName <> ": " <> bodyText <> " { exact " <> fromText codeName <> " }; " else "reflect " <> fromText codeName <> " as " <> fromText bodyName <> "; "
+              tactic =
+                evBefore ev
+                  <> "have "
+                  <> fromText factName
+                  <> ": "
+                  <> existentialText
+                  <> " { "
+                  <> exactAppeal ev
+                  <> " }; "
+                  <> "exact existsUse _ "
+                  <> render limitCode
+                  <> " { have "
+                  <> fromText boundName
+                  <> ": "
+                  <> boundText
+                  <> " { assumption }; "
+                  <> "have "
+                  <> fromText codeName
+                  <> ": ((lt 0 "
+                  <> bodyCode
+                  <> ") = 1) { assumption }; "
+                  <> codeToBody
+                  <> decoderFacts
+                  <> "exact "
+                  <> fromText helper
+                  <> arguments
+                  <> " }"
+          pure (Out tactic (evAux ev <> outAux proof <> [(helper, runBuilder declarationText)]), rest)
+        _ -> Left (EngineError tsp "obtain: expected a bounded existential proposition and a witness name")
+    existsGoal tsp witnesses g more = do
+      source <- finiteView k info g (goalConcl g)
+      case (witnesses, source) of
+        (w : ws, Just view) | Quant Exists _ _ _ _ <- stripLocations (goalConcl g) -> do
+          let domain = viewDomain view
+          ((value, _), checked) <- typedArgExpected k info g w (finiteElementType domain)
+          (rank, decoded, roundtrip, bridge, ready) <- finiteWitness k info g tsp view value
+          let sourceBody = scopedValue value (viewBody view)
+              targetBody = scopedValue decoded (viewBody view)
+              bodyName = freshProofName ready (tacticName tsp "FiniteBody")
+              codeName = freshProofName ready (tacticName tsp "FiniteCode")
+              targetName = freshProofName ready (tacticName tsp "EnumerationCode")
+              sourceGoal = bindSourceView (viewSource view) value (finiteElementType domain) ready {goalConcl = sourceBody}
+              bodyTactics = [Located tsp (R.TExists ws) | not (null ws)] <> more
+          (bodyProof, rest) <- goal sourceGoal bodyTactics
+          stated <- liftAt tsp (formula sourceBody)
+          (sourceCode, ownCode) <- liftAt tsp (propositionCode sourceBody)
+          (targetCode, _) <- liftAt tsp (propositionCode targetBody)
+          limitCode <- liftAt tsp (termCT CVar (finiteBound domain))
+          rankCode <- liftAt tsp (termCT CVar rank)
+          let codeProof = if ownCode then fromText bodyName else fromText codeName
+              tactic =
+                outTactic checked
+                  <> outTactic bridge
+                  <> "have "
+                  <> fromText bodyName
+                  <> ": "
+                  <> stated
+                  <> " { "
+                  <> outTactic bodyProof
+                  <> " }; "
+                  <> (if ownCode then "" else "reify " <> fromText bodyName <> " as " <> fromText codeName <> "; ")
+                  <> "have "
+                  <> fromText targetName
+                  <> ": ((lt 0 "
+                  <> targetCode
+                  <> ") = 1) { calc (lt 0 "
+                  <> targetCode
+                  <> ") = (lt 0 "
+                  <> sourceCode
+                  <> ") by cong "
+                  <> fromText roundtrip
+                  <> " = 1 by exact "
+                  <> codeProof
+                  <> " }; "
+                  <> "exact muBelow _ "
+                  <> render limitCode
+                  <> " "
+                  <> render rankCode
+          pure (Out tactic (outAux checked <> outAux bridge <> outAux bodyProof), rest)
+        _ -> numericExists tsp witnesses g more
+    numericExists tsp witnesses g more = case (witnesses, stripLocations (goalConcl g)) of
+      (w : ws, Quant Exists _ (Just (rel, bound)) _ body) -> do
+        ((value, _), checked) <- typedArgExpected k info g w TNat
+        let limit = strictLimit rel bound
+            boundProp = Rel RelLt value limit
+            instanceProp = instantiate (const value) body
+            boundName = freshProofName g (tacticName tsp "WitnessBound")
+            bodyName = freshProofName g (tacticName tsp "WitnessBody")
+            codeName = freshProofName g (tacticName tsp "WitnessCode")
+        (boundProof, afterBound) <- goal g {goalConcl = boundProp} more
+        let bodyTactics = [Located tsp (R.TExists ws) | not (null ws)] <> afterBound
+        (bodyProof, rest) <- goal g {goalConcl = instanceProp, goalHyps = goalHyps g <> [(boundName, HProp boundProp)]} bodyTactics
+        boundText <- either (Left . EngineError tsp) Right (formula boundProp)
+        bodyText <- either (Left . EngineError tsp) Right (formula instanceProp)
+        valueCode <- either (Left . EngineError tsp) Right (termCT CVar value)
+        limitCode <- either (Left . EngineError tsp) Right (termCT CVar limit)
+        pure
+          ( Out
+              ( outTactic checked
+                  <> "have "
+                  <> fromText boundName
+                  <> ": "
+                  <> boundText
+                  <> " { "
+                  <> outTactic boundProof
+                  <> " }; "
+                  <> "have "
+                  <> fromText bodyName
+                  <> ": "
+                  <> bodyText
+                  <> " { "
+                  <> outTactic bodyProof
+                  <> " }; "
+                  <> "reify "
+                  <> fromText bodyName
+                  <> " as "
+                  <> fromText codeName
+                  <> "; "
+                  <> "exact muBelow _ "
+                  <> render limitCode
+                  <> " "
+                  <> render valueCode
+              )
+              (outAux checked <> outAux boundProof <> outAux bodyProof)
+          , rest
+          )
+      ([], _) -> Left (EngineError tsp "exists: supply a witness")
+      _ -> Left (EngineError tsp "exists: the goal is not a bounded existential proposition")
+    strictLimit Below bound = bound
+    strictLimit AtMost bound = App (Global (Ref RefBuiltin "S")) bound
+    tacticName tsp base =
+      let (line, col) = R.spanStart tsp
+       in base <> "L" <> T.pack (show line) <> "C" <> T.pack (show col)
     -- Name induction fields and hypotheses first, then introduce implications
-    -- reverted by an inner induction. The kernel checks each implication rule.
+    -- or bounded universals. A universal uses the ordinary kernel rule and
+    -- reifies the proved body; no quantified surface syntax reaches the kernel.
     introGoal tsp names g more = do
       let pending = length [() | (v, _) <- goalVars g, "#" `T.isPrefixOf` v]
           ihs = length [() | (v, _) <- goalNames g, "IH" `T.isPrefixOf` v]
           remaining = drop (pending + ihs) names
           renamed = introduce names g
-          (line, col) = R.spanStart tsp
-          prefix = "IntroL" <> T.pack (show line) <> "C" <> T.pack (show col) <> "N"
-          introduceOne (script, current) (i, source) = case stripLocations (goalConcl current) of
-            Arrow premise conclusion ->
-              let core = prefix <> T.pack (show i)
-               in Right
-                    ( script <> "ImplR as " <> fromText core <> "; "
-                    , current
+          prefix = tacticName tsp "Intro" <> "N"
+          introduceOne (wrap, current) (i, sourceName) = do
+            sourceView <- finiteView k info current (goalConcl current)
+            case (stripLocations (goalConcl current), sourceView) of
+              (Arrow premise conclusion, _) ->
+                let core = freshProofName current (prefix <> T.pack (show i))
+                    next =
+                      current
                         { goalHyps = goalHyps current <> [(core, HProp premise)]
-                        , goalNames = (source, core) : [(s, h) | (s, h) <- goalNames current, s /= source]
+                        , goalNames = (sourceName, core) : [(name, h) | (name, h) <- goalNames current, name /= sourceName]
                         , goalConcl = conclusion
                         }
-                    )
-            _ -> Left (EngineError tsp "intro: no implication remains to introduce")
-      (script, extended) <- foldM introduceOne ("", renamed) (zip [1 :: Int ..] remaining)
+                    wrapper out = wrap out {outTactic = "ImplR as " <> fromText core <> "; " <> outTactic out}
+                 in Right (wrapper, next)
+              (Quant Forall _ (Just (rel, bound)) _ body, Just view) -> do
+                let domain = viewDomain view
+                    source = freshProofName current ("q_source_" <> prefix <> T.pack (show i))
+                    ty = finiteElementType domain
+                    sourceProp = scopedValue (Var source) (viewBody view)
+                facts <- liftAt tsp (valueFacts k info current (Var source) ty)
+                let typed = case (typePredicate k current ty, facts) of
+                      (Just predicate, _ : indices) -> HMember predicate source : map HProp indices
+                      _ -> map HProp facts
+                    typedNames = [freshProofName current (source <> "Type" <> T.pack (show j)) | j <- [0 :: Int .. length typed - 1]]
+                    extended =
+                      bindSourceView
+                        (viewSource view)
+                        (Var source)
+                        ty
+                        current
+                          { goalHyps = goalHyps current <> zip typedNames typed
+                          , goalVars = (sourceName, (source, ty)) : [(name, entry) | (name, entry) <- goalVars current, name /= sourceName]
+                          , goalConcl = sourceProp
+                          }
+                    helper = thmCore info <> "_finite_" <> source
+                    eigen = freshProofName extended ("q_index_" <> prefix <> T.pack (show i))
+                    limit = strictLimit rel bound
+                    boundProp = Rel RelLt (Var eigen) limit
+                    bounded = current {goalHyps = goalHyps current <> [(eigen <> "Bound", HProp boundProp)], goalVars = (eigen, (eigen, TNat)) : goalVars current}
+                    decoded = scopedValue (Var eigen) (finiteDecode domain)
+                decoderProofs <- liftAt tsp (proveValueFacts k info bounded decoded ty)
+                (decoderFacts, _) <- liftAt tsp (stateFacts (eigen <> "Typed") bounded decoderProofs)
+                arguments <- liftAt tsp (auxiliaryArguments extended [(source, decoded)])
+                limitCode <- liftAt tsp (termCT CVar limit)
+                bodyText <- liftAt tsp ((\text -> "(" <> text <> ")") <$> formula (instantiate (const (Var eigen)) body))
+                let wrapper out = do
+                      decl <- liftAt tsp (auxiliaryDeclaration helper extended (outTactic out))
+                      let blocks = mconcat [" { exact " <> fromText (gpName premise) <> " }" | premise <- goalPremises current]
+                          bodyName = eigen <> "Body"
+                          codeName = eigen <> "Code"
+                          tactic =
+                            "exact belowIntro "
+                              <> fromText eigen
+                              <> " "
+                              <> render limitCode
+                              <> " { "
+                              <> decoderFacts
+                              <> "have "
+                              <> fromText bodyName
+                              <> ": "
+                              <> bodyText
+                              <> " { exact "
+                              <> fromText helper
+                              <> arguments
+                              <> " }; "
+                              <> "reify "
+                              <> fromText bodyName
+                              <> " as "
+                              <> fromText codeName
+                              <> "; exact "
+                              <> fromText codeName
+                              <> " }"
+                      wrap (Out tactic (outAux out <> [(helper, runBuilder decl)]))
+                pure (wrapper, extended)
+              (Quant Forall _ (Just (rel, bound)) _ body, Nothing) -> do
+                let eigen = freshProofName current ("q_" <> prefix <> T.pack (show i))
+                    limit = strictLimit rel bound
+                    instanceProp = instantiate (const (Var eigen)) body
+                    boundProp = Rel RelLt (Var eigen) limit
+                    boundName = eigen <> "Bound"
+                    bodyName = eigen <> "Body"
+                    codeName = eigen <> "Code"
+                    next0 =
+                      current
+                        { goalHyps = goalHyps current <> [(boundName, HProp boundProp)]
+                        , goalVars = (sourceName, (eigen, TNat)) : [(name, entry) | (name, entry) <- goalVars current, name /= sourceName]
+                        , goalConcl = instanceProp
+                        }
+                    next = foldl (\acc view -> bindSourceView view (Var eigen) TNat acc) next0 (sourceCandidates current)
+                limitCode <- liftAt tsp (termCT CVar limit)
+                boundText <- liftAt tsp (formula boundProp)
+                bodyText <- liftAt tsp ((\text -> "(" <> text <> ")") <$> formula instanceProp)
+                let wrapper out =
+                      wrap
+                        out
+                          { outTactic =
+                              "exact belowIntro "
+                                <> fromText eigen
+                                <> " "
+                                <> render limitCode
+                                <> " { "
+                                <> "have "
+                                <> fromText boundName
+                                <> ": "
+                                <> boundText
+                                <> " { assumption }; "
+                                <> "have "
+                                <> fromText bodyName
+                                <> ": "
+                                <> bodyText
+                                <> " { "
+                                <> outTactic out
+                                <> " }; "
+                                <> "reify "
+                                <> fromText bodyName
+                                <> " as "
+                                <> fromText codeName
+                                <> "; exact "
+                                <> fromText codeName
+                                <> " }"
+                          }
+                pure (wrapper, next)
+              _ -> Left (EngineError tsp "intro: no implication or bounded universal remains to introduce")
+      (wrap, extended) <- foldM introduceOne (Right, renamed) (zip [1 :: Int ..] remaining)
       (out, rest) <- goal extended more
-      pure (out {outTactic = script <> outTactic out}, rest)
+      (,rest) <$> wrap out
+    liftAt tsp = either (Left . EngineError tsp) Right
+    sourceCandidates current = sourceCandidatesFor current (goalConcl current)
     -- Each goal in turn, by the tactics left: a focused block solves one, anything else the first.
     solveAll [] rest = Right ([], rest)
     solveAll (c : cs) rest = do
@@ -3085,7 +3781,7 @@ natInduction info g sp core = pure ([base, step], finish)
     dependentNames offset = [(s, hname (length kept + offset + i)) | (i, (h, _)) <- zip [1 ..] dependent, (s, h') <- goalNames g, h' == h]
     ihName = hname (length kept + 1)
     numbered = zip (map hname [1 ..])
-    base = Goal (numbered (map snd kept <> [HProp (at (Nat 0) p) | (_, p) <- dependent])) (at (Nat 0) (goalConcl g)) others (keptNames <> dependentNames 0) [] (goalDict g) (goalPremises g)
+    base = Goal (numbered (map snd kept <> [HProp (at (Nat 0) p) | (_, p) <- dependent])) (at (Nat 0) (goalConcl g)) others (keptNames <> dependentNames 0) [] (goalDict g) (goalPremises g) (mapSourceBindings (at (Nat 0)) (goalSourceBindings g)) (goalQuantifierViews g)
     step =
       Goal
         (numbered (map snd kept <> [HProp (at (Var eigen) motive)] <> [HProp (at successor p) | (_, p) <- dependent]))
@@ -3095,6 +3791,8 @@ natInduction info g sp core = pure ([base, step], finish)
         [(eigen, ihName)]
         (goalDict g)
         (goalPremises g)
+        (mapSourceBindings (at successor) (goalSourceBindings g))
+        (goalQuantifierViews g)
     tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
     auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show (i :: Int))])
     finish outs = do
@@ -3167,7 +3865,7 @@ tupleInduction k info g sp applied cols positions = do
               | (ci, sh) <- zip [0 ..] selected
               , j <- [1 .. propCount sh]
               ]
-         in (ihs, Goal (zip (map hname [1 ..]) hyps) (at vals (goalConcl g)) vars (ihNames <> keptNames <> dependentNames <> propNames) [(ihKey u, ihCore j) | (j, u) <- zip [1 ..] ihs] (goalDict g) (goalPremises g))
+         in (ihs, Goal (zip (map hname [1 ..]) hyps) (at vals (goalConcl g)) vars (ihNames <> keptNames <> dependentNames <> propNames) [(ihKey u, ihCore j) | (j, u) <- zip [1 ..] ihs] (goalDict g) (goalPremises g) (mapSourceBindings (at vals) (goalSourceBindings g)) (goalQuantifierViews g))
       built = map caseGoal combos
       cases = map snd built
       finish outs = do
@@ -3227,7 +3925,7 @@ tupleInduction k info g sp applied cols positions = do
     atName = helperName "at"
     svars = [fresh ("v_tuple_s_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
     wvars = [fresh ("v_tuple_w_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
-    helperGoal concl = Goal [] concl [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols] [] [] (goalDict g) (goalPremises g)
+    helperGoal concl = Goal [] concl [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols] [] [] (goalDict g) (goalPremises g) (goalSourceBindings g) (goalQuantifierViews g)
     -- The motive at the components of a code, from what they are and the motive there.
     substExpr vs = foldr (\(c, v) -> Arrow (Rel RelEq (fromCT c) (fromCT v))) (Arrow (at vs motive) (at (comps n) motive)) (zip (comps n) vs)
     belowGoal = helperGoal (at (map CVar wvars) motive)
@@ -3495,8 +4193,10 @@ dataInduction k info _ g sp v _ = do
             ihNames = [(if length recursive == 1 then "IH" else "IH" <> T.pack (show i), ihCore i) | i <- [1 .. length recursive]]
             keptNames = [(s, hname (before + length ihs + i)) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
             vars = [("#" <> T.pack (show j), f) | (j, f) <- zip [0 :: Int ..] fields] <> [(nm, x) | (nm, x) <- goalVars g, fst x /= core]
-            concl = at (apps (Global (Ref RefConstructor (ctorCore c))) [Var fv | (fv, _) <- fields])
-         in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames <> propNames) (zip recursive (map ihCore [1 ..])) (goalDict g) (goalPremises g)
+            constructor = apps (Global (Ref RefConstructor (ctorCore c))) [Var fv | (fv, _) <- fields]
+            sourceReplace expression = expression >>= \name -> if name == core then constructor else Var name
+            concl = at constructor
+         in Goal (zip (map hname [1 ..]) hyps) concl vars (ihNames <> keptNames <> propNames) (zip recursive (map ihCore [1 ..])) (goalDict g) (goalPremises g) (mapSourceBindings sourceReplace (goalSourceBindings g)) (goalQuantifierViews g)
       cases = map caseGoal (dataCtors dat)
       -- The hypotheses about indices a case has, the statement's: introduced, since the user cannot name them.
       opened = map openIndices cases
@@ -3524,7 +4224,7 @@ dataInduction k info _ g sp v _ = do
        in (mconcat ["ImplR as " <> fromText h <> "; " | (h, _) <- new], cg {goalHyps = goalHyps cg <> new, goalConcl = concl})
 
     indexImplications e = case e of
-      At _ x -> indexImplications x
+      At sp x -> let (hs, c) = indexImplications x in (hs, At sp c)
       Arrow a b | isIndexEquation a -> let (as, c) = indexImplications b in (a : as, c)
       _ -> ([], e)
 
@@ -3553,7 +4253,7 @@ mkScript k appeal dat isAt fieldPred t memberHyp m motive reverted = do
   inversion <- inversionText
   branches <- forM (zip [0 ..] (dataCtors dat)) \(i, c) -> branch i c
   let split = splitDisj "I" branches
-      step = "have Q: (((lt 0 " <> render (isAt (CVar m)) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> fromText (dataLemma dat "inversion") <> " }; " <> split <> " }; exact impIntro"
+      step = "have Q: (((lt 0 " <> render (isAt (CVar m)) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> fromText (dataLemma dat "inversion") <> " on M }; " <> split <> " }; exact impIntro"
   finishText <- finishing
   pure
     ( "have C: ((lt 0 (imp "

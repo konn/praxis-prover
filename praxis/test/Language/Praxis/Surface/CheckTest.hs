@@ -17,7 +17,7 @@ import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Core qualified as SurfaceCore
 import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, predicateOver, predicateParam)
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
-import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, membershipProof, theoremStatement)
+import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, initialSourceBindings, membershipProof, theoremStatement)
 import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), Env, FunInfo (..), Global (..), TeleEntry (..), constructorsNamed, emptyEnv, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Index (Unified (..), emptySubst, unifyIx)
@@ -668,7 +668,7 @@ checkTests =
         -- The elements below b, a closure capturing b; and the lists of them.
         let below = predicateOver "x" (CSym "lt" [CVar "x", CVar "b"])
             lists = Pred listIs [predicateParam below]
-            g = Goal [("H1", HMember below "a"), ("H2", HMember lists "xs")] Top [] [] [] [] []
+            g = Goal [("H1", HMember below "a"), ("H2", HMember lists "xs")] Top [] [] [] [] [] (initialSourceBindings []) mempty
             hyps = membershipText below (CVar "a") <> ", " <> membershipText lists (CVar "xs")
             prove name t = do
               tactic <- either assertFailure pure (membershipProof k g lists t)

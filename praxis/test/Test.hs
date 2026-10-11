@@ -11,6 +11,8 @@ import Language.Praxis.Surface.CoreTest (coreTests)
 import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
 import Language.Praxis.Surface.EvidenceTest (evidenceTests)
 import Language.Praxis.Surface.FiniteElaborationTest (finiteElaborationTests)
+import Language.Praxis.Surface.FiniteQuantifierTest (finiteQuantifierTests)
+import Language.Praxis.Surface.FiniteTacticTest (finiteTacticTests)
 import Language.Praxis.Surface.IndexedInstanceTest (indexedInstanceTests)
 import Language.Praxis.Surface.MethodContractTest (methodContractTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
@@ -35,6 +37,8 @@ main =
       , dependentClassTests
       , computationIndexTests
       , indexedInstanceTests
+      , finiteQuantifierTests
+      , finiteTacticTests
       , finiteElaborationTests
       , evidenceTests
       , methodContractTests
