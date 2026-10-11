@@ -105,6 +105,8 @@ data RefKind
     takes before that dictionary's values
     -}
     RefPartial !Int
+  | -- | a schema capturing runtime values before its arguments and dictionary values after them
+    RefIndexedPartial !Int !Int
   deriving stock (Show, Eq, Ord)
 
 -- | A global name, fully qualified by its module and namespaces: @Data.List.List.Nil@.

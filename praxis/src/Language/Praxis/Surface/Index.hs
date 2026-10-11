@@ -73,6 +73,7 @@ applyIx (Subst m) = normIx . go
       IxSucc x -> IxSucc (go x)
       IxCon c xs -> IxCon c (map go xs)
       IxFun f xs -> IxFun f (map go xs)
+      IxPartial f arity prefix xs -> IxPartial f arity prefix (map go xs)
       x -> x
 
 -- | A type with the variables of its indices solved replaced.
@@ -93,6 +94,7 @@ keysOf = \case
   IxSucc x -> keysOf x
   IxCon _ xs -> concatMap keysOf xs
   IxFun _ xs -> concatMap keysOf xs
+  IxPartial _ _ _ xs -> concatMap keysOf xs
   _ -> []
 
 -- * Unification
@@ -189,6 +191,8 @@ ixToExprWith var param = go
       IxVar v -> var v
       IxCon c xs -> apps (Global (Ref RefConstructor c)) <$> traverse go xs
       IxFun f xs -> apps (Global (Ref (if f `elem` builtins then RefBuiltin else RefFunction) f)) <$> traverse go xs
+      IxSchema name -> Just (Global (Ref RefStatic name))
+      IxPartial name arity prefix xs -> apps (Global (Ref (if prefix == 0 then RefPartial arity else RefIndexedPartial arity prefix) name)) <$> traverse go xs
       IxParam i -> param i
       IxHole -> Nothing
     builtins = ["add", "sub", "mul", "pow"] :: [Text]
@@ -199,5 +203,7 @@ isPattern = \case
   IxSucc x -> isPattern x
   IxCon _ xs -> all isPattern xs
   IxFun _ _ -> False
+  IxSchema _ -> False
+  IxPartial {} -> False
   IxHole -> False
   _ -> True

@@ -85,6 +85,8 @@ data CT
     dictionary's
     -}
     CPartial !Text ![CT] !Int
+  | -- | a partial schema with captures before and after its source arguments
+    CIndexedPartial !Text ![CT] !Int !Int
   | {- | a predicate standing as the parameter of a variadic schema, closed
     over the terms it captures: its binders, the element's and then a slot
     for each captured term; its body over them; and those terms, which the
@@ -115,6 +117,10 @@ render = \case
     let ys = [CVar ("y_" <> T.pack (show i)) | i <- [1 .. n]]
         (statics, values) = partition isParameter dict
      in "{λ " <> unwordsB (map render ys) <> ". " <> render (CSym f (statics <> ys <> values)) <> "}"
+  CIndexedPartial f captures n prefixCount ->
+    let ys = take n [CVar name | i <- [1 :: Int ..], let name = "y_" <> T.pack (show i), name `notElem` concatMap varsCT captures]
+        (prefix, suffix) = splitAt prefixCount captures
+     in "{λ " <> unwordsB (map render ys) <> ". " <> render (CSym f (prefix <> ys <> suffix)) <> "}"
   CClosure params body _ -> "{λ " <> unwordsB (map fromText params) <> ". " <> render body <> "}"
 
 -- | The ordinary runtime argument of a fixed callback: its packed environment.
@@ -137,6 +143,7 @@ isParameter :: CT -> Bool
 isParameter = \case
   CStatic _ -> True
   CPartial {} -> True
+  CIndexedPartial {} -> True
   CClosure {} -> True
   _ -> False
 
@@ -163,6 +170,7 @@ replaceCT f t = case f t of
   Nothing -> case t of
     CSym g args -> CSym g (map (replaceCT f) args)
     CPartial g dict n -> CPartial g (map (replaceCT f) dict) n
+    CIndexedPartial g captures n prefixCount -> CIndexedPartial g (map (replaceCT f) captures) n prefixCount
     CCallback code environment -> CCallback (replaceCT f code) (replaceCT f environment)
     -- A closure's body is closed over its binders: only what it captures is replaced.
     CClosure ps body captured -> CClosure ps body (map (replaceCT f) captured)
@@ -174,6 +182,7 @@ varsCT = \case
   CVar v -> [v]
   CSym _ args -> concatMap varsCT args
   CPartial _ dict _ -> concatMap varsCT dict
+  CIndexedPartial _ captures _ _ -> concatMap varsCT captures
   CCallback code environment -> varsCT code <> varsCT environment
   CClosure _ _ captured -> concatMap varsCT captured
   _ -> []
@@ -259,6 +268,9 @@ lowerTermWith lowering = go
           if i < 0 then Left "internal: a negative dictionary position" else lowerDictionaryValue lowering i
         (RefValueParam, _) -> Left "a dictionary value applied to arguments"
         (RefPartial n, _) -> (\dict -> CPartial core dict n) <$> traverse go args
+        (RefIndexedPartial n prefixCount, _) -> do
+          unless (n > 0 && prefixCount >= 0 && prefixCount <= length args) $ Left "an invalid indexed partial schema"
+          (\captures -> CIndexedPartial core captures n prefixCount) <$> traverse go args
         _ -> do
           translated <- traverse go args
           lowerApplication lowering r (zip args translated)
@@ -365,6 +377,13 @@ parameterPredicate :: CT -> Pred
 parameterPredicate = \case
   CStatic p -> Pred p []
   CPartial p ps _ -> Pred p ps
+  CIndexedPartial p captures _ prefixCount ->
+    let fresh name
+          | name `elem` concatMap varsCT captures = fresh (name <> "'")
+          | otherwise = name
+        variable = fresh "indexed_value"
+        (prefix, suffix) = splitAt prefixCount captures
+     in predicateOver variable (CSym p (prefix <> [CVar variable] <> suffix))
   CClosure params body captured -> PredClosure params body captured
   _ -> Pred "anyIs" []
 

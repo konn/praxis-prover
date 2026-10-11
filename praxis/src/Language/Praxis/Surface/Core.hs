@@ -33,7 +33,6 @@ import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Type.Equality ((:~:) (..))
-import Data.Void (Void, absurd)
 import Language.Praxis.Surface.Core.Types
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Pretty qualified as Pretty
@@ -56,7 +55,7 @@ data Value o ctx t where
   Variable :: Variable ctx t -> Value o ctx t
   Literal :: Natural -> Value o ctx 'Natural
   Apply :: Signature args t -> List (Value o ctx) args -> [o] -> Value o ctx t
-  Dictionary :: SType t -> Tm.Term Void -> Value o ctx t
+  Dictionary :: SType t -> Tm.Term Int -> Value o ctx t
   Callback :: SType t -> Tm.Term Int -> Value o ctx t
   Invoke :: SType t -> Value o ctx u -> List (Value o ctx) args -> Value o ctx t
   Transport :: SType t -> Value o ctx u -> [o] -> Value o ctx t
@@ -161,9 +160,8 @@ elaborateNamed env slots variables expression = do
       SomeType ty <- first (\message -> message <> " in " <> show t) (reflectType (complete t))
       p <- Tm.prepareTerm e
       code <- Tm.withoutObligations p
-      closed <- traverse (const (Left "a dictionary contains a free value variable")) code
-      validateDictionary env slots (forgetType ty) closed
-      pure (SomeValue ty (Dictionary ty closed))
+      validateDictionary env slots variables (forgetType ty) e
+      pure (SomeValue ty (Dictionary ty code))
     infer _ _ = Left "a value without a checked type at the explicit core boundary"
     callbackSignature source = case arrows source of
       ([], _) -> Left "a callback needs a function signature"
@@ -200,7 +198,7 @@ elaborateNamed env slots variables expression = do
     proofArgument argument = case S.stripLocations argument of
       S.ProofArg {} -> True
       _ -> False
-    sourceIndex = expressionIndex (\i -> Ty.IxVar . fst <$> listToMaybe (drop i variables))
+    sourceIndex = expressionIndex env variables
     invocation :: List SType ctx -> SType t -> S.Expr Int -> [S.Expr Int] -> Either String (Value (Tm.ProofArgument Int) ctx t)
     invocation ctx expected callback [] = do
       SomeValue actual value <- infer ctx callback
@@ -251,10 +249,11 @@ validateGlobal env slots ref proofCount explicitIndices actualValues actual resu
           offset = length runtime + funArity f
       dictionary <- traverse (dictionaryMethodType env (funSlots f)) (funSlots f)
       instantiated <- instantiateDictionary (funSlots f) (drop offset actualValues) (Ty.schemeType scheme : dictionary)
+      captured <- sequence [maybe (Left "a runtime argument has no scoped index") (Right . (i,)) value | (i, value) <- zip (funRuntime f) actualValues]
       case instantiated of
         signature : entries ->
           let (args, r) = arrows signature
-           in check (length (funProofs f)) (length (Ty.schemeParams scheme), length (Ty.schemeValues scheme)) (runtime <> args <> entries) r
+           in checkWith captured (length (funProofs f)) (length (Ty.schemeParams scheme), length (Ty.schemeValues scheme)) (runtime <> args <> entries) r
         [] -> Left "a dictionary lost its function signature"
     [] -> missing
   S.RefConstructor -> case [c | GCtor c <- globals, ctorCore c == S.refName ref] of
@@ -274,11 +273,21 @@ validateGlobal env slots ref proofCount explicitIndices actualValues actual resu
   where
     globals = Map.elems (envGlobals env)
     missing = Left ("an unknown value reference in the explicit core: " <> show ref)
-    check required n ds r = do
+    check = checkWith []
+    checkWith captured required n ds r = do
       unless (proofCount == required) $ Left ("core evidence arity mismatch for " <> show ref)
       unless (length ds == length actual) $ Left ("core application arity mismatch for " <> show ref)
       let match a b s = maybe (Left ("core application type mismatch for " <> show ref <> ": " <> show a <> " against " <> show b)) Right (Ty.matchTy n a b s)
-      let seed = Ty.emptyAssignment {Ty.asValues = IM.fromList [(i, x) | (i, x) <- explicitIndices, i >= 0, i < snd n]}
+      let stated = IM.fromList [(i, x) | (i, x) <- explicitIndices, i >= 0, i < snd n]
+      indices <-
+        foldM
+          ( \known (i, x) -> case IM.lookup i known of
+              Nothing -> Right (IM.insert i x known)
+              Just y -> maybe (Left "a runtime argument disagrees with its stated index") (\value -> Right (IM.insert i value known)) (Ty.mergeIx x y)
+          )
+          stated
+          captured
+      let seed = Ty.emptyAssignment {Ty.asValues = indices}
       initial <- match r result seed
       assignment <- foldM (\s (a, b) -> match a b s) initial (zip ds actual)
       unless (all Ty.firstOrder (IM.elems (Ty.asTypes assignment))) $ Left "type parameters cannot contain fixed callbacks"
@@ -296,12 +305,12 @@ validateGlobal env slots ref proofCount explicitIndices actualValues actual resu
       let (domains, r) = arrows ty
       check 0 (0, 0) domains r
 
--- Dictionary entries are closed static functions or closed nullary values.
--- Their captured dictionaries are checked against the instantiated slots;
--- no untyped application tree is accepted merely because it is annotated.
-validateDictionary :: Env -> [Slot] -> Ty.Ty -> Tm.Term Void -> Either String ()
-validateDictionary env slots expected = \case
-  Tm.Call ref captures
+-- Dictionary entries retain their runtime index captures in the current
+-- value context. Check every captured value and dependent result against
+-- the selected implementation before discarding its source annotations.
+validateDictionary :: Env -> [Slot] -> [(Text, Ty.Ty)] -> Ty.Ty -> S.Expr Int -> Either String ()
+validateDictionary env slots variables expected expression = case S.spine expression of
+  (S.Global ref, captures)
     | Just _ <- lookup ref places -> do
         unless (null captures) $ Left "a dictionary place cannot capture arguments"
         let (ds, r) = arrows expected
@@ -309,23 +318,36 @@ validateDictionary env slots expected = \case
     | f : _ <- [f | GFun f <- Map.elems (envGlobals env), funCore f == S.refName ref] -> do
         let scheme = funScheme f
             arity = funArity f
+            runtimeCount = length (funRuntime f)
+            (runtime, dictionaryCaptures) = splitAt runtimeCount captures
             n = (length (Ty.schemeParams scheme), length (Ty.schemeValues scheme))
             correctRole = case S.refKind ref of
-              S.RefStatic -> arity > 0 && null captures
-              S.RefPartial a -> a == arity && arity > 0
+              S.RefStatic -> arity > 0 && null captures && runtimeCount == 0
+              S.RefPartial a -> a == arity && arity > 0 && runtimeCount == 0
+              S.RefIndexedPartial a prefix -> a == arity && arity > 0 && prefix == runtimeCount
               S.RefFunction -> arity == 0
               _ -> False
-        unless (correctRole && length captures == length (funSlots f)) $ Left "a dictionary has the wrong static arity"
+        unless (correctRole && length captures == runtimeCount + length (funSlots f)) $ Left "a dictionary has the wrong static arity"
+        runtimeIndices <- traverse (maybe (Left "a dictionary runtime capture has no first-order index") Right . sourceIndex) runtime
         dictionary <- traverse (dictionaryMethodType env (funSlots f)) (funSlots f)
-        instantiated <- instantiateDictionary (funSlots f) (map (expressionIndex absurd . Tm.toExpr) captures) (Ty.schemeType scheme : dictionary)
+        instantiated <- instantiateDictionary (funSlots f) (map sourceIndex dictionaryCaptures) (Ty.schemeType scheme : dictionary)
+        let seed = Ty.emptyAssignment {Ty.asValues = IM.fromList (zip (funRuntime f) runtimeIndices)}
         case instantiated of
           signature : entries -> do
-            assignment <- maybe (Left "a dictionary implementation has the wrong type") Right (Ty.matchTy n signature expected Ty.emptyAssignment)
-            sequence_ [validateDictionary env slots (Ty.substScheme n assignment ty) entry | (ty, entry) <- zip entries captures]
+            assignment <- maybe (Left "a dictionary implementation has the wrong type") Right (Ty.matchTy n signature expected seed)
+            sequence_
+              [ do
+                  body <- elaborateNamed env slots variables value
+                  let required = complete (Ty.substScheme n assignment (snd (Ty.schemeValues scheme !! i)))
+                  unless (null (obligations body) && bodyType body == required) $ Left "a dictionary runtime capture has the wrong type"
+              | (i, value) <- zip (funRuntime f) runtime
+              ]
+            sequence_ [validateDictionary env slots variables (Ty.substScheme n assignment ty) entry | (ty, entry) <- zip entries dictionaryCaptures]
           [] -> Left "a dictionary lost its implementation signature"
     | otherwise -> Left ("an unknown dictionary reference: " <> show ref)
   _ -> Left "a dictionary entry must be a resolved reference"
   where
+    sourceIndex = expressionIndex env variables
     arrows (Ty.TArrow a b) = let (as, r) = arrows b in (a : as, r)
     arrows t = ([], t)
     places = place 1 0 slots
@@ -348,20 +370,38 @@ instantiateDictionary slots values types = do
       rewrite (Ty.IxSucc x) = Ty.IxSucc (rewrite x)
       rewrite (Ty.IxCon name xs) = Ty.IxCon name (map rewrite xs)
       rewrite (Ty.IxFun name xs) = Ty.IxFun name (map rewrite xs)
+      rewrite (Ty.IxPartial name arity prefix xs) = Ty.IxPartial name arity prefix (map rewrite xs)
       rewrite x = x
   pure (map (Ty.mapIx rewrite) types)
 
--- | The code denoted by a checked first-order source expression.
-expressionIndex :: (a -> Maybe Ty.Ix) -> S.Expr a -> Maybe Ty.Ix
-expressionIndex variable = go
+{- | The code denoted by a checked first-order source expression. An index
+projection of a context variable denotes the index recorded in its checked
+type; this uses the datatype's registered projection, never an annotation
+placed on the expression being validated.
+-}
+expressionIndex :: Env -> [(Text, Ty.Ty)] -> S.Expr Int -> Maybe Ty.Ix
+expressionIndex env variables = go
   where
     go (S.At _ value) = go value
     go (S.Typed _ _ _ value) = go value
     go (S.Dictionary _ value) = go value
-    go (S.Var value) = variable value
+    go (S.Var position)
+      | position >= 0 = Ty.IxVar . fst <$> listToMaybe (drop position variables)
+      | otherwise = Nothing
     go (S.Nat n) = Just (Ty.IxNat n)
+    go expression
+      | (S.Global (S.Ref S.RefFunction name), [child]) <- S.spine expression
+      , S.Var position <- S.stripLocations child
+      , position >= 0
+      , Just (_, Ty.TData datatype _ indices) <- listToMaybe (drop position variables)
+      , Just projections <- indexFunctionCores env datatype
+      , Just index <- lookup name (zip projections indices) =
+          Just index
     go expression = case S.spine expression of
       (S.Global (S.Ref S.RefValueParam name), []) -> Just (Ty.IxVar ("#d" <> name))
+      (S.Global (S.Ref S.RefStatic name), []) -> Just (Ty.IxSchema name)
+      (S.Global (S.Ref (S.RefPartial arity) name), captures) -> Ty.IxPartial name arity 0 <$> traverse go captures
+      (S.Global (S.Ref (S.RefIndexedPartial arity prefix) name), captures) -> Ty.IxPartial name arity prefix <$> traverse go captures
       (S.Global (S.Ref S.RefBuiltin "S"), [value]) -> Ty.IxSucc <$> go value
       (S.Global (S.Ref kind name), arguments)
         | kind `elem` [S.RefBuiltin, S.RefFunction, S.RefConstructor] ->
@@ -385,7 +425,7 @@ lower = \case
   Variable v -> Tm.Variable (number v)
   Literal n -> Tm.Literal n
   Apply (Signature r _ _ _ _) vs _ -> Tm.Call r (lowerArgs vs)
-  Dictionary _ code -> fmap absurd code
+  Dictionary _ code -> code
   Callback _ code -> code
   Invoke _ callback arguments -> Tm.Invoke (lower callback) (lowerArgs arguments)
   Transport _ child _ -> lower child
@@ -498,7 +538,7 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
     arguments Nil = []
     arguments (Cons v vs) = term 11 v : arguments vs
     dictionary = \case
-      Tm.Variable v -> absurd v
+      Tm.Variable i -> Pretty.nameAt "v" (Pretty.variableNames sc) i
       Tm.Literal n -> T.pack (show n)
       Tm.Call r xs -> Pretty.application 0 (Pretty.reference r) ["[dict " <> dictionary x <> "]" | x <- xs]
       Tm.Parameter _ _ -> "[fixed callback]"

@@ -446,6 +446,7 @@ methodTypeWith at method = do
           IxSucc y -> IxSucc (rewrite y)
           IxCon name ys -> IxCon name (map rewrite ys)
           IxFun name ys -> IxFun name (map rewrite ys)
+          IxPartial name arity prefix ys -> IxPartial name arity prefix (map rewrite ys)
           other -> other
   pure (mapIx rewrite (schemeType (methodScheme method)))
 

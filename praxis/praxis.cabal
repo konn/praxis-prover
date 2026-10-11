@@ -136,6 +136,7 @@ test-suite praxis-test
     Language.Praxis.Surface.BuiltinCheckTest
     Language.Praxis.Surface.BuiltinTest
     Language.Praxis.Surface.CheckTest
+    Language.Praxis.Surface.ComputationIndexTest
     Language.Praxis.Surface.CoreTest
     Language.Praxis.Surface.DependentClassTest
     Language.Praxis.Surface.ParserTest

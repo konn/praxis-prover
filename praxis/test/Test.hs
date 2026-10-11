@@ -6,6 +6,7 @@ import Language.Praxis.Surface.AdequacyTest (adequacyTests)
 import Language.Praxis.Surface.BuiltinCheckTest (builtinCheckTests)
 import Language.Praxis.Surface.BuiltinTest (builtinTests)
 import Language.Praxis.Surface.CheckTest (checkTests)
+import Language.Praxis.Surface.ComputationIndexTest (computationIndexTests)
 import Language.Praxis.Surface.CoreTest (coreTests)
 import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
@@ -28,6 +29,7 @@ main =
       , termTests
       , coreTests
       , dependentClassTests
+      , computationIndexTests
       , builtinTests
       , builtinCheckTests
       , checkTests

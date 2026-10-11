@@ -770,6 +770,7 @@ closedKind t = if null (tyParams t) && all noParam (tyIndices t) then t else THo
       IxSucc x -> noParam x
       IxCon _ xs -> all noParam xs
       IxFun _ xs -> all noParam xs
+      IxPartial _ _ _ xs -> all noParam xs
       _ -> True
 
 {- |
@@ -1050,6 +1051,7 @@ instanceDependencies cls instanceName = mapIx go
         IxSucc x -> IxSucc (go x)
         IxCon name xs -> IxCon name (map go xs)
         IxFun name xs -> IxFun name (map go xs)
+        IxPartial name arity prefix xs -> IxPartial name arity prefix (map go xs)
         other -> other
 
 -- | A method's type at an instance: the class's parameter the instance's type, over its @n@ variables, and the method's own variables after them.
@@ -1145,6 +1147,9 @@ expressionIndex expression = case expression of
   Nat n -> Just (IxNat n)
   _ -> case spine expression of
     (Global (Ref RefValueParam name), []) -> Just (IxVar ("#d" <> name))
+    (Global (Ref RefStatic name), []) -> Just (IxSchema name)
+    (Global (Ref (RefPartial arity) name), captures) -> IxPartial name arity 0 <$> traverse expressionIndex captures
+    (Global (Ref (RefIndexedPartial arity prefix) name), captures) -> IxPartial name arity prefix <$> traverse expressionIndex captures
     (Global (Ref RefBuiltin "S"), [value]) -> IxSucc <$> expressionIndex value
     (Global (Ref kind name), arguments)
       | kind `elem` [RefBuiltin, RefFunction, RefConstructor] ->
@@ -1160,6 +1165,7 @@ rewriteDictionaryIndices at = go
     go (IxSucc x) = IxSucc (go x)
     go (IxCon name xs) = IxCon name (map go xs)
     go (IxFun name xs) = IxFun name (map go xs)
+    go (IxPartial name arity prefix xs) = IxPartial name arity prefix (map go xs)
     go x = x
 
 -- | How deep instances under contexts may nest where a method is resolved.
@@ -1669,12 +1675,21 @@ retainDependencies env full initial =
          in if more == current then current else close more
       needed = close initial
       lastValue = maximum (-1 : [i | (i, slot) <- zip [0 :: Int ..] (valueSlots full), slot `elem` needed])
-      prefix = take (lastValue + 1) (valueSlots full)
+      lastStatic = maximum (-1 : [i | (i, slot) <- zip [0 :: Int ..] (staticSlots full), slot `elem` needed])
+      prefix = take (lastValue + 1) (valueSlots full) <> take (lastStatic + 1) (staticSlots full)
    in [slot | slot <- full, slot `elem` needed || slot `elem` prefix]
 
 typeDictionaryRefs :: [Ty] -> [Ref]
-typeDictionaryRefs types =
-  [Ref RefValueParam number | name <- concatMap (concatMap ixVars . tyIndices) types, Just number <- [T.stripPrefix "#d" name]]
+typeDictionaryRefs types = concatMap (concatMap indexRefs . tyIndices) types
+  where
+    indexRefs = \case
+      IxVar name | Just number <- T.stripPrefix "#d" name -> [Ref RefValueParam number]
+      IxSchema name -> [Ref RefStatic name]
+      IxSucc index -> indexRefs index
+      IxCon _ xs -> concatMap indexRefs xs
+      IxFun _ xs -> concatMap indexRefs xs
+      IxPartial _ _ _ xs -> concatMap indexRefs xs
+      _ -> []
 
 -- | The type parameters a type mentions at kind @Type@, whose predicates the memberships of its values may take.
 valueVariables :: Ty -> [Int]
@@ -1891,6 +1906,7 @@ paramsOf = \case
   IxSucc x -> paramsOf x
   IxCon _ xs -> concatMap paramsOf xs
   IxFun _ xs -> concatMap paramsOf xs
+  IxPartial _ _ _ xs -> concatMap paramsOf xs
   _ -> []
 
 -- | The index a pattern stands for, where it stands for one: its variables the clause's.

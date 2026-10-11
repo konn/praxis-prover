@@ -96,6 +96,8 @@ indexText sc p = \case
   IxSucc x -> application p "S" [indexText sc 11 x]
   IxCon n xs -> application p (reference (Ref RefConstructor n)) (map (indexText sc 11) xs)
   IxFun n xs -> application p (reference (Ref RefFunction n)) (map (indexText sc 11) xs)
+  IxSchema n -> "{" <> reference (Ref RefStatic n) <> "}"
+  IxPartial n _ _ xs -> "{" <> application 0 (reference (Ref RefFunction n)) (map (indexText sc 11) xs) <> "}"
 
 patternText :: Int -> Pattern -> Text
 patternText p = \case

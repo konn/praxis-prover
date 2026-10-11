@@ -849,6 +849,8 @@ ixCTWith variable param = go
       IxSucc x -> CSym "S" [go x]
       IxCon c xs -> CSym c (map go xs)
       IxFun f xs -> CSym f (map go xs)
+      IxSchema name -> CStatic name
+      IxPartial name arity prefix xs -> CIndexedPartial name (map go xs) arity prefix
 
 {- | The indices a function's arguments must have, as the propositions of its lemmas' hypotheses, over its arguments' core variables.
 | Preconditions as hypotheses: the equations the core states them as.
@@ -2781,11 +2783,13 @@ unfoldRedex k t = projection t <|> redex t
       CStatic v -> fromMaybe (CStatic v) (lookup v s)
       CCallback code environment -> CCallback (instantiated s code) (instantiated s environment)
       CPartial f dictionary arity -> CPartial f (map (instantiated s) dictionary) arity
+      CIndexedPartial f captures arity prefixCount -> CIndexedPartial f (map (instantiated s) captures) arity prefixCount
       CClosure binders body captured -> CClosure binders (instantiated (filter ((`notElem` binders) . fst) s) body) (map (instantiated s) captured)
       CSym f args -> case lookup f s of
         Just (CStatic fn) -> CSym fn (map (instantiated s) args)
         -- A function with its dictionary, applied: to the arguments, then to the dictionary, as a call passes it.
         Just (CPartial fn dict _) -> CSym fn (map (instantiated s) args <> dict)
+        Just (CIndexedPartial fn captures _ prefixCount) -> CSym fn (take prefixCount captures <> map (instantiated s) args <> drop prefixCount captures)
         Just (CClosure binders body [])
           | length binders == length args ->
               instantiated (zip binders (map (instantiated s) args)) body
@@ -3453,6 +3457,7 @@ fromCT = \case
   CRaw t -> Global (Ref RefBuiltin t)
   CStatic t -> Global (Ref RefStatic t)
   CPartial f dict n -> apps (Global (Ref (RefPartial n) f)) (map fromCT dict)
+  CIndexedPartial f captures n prefixCount -> apps (Global (Ref (RefIndexedPartial n prefixCount) f)) (map fromCT captures)
   CCallback (CStatic name) environment -> SchemaParameter THole (Ref RefStatic name) (fromCT environment)
   CCallback (CClosure binders body []) environment ->
     -- Preserve the original closed code and packed captures verbatim. Opening

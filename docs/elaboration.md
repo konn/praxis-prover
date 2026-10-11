@@ -223,6 +223,16 @@ one-sided, as an application's implicit arguments are. An index function's
 result is of its index's type erased, `SameVec.#idx-2 : SameVec a → Vec a`,
 the indices of that type being other index functions' results.
 
+Index computations can also carry explicit static functions and partially
+applied functions. These are ordinary Praxis Core computations, independent
+of builtin registration. A partial application records which captured
+runtime arguments precede its remaining arguments, preserving an indexed
+instance's runtime indices separately from its trailing dictionary. Praxis
+Core validates every captured term in its value context and ties the result
+indices to those actual captures. A generated index projection of a context
+variable recovers the index in that variable's checked type; an unrelated
+function with the same signature does not receive that interpretation.
+
 ## Functions
 
 `Compile` turns clauses into one prf definition. Functions are type-erased

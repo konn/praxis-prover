@@ -39,6 +39,8 @@ data Index
   | SuccessorIndex Index
   | ConstructorIndex Symbol [Index]
   | FunctionIndex Symbol [Index]
+  | SchemaIndex Symbol
+  | PartialIndex Symbol Nat Nat [Index]
 
 data List (f :: k -> K.Type) (xs :: [k]) where
   Nil :: List f '[]
@@ -57,6 +59,8 @@ data SIndex (i :: Index) where
   SSuccessorIndex :: SIndex n -> SIndex ('SuccessorIndex n)
   SConstructorIndex :: (KnownSymbol n) => Proxy n -> List SIndex xs -> SIndex ('ConstructorIndex n xs)
   SFunctionIndex :: (KnownSymbol n) => Proxy n -> List SIndex xs -> SIndex ('FunctionIndex n xs)
+  SSchemaIndex :: (KnownSymbol n) => Proxy n -> SIndex ('SchemaIndex n)
+  SPartialIndex :: (KnownSymbol n, KnownNat arity, KnownNat prefix) => Proxy n -> Proxy arity -> Proxy prefix -> List SIndex xs -> SIndex ('PartialIndex n arity prefix xs)
 
 data SomeType where
   SomeType :: SType t -> SomeType
@@ -131,6 +135,14 @@ reflectIndex = go . S.normIx
       SomeList sis <- indices xs
       case someSymbolVal (T.unpack name) of
         SomeSymbol p -> Right (SomeIndex (SFunctionIndex p sis))
+    go (S.IxSchema name) = case someSymbolVal (T.unpack name) of
+      SomeSymbol p -> Right (SomeIndex (SSchemaIndex p))
+    go (S.IxPartial name arity prefix xs)
+      | arity <= 0 || prefix < 0 || prefix > length xs = Left "an invalid partial schema in a type index"
+      | otherwise = do
+          SomeList sis <- indices xs
+          case (someSymbolVal (T.unpack name), someNatVal (fromIntegral arity), someNatVal (fromIntegral prefix)) of
+            (SomeSymbol p, SomeNat a, SomeNat k) -> Right (SomeIndex (SPartialIndex p a k sis))
 
 forgetType :: SType t -> S.Ty
 forgetType = \case
@@ -147,6 +159,8 @@ forgetIndex = \case
   SSuccessorIndex i -> S.IxSucc (forgetIndex i)
   SConstructorIndex p xs -> S.IxCon (T.pack (symbolVal p)) (listMap forgetIndex xs)
   SFunctionIndex p xs -> S.IxFun (T.pack (symbolVal p)) (listMap forgetIndex xs)
+  SSchemaIndex p -> S.IxSchema (T.pack (symbolVal p))
+  SPartialIndex p a k xs -> S.IxPartial (T.pack (symbolVal p)) (fromIntegral (natVal a)) (fromIntegral (natVal k)) (listMap forgetIndex xs)
 
 sameList :: (forall a b. f a -> f b -> Maybe (a :~: b)) -> List f as -> List f bs -> Maybe (as :~: bs)
 sameList _ Nil Nil = Just Refl
@@ -184,6 +198,13 @@ sameIndex (SConstructorIndex p ps) (SConstructorIndex q qs) = do
   pure Refl
 sameIndex (SFunctionIndex p ps) (SFunctionIndex q qs) = do
   Refl <- sameSymbol p q
+  Refl <- sameList sameIndex ps qs
+  pure Refl
+sameIndex (SSchemaIndex p) (SSchemaIndex q) = do Refl <- sameSymbol p q; pure Refl
+sameIndex (SPartialIndex p a k ps) (SPartialIndex q b l qs) = do
+  Refl <- sameSymbol p q
+  Refl <- sameNat a b
+  Refl <- sameNat k l
   Refl <- sameList sameIndex ps qs
   pure Refl
 sameIndex _ _ = Nothing

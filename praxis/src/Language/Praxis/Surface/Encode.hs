@@ -217,6 +217,8 @@ ctorIndexEquations indexFns c = case ctorSignature c of
           IxSucc x -> (\y -> CSym "S" [y]) <$> index x
           IxCon k xs -> CSym k <$> traverse index xs
           IxFun f xs -> CSym f <$> traverse index xs
+          IxSchema name -> Just (CStatic name)
+          IxPartial name arity prefix xs -> (\captures -> CIndexedPartial name captures arity prefix) <$> traverse index xs
           IxVar _ -> Nothing
           IxHole -> Nothing
      in [ (l, r)
@@ -278,6 +280,8 @@ validateEncoding indexFns d = forM_ (dataCtors d) $ \c -> do
         IxSucc x -> knownIndex x
         IxCon _ xs -> all knownIndex xs
         IxFun _ xs -> all knownIndex xs
+        IxSchema _ -> True
+        IxPartial _ _ _ xs -> all knownIndex xs
         _ -> False
   unless (length (ctorPropositions indexFns c) == length (constructorProofs signature)) $
     failure "a proof field's proposition cannot be represented by the PRA membership predicate"
