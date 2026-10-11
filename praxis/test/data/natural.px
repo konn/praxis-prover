@@ -1,0 +1,71 @@
+module Natural where
+
+add-zero : {x: nat} -> x + 0 = x
+add-zero = rfl
+
+add-suc : (x y: nat) -> x + S y = S (x + y)
+add-suc x y = rfl
+
+add-assoc : {x y z: nat} -> (x + y) + z = x + (y + z)
+add-assoc = by exact addAssoc
+
+add-comm : {x y: nat} -> x + y = y + x
+add-comm = by exact addComm
+
+zero-add : {x : nat} -> 0 + x = x
+zero-add {0}= by rfl
+zero-add {S x} = calc
+  0 + S x = S (0 + x) = S x := cong (zero-add {x})
+
+suc-add : {x y : nat} -> S x + y = S (x + y)
+suc-add {x} {y} = by exact succAdd
+
+mul-one-l : {x : nat} -> 1 * x = x
+mul-one-l = by exact oneMul
+
+mul-one-r : {x : nat} -> x * 1 = x
+mul-one-r = by exact mulOne
+
+mul-assoc : {x y z: nat} -> (x * y) * z = x * (y * z)
+mul-assoc = by exact mulAssoc
+
+mul-comm : {x y: nat} -> x * y = y * x
+mul-comm = by exact mulComm
+
+add-mul : (x y z : nat) -> (x + y) * z = (x * z) + (y * z)
+add-mul x y z = by exact mulDistribR
+
+mul-add : (x y z : nat) -> x * (y + z) = (x * y) + (x * z)
+mul-add x y z = by exact mulDistribL
+
+-- | Propositional strict ordering
+data PLt (n : nat) (m : nat) where
+  Zero : (m : nat) -> PLt 0 (S m)
+  Succ  : {n m : nat} -> PLt n m -> PLt (S n) (S m)
+
+plt-of-lt : {n m : nat} -> n < m -> PLt n m
+plt-of-lt {0} {S m} h = Zero m
+plt-of-lt {0} {0} h = absurd h
+plt-of-lt {S n} {0} h = absurd h
+plt-of-lt {S n} {S m} h = Succ (plt-of-lt h)
+
+lt-of-plt : {n m : nat} -> PLt n m -> n < m
+lt-of-plt (Zero _) = rfl
+lt-of-plt (Succ p) = lt-of-plt p
+
+-- | Existential form of strict ordering
+data ELt (n : nat) (m : nat) where
+  delta : (k : nat) -> n + S k = m -> ELt n m
+
+succ-elt : {n m : nat} -> ELt n m -> ELt (S n) (S m)
+succ-elt {n} {m} (delta k pf) = ELt.delta {S n} {S m} k (calc
+  S n + S k
+  _ = S (n + S k) := suc-add
+  _ = S m         := cong pf
+  )
+
+elt-of-plt : {n m : nat} -> PLt n m -> ELt n m
+elt-of-plt {0} {0} p = absurd p
+elt-of-plt {0} {S m} (Zero _) = delta m (zero-add {S m})
+elt-of-plt {S n} {0} p = absurd p
+elt-of-plt {S n} {S m} (Succ p) = succ-elt (elt-of-plt p)

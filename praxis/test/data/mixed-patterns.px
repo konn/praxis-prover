@@ -1,0 +1,33 @@
+module MixedPatterns where
+
+data List a = Nil | Cons a (List a)
+data Pair a b = pair a b
+
+-- A numeric predecessor and a constructor field decrease together.
+take : Nat -> List a -> List a
+take 0 xs = Nil
+take (S n) Nil = Nil
+take (S n) (Cons x xs) = Cons x (take n xs)
+
+-- Distinct datatype arguments keep their own field positions.
+zip : List a -> List b -> List (Pair a b)
+zip Nil ys = Nil
+zip (Cons x xs) Nil = Nil
+zip (Cons x xs) (Cons y ys) = Cons (pair x y) (zip xs ys)
+
+-- More than two constructors, including nullary ones.
+data Three = A | B | C Nat
+choose : Three -> List Nat -> Nat
+choose A xs = 0
+choose B xs = 1
+choose (C n) Nil = n
+choose (C n) (Cons x xs) = x
+
+take-two : take (S (S 0)) (Cons 3 (Cons 4 (Cons 5 Nil))) = Cons 3 (Cons 4 Nil)
+take-two = rfl
+
+zip-one : zip (Cons 2 Nil) (Cons 3 Nil) = Cons (pair 2 3) Nil
+zip-one = rfl
+
+choose-last : choose (C 7) (Cons 9 Nil) = 9
+choose-last = rfl

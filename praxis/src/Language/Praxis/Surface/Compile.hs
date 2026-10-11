@@ -17,6 +17,11 @@ an instance of the prelude's course-of-values recursion,
 
 its recursive calls looked up in the history, @at h k (field k)@.
 
+Several shallow matches, mixing @Nat@ and data types, use the same recursion
+on a tuple of their codes. Each recursive component is unchanged or a field
+of its own constructor, and at least one decreases. Constructor index clashes
+allow omitted cases; the result contracts separately certify their impossibility.
+
 A function under constraints, @mconcat : Monoid a => List a -> a@, takes a
 dictionary: the methods it uses of the classes constraining its type
 parameters.  A method taking arguments is a parameter of the function's
@@ -55,6 +60,7 @@ import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (collapseLemma, ctorLemma)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
+import Language.Praxis.Surface.Match
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (segmentRaw)
 import Language.Praxis.Surface.Term qualified as Term
@@ -99,7 +105,13 @@ ownDictionary = go 1 (0 :: Int)
 argName :: Int -> Text
 argName i = "a" <> T.pack (show i)
 
--- | Where a pattern variable is: an argument itself, or a field of the scrutinee's constructor.
+{- | A variable in a multi-column match: a whole scrutinee, one of its
+constructor fields, or an argument outside the match.
+-}
+data MultiPlace = Whole !Int | Part !Int !Int | Other !Int
+  deriving stock (Eq, Show)
+
+-- | An argument itself, or a field of the single scrutinee's constructor.
 data Place = Arg !Int | Field !Int
   deriving stock (Eq, Show)
 
@@ -250,8 +262,7 @@ compileFunction env fd = do
                 )
                 (table proofs)
             )
-    cs | all (\c -> fdArgs fd !! c == TNat) cs -> natColumns cs
-    _ -> Left "clauses matching on several arguments, not all of Nat, are not supported yet"
+    cs -> matchingColumns cs
   where
     info = fdInfo fd
     core = funCore info
@@ -365,35 +376,27 @@ compileFunction env fd = do
                 (table proofs)
             )
 
-    {- Matching on several values of Nat at once, in the columns given: each
-    clause at 0, at S x, or at any value, in each; together the clauses cover
-    each case, 0 or S, of the values once.  Recursion, at the predecessors of
-    some of the values and at the others as they are, is course-of-values
-    recursion on the code of their tuple, cons a₁ (cons a₂ … 0), each value
-    its component.  An unfolding lemma for each case: the tuple taken apart
-    by hdCons and tlCons, the dispatch collapsed by the definitions of sgn
-    and prd, the history looked up by histAt, the tuple of the predecessors
-    below the tuple by consLtL and consLtR. -}
-    natColumns cs = do
+    -- Several shallow patterns use recursion on the tuple of their codes.
+    -- Every recursive component stays fixed or descends to a constructor field.
+    matchingColumns cs = do
+      choices <- traverse (shapes env . (fdArgs fd !!)) cs
       let kc = length cs
           colIdx = zip cs [0 :: Int ..]
+          shapeAt ci tag = choices !! ci !! tag
+          comboShapes combo = zipWith shapeAt [0 ..] combo
           patAt fc c = fcPatterns fc !! c
-          covers combo fc =
-            and
-              [ case patAt fc c of
-                  PNat 0 -> not b
-                  PSucc _ -> b
-                  _ -> True
-              | (c, b) <- zip cs combo
-              ]
+          covers combo fc = and (zipWith (\c sh -> shapeMatches sh (patAt fc c)) cs (comboShapes combo))
       forM_' clauses \fc -> unless (all (\(i, p) -> i `elem` cs || isVar p) (zip [0 ..] (fcPatterns fc))) (Left "the values not matched on are variables, for now")
       forM_' clauses \fc -> forM_' cs \c -> case patAt fc c of
         PSucc sub | not (isVar sub) -> Left "nested patterns are not supported yet"
+        PCon _ subs | not (all isVar subs) -> Left "nested patterns are not supported yet"
         PNat j | j > 0 -> Left "a numeral other than 0 in a pattern: write it S n"
         _ -> Right ()
-      cases <- forM (sequence (replicate kc [False, True])) \combo -> case filter (covers combo) clauses of
-        [fc] -> Right (combo, fc)
-        _ -> Left "the clauses must cover each case, 0 or S, of the values they match on exactly once (no overlap) for now"
+      cases <- fmap catMaybes . forM (sequence [[0 .. length opts - 1] | opts <- choices]) $ \combo -> case filter (covers combo) clauses of
+        [fc] -> Right (Just (combo, fc))
+        [] | not (possibleShapes (fdArgs fd) (funRuntime info) (zip cs (comboShapes combo))) -> Right Nothing
+        [] -> Left "the clauses miss a possible combination of constructors"
+        _ -> Left "the clauses overlap on a combination of constructors"
       let others = [i | i <- [0 .. arity - 1], i `notElem` cs]
           userOthers = [i | i <- [0 .. userArity - 1], i `notElem` cs]
           defLemma = functionLemma info "#def"
@@ -401,40 +404,42 @@ compileFunction env fd = do
           defLhs = CSym core (take userArity vargs <> dict)
           component i t = hdT (iterate tlT t !! i)
           tupleT = foldr (\x acc -> CSym "cons" [x, acc]) (CNum 0)
-          -- What each variable of a clause is: a value it matches whole (0), the predecessor of one (1), or another argument (2).
           roles fc =
             concat
               [ case p of
-                  PVar _ -> [maybe (2, a) (\ci -> (0, ci)) (lookup a colIdx)]
-                  PSucc (PVar _) -> [(1, fromMaybe 0 (lookup a colIdx))]
+                  PVar _ -> [maybe (Other a) Whole (lookup a colIdx)]
+                  PSucc (PVar _) -> [Part (position cs a) 0]
+                  PCon _ subs -> [Part (position cs a) j | (j, PVar _) <- zip [0 ..] subs]
                   _ -> []
               | (a, p) <- zip [0 ..] (fcPatterns fc)
               ]
           roleOf fc v = listToMaybe (drop v (roles fc))
-          roleTerm value other (r, j) = case r :: Int of
-            0 -> value j
-            1 -> CSym "prd" [value j]
-            _ -> other j
+          roleTerm fc value other = \case
+            Whole j -> value j
+            Part j f -> case patAt fc (cs !! j) of
+              PSucc _ -> CSym "prd" [value j]
+              _ -> fieldT f (value j)
+            Other j -> other j
           -- A recursive call, at the code k of the tuple and its history h: the history at the tuple of what it passes.
           recAt kT value hT fc callArgs = do
             unless (length callArgs == userArity) $
               Left ("a recursive call with " <> show (length callArgs) <> " arguments, where the function takes " <> show userArity)
             comps <- forM colIdx \(c, ci) -> case fst (callArgs !! c) >>= roleOf fc of
-              Just (0, ci') | ci' == ci -> Right (False, value ci)
-              Just (1, ci') | ci' == ci -> Right (True, CSym "prd" [value ci])
-              _ -> Left "a recursive call passes each value the function matches on, or its predecessor"
+              Just (Whole ci') | ci' == ci -> Right (False, value ci)
+              Just place@(Part ci' _) | ci' == ci -> Right (True, roleTerm fc value (const (CNum 0)) place)
+              _ -> Left "a recursive call passes each matched argument unchanged or a field of its own constructor"
             forM_' userOthers \a -> case fst (callArgs !! a) >>= roleOf fc of
-              Just (2, a') | a' == a -> Right ()
+              Just (Other a') | a' == a -> Right ()
               _ -> Left "a recursive call must pass the other arguments unchanged (primitive recursion)"
-            unless (any fst comps) $ Left "a recursive call must pass the predecessor of a value the function matches on"
+            unless (any fst comps) $ Left "a recursive call must descend in at least one matched argument"
             Right (CSym "at" [hT, kT, tupleT (map snd comps)])
           -- A clause's body at the code k of the tuple, its values, its history h, the other arguments and the dictionary's values.
-          bodyAt kT value hT other dv fc = body (\v -> maybe (CVar "?") (roleTerm value other) (roleOf fc v)) dv (recAt kT value hT fc) fc
+          bodyAt kT value hT other dv fc = body (\v -> maybe (CVar "?") (roleTerm fc value other) (roleOf fc v)) dv (recAt kT value hT fc) fc
           tree value leaf = go 0 []
             where
               go i combo
                 | i == kc = leaf combo
-                | otherwise = ifChain (CSym "sgn" [value i]) [go (i + 1) (combo <> [False]), go (i + 1) (combo <> [True])]
+                | otherwise = ifChain (if fdArgs fd !! (cs !! i) == TNat then CSym "sgn" [value i] else hdT (value i)) [go (i + 1) (combo <> [tag]) | tag <- [0 .. length (choices !! i) - 1]]
           lamParams = ["k", "h"] <> map argName others
       leavesDef <- forM cases \(combo, fc) -> (combo,) <$> bodyAt (CVar "k") (\ci -> component ci (CVar "k")) (CVar "h") (CVar . argName) inDef fc
       let lam = runBuilder ("{λ " <> unwordsB (map fromText lamParams) <> ". " <> render (tree (\ci -> component ci (CVar "k")) (\combo -> fromMaybe (CNum 0) (lookup combo leavesDef))) <> "}")
@@ -449,13 +454,14 @@ compileFunction env fd = do
                   Nothing -> CNum 0
       proofs <- forM cases \(combo, fc) -> do
         let rs = roles fc
-            predVar ci = case [v | (v, (1, ci')) <- zip [0 ..] rs, ci' == ci] of
+            fieldVar ci j = case [v | (v, Part ci' j') <- zip [0 ..] rs, ci' == ci, j' == j] of
               v : _ -> varOf fc v
-              [] -> CVar ("v__x23_c" <> T.pack (show ci))
-            vals = [if b then CSym "S" [predVar ci] else CNum 0 | (ci, b) <- zip [0 ..] combo]
+              [] -> CVar ("v__x23_c" <> T.pack (show ci) <> "f" <> T.pack (show j))
+            selected = comboShapes combo
+            vals = [shapeTerm sh [fieldVar ci j | j <- [0 .. length (shapeFields sh) - 1]] | (ci, sh) <- zip [0 ..] selected]
             otherArg a
               | a >= userArity = CVar (valueVar (T.pack (show (a - userArity))))
-              | otherwise = case [v | (v, (2, a')) <- zip [0 ..] rs, a' == a] of
+              | otherwise = case [v | (v, Other a') <- zip [0 ..] rs, a' == a] of
                   v : _ -> varOf fc v
                   [] -> CVar ("v__x23_" <> T.pack (show a))
             rest = map otherArg others
@@ -465,12 +471,12 @@ compileFunction env fd = do
             start = betaBody scr rest
             apart = takeApart start
             afterApart = maybe start fst (listToMaybe (reverse apart))
-            caseTerm (r, j) = case r :: Int of
-              0 -> vals !! j
-              1 -> predVar j
-              _ -> otherArg j
-            -- The case's branch: its values, the predecessor of each S x its x.
-            branch = replaceCT (\case CSym "prd" [CSym "S" [x]] -> Just x; _ -> Nothing) (either (error "internal") id (bodyAt scr (vals !!) h otherArg inLemma fc))
+            caseTerm = \case
+              Whole j -> vals !! j
+              Part j f -> fieldVar j f
+              Other j -> otherArg j
+            reduced t = maybe t fst (listToMaybe (reverse (collapsing t)))
+            branch = reduced (either (error "internal") id (bodyAt scr (vals !!) h otherArg inLemma fc))
             lookups = nub [(u, tup) | u@(CSym "at" [h', k', tup]) <- subterms branch, h' == h, k' == scr]
             -- The tuple a recursive call looks up below the case's, component by component from the last.
             ltProof j tup =
@@ -488,7 +494,7 @@ compileFunction env fd = do
                               | otherwise = "have " <> fromText (nm "R" i) <> ": (" <> render (suffix vals (i + 1)) <> " <= " <> render (suffix vals (i + 1)) <> ") { exact leSelf }; "
                             fact = "have " <> fromText (nm "Q" i) <> ": (" <> render (suffix comps' i) <> " < " <> render (suffix vals i) <> ")"
                          in if c' /= c
-                              then (True, tailSteps <> "have " <> fromText (nm "P" i) <> ": (" <> render c' <> " < " <> render c <> ") { exact ltSucc }; " <> tailLe <> fact <> " { exact consLtL on " <> fromText (nm "P" i) <> " " <> fromText (nm "R" i) <> " }; ")
+                              then (True, tailSteps <> "have " <> fromText (nm "P" i) <> ": (" <> render c' <> " < " <> render c <> ") { exact " <> fromText (fromMaybe "" (shapeLess (selected !! i) c' c)) <> " }; " <> tailLe <> fact <> " { exact consLtL on " <> fromText (nm "P" i) <> " " <> fromText (nm "R" i) <> " }; ")
                               else
                                 if lessTail
                                   then (True, tailSteps <> "have " <> fromText (nm "P" i) <> ": (" <> render c <> " <= " <> render c <> ") { exact leSelf }; " <> fact <> " { exact consLtR on " <> fromText (nm "P" i) <> " " <> fromText (nm "Q" (i + 1)) <> " }; ")
@@ -507,7 +513,7 @@ compileFunction env fd = do
                 <> defSteps
         rhs <- body (\v -> maybe (CVar "?") caseTerm (roleOf fc v)) inLemma (\callArgs -> Right (CSym core (map snd callArgs <> dict))) fc
         pure (combo, (lhs, rhs, haves <> calc lhs steps))
-      let named = [(functionLemma info ("unfold-" <> T.intercalate "-" [if b then "S" else "0" | b <- combo]), p) | (combo, p) <- proofs]
+      let named = [(functionLemma info ("unfold-" <> T.intercalate "-" (map shapeName (comboShapes combo))), p) | (combo, p) <- proofs]
       pure
         ( compiled
             [definition (cvrec (scrOf args) (map (args !!) others))]
@@ -523,7 +529,34 @@ compileFunction env fd = do
     -- the predecessor of each successor: the codes and the history left as they are.
     collapsing t = case collapseAt t of
       Just (t', lem) -> (t', lem) : collapsing t'
-      Nothing -> predSteps t
+      Nothing -> case dataDispatch t of
+        Just (tagged, branch, ci, dat) ->
+          (tagged, fromText (ctorLemma ci "tag")) : (branch, fromText (collapseLemma dat (ctorIndex ci))) : collapsing branch
+        Nothing -> case fieldRedex t of
+          Just (t', lem) -> (t', fromText lem) : collapsing t'
+          Nothing -> predSteps t
+    dataDispatch t = case t of
+      CSym "ifte" [CSym "eq" [CSym "hd" [CSym name _], CNum 0], _, _]
+        | Just ci <- ctorByCore env name
+        , Just dat <- dataOfCtor env ci
+        , Just branches <- dispatchBranches t
+        , length branches == length (dataCtors dat) ->
+            let tagged = ifChain (CNum (fromIntegral (ctorIndex ci))) branches
+             in Just (tagged, branches !! ctorIndex ci, ci, dat)
+      _ -> Nothing
+    fieldRedex t =
+      listToMaybe
+        [ (replaceCT (\u -> if u == redex then Just value else Nothing) t, ctorLemma ci ("field-" <> T.pack (show j)))
+        | applied@(CSym name fields) <- subterms t
+        , Just ci <- [ctorByCore env name]
+        , (j, value) <- zip [0 ..] fields
+        , let redex = fieldT j applied
+        , redex `elem` subterms t
+        ]
+    dispatchBranches = \case
+      CNum 0 -> Just []
+      CSym "ifte" [CSym "eq" [_, CNum _], b, rest] -> (b :) <$> dispatchBranches rest
+      _ -> Nothing
     collapseAt = \case
       CSym "ifte" [CSym "eq" [CSym "sgn" [v], CNum 0], a, CSym "ifte" [CSym "eq" [CSym "sgn" [v'], CNum 1], b, CNum 0]]
         | v == v', CNum 0 <- v -> Just (a, "collapseSgnZero")

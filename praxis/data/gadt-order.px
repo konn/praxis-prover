@@ -1,0 +1,21 @@
+module Arith.Order.GADTs where
+
+data PLt (n : nat) (m : nat) where
+  ZeroSucc : {m : nat} -> PLt 0 (S m)
+  SuccSucc : {n m : nat} -> PLt n m -> PLt (S n) (S m)
+
+lt-of-plt : {n m : nat} -> PLt n m -> n < m
+lt-of-plt ZeroSucc = by rfl
+lt-of-plt (SuccSucc p) = lt-of-plt p
+
+plt-of-lt : {n m : nat} -> (n < m) -> PLt n m
+plt-of-lt {0} {S m} h = ZeroSucc
+plt-of-lt {S n} {S m} h = SuccSucc (plt-of-lt h)
+plt-of-lt {n} {0} h = absurd h
+
+plt-trans : {n m k : nat} -> PLt n m -> PLt m k -> PLt n k
+plt-trans ZeroSucc (SuccSucc {n} {m} p) = ZeroSucc
+plt-trans (SuccSucc p) (SuccSucc q) = SuccSucc (plt-trans p q)
+
+lt-trans : {n m k: nat} -> n < m -> m < k -> n < k
+lt-trans nltm mltk = lt-of-plt (plt-trans (plt-of-lt nltm) (plt-of-lt mltk))

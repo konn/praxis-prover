@@ -72,6 +72,7 @@ library
     Language.Praxis.Surface.Index
     Language.Praxis.Surface.Lexer
     Language.Praxis.Surface.Mangle
+    Language.Praxis.Surface.Match
     Language.Praxis.Surface.Parser
     Language.Praxis.Surface.Prelude
     Language.Praxis.Surface.Rename

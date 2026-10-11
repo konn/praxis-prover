@@ -66,6 +66,7 @@ module Language.Praxis.Surface.Engine (
 ) where
 
 import Bound (instantiate)
+import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM, forM_, guard, unless, zipWithM)
 import Data.Char (isAlphaNum)
 import Data.List (elemIndex, find, nub, sort)
@@ -86,6 +87,7 @@ import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), atPositio
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
+import Language.Praxis.Surface.Match
 import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw)
@@ -401,13 +403,39 @@ proveClosure :: Knowledge -> FunDef -> Either EngineError (Maybe (Closure, [(Tex
 proveClosure k fd = case (fdResult fd, lemmaPredicate k (lemmaDictionary fd) (fdResult fd)) of
   (result, Just (Pred resultIs ps))
     | closes result ->
-        let spec = indexSpecOf k fd
-            pre = maybe [] ixsPre spec
-            values = maybe [] ixsValues spec
-            props = maybe [] ixsProps spec
-            -- Under the indices of its arguments and its preconditions, a case they clash in refuted.
-            closure = (closureSpec resultIs ps) {specPre = \cs -> preExprs pre cs <> propExprs props, specCase = \kk gg -> either (const (membershipCase kk gg)) Right (refute kk gg)}
-         in either (const Nothing) (\p -> Just (Closure (spLemma p) (fdArgs fd) (fdResult fd) (spPremises p) pre values props, spDecls p)) <$> proveSpec k fd closure
+        do
+          let spec = indexSpecOf k fd
+              pre = maybe [] ixsPre spec
+              values = maybe [] ixsValues spec
+              props = maybe [] ixsProps spec
+              closure = (closureSpec resultIs ps) {specPre = \cs -> preExprs pre cs <> propExprs props, specCase = \kk gg -> either (const (membershipCase kk gg)) Right (refute kk gg)}
+              closeWith proof decls = Just (Closure (functionLemma (fdInfo fd) "#closed") (fdArgs fd) (fdResult fd) (spPremises proof) pre values props, decls)
+          case spec of
+            Just indices | not (null (ixsPost indices)) -> do
+              let indexed = indexSpec indices
+                  contract =
+                    closure
+                      { specName = "#contract"
+                      , specPost = \cs value -> Conn And (specPost closure cs value) (specPost indexed cs value)
+                      , specCase = \kk gg -> case refute kk gg of
+                          Right proof -> Right proof
+                          Left _ -> case stripLocations (goalConcl gg) of
+                            Conn And member idx -> (\m i -> "ConjR { " <> m <> " } { " <> i <> " }") <$> membershipCase kk gg {goalConcl = member} <*> indexCase kk gg {goalConcl = idx}
+                            _ -> Left "internal: a contract must state membership and indices"
+                      }
+              proveSpec k fd contract >>= \case
+                Left _ -> pure Nothing
+                Right proof -> do
+                  goal <- specGoal k fd closure
+                  let applied = apps (Global (Ref RefFunction (funCore (fdInfo fd)))) (map (Var . fst . snd) (goalVars goal) <> ownDictionary (funSlots (fdInfo fd)))
+                  full <- either (Left . EngineError (fdSpan fd)) Right (formula (specPost contract [] applied))
+                  params <- either (Left . EngineError (fdSpan fd)) Right (ruleParams goal)
+                  let blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises goal]
+                      tactic = "have Contract: " <> full <> " { exact " <> fromText (spLemma proof) <> staticArgs params <> blocks <> " }; ConjL on Contract as Member Indices; exact Member"
+                      name = functionLemma (fdInfo fd) "#closed"
+                  decl <- either (Left . EngineError (fdSpan fd)) Right (declaration name goal tactic)
+                  pure (closeWith proof (spDecls proof <> [(name, runBuilder decl)]))
+            _ -> either (const Nothing) (\proof -> closeWith proof (spDecls proof)) <$> proveSpec k fd closure
   _ -> Right Nothing
   where
     closes = \case
@@ -461,20 +489,30 @@ data SpecProof = SpecProof
   , spDecls :: ![(Text, Text)]
   }
 
+-- | The statement shared by a specification and projections of a contract.
+specGoal :: Knowledge -> FunDef -> Spec -> Either EngineError Goal
+specGoal k fd spec = do
+  let info = fdInfo fd
+      names = ["x" <> T.pack (show i) | i <- [0 .. length (fdArgs fd) - 1]]
+      cores = map mangleVariable names
+      dict = lemmaDictionary fd
+      predicate = lemmaPredicate k dict
+      applied = apps (Global (Ref RefFunction (funCore info))) (map Var cores <> ownDictionary (funSlots info))
+      hyps = [HMember p v | (v, Just p) <- zip cores (map predicate (fdArgs fd))] <> map HProp (specPre spec cores)
+  premises <- either (Left . EngineError (fdSpan fd)) Right (renderPremises predicate (specPremises spec (knowEnv k) dict))
+  pure (Goal (zip (map hname [1 ..]) hyps) (specPost spec cores applied) (zip names (zip cores (fdArgs fd))) [] [] dict premises)
+
 {- |
 A specification proved by the skeleton every lemma of a function shares: by
-induction on the argument its clauses match on, or on the values of @Nat@
-they match on together ('tupleInduction'), or outright when they match on
-none, each case by the specification's prover.  Left inside, with why, when a
-case is not proved, or the clauses match on several arguments not all of
-@Nat@, or on one whose type has no membership to induct on.
+induction on the argument its clauses match on, or on their tuple
+('tupleInduction'), or outright when they match on none, each case by the
+specification's prover. Left inside, with why, when a case is not proved or
+a matched datatype has no membership to induct on.
 -}
 proveSpec :: Knowledge -> FunDef -> Spec -> Either EngineError (Either String SpecProof)
 proveSpec k fd spec = do
-  premises <- either (Left . EngineError sp) Right (renderPremises predicate pds)
+  g0 <- specGoal k fd spec
   let applied = apps (Global (Ref RefFunction (funCore info))) (map Var cores <> ownDictionary (funSlots info))
-      hyps = [HMember p v | (v, Just p) <- zip cores argIs] <> map HProp (specPre spec cores)
-      g0 = Goal (zip (map hname [1 ..]) hyps) (specPost spec cores applied) (zip names (zip cores (fdArgs fd))) [] [] dict premises
       done out = do
         decl <- either (Left . EngineError sp) Right (declaration (thmCore thm) g0 (outTactic out))
         Right (Right (SpecProof (thmCore thm) (map pdPremise pds) (outAux out <> [(thmCore thm, runBuilder decl)])))
@@ -486,10 +524,10 @@ proveSpec k fd spec = do
           either (Right . Left) (\tacs -> finish (map closed tacs) >>= done) (traverse caseProof cases)
       | otherwise -> Right (Left "the argument the clauses match on has no membership to induct on")
     cs
-      | all (\c -> fdArgs fd !! c == TNat) cs -> do
+      | all (\c -> fdArgs fd !! c == TNat || isJust (argIs !! c)) cs -> do
           (cases, finish) <- tupleInduction k thm g0 sp applied [cores !! c | c <- cs] cs
           either (Right . Left) (\tacs -> finish (map closed tacs) >>= done) (traverse caseProof cases)
-      | otherwise -> Right (Left "the clauses match on several arguments, not all of them values of Nat")
+      | otherwise -> Right (Left "a matched argument has no membership to induct on")
   where
     info = fdInfo fd
     sp = fdSpan fd
@@ -510,8 +548,10 @@ proveSpec k fd spec = do
     pds = specPremises spec (knowEnv k) dict
     caseProof g =
       let (intro, g') = introduceImplications g
-          (specialized, g'') = specializeIHs k g'
-       in ((intro <> specialized) <>) <$> specCase spec k g''
+          (normalized, equations) = digestWith "BeforeIH" k g'
+          new = [(h, HProp (Rel RelEq (fromCT l) (fromCT r))) | (h, l, r) <- equations, h `notElem` map fst (goalHyps g')]
+          (specialized, g'') = specializeIHs k g' {goalHyps = goalHyps g' <> new}
+       in ((intro <> normalized <> specialized) <>) <$> specCase spec k g''
 
 -- | The dictionary of a function's lemmas: its own, then the membership predicate of each type parameter its values are of, parameters of the lemma's rule.
 lemmaDictionary :: FunDef -> [Slot]
@@ -560,9 +600,11 @@ specializeIHs k g0 = foldl one ("", g0) (zip [1 :: Int ..] (nub (map snd (goalIH
       Rel RelEq x y
         | Right l <- termCT CVar x
         , Right r <- termCT CVar y ->
-            case preconditionsAt k g Map.empty [(l, r)] of
-              Right t -> Just (t <> "assumption")
-              Left _ -> listToMaybe [b | (h', HProp _) <- goalHyps g, Just b <- [hypothesisBridge k g {goalConcl = a} h']]
+            case [h | (h, HMember p v) <- goalHyps g, canonical l == canonical (CSym "lt" [CNum 0, predicateAt p (CVar v)]), canonical r == CNum 1] of
+              h : _ -> Just ("exact " <> fromText h)
+              [] -> case preconditionsAt k g Map.empty [(l, r)] of
+                Right t -> Just (t <> "assumption")
+                Left _ -> listToMaybe [b | (h', HProp _) <- goalHyps g, Just b <- [hypothesisBridge k g {goalConcl = a} h']]
       _ -> Nothing
     split acc@(tac, g) h c = case stripLocations c of
       Conn And a b ->
@@ -685,12 +727,20 @@ preconditionsAt k g sigma props = fmap mconcat . forM props $ \(l0, r0) -> do
       found t = listToMaybe [(o, sub) | o <- knowObligations k, Just sub <- [concludes t o]]
       -- The obligation's own hypotheses, the clause's preconditions, at what the match gives its
       -- variables: each at hand, or from a hypothesis by the equations between variables.
-      hypotheses (o, _, _, _, hs) sub = fmap mconcat . forM hs $ \(hl0, hr0) -> do
-        let hl = substCT sub hl0
-            hr = substCT sub hr0
-        if hasEquation g hl hr
-          then Right ""
-          else maybe (Left ("the precondition " <> T.unpack (runBuilder (equationText hl hr)) <> " of the obligation " <> T.unpack o <> " is not established here")) Right (equationFromHyps k g hl hr)
+      hypotheses (o, vs, _, _, hs) sub = snd <$> foldM premise (sub, "") hs
+        where
+          premise (known, tac) (hl0, hr0) = do
+            -- A premise may determine a value absent from the conclusion,
+            -- such as the vector in an obligation proving the constant 0 < 2.
+            let matches = [s' | (_, l', r') <- goalEquations g, Just s <- [matchCT vs hl0 l' known], Just s' <- [matchCT vs hr0 r' s]]
+                known' = fromMaybe known (listToMaybe matches)
+                hl = substCT known' hl0
+                hr = substCT known' hr0
+            proof <-
+              if hasEquation g hl hr
+                then Right ""
+                else maybe (Left ("the precondition " <> T.unpack (runBuilder (equationText hl hr)) <> " of the obligation " <> T.unpack o <> " is not established here")) Right (equationFromHyps k g hl hr)
+            pure (known', tac <> proof)
       -- The left side rewritten by the equations of indices at hand, as the obligation
       -- states it at them: each step, with the hypothesis doing it.
       rewrites = rewriting l (goalEquations g)
@@ -804,7 +854,7 @@ indexCase k g = case refute k g of
 -- | The goal closed by a clash of the equations of indices among its hypotheses, once unfolded and taken apart: zero against a successor.
 refute :: Knowledge -> Goal -> Either String Builder
 refute k g = case [(n, l) | (n, l, r) <- eqs, clash l r] of
-  (n, l) : _ -> Right (prep <> (if l == CNum 0 then "symmetry " <> fromText n <> " as IxR; " else "") <> "SuccNonZero")
+  (n, l) : _ -> Right (prep <> (if l == CNum 0 then "symmetry " <> fromText n <> " as IxR; SuccNonZero on IxR" else "SuccNonZero on " <> fromText n))
   [] -> Left "no equation of indices clashes"
   where
     (prep, eqs) = digest k g
@@ -831,8 +881,9 @@ digest = digestWith "Ix"
 digestWith :: Text -> Knowledge -> Goal -> (Builder, [(Text, CT, CT)])
 digestWith prefix k g = foldl one ("", []) (zip [1 :: Int ..] (goalEquations g))
   where
+    freshPrefix = head [p | p <- prefix : [prefix <> T.pack (show i) <> "_" | i <- [1 :: Int ..]], all (not . T.isPrefixOf p . fst) (goalHyps g)]
     one (tac, acc) (i, (h, l, r)) =
-      let name = prefix <> T.pack (show i)
+      let name = freshPrefix <> T.pack (show i)
           (tac1, h1, l1, r1) = case restate k h l r name of
             Just (t, l', r') -> (t, name, l', r')
             Nothing -> ("", h, l, r)
@@ -841,7 +892,7 @@ digestWith prefix k g = foldl one ("", []) (zip [1 :: Int ..] (goalEquations g))
     -- A successor against a successor: the predecessors, again and again.
     injective h l r = case (l, r) of
       (CSym "S" [a], CSym "S" [b]) ->
-        let n = h <> "i"
+        let n = freshPrefix <> h <> "i"
             (t, more) = injective n a b
          in ("SuccInj on " <> fromText h <> " as " <> fromText n <> "; " <> t, (n, a, b) : more)
       _ -> ("", [])
@@ -983,9 +1034,16 @@ premisesAt k g eqs pre values byArg = foldM one (Map.empty, "") pre
       arg <- maybe (Left "internal: an index of no argument") (Right . snd) (listToMaybe (drop a byArg))
       let lhs = CSym fn [arg]
       (e, proof) <- indexOf k g eqs lhs
-      sigma' <- maybe (Left ("the index " <> T.unpack (runBuilder (render e)) <> " of " <> T.unpack (runBuilder (render arg)) <> " is not " <> T.unpack (runBuilder (render (substCT argMap pat))))) Right (matchCT values (substCT argMap pat) e sigma)
+      sigma' <- case matchCT values (substCT argMap pat) e sigma of
+        Just found -> Right found
+        Nothing
+          | all (\v -> v `notElem` values || Map.member v sigma) (varsCT (substCT argMap pat)) -> Right sigma
+          | otherwise -> Left ("the index " <> T.unpack (runBuilder (render e)) <> " of " <> T.unpack (runBuilder (render arg)) <> " is not " <> T.unpack (runBuilder (render (substCT argMap pat))))
       let inst = substCT (argMap <> sigma') pat
-          proof' = if e == inst then proof else "calc " <> render lhs <> " = " <> render e <> " by (" <> proof <> ") = " <> render inst
+      -- Shared indices can be projections of another computed argument. Their
+      -- equality follows from its certified contract, not syntactic matching.
+      bridge <- closeEq indexFuel k g eqs e inst
+      let proof' = if e == inst then proof else "calc " <> render lhs <> " = " <> render e <> " by (" <> proof <> ") = " <> render inst <> " by (" <> bridge <> ")"
       pure (sigma', acc <> (if hasEquation g lhs inst then "" else "have " <> equationText lhs inst <> " { " <> proof' <> " }; "))
 
 -- | The memberships of a function's arguments its lemmas take as hypotheses, each proved and stated where no hypothesis states it.
@@ -995,25 +1053,36 @@ argMemberships k g h args = do
   fmap mconcat . forM (zip (closureArgTys cl) args) $ \(ty, a) -> case ty of
     TNat -> Right ""
     _ -> do
-      p <- maybe (Left ("the membership of " <> T.unpack (runBuilder (render a)) <> " is not known")) Right (termPred k g a)
+      p <- maybe (Left ("the membership of " <> T.unpack (runBuilder (render a)) <> " is not known")) Right (termPred k g a <|> if null (valueVariables ty) then typePredicate k g ty else Nothing)
       if hasMembership g p a then Right "" else (\proof -> "have (" <> membershipText p a <> ") { " <> proof <> " }; ") <$> membershipProof k g p a
 
 -- | The membership predicate of a term, in a goal: a variable's, by its hypothesis; a function's result's, by its closure lemma at the predicates of its arguments.
 termPred :: Knowledge -> Goal -> CT -> Maybe Pred
-termPred k g = \case
-  CVar v -> listToMaybe [p | (_, HMember p x) <- goalHyps g, x == v]
-  CSym f args
-    | Just cl <- Map.lookup f (knowClosures k) -> do
-        given <- fmap Map.unions . forM (zip (closureArgTys cl) args) $ \(ty, a) -> case ty of
-          TParam j [] -> Map.singleton j <$> termPred k g a
-          TData dn targs _ -> do
-            Pred q ps <- termPred k g a
-            (q', used) <- Map.lookup dn (knowMembership k)
-            guard (q == q')
-            Just (Map.fromList [(j, parameterPredicate c) | (u, c) <- zip used ps, Just (TParam j []) <- [lookup u (zip [0 ..] targs)]])
-          _ -> Just Map.empty
-        predicateOf (knowMembership k) (`Map.lookup` given) (closureResultTy cl)
-  _ -> Nothing
+termPred k g term
+  | p : _ <-
+      [ Pred name captures
+      | (_, HProp prop) <- goalHyps g
+      , Rel RelLt (Nat 0) member <- [stripLocations prop]
+      , Right (CSym name args) <- [termCT CVar member]
+      , not (null args)
+      , last args == term
+      , let captures = init args
+      ] =
+      Just p
+  | otherwise = case term of
+      CVar v -> listToMaybe [p | (_, HMember p x) <- goalHyps g, x == v]
+      CSym f args
+        | Just cl <- Map.lookup f (knowClosures k) -> do
+            given <- fmap Map.unions . forM (zip (closureArgTys cl) args) $ \(ty, a) -> case ty of
+              TParam j [] -> Map.singleton j <$> termPred k g a
+              TData dn targs _ -> do
+                Pred q ps <- termPred k g a
+                (q', used) <- Map.lookup dn (knowMembership k)
+                guard (q == q')
+                Just (Map.fromList [(j, parameterPredicate c) | (u, c) <- zip used ps, Just (TParam j []) <- [lookup u (zip [0 ..] targs)]])
+              _ -> Just Map.empty
+            predicateOf (knowMembership k) (`Map.lookup` given) (closureResultTy cl)
+      _ -> Nothing
 
 -- | Whether a hypothesis of the goal states the equation, as the core writes it.
 hasEquation :: Goal -> CT -> CT -> Bool
@@ -1186,6 +1255,14 @@ termProof k info n g le@(Located sp e) = case e of
     (Located _ (R.EName (QName [] (Ident w))), []) | w `elem` ["rfl", "refl"] -> closed <$> rflTactic k g sp
     -- What cannot be, from hypotheses whose equations clash once unfolded.
     _ | Bottom <- stripLocations (goalConcl g), Right tac <- refute k g -> pure (closed tac)
+    -- An impossible indexed value is eliminated by membership inversion.
+    -- Merely naming an ordinary inhabited data value never proves bottom.
+    (Located _ (R.EName (QName [] (Ident w))), [])
+      | Bottom <- stripLocations (goalConcl g)
+      , Just (_, TData {}) <- lookup w (goalVars g) -> do
+          (cases, finish) <- dataInduction k info n g sp w []
+          proofs <- traverse (either (Left . EngineError sp) (Right . closed) . refute k) cases
+          finish proofs
     -- A hypothesis whose equation is the goal's once both are unfolded: the one taken to the other.
     (Located _ (R.EName (QName [] (Ident w))), [])
       | Just h <- lookup w (goalNames g)
@@ -1238,7 +1315,7 @@ indexedAppeal k g ev = do
   Rel RelEq ca cb <- Just (stripLocations (asEquation c))
   Rel RelEq ga gb <- Just (stripLocations (asEquation (goalConcl g)))
   [a, b, l, r] <- either (const Nothing) Just (traverse (termCT CVar) [ca, cb, ga, gb])
-  let found = [(s, e, p) | s <- nub (subtermsOf a <> subtermsOf b), specified s, Right (e, p) <- [indexOf k g (goalEquations g) s], e /= s]
+  let found = discover indexFuel [] (subtermsOf a <> subtermsOf b)
       names = ["IxA" <> fromDec i | i <- [1 .. length found]]
       -- A side rewritten an index at a time: each stage that changes, with the equation doing it.
       stages t = [(u', n) | ((u, u'), n) <- zip (zip (t : map fst (rewrites t)) (map fst (rewrites t))) names, u /= u']
@@ -1256,6 +1333,18 @@ indexedAppeal k g ev = do
         <> mconcat [" = " <> render u <> " by cong " <> n | (u, n) <- stages b]
     )
   where
+    -- Rewriting an outer result index can expose an index of another computed
+    -- argument. Follow those contracts too, retaining a proof for every step.
+    discover fuel seen = \case
+      _ | fuel <= 0 -> []
+      [] -> []
+      s : rest
+        | s `elem` seen -> discover fuel seen rest
+        | specified s
+        , Right (e, proof) <- indexOf k g (goalEquations g) s
+        , e /= s ->
+            (s, e, proof) : discover (fuel - 1) (s : seen) (subtermsOf e <> rest)
+        | otherwise -> discover fuel (s : seen) rest
     specified = \case
       CSym fn [CSym h _] | Just s <- Map.lookup h (knowIndexSpecs k) -> isJust (lookup fn (ixsPost s))
       _ -> False
@@ -1469,7 +1558,8 @@ in the final derivation even if later computation does not use it.
 typedArg :: Knowledge -> TheoremInfo -> Goal -> Located R.Expr -> Either EngineError ((Expr Text, Ty), Out)
 typedArg k info g e0 = do
   e <- either (\err -> let (sp, msg) = renderFixityError err in Left (EngineError sp msg)) Right (resolveExpr (knowFixities k) e0)
-  (prepared, ty) <- either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTermWithObligations (knowEnv k) (goalDict g) (goalVars g) e))
+  let hypotheses = [(name, surfaceNames g prop) | (name, h) <- goalNames g, Just (HProp prop) <- [lookup h (goalHyps g)]]
+  (prepared, ty) <- either (\(ElabError sp msg) -> Left (EngineError sp msg)) Right (runTC (inferTermWithHypotheses hypotheses (knowEnv k) (goalDict g) (goalVars g) e))
   checked <-
     Term.traverseObligations
       ( \(prop, raw) -> do
@@ -2108,8 +2198,9 @@ Induction on several values of @Nat@ at once, as a function recursing on them
 together does: course-of-values induction on the code of their tuple, @pair
 x0 (pair x1 …)@, which every code is, by @pairSurj@.  The motive is the goal
 at the components of the code, the hypotheses mentioning the values reverted
-into it.  In the step, each component is @0@ or a successor, by
-@zeroOrSucc@, and each combination is a case, an auxiliary theorem, under the
+into it. In the step, each natural component is @0@ or a successor, by
+@zeroOrSucc@, and each datatype component is split by its certified membership
+inversion. Each combination is a case, an auxiliary theorem, under the
 induction hypotheses at the tuples the function's recursive calls there
 pass, as its unfolding lemma for the case has them: each looked up below the
 code by @belowElim@, since the code of a pair grows with its components
@@ -2129,11 +2220,14 @@ tupleInduction k info g sp applied cols positions = do
               Just (u, _, rhs) | u == target -> nub [us | CSym f as <- subtermsCT rhs, f == fname, length as == arity, let us = map (as !!) positions, below us vals]
               _ -> []
       caseGoal combo =
-        let vals = [if b then CSym "S" [CVar e] else CNum 0 | (b, e) <- zip combo preds]
+        let selected = comboShapes combo
+            vals = [shapeTerm sh (map (CVar . fieldName ci) [0 .. length (shapeFields sh) - 1]) | (ci, sh) <- zip [0 ..] selected]
+            fields = concat [caseFields ci sh | (ci, sh) <- zip [0 ..] selected]
+            facts = concat [caseFacts ci sh | (ci, sh) <- zip [0 ..] selected]
             ihs = recursiveTuples vals
-            hyps = map snd kept <> [HProp (at u motive) | u <- ihs] <> [HProp (at vals p) | (_, p) <- dependent]
-            vars = [("#" <> T.pack (show i), (e, TNat)) | (i, (True, e)) <- zip [0 :: Int ..] (zip combo preds)] <> [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols]
-            ihCore j = hname (length kept + j)
+            hyps = map snd kept <> facts <> [HProp (at u motive) | u <- ihs] <> [HProp (at vals p) | (_, p) <- dependent]
+            vars = [("#" <> v, (v, t)) | (v, t) <- fields] <> [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols]
+            ihCore j = hname (length kept + length facts + j)
             ihNames = [(if length ihs == 1 then "IH" else "IH" <> T.pack (show j), ihCore j) | j <- [1 .. length ihs]]
             keptNames = [(s, hname i) | (i, (h, _)) <- zip [1 ..] kept, (s, h') <- goalNames g, h' == h]
          in (ihs, Goal (zip (map hname [1 ..]) hyps) (at vals (goalConcl g)) vars (ihNames <> keptNames) [(runBuilder (render (pairT u)), ihCore j) | (j, u) <- zip [1 ..] ihs] (goalDict g) (goalPremises g))
@@ -2155,13 +2249,30 @@ tupleInduction k info g sp applied cols positions = do
     fresh nm = fromMaybe nm (find (`notElem` used) (nm : [nm <> "_" <> T.pack (show i) | i <- [0 :: Int ..]]))
     eigen = fresh "e_k"
     n = CVar eigen
-    preds = [fresh ("e_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
-    dependent = [(h, p) | (h, HProp p) <- goalHyps g, any (`elem` cols) (foldr (:) [] p)]
+    columnTypes = [ty | col <- cols, (_, (v, ty)) <- goalVars g, col == v]
+    choices = [either (const []) id (shapes (knowEnv k) ty) | ty <- columnTypes]
+    comboShapes combo = zipWith (\opts tag -> opts !! tag) choices combo
+    fieldName ci j = fresh ("e_" <> T.pack (show ci) <> "_" <> T.pack (show j))
+    caseFields ci sh = [(fieldName ci j, substTy (typeArgs ci) ty) | (j, ty) <- zip [0 ..] (shapeFields sh)]
+    typeArgs ci = case columnTypes !! ci of TData _ ts _ -> ts; _ -> []
+    memberAt ci = listToMaybe [p | (_, HMember p v) <- goalHyps g, v == cols !! ci]
+    fieldPredAt ci fp = case columnTypes !! ci of
+      TData dn _ _ | Just (_, usedParams) <- Map.lookup dn (knowMembership k), Just (Pred _ ps) <- memberAt ci -> fieldPredicate usedParams ps fp
+      _ -> error "internal: matched datatype without membership"
+    caseFacts ci (Constructor c) =
+      [HMember (fieldPredAt ci fp) (fieldName ci j) | (j, fp) <- Map.findWithDefault [] (ctorCore c) (knowMembers k)]
+        <> [HProp (Rel RelEq (fromCT (atPositions (CVar . fieldName ci) l)) (fromCT (atPositions (CVar . fieldName ci) r))) | (l, r) <- Map.findWithDefault [] (ctorCore c) (knowIndexEqs k)]
+    caseFacts _ _ = []
+    hypExpr = \case
+      HProp p -> p
+      HMember p v -> Rel RelLt (Nat 0) (fromCT (predicateAt p (CVar v)))
+    dependent = [(h, p) | (h, hy) <- goalHyps g, let p = hypExpr hy, any (`elem` cols) (foldr (:) [] p)]
     kept = [(h, hy) | (h, hy) <- goalHyps g, h `notElem` map fst dependent]
     motive = foldr (Arrow . snd) (goalConcl g) dependent
     at ts e = e >>= \w -> maybe (Var w) fromCT (lookup w (zip cols ts))
-    combos = sequence (replicate kc [False, True])
-    below us vs = and (zipWith (\u v -> u == v || v == CSym "S" [u]) us vs) && or (zipWith (/=) us vs)
+    combos = sequence [[0 .. length opts - 1] | opts <- choices]
+    below us vs = and (zipWith3 (\opts u v -> u == v || any (\sh -> isJust (shapeLess sh u v)) opts) choices us vs) && or (zipWith (/=) us vs)
+    mixed = any (/= TNat) columnTypes
     subtermsCT t =
       t : case t of
         CSym _ xs -> concatMap subtermsCT xs
@@ -2173,8 +2284,8 @@ tupleInduction k info g sp applied cols positions = do
     helperName s = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> s])
     belowName = helperName "below"
     atName = helperName "at"
-    svars = [fresh ("s_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
-    wvars = [fresh ("w_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
+    svars = [fresh ("v_tuple_s_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
+    wvars = [fresh ("v_tuple_w_" <> T.pack (show i)) | i <- [0 .. kc - 1]]
     helperGoal concl = Goal [] concl [(nm, x) | (nm, x) <- goalVars g, fst x `notElem` cols] [] [] (goalDict g) (goalPremises g)
     -- The motive at the components of a code, from what they are and the motive there.
     substExpr vs = foldr (\(c, v) -> Arrow (Rel RelEq (fromCT c) (fromCT v))) (Arrow (at vs motive) (at (comps n) motive)) (zip (comps n) vs)
@@ -2269,7 +2380,13 @@ tupleInduction k info g sp applied cols positions = do
       codeC <- code (comps (pairT xs))
       codeX <- code xs
       up <- upFrom xs
-      step <- dispatch ihsOf appeals 0 []
+      branches <- dispatch ihsOf appeals 0 []
+      step <-
+        if mixed
+          then do
+            mf <- formula (at (comps n) motive)
+            pure ("have Step: " <> mf <> " { " <> introDependent <> branches <> " }; reify Step as StepCode; exact StepCode")
+          else pure branches
       pure
         ( "have C: ((lt 0 "
             <> codeC
@@ -2292,25 +2409,50 @@ tupleInduction k info g sp applied cols positions = do
     eliminations h = \case
       [] -> "exact " <> h
       x : xs -> "ImplL on " <> h <> " as " <> h <> "i { exact " <> fromText x <> " } { " <> eliminations (h <> "i") xs <> " }"
-    -- The step: each component 0 or a successor, in turn, and a case at each combination.
+    introDependent = mconcat ["ImplR as D" <> fromDec q <> "; " | q <- [1 .. length dependent]]
+    -- Natural cases use zeroOrSucc; datatype cases use certified membership inversion.
     dispatch ihsOf appeals i combo
       | i == kc = leaf ihsOf appeals combo
-      | otherwise = do
+      | columnTypes !! i == TNat = do
           let c = render (comps n !! i)
               z = "Z" <> fromDec i
-          a <- dispatch ihsOf appeals (i + 1) (combo <> [False])
-          b <- dispatch ihsOf appeals (i + 1) (combo <> [True])
+          a <- dispatch ihsOf appeals (i + 1) (combo <> [0])
+          b <- dispatch ihsOf appeals (i + 1) (combo <> [1])
           pure ("have " <> z <> ": ((" <> c <> ") = 0 \\/ (" <> c <> ") = S (prd (" <> c <> "))) { exact zeroOrSucc }; DisjL on " <> z <> " as " <> z <> "a " <> z <> "b { " <> a <> " } { " <> b <> " }")
+      | otherwise = do
+          let value = comps n !! i
+              constructors = [c | Constructor c <- choices !! i]
+              applied c = shapeTerm (Constructor c) [fieldT j value | j <- [0 .. length (ctorFields c) - 1]]
+              facts c =
+                [membershipText (fieldPredAt i fp) (fieldT j value) | (j, fp) <- Map.findWithDefault [] (ctorCore c) (knowMembers k)]
+                  <> [equationText (atPositions (`fieldT` value) l) (atPositions (`fieldT` value) r) | (l, r) <- Map.findWithDefault [] (ctorCore c) (knowIndexEqs k)]
+              parts c = equationText value (applied c) : facts c
+              conjunction = \case [] -> "(0 = 0)"; [q] -> q; q : qs -> "(" <> q <> " /\\ " <> conjunction qs <> ")"
+              disjunction = \case [] -> "_|_"; [q] -> q; q : qs -> "(" <> q <> " \\/ " <> disjunction qs <> ")"
+              split _ [] = "ExFalso"
+              split h [branch] = branch h
+              split h (branch : rest) = "DisjL on " <> h <> " as " <> h <> "a " <> h <> "b { " <> branch (h <> "a") <> " } { " <> split (h <> "b") rest <> " }"
+          dat <- maybe (Left "a matched type has no constructors") Right (listToMaybe constructors >>= dataOfCtor (knowEnv k))
+          branches <- forM (zip [0 ..] constructors) \(tag', c) -> do
+            rest <- dispatch ihsOf appeals (i + 1) (combo <> [tag'])
+            pure \h ->
+              let unpack q =
+                    let (tac, name) = conjunct h (length (parts c)) q
+                        target = if q == 0 then "Z" <> fromDec i else "F" <> fromDec i <> "_" <> fromDec q
+                     in "have " <> target <> ": " <> parts c !! q <> " { " <> tac <> "exact " <> name <> " }; "
+               in mconcat [unpack q | q <- [0 .. length (parts c) - 1]] <> rest
+          pure ("have I" <> fromDec i <> ": " <> disjunction (map (conjunction . parts) constructors) <> " { exact " <> fromText (dataLemma dat "inversion") <> " }; " <> split ("I" <> fromDec i) branches)
     leaf ihsOf (appeal, belowAppeal, atAppeal) combo = do
       let i = fromMaybe 0 (elemIndex combo combos)
           cs' = comps n
-          vals = [if b then CSym "S" [CSym "prd" [c]] else CNum 0 | (b, c) <- zip combo cs']
-          zs = ["Z" <> fromDec j <> (if b then "b" else "a") | (j, b) <- zip [0 :: Int ..] combo]
+          selected = comboShapes combo
+          vals = [shapeTerm sh [shapeProject sh j c | j <- [0 .. length (shapeFields sh) - 1]] | (sh, c) <- zip selected cs']
+          zs = ["Z" <> fromDec j <> (case sh of Zero -> "a"; Successor -> "b"; Constructor _ -> "") | (j, sh) <- zip [0 :: Int ..] selected]
           -- The case's variables, the predecessors, at the components.
-          sigma = Map.fromList (zip preds [CSym "prd" [c] | c <- cs'])
+          sigma = Map.fromList [(fieldName ci j, shapeProject sh j c) | (ci, (sh, c)) <- zip [0 ..] (zip selected cs'), j <- [0 .. length (shapeFields sh) - 1]]
           ihs = map (map (substCT sigma)) (ihsOf !! i)
           towardsComps = drop 1 (scanl replaced vals (zip [0 ..] cs'))
-          intros = mconcat ["ImplR as D" <> fromDec q <> "; " | q <- [1 .. length dependent]]
+          intros = mconcat ["ImplR as Adep" <> fromDec q <> "; " | q <- [1 .. length dependent]]
           -- The motive at the components, from it at the case's values: its code is the goal.
           eliminate cur = \case
             [] -> if ownCode then "exact " <> cur else "reify " <> cur <> " as F1; exact F1"
@@ -2331,29 +2473,33 @@ tupleInduction k info g sp applied cols positions = do
         let pu = render (pairT u)
             jd = fromDec j
         pure
-          ( pairLtProof j u vals
+          ( pairLtProof selected j u vals
               <> ("have L" <> jd <> ": (" <> pu <> " < " <> render n <> ") { calc (" <> pu <> " < " <> render n <> ") = (" <> pu <> " < " <> render (pairT vals) <> ") by cong K = 1 by exact Q" <> jd <> "_0 }; ")
               <> ("have IHc" <> jd <> ": ((lt 0 " <> codeAt <> ") = 1) { exact belowElim _ " <> render n <> " (" <> pu <> ") }; ")
               <> ("have IHr" <> jd <> ": " <> mu <> " { " <> belowAppeal <> " }; ")
           )
       caseF <- formula (at vals motive)
       substF <- formula (substExpr vals)
-      pure
-        ( kProof
-            <> mconcat ihTexts
-            <> ("have A: " <> caseF <> " { " <> intros <> appeal i <> " }; ")
-            <> ("have T: (" <> substF <> ") { " <> atAppeal <> " }; ")
-            <> eliminate "T" (zip [0 ..] (zs <> ["A"]))
-        )
+      let proof =
+            kProof
+              <> mconcat ihTexts
+              <> ("have A: " <> caseF <> " { " <> intros <> appeal i <> " }; ")
+              <> ("have T: (" <> substF <> ") { " <> atAppeal <> " }; ")
+              <> eliminate "T" (zip [0 ..] (zs <> ["A"]))
+      if mixed
+        then do
+          coded <- code cs'
+          pure ("have LeafCode: ((lt 0 " <> coded <> ") = 1) { " <> proof <> " }; reflect LeafCode as LeafResult; " <> eliminations "LeafResult" ["D" <> T.pack (show q) | q <- [1 .. length dependent]])
+        else pure proof
     -- The code of a tuple below the case's, component by component from the last: Qj_0 states it.
-    pairLtProof j us vs = snd (go 0)
+    pairLtProof selected j us vs = snd (go 0)
       where
         nm p i = p <> fromDec (j :: Int) <> "_" <> fromDec (i :: Int)
         suffix xs i = pairT (drop i xs)
         go i
           | i == kc - 1 =
               if us !! i /= vs !! i
-                then (True, "have " <> nm "Q" i <> ": (" <> render (us !! i) <> " < " <> render (vs !! i) <> ") { exact ltSucc }; ")
+                then (True, "have " <> nm "Q" i <> ": (" <> render (us !! i) <> " < " <> render (vs !! i) <> ") { exact " <> fromText (fromMaybe "" (shapeLess (selected !! i) (us !! i) (vs !! i))) <> " }; ")
                 else (False, "")
           | otherwise =
               let (lessTail, tailSteps) = go (i + 1)
@@ -2364,7 +2510,7 @@ tupleInduction k info g sp applied cols positions = do
                     | otherwise = "have " <> nm "R" i <> ": (" <> render (suffix vs (i + 1)) <> " <= " <> render (suffix vs (i + 1)) <> ") { exact leSelf }; "
                   fact = "have " <> nm "Q" i <> ": (" <> render (suffix us i) <> " < " <> render (suffix vs i) <> ")"
                in if c' /= c
-                    then (True, tailSteps <> "have " <> nm "P" i <> ": (" <> render c' <> " < " <> render c <> ") { exact ltSucc }; " <> tailLe <> fact <> " { exact pairLtL on " <> nm "P" i <> " " <> nm "R" i <> " }; ")
+                    then (True, tailSteps <> "have " <> nm "P" i <> ": (" <> render c' <> " < " <> render c <> ") { exact " <> fromText (fromMaybe "" (shapeLess (selected !! i) c' c)) <> " }; " <> tailLe <> fact <> " { exact pairLtL on " <> nm "P" i <> " " <> nm "R" i <> " }; ")
                     else
                       if lessTail
                         then (True, tailSteps <> "have " <> nm "P" i <> ": (" <> render c <> " <= " <> render c <> ") { exact leSelf }; " <> fact <> " { exact pairLtR on " <> nm "P" i <> " " <> nm "Q" (i + 1) <> " }; ")

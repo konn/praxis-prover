@@ -44,7 +44,7 @@ membership elimination lemma, never extracting a derivation from a number.
 Preserve the currently accepted first-order, primitive-recursive language and
 its examples. This migration does not introduce arbitrary dependent type theory,
 unrestricted higher-order computation or new arithmetic axioms. Existing source
-syntax remains usable. No commits or pushes are part of this request.
+syntax remains usable.
 
 ## Progress
 
@@ -127,10 +127,11 @@ statements; they are not a formal adequacy proof of the whole source language.
 
 ## Verification
 
-- `cabal test praxis`: 89 tests passed, including constructor normalization,
+- `cabal test praxis`: 96 tests passed, including constructor normalization,
   typed scope/signature/dictionary rejection, proof forwarding through functions
   and containers, rebuilding from a theorem application, impossible branches,
-  invalid evidence, and independent replay of a GADT projection proof.
+  invalid evidence, mixed GADT recursion, implicit pattern and proof inference,
+  and independent replay of a GADT projection proof.
 - `cabal test praxis-core`: 401 tests and 38 doctests passed.
 - `cabal test praxis-lsp`: 25 tests passed.
 - HLS: both the explicit core and downstream LSP module checked successfully.
@@ -142,4 +143,42 @@ statements; they are not a formal adequacy proof of the whole source language.
   arguments, proof counts, dictionary types and source result types of empty
   branches.
 
-No kernel rules or axioms were added. No commits or pushes were made.
+No kernel rules or axioms were added.
+
+## Mixed GADT matching follow-up
+
+Shallow function clauses can match several arguments, mixing natural numbers
+and indexed or ordinary datatypes. `Surface.Match` shares their constructor
+shapes between the compiler and proof generator. Compilation recurses on the
+tuple of numerical codes. Every recursive component is unchanged or a field of
+its own constructor, and at least one decreases. Coverage excludes only cases
+whose indices demonstrably clash; the PRA contract also proves those cases
+impossible. Nested patterns and overlapping reachable clauses remain unsupported.
+
+Implicit constructor patterns bind stored values or name recovered indices.
+Recovered indices are materialized through the index projections of typed
+fields. Reusing an implicit name requires the indices to be already equal;
+it cannot silently impose an extra equality on an unconstrained argument.
+Named proof arguments also guide implicit inference, while retaining all proof
+obligations for certification.
+
+For indexed results, induction proves membership and result indices together
+in a `#contract` lemma. The usual `#closed` lemma projects its membership part.
+This lets recursive results be passed to another indexed function or repacked
+in a constructor. Shared indices of computed arguments are compared by their
+certified index equations. Datatype inversion and course-of-values induction
+use only existing PRA rules and library lemmas.
+
+The natural arithmetic regression uses `zero-add {S m}` for the equation
+`0 + S m = S m`: that equation is not definitional when addition recurses on
+its second argument. The original `rfl` was a source proof error independent
+of the compiler gaps.
+
+Regressions cover both mixed and constructor-only `elt-of-plt`, `plt-trans`
+with named or inferred implicit patterns, composition into `lt-trans`,
+polymorphic List recursion, invalid evidence, invalid implicit patterns,
+missing cases, overlaps, and nondecreasing recursion. The kernel checks every
+generated declaration and retains the GADT contract and theorem certificates.
+The existing primitive replay regression for extracted GADT evidence remains
+in the suite. Full expansion of the tuple-recursion certificates is too costly
+for this regression suite.

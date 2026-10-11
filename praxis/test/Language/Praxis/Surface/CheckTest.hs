@@ -61,6 +61,70 @@ checkTests =
               _ -> assertFailure "missing impossible branch"
             cert <- maybe (assertFailure "missing projection certificate") pure (Map.lookup "u_ProofFlow_szero" (coreCertificates core))
             either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal "u_ProofFlow_szero" [] [] MS.empty) [])
+    , testCase "mixed indexed patterns certify the natural arithmetic example" $ do
+        c <- checkFile "test/data/natural.px"
+        errors c @?= []
+        assertBool "the conversion's result indices are certified" ("Natural.elt-of-plt.#index" `elem` checkedTheorems c)
+    , testCase "implicit indices are recovered when converting by constructors alone" $ do
+        p <- either assertFailure pure prelude
+        source <- TIO.readFile "test/data/natural.px"
+        let before = fst (T.breakOn "elt-of-plt {0} {0}" source)
+            simple = before <> "elt-of-plt (Zero m) = delta m (zero-add {S m})\nelt-of-plt (Succ p) = succ-elt (elt-of-plt p)\n"
+            c = checkSource p "inferred-indices.px" simple
+        errors c @?= []
+        assertBool "the constructor-only conversion certifies" ("Natural.elt-of-plt.#index" `elem` checkedTheorems c)
+    , testCase "mixed patterns cover Nat and multiple polymorphic data arguments" $ do
+        c <- checkFile "test/data/mixed-patterns.px"
+        errors c @?= []
+        mapM_ (\name -> assertBool (T.unpack name) (name `elem` checkedTheorems c)) ["MixedPatterns.take-two", "MixedPatterns.zip-one", "MixedPatterns.choose-last"]
+        case checkedFinal c of
+          Nothing -> assertFailure "missing final core"
+          Just (k, _) -> mapM_ (\name -> assertBool "a polymorphic closure is certified" (Map.member name (knowClosures k))) ["u_MixedPatterns_stake", "u_MixedPatterns_szip"]
+    , testCase "mixed patterns reject missing cases, overlaps and nondecreasing recursion" $ do
+        p <- either assertFailure pure prelude
+        let prefix = "module BadMixed where\ndata List = Nil | Cons Nat List\nf : Nat -> List -> Nat\n"
+        forM_
+          [ ("f 0 xs = 0\nf (S n) Nil = 0\n", "miss a possible")
+          , ("f 0 xs = 0\nf n Nil = 0\nf (S n) (Cons x xs) = n\n", "overlap")
+          , ("f 0 xs = 0\nf (S n) Nil = 0\nf (S n) (Cons x xs) = f (S n) (Cons x xs)\n", "recursive call")
+          ]
+          $ \(body, message) -> do
+            let c = checkSource p "bad-mixed.px" (prefix <> body)
+            assertBool (T.unpack message) (any (message `T.isInfixOf`) (map T.pack (errors c)))
+    , testCase "GADT transitivity certifies with explicit or inferred constructor indices" $ do
+        p <- either assertFailure pure prelude
+        source <- TIO.readFile "test/data/gadt-order.px"
+        forM_
+          [ source
+          , T.replace "plt-trans ZeroSucc (SuccSucc {n} {m} p) = ZeroSucc" "plt-trans (ZeroSucc {n}) (SuccSucc {n} {m} p) = ZeroSucc {m}" source
+          , T.replace "(SuccSucc {n} {m} p)" "(SuccSucc p)" source
+          ]
+          $ \program -> do
+            let c = checkSource p "gadt-order.px" program
+            errors c @?= []
+            assertBool "proof arguments determine the indices of nested applications" ("Arith.Order.GADTs.lt-trans" `elem` checkedTheorems c)
+        case checkedFinal (checkSource p "gadt-order.px" source) of
+          Nothing -> assertFailure "missing final core"
+          Just (_, core) -> forM_ ["u_Arith_sOrder_sGADTs_splt_dtrans_s_x23_contract", "u_Arith_sOrder_sGADTs_slt_dtrans"] $ \name ->
+            assertBool ("retained checked certificate " <> name) (Map.member name (coreCertificates core))
+    , testCase "implicit constructor patterns are checked rather than discarded" $ do
+        p <- either assertFailure pure prelude
+        let prefix = "module BadImplicits where\ndata Box (n : Nat) where\n  Mk : {n : Nat} -> Box n\nf : {n m : Nat} -> Box n -> Box m -> Nat\n"
+        forM_
+          [ "f (Mk {n} {m}) q = 0"
+          , "f (Mk {0}) q = 0"
+          , "f (Mk {n}) (Mk {n}) = 0"
+          , "f (p {n}) q = 0"
+          ]
+          $ \clause -> assertBool (T.unpack clause) (not (null (errors (checkSource p "bad-implicits.px" (prefix <> clause)))))
+        let late = "module Late where\ndata Box where\n  Mk : {n : Nat} -> Nat -> Box\nf : Box -> Nat\nf (Mk x {n}) = x\n"
+            natural = "module BadSucc where\nf : Nat -> Nat\nf 0 = 0\nf (S {n} p) = p\n"
+            recovered = "module BadRecovered where\ndata Box (n : Nat) where\n  Mk : {n : Nat} -> Box n\ndata Wrap (n : Nat) where\n  wrap : {n : Nat} -> Box n -> Wrap n\nf : {n m : Nat} -> Wrap n -> Wrap m -> Nat\nf (wrap {q} x) (wrap {q} y) = 0\n"
+        mapM_ (\program -> assertBool "invalid implicit syntax is rejected" (not (null (errors (checkSource p "bad-implicit.px" program))))) [late, natural, recovered]
+    , testCase "inferring indices from proofs still checks every proof obligation" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module BadProofHint where", "data Witness (n : Nat) where", "  Mk : {n : Nat} -> n = 0 -> Witness n", "bad : {n : Nat} -> n = 1 -> Witness n", "bad h = Mk h"]
+        assertBool "a proof of a different proposition cannot be repacked" (not (null (errors (checkSource p "bad-proof-hint.px" source))))
     , testCase "invalid constructor evidence does not establish membership" $ do
         p <- either assertFailure pure prelude
         let source = T.unlines ["module InvalidEvidence where", "data Witness where", "  Mk : (n : nat) -> n = 0 -> Witness", "bad : Witness", "bad = Mk 1 rfl"]
