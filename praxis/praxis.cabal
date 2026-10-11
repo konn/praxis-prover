@@ -64,6 +64,7 @@ library
     Language.Praxis.Package.Build
     Language.Praxis.Package.Manifest
     Language.Praxis.Package.Version
+    Language.Praxis.Surface.Builtin
     Language.Praxis.Surface.Check
     Language.Praxis.Surface.Compile
     Language.Praxis.Surface.Core
@@ -132,6 +133,8 @@ test-suite praxis-test
   other-modules:
     Language.Praxis.Package.PackageTest
     Language.Praxis.Surface.AdequacyTest
+    Language.Praxis.Surface.BuiltinCheckTest
+    Language.Praxis.Surface.BuiltinTest
     Language.Praxis.Surface.CheckTest
     Language.Praxis.Surface.CoreTest
     Language.Praxis.Surface.DependentClassTest

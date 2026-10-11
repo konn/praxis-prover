@@ -298,6 +298,38 @@ instance holds by the instance's proofs of the laws. A law applies to
 arguments, whose type gives the instance; and a proof may use the laws
 about the methods its statement uses, which fix the functions they are at.
 
+## Builtin registrations
+
+`{-# BUILTIN ROLE name #-}` connects a compiler role to an ordinary,
+previously declared definition. It introduces no axiom. The checker validates
+the exact signature and the role's earlier registrations, and activates the
+binding only after the target completes checking. A compiled body with a
+failed proof obligation or generated contract is insufficient. A role cannot
+be registered twice or rebound, including across imported modules.
+
+The finite-domain protocol uses these roles:
+
+| Role | Required declaration |
+| --- | --- |
+| `FIN` | An inductive type with one `Nat` index |
+| `VEC` | An inductive type with a `Nat` index followed by one type parameter |
+| `FIN_FROM_NAT` | Conversion from `k`, given `k < n`, to `Fin n` |
+| `FIN_TO_NAT` | Conversion from `Fin n` to `Nat` |
+| `FIN_TO_NAT_BOUND` | A certified theorem that the conversion is less than `n` |
+| `FIN_FROM_TO_NAT` | A certified theorem that converting an ordinal to `Nat` and back returns it |
+| `FIN_TO_FROM_NAT` | A certified theorem that converting a bounded numeral to an ordinal and back returns it |
+| `VEC_LOOKUP` | `Fin n -> Vec n a -> a` |
+| `FINITE` | The finite class |
+| `FINITE_CARD` | Its `card : Nat` method |
+| `FINITE_ENUMERATION` | Its `enumeration : Vec card a` method |
+| `FINITE_LOCATE` | Its `locate : a -> Fin card` method |
+| `FINITE_COVERAGE` | Its law `lookup (locate x) enumeration = x` |
+
+The dependent member signatures and coverage law must use the same registered
+class and cardinality. The bridge theorems must have exactly the required
+statements, without extra assumptions. Names alone do not establish these
+properties: the kernel checks the ordinary proofs.
+
 ## Types
 
 Types are `Nat` (also `nat`), data types applied to types, type parameters

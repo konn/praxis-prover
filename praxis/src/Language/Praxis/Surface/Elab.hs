@@ -105,6 +105,8 @@ data Item
     IData !DataInfo !Span ![FunDef]
   | IFun !FunDef
   | ITheorem !TheoremDef
+  | -- | A requested builtin registration, admitted by the checker in source order.
+    IBuiltin !(Located Text) !(Located QualName)
   | -- | a declaration which did not elaborate; the rest go on without it
     IFailed !ElabError
 
@@ -310,7 +312,11 @@ elabModule fx env0 rn = withModules (walk envData decls [])
             R.DData dd -> walk env rest (reverse (Map.findWithDefault [IFailed (ElabError sp "internal: a data type not declared")] (owner, unLocated (R.dataName dd)) dataItems) <> acc)
             R.DTypeAlias n _ _ -> walk env rest (maybe acc (\err -> IFailed err : acc) (Map.lookup (owner, unLocated n) aliasErrors))
             R.DFixity {} -> walk env rest acc
-            R.DBuiltin role _ -> walk env rest (IFailed (ElabError (location role) "BUILTIN registration is not available yet") : acc)
+            R.DBuiltin role (Located targetSpan (QName qualifiers name)) ->
+              let target = qualifiers <> [name]
+               in if Map.member target (envGlobals env)
+                    then walk env rest (IBuiltin role (Located targetSpan target) : acc)
+                    else walk env rest (IFailed (ElabError targetSpan "a BUILTIN target must be declared before its registration") : acc)
             R.DKindSig (Located ksp n) _
               | (owner, n) `elem` dataNames -> walk env rest acc
               | otherwise -> walk env rest (IFailed (ElabError ksp ("a kind signature for no data type of this module: " <> T.unpack n)) : acc)

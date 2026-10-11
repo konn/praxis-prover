@@ -3,6 +3,8 @@ module Main (main) where
 import Data.Map.Strict qualified as Map
 import Language.Praxis.Package.PackageTest (packageTests)
 import Language.Praxis.Surface.AdequacyTest (adequacyTests)
+import Language.Praxis.Surface.BuiltinCheckTest (builtinCheckTests)
+import Language.Praxis.Surface.BuiltinTest (builtinTests)
 import Language.Praxis.Surface.CheckTest (checkTests)
 import Language.Praxis.Surface.CoreTest (coreTests)
 import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
@@ -26,6 +28,8 @@ main =
       , termTests
       , coreTests
       , dependentClassTests
+      , builtinTests
+      , builtinCheckTests
       , checkTests
       , adequacyTests
       , packageTests
