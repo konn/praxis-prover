@@ -69,7 +69,7 @@ import Language.Praxis.Surface.CoreText (CT (..), isParameter)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule, fcBody)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
-import Language.Praxis.Surface.Env (CtorInfo (..), DataInfo (..), FunInfo (..), GadtCtor (..), Role (..), TeleEntry (..), TheoremInfo (..), emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), DataInfo (..), FunInfo (..), Role (..), TeleEntry (..), TheoremInfo (..), emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
 import Language.Praxis.Surface.Mangle (demangle, mangleVariable)
@@ -252,24 +252,22 @@ genData ld d args asked = sized \s ->
     self = renderQualName (dataQual d)
     -- The constructors which build a value at the indices asked, each with what that fixes of its telescope.
     fits = [(c, fixed) | c <- dataCtors d, Just fixed <- [fitting c]]
-    fitting c = case ctorGadt c of
-      Nothing -> Just Map.empty
-      Just g -> foldM (\acc (x, a) -> maybe (Just acc) (\v -> matchValue x v acc) a) Map.empty (zip (gcResult g) asked)
+    fitting c = case ctorSignature c of
+      g -> foldM (\acc (x, a) -> maybe (Just acc) (\v -> matchValue x v acc) a) Map.empty (zip (constructorResult g) asked)
     leaves = [cf | cf@(c, _) <- fits, not (any (mentions self) (ctorFields c))]
-    build c fixed = case ctorGadt c of
-      Nothing -> fmap (\env -> (VCon (ctorCore c) (Map.elems env), [])) <$> genTele ld Map.empty (map (substParams args) (ctorFields c))
-      Just g -> do
-        let tele = gcTele g
+    build c fixed = case ctorSignature c of
+      g -> do
+        let tele = constructorTele g
             -- The entry of the telescope at a position of the code: a field, or an implicit argument stored.
             at k = listToMaybe [p | (p, en) <- zip [0 ..] tele, teRole en `elem` [Explicit k, Stored k]]
         r <- genTele ld fixed [substParams args (teType en) | en <- tele]
         pure do
           generated <- r
-          let env = constructorWitness ld fixed tele [stripLocations (instantiate Var (fmap absurd prop)) | (_, prop) <- gcProofs g] generated
+          let env = constructorWitness ld fixed tele [stripLocations (instantiate Var (fmap absurd prop)) | (_, prop) <- constructorProofs g] generated
           -- Its preconditions hold of the entries, or no value is built of them.
-          guard (all (\(_, p) -> truth ld (instantiate (\i -> Var (env Map.! i)) (fmap absurd p))) (gcProofs g))
+          guard (all (\(_, p) -> truth ld (instantiate (\i -> Var (env Map.! i)) (fmap absurd p))) (constructorProofs g))
           fields <- traverse (\k -> at k >>= (`Map.lookup` env)) [0 .. length (ctorFields c) - 1]
-          is <- traverse (ixValue ld (`Map.lookup` env)) (gcResult g)
+          is <- traverse (ixValue ld (`Map.lookup` env)) (constructorResult g)
           pure (VCon (ctorCore c) fields, is)
 
 {- | Construct witnesses for equality preconditions by assigning an unfixed
@@ -628,10 +626,7 @@ emptyTelescope ld = any emptyType
     emptyType (TData n _ asked)
       | Just d <- Map.lookup n (ldDatas ld) =
           all
-            ( \c -> case ctorGadt c of
-                Nothing -> False
-                Just g -> or (zipWith clash asked (gcResult g))
-            )
+            (\c -> or (zipWith clash asked (constructorResult (ctorSignature c))))
             (dataCtors d)
     emptyType _ = False
     clash x y = case (normIx x, normIx y) of

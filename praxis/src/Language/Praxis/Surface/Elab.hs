@@ -73,6 +73,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void, absurd, vacuous)
+import Language.Praxis.Surface.Core qualified as Core
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Index
@@ -112,18 +113,18 @@ data FunDef = FunDef
 data FunClause = FunClause
   { fcPatterns :: ![Pattern]
   , fcVars :: ![(Text, Ty)]
-  , fcTerm :: !(Term.PendingTerm TheoremDef Int)
+  , fcTerm :: !(Core.Body TheoremDef)
   -- ^ the computation and its proof obligations, scoped over the clause variables
   , fcSpan :: !Span
   }
 
 -- | The proof-free computation over a clause's pattern variables.
 fcBody :: FunClause -> Term.Term Int
-fcBody = Term.computation . fcTerm
+fcBody = Core.computation . fcTerm
 
 -- | Every obligation retained with its clause, including instance methods.
 fdObligations :: FunDef -> [TheoremDef]
-fdObligations = concatMap (Term.obligations . fcTerm) . fdClauses
+fdObligations = concatMap (Core.obligations . fcTerm) . fdClauses
 
 data TheoremDef = TheoremDef
   { tdInfo :: !TheoremInfo
@@ -242,7 +243,7 @@ elabModule fx env0 rn = withModules (walk envData decls [])
       let e = at owner e0
           name = unLocated (R.dataName d)
        in case dataLayout fx e (Map.lookup (owner, name) kindSigs) d of
-            Right (params, indices, implicits) -> fst (addGadtData e (Ident name) params indices implicits [] [])
+            Right (params, indices, implicits) -> fst (addIndexedData e (Ident name) params indices implicits [] [])
             Left _ -> fst (addData e (Ident name) [(unLocated (R.dataParamName p), KType) | p <- R.dataParams d] [])
     (envData, dataItems) = foldl declareData (placeholders, Map.empty) dataDecls
     declareData (e0, done) (owner, sp, d) =
@@ -301,11 +302,11 @@ elabDataDecl fx env sig sp d
       unless (null (R.dataConstructors d)) $
         Left (ElabError (location (R.dataName d)) "a data type with a kind or indices gives its constructors by their signatures, after where")
       (params, indices, implicits) <- dataLayout fx env sig d
-      ctors <- forM (R.dataSignatures d) (elabGadtCtor fx env d params indices implicits)
+      ctors <- forM (R.dataSignatures d) (elabConstructorSignature fx env d params indices implicits)
       let name = Ident (unLocated (R.dataName d))
           q = qualify env [name]
           fnNames = [if length indices == 1 then "#idx" else "#idx-" <> T.pack (show p) | p <- [0 .. length indices - 1]]
-          (env1, info) = addGadtData env name params indices implicits [q <> [Ident n] | n <- fnNames] [(c, fs, Just g) | (c, fs, g) <- ctors]
+          (env1, info) = addIndexedData env name params indices implicits [q <> [Ident n] | n <- fnNames] ctors
           self = TData (renderQualName q) [TParam i [] | i <- [0 .. length params - 1]] []
           -- An index function's result is of its index's type erased, whose own indices would be other indices.
           declare (e, fs) (p, n) = let (e', f) = addInstanceFunction e q (Ident n) (Scheme params [] (TArrow self (erase (indices !! p)))) 1 [] in (e', fs <> [f])
@@ -499,8 +500,8 @@ its data type at distinct type variables, the type's parameters in order, and
 at indices which are patterns.  An implicit argument which is an index of a
 field is not stored: the index function of the field's type recovers it.
 -}
-elabGadtCtor :: Fixities -> Env -> R.DataDecl -> [(Text, Kind)] -> [Ty] -> [Bool] -> (Located Segment, Located R.Expr) -> Either ElabError (Segment, [Ty], GadtCtor)
-elabGadtCtor fx env d params indices implicits (Located csp cname, sig0) = do
+elabConstructorSignature :: Fixities -> Env -> R.DataDecl -> [(Text, Kind)] -> [Ty] -> [Bool] -> (Located Segment, Located R.Expr) -> Either ElabError (Segment, [Ty], ConstructorSignature)
+elabConstructorSignature fx env d params indices implicits (Located csp cname, sig0) = do
   sig <- resolved fx sig0
   let (parts, result) = gadtShape sig
       np = length params
@@ -576,8 +577,10 @@ elabGadtCtor fx env d params indices implicits (Located csp cname, sig0) = do
   writtenIx <- forM indexArgs (elabIx env (tsValues scopeFields))
   -- Its proofs: each of a precondition over the implicit arguments and the named fields, in scope by their names.
   proofs <- forM proofParts \(a, t) -> do
-    let ctx = [(v, (pos, ty)) | (v, IxParam pos) <- tsValues scopeFields, Just ty <- [lookup v (tsValueTys scopeFields)]]
-    p <- runTC (elabProp env {envScope = scopeFields} [] ctx t)
+    let available = nImplicit + length [() | (_, field) <- take a explicitParts, not (isProp field)]
+        proofScope = scopeFields {tsValues = [(v, i) | (v, i@(IxParam pos)) <- tsValues scopeFields, pos < available]}
+        ctx = [(v, (pos, ty)) | (v, IxParam pos) <- tsValues proofScope, Just ty <- [lookup v (tsValueTys proofScope)]]
+    p <- runTC (elabProp env {envScope = proofScope} [] ctx t)
     -- The membership predicate checks it as it checks an equation of indices: an equation, or a comparison, which is one.
     case stripLocations p of
       Rel r _ _ | r /= RelNe -> pure ()
@@ -603,7 +606,7 @@ elabGadtCtor fx env d params indices implicits (Located csp cname, sig0) = do
       tele =
         [TeleEntry v ty (role e) | (e, (v, ty)) <- zip [0 ..] (zip implicitNames implicitTys)]
           <> [TeleEntry (maybe ("#" <> T.pack (show fi)) unLocated mn) ty (Explicit (nStored + fi)) | (fi, ((mn, _), ty)) <- zip [0 :: Int ..] (zip fieldParts fieldTys)]
-  pure (cname, [erase (implicitTys !! e) | e <- storedEs] <> map erase fieldTys, GadtCtor tele resultIx proofs)
+  pure (cname, [erase (implicitTys !! e) | e <- storedEs] <> map erase fieldTys, ConstructorSignature tele resultIx proofs)
   where
     isImplicit = \case
       SigImplicit {} -> True
@@ -668,24 +671,57 @@ recovered by the index functions of the fields' types.
 indexFunction :: Env -> DataInfo -> [FunInfo] -> Int -> FunInfo -> Span -> Either ElabError FunDef
 indexFunction env info fns p f sp = do
   clauses <- forM (dataCtors info) \c -> do
-    g <- maybe (Left (ElabError sp "internal: a constructor of no signature in a data type in the GADT style")) pure (ctorGadt c)
-    let fields = ["f" <> T.pack (show k) | k <- [0 .. length (ctorFields c) - 1]]
-        tele = gcTele g
+    let g = ctorSignature c
+    let fieldTypes = constructorValueTypes c
+        fields = ["f" <> T.pack (show k) | k <- [0 .. length (ctorFields c) - 1]]
+        tele = constructorTele g
         term :: Ix -> Either ElabError (Expr Int)
         term = \case
           IxParam e | e < length tele -> case teRole (tele !! e) of
             Explicit k -> Right (Var k)
             Stored k -> Right (Var k)
-            Recovered k j -> (\fn -> App (Global (Ref RefFunction fn)) (Var k)) <$> indexFnOf (ctorFields c !! k) j
+            Recovered k j -> (\fn -> Typed (teType (tele !! e)) [] [] (App (Global (Ref RefFunction fn)) (Var k))) <$> indexFnOf (ctorFields c !! k) j
           IxNat n -> Right (Nat n)
           IxSucc x -> App (Global (Ref RefBuiltin "S")) <$> term x
           IxCon cc xs -> apps (Global (Ref RefConstructor cc)) <$> traverse term xs
           _ -> Left (ElabError sp "internal: an index of a constructor's result which is no pattern")
-    body <- term (gcResult g !! p)
-    prepared <- either (Left . ElabError sp) Right (Term.prepareTerm body)
-    -- Generated index expressions have no proof arguments.
-    withoutProofs <- Term.traverseObligations (const (Left (ElabError sp "internal: index expression has a proof argument"))) prepared
-    pure (FunClause [PCon (Ref RefConstructor (ctorCore c)) (map (PVar . Hint) fields)] (zip fields (ctorFields c)) withoutProofs sp)
+    bare <- term (constructorResult g !! p)
+    let exprIndex e = case spine e of
+          (Var i, []) -> fromMaybe (IxVar (fields !! i)) (listToMaybe [IxParam k | (k, entry) <- zip [0 ..] tele, teRole entry `elem` [Explicit i, Stored i]])
+          (Nat n, []) -> IxNat n
+          (Global (Ref RefBuiltin "S"), [x]) -> IxSucc (exprIndex x)
+          (Global r, as) -> (if refKind r == RefConstructor then IxCon else IxFun) (refName r) (map exprIndex as)
+          _ -> IxHole
+        annotate (Typed t ts is e) = do
+          (checked, _) <- annotate e
+          pure (Typed t ts is checked, t)
+        annotate e = case spine e of
+          (Var i, []) -> Right (Typed (fieldTypes !! i) [] [] e, fieldTypes !! i)
+          (Nat _, []) -> Right (Typed TNat [] [] e, TNat)
+          (Global r, args) -> do
+            annotated <- traverse annotate args
+            let actual = map snd annotated
+            (result, typeArgs, indices) <- case refKind r of
+              RefBuiltin -> pure (TNat, [], [])
+              RefConstructor -> case [cc | GCtor cc <- Map.elems (envGlobals env), ctorCore cc == refName r] of
+                cc : _ | Just dd <- dataOfCtor env cc -> do
+                  let sig = ctorSignature cc
+                      n = (length (dataParams dd), length (constructorTele sig))
+                      entries = zip [0 ..] (constructorTele sig)
+                      values = IM.fromList [(k, exprIndex (args !! j)) | (k, en) <- entries, j <- case teRole en of Explicit j -> [j]; Stored j -> [j]; _ -> [], j < length args]
+                  assignment <-
+                    maybe (Left (ElabError sp "cannot instantiate a generated index constructor")) Right $
+                      foldM (\s (a, b) -> matchTy n a b s) emptyAssignment {asValues = values} (zip (constructorValueTypes cc) actual)
+                  let result = substScheme n assignment (TData (renderQualName (dataQual dd)) [TParam i [] | i <- [0 .. fst n - 1]] (constructorResult sig))
+                  pure (result, [substScheme n assignment (TParam i []) | i <- [0 .. fst n - 1]], IM.toList values)
+                _ -> Left (ElabError sp "unknown generated index constructor")
+              _ -> pure (erase (dataIndices info !! p), [], [])
+            pure (Typed result typeArgs indices (apps (Global r) (map fst annotated)), result)
+          _ -> Left (ElabError sp "invalid generated index expression")
+    (body, _) <- annotate bare
+    prepared <- either (Left . ElabError sp) Right (Core.elaborate env [] fieldTypes body)
+    withoutProofs <- Core.traverseObligations (const (Left (ElabError sp "internal: index expression has a proof argument"))) prepared
+    pure (FunClause [PCon (Ref RefConstructor (ctorCore c)) (map (PVar . Hint) fields)] (zip fields fieldTypes) withoutProofs sp)
   pure (FunDef f [TData self [TParam i [] | i <- [0 .. length (dataParams info) - 1]] []] (erase (dataIndices info !! p)) clauses sp [])
   where
     self = renderQualName (dataQual info)
@@ -1106,8 +1142,8 @@ elabIx env vals le@(Located sp e) = case e of
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
     applied hsp q args = case [g | g <- resolve env q, isValueHead g] <> [GCtor c | QName [] s <- [q], null (resolve env q), c <- constructorsNamed env s] of
       GCtor c : _ -> do
-        let explicitArity = maybe (length (ctorFields c)) (\g -> length [() | TeleEntry _ _ (Explicit _) <- gcTele g]) (ctorGadt c)
-            storing = maybe False (\g -> or [True | TeleEntry _ _ (Stored _) <- gcTele g]) (ctorGadt c)
+        let explicitArity = length [() | TeleEntry _ _ (Explicit _) <- constructorTele (ctorSignature c)]
+            storing = or [True | TeleEntry _ _ (Stored _) <- constructorTele (ctorSignature c)]
         unless (length args == explicitArity) $ Left (ElabError hsp (T.unpack (displayQName q) <> " takes " <> show explicitArity <> " fields"))
         when storing $ Left (ElabError hsp ("a constructor storing implicit arguments, " <> T.unpack (displayQName q) <> ", in an index: not supported yet"))
         IxCon (ctorCore c) <$> traverse (elabIx env vals) args
@@ -1146,14 +1182,11 @@ ixType env sc = go
     constructor dd ci xs =
       let np = length (dataParams dd)
           self = TData (renderQualName (dataQual dd)) [TParam i [] | i <- [0 .. np - 1]]
-       in case ctorGadt ci of
-            Nothing -> maybe THole (\s -> substScheme (np, 0) s (self [])) (foldM (\s (f, x) -> matchTy (np, 0) f (go x) s) emptyAssignment (zip (ctorFields ci) xs))
-            -- Its telescope's explicit entries are its arguments, whose types give the implicit ones.
-            Just g ->
-              let tele = gcTele g
-                  explicits = [(e, t) | (e, TeleEntry _ t (Explicit _)) <- zip [0 ..] tele]
-                  given = emptyAssignment {asValues = IM.fromList [(e, x) | ((e, _), x) <- zip explicits xs]}
-               in maybe THole (\s -> substScheme (np, length tele) s (self (gcResult g))) (foldM (\s ((_, t), x) -> matchTy (np, length tele) t (go x) s) given (zip explicits xs))
+          g = ctorSignature ci
+          tele = constructorTele g
+          explicits = [(e, t) | (e, TeleEntry _ t (Explicit _)) <- zip [0 ..] tele]
+          given = emptyAssignment {asValues = IM.fromList [(e, x) | ((e, _), x) <- zip explicits xs]}
+       in maybe THole (\s -> substScheme (np, length tele) s (self (constructorResult g))) (foldM (\s ((_, t), x) -> matchTy (np, length tele) t (go x) s) given (zip explicits xs))
 
 -- | The names of the enclosing signature's value parameters, by their positions: how its messages render indices.
 valueNamesOf :: Env -> [Text]
@@ -1277,11 +1310,10 @@ elabDecl fx env sp name ty0 clauses = do
         | TData dn _ idxs@(_ : _) <- args !! c
         , dd : _ <- [dd | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn] -> do
             let matched = [r | fc <- fcs, PCon (Ref _ r) _ <- [fcPatterns fc !! c]]
-            fmap catMaybes . forM [ci | ci <- dataCtors dd, ctorCore ci `notElem` matched] $ \ci -> case ctorGadt ci of
-              Just g -> case unifyAll flexibleKey (zip idxs (map (instValues [IxVar ("#" <> teName en) | en <- gcTele g]) (gcResult g))) emptySubst of
+            fmap catMaybes . forM [ci | ci <- dataCtors dd, ctorCore ci `notElem` matched] $ \ci -> case ctorSignature ci of
+              g -> case unifyAll flexibleKey (zip idxs (map (instValues [IxVar ("#" <> teName en) | en <- constructorTele g]) (constructorResult g))) emptySubst of
                 Clash _ -> pure (Just (ctorCore ci))
                 _ -> Left (ElabError sp ("the clauses of " <> T.unpack (segmentText name) <> " miss the constructor " <> T.unpack (segmentText (last (ctorQual ci))) <> ", which can match there"))
-              Nothing -> pure Nothing
       _ -> pure []
     -- A pattern splitting its argument: a constructor, or the absurd pattern, which no constructor matches.
     splits = \case
@@ -1411,7 +1443,7 @@ pruneDictionary info fcs = (kept, map prune fcs)
     keep = [r `elem` used | r <- refs]
     kept = [s | (s, True) <- zip full keep]
     renumber = Map.fromList (zip [r | (r, True) <- zip refs keep] (placeRefs kept))
-    prune fc = fc {fcTerm = Term.mapComputation rewrite (fcTerm fc)}
+    prune fc = fc {fcTerm = Core.mapComputation rewrite (fcTerm fc)}
     usedIn :: Term.Term x -> [Ref]
     usedIn = \case
       Term.Call (Ref _ n) as | n == self -> concatMap usedIn (take arity as)
@@ -1604,11 +1636,17 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       obligation (prop, raw) =
         let (l, col) = R.spanStart (location raw)
             q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col))]
-            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map (const TNat) vars) [] [] Nothing [] [] Nothing
+            statement = foldr (Arrow . snd) prop own
+            (slots, _) = theoremPlaces (funSlots info) statement (map snd vars)
+            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots [] Nothing [] [] Nothing
             pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] []
-         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] [(n, TNat) | (n, _) <- vars] (toScope (fmap B (foldr (Arrow . snd) prop own))) [pc] (location raw) [] [] [] (map fst own) []
-  prepared <- either (failAt rsp) pure (Term.prepareTerm body)
-  pure (FunClause pats vars (Term.mapObligations obligation prepared) (R.spanning (location lhs) rsp))
+         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots (closurePremises env slots) [] (map fst own) []
+  prepared <-
+    either (failAt rsp) pure $
+      if PAbsurd `elem` pats
+        then Core.emptyBranch (applyTy refined result)
+        else Core.elaborate envBody (funSlots info) (map snd vars) body
+  pure (FunClause pats vars (Core.mapObligations obligation prepared) (R.spanning (location lhs) rsp))
 
 -- | The value parameters an index mentions, by position.
 paramsOf :: Ix -> [Int]
@@ -1749,8 +1787,8 @@ elabPattern env s expected le@(Located sp e) = case e of
       | dd : _ <- [dd | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn] -> do
           let (line, col) = R.spanStart sp
               ghost en = IxVar ("#" <> teName en <> "@" <> T.pack (show line) <> ":" <> T.pack (show col))
-              possible ci = case ctorGadt ci of
-                Just g | not (null idxs) -> case unifyAll flexibleKey (zip idxs (map (instValues (map ghost (gcTele g))) (gcResult g))) s of
+              possible ci = case ctorSignature ci of
+                g | not (null idxs) -> case unifyAll flexibleKey (zip idxs (map (instValues (map ghost (constructorTele g))) (constructorResult g))) s of
                   Clash _ -> False
                   _ -> True
                 _ -> True
@@ -1790,65 +1828,57 @@ elabPattern env s expected le@(Located sp e) = case e of
       typeArgs <- case mergeTy expected (TData dn holes []) of
         Just (TData _ targs _) -> pure targs
         _ -> failAt csp (mismatch env expected (TData dn holes []))
-      case ctorGadt ci of
-        Nothing -> do
-          let fields = map (substParams typeArgs) (ctorFields ci)
-          unless (length args == length fields) $
-            failAt csp (T.unpack (displayQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields")
-          (subs, s') <- subpatterns s fields args
-          pure (PCon (Ref RefConstructor (ctorCore ci)) (map fst subs), concatMap snd subs, [], s')
-        Just g -> do
-          -- The constructor's implicit arguments, variables to solve, named apart by where the pattern is.
-          let (line, col) = R.spanStart csp
-              ghost en = IxVar ("#" <> teName en <> "@" <> T.pack (show line) <> ":" <> T.pack (show col))
-              tele = gcTele g
-              inst = instValues (map ghost tele)
-              expectedIdx = case expected of
-                TData _ _ xs -> xs
-                _ -> []
-          s1 <-
-            if null expectedIdx
-              then pure s
-              else case unifyAllNamed (valueNamesOf env) flexibleKey (zip expectedIdx (map inst (gcResult g))) s of
-                Unified s' -> pure s'
-                Clash why -> failAt csp ("this pattern can never match here: " <> why)
-                Stuck why -> failAt csp ("cannot match on this index: " <> why)
-          let explicits = [(k, t) | TeleEntry _ t (Explicit k) <- tele]
-              fields = [applyTy s1 (mapIx inst (substParams typeArgs t)) | (_, t) <- explicits]
-              entries = [pos | (pos, TeleEntry _ _ (Explicit _)) <- zip [0 ..] tele]
-              -- Its explicit arguments: its fields, and its proofs at their positions among them, each named by a variable or _.
-              proofPositions = map fst (gcProofs g)
-              valueArgs = [a | (i, a) <- zip [0 :: Int ..] args, i `notElem` proofPositions]
-              proofExprs = [a | (i, a) <- zip [0 :: Int ..] args, i `elem` proofPositions]
-          unless (length args == length fields + length proofPositions) $
-            failAt csp (T.unpack (displayQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields" <> (if null proofPositions then "" else " and " <> show (length proofPositions) <> " proofs"))
-          proofNames <- forM proofExprs \a -> case stripParen a of
-            Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
-            Located _ R.EWildcard -> pure Nothing
-            Located psp _ -> failAt psp "a proof of a constructor is named by a variable or _: a proposition has no constructors"
-          -- Each field's pattern, and what it says the field is, which holds of its entry: the types of the fields
-          -- after it and the indices of the result may mention it, as a named field, @(m : nat) ->@, is in scope there.
-          (subs, s2) <-
-            foldM
-              ( \(acc, st) ((pos, f), a) -> do
-                  (p, vs, _, st') <- elabPattern env st (applyTy st f) a >>= nested
-                  st'' <- case patternIx p of
-                    Nothing -> pure st'
-                    Just x -> case unifyIxNamed (valueNamesOf env) flexibleKey (applyIx st' (ghost (tele !! pos))) x st' of
-                      Unified u -> pure u
-                      Clash why -> failAt (location a) ("this pattern can never match here: " <> why)
-                      Stuck why -> failAt (location a) ("cannot match on this value: " <> why)
-                  pure (acc <> [(p, vs)], st'')
-              )
-              ([], s1)
-              (zip (zip entries fields) valueArgs)
-          -- The fields its code stores, in order: the explicit ones as matched, the implicit ones not.
-          let runtime = [maybe PWild fst (lookup pos (zip (map fst explicits) subs)) | pos <- [0 .. length (ctorFields ci) - 1]]
-              -- Its preconditions at the entries as matched: a variable of the pattern, a value parameter of the signature, $i, or nothing, ?.
-              entryExpr en = fromMaybe (Var "?") (ixToExprWith (\v -> if "#" `T.isPrefixOf` v then Nothing else Just (Var v)) (\i -> Just (Var ("$" <> T.pack (show i)))) (applyIx s2 (ghost en)))
-              proofs = [(nm, instantiate (\i -> entryExpr (tele !! i)) (fmap absurd prop)) | (nm, (_, prop)) <- zip proofNames (gcProofs g)]
-          pure (PCon (Ref RefConstructor (ctorCore ci)) runtime, concatMap snd subs, proofs, s2)
-    subpatterns s0 fields args = foldM (\(acc, st) (f, a) -> (\(p, vs, _, st') -> (acc <> [(p, vs)], st')) <$> (elabPattern env st (applyTy st f) a >>= nested)) ([], s0) (zip fields args)
+      let g = ctorSignature ci
+      -- The constructor's implicit arguments, variables to solve, named apart by where the pattern is.
+      let (line, col) = R.spanStart csp
+          ghost en = IxVar ("#" <> teName en <> "@" <> T.pack (show line) <> ":" <> T.pack (show col))
+          tele = constructorTele g
+          inst = instValues (map ghost tele)
+          expectedIdx = case expected of
+            TData _ _ xs -> xs
+            _ -> []
+      s1 <-
+        if null expectedIdx
+          then pure s
+          else case unifyAllNamed (valueNamesOf env) flexibleKey (zip expectedIdx (map inst (constructorResult g))) s of
+            Unified s' -> pure s'
+            Clash why -> failAt csp ("this pattern can never match here: " <> why)
+            Stuck why -> failAt csp ("cannot match on this index: " <> why)
+      let explicits = [(k, t) | TeleEntry _ t (Explicit k) <- tele]
+          fields = [applyTy s1 (mapIx inst (substParams typeArgs t)) | (_, t) <- explicits]
+          entries = [pos | (pos, TeleEntry _ _ (Explicit _)) <- zip [0 ..] tele]
+          -- Its explicit arguments: its fields, and its proofs at their positions among them, each named by a variable or _.
+          proofPositions = map fst (constructorProofs g)
+          valueArgs = [a | (i, a) <- zip [0 :: Int ..] args, i `notElem` proofPositions]
+          proofExprs = [a | (i, a) <- zip [0 :: Int ..] args, i `elem` proofPositions]
+      unless (length args == length fields + length proofPositions) $
+        failAt csp (T.unpack (displayQualName (ctorQual ci)) <> " takes " <> show (length fields) <> " fields" <> (if null proofPositions then "" else " and " <> show (length proofPositions) <> " proofs"))
+      proofNames <- forM proofExprs \a -> case stripParen a of
+        Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
+        Located _ R.EWildcard -> pure Nothing
+        Located psp _ -> failAt psp "a proof of a constructor is named by a variable or _: a proposition has no constructors"
+      -- Each field's pattern, and what it says the field is, which holds of its entry: the types of the fields
+      -- after it and the indices of the result may mention it, as a named field, @(m : nat) ->@, is in scope there.
+      (subs, s2) <-
+        foldM
+          ( \(acc, st) ((pos, f), a) -> do
+              (p, vs, _, st') <- elabPattern env st (applyTy st f) a >>= nested
+              st'' <- case patternIx p of
+                Nothing -> pure st'
+                Just x -> case unifyIxNamed (valueNamesOf env) flexibleKey (applyIx st' (ghost (tele !! pos))) x st' of
+                  Unified u -> pure u
+                  Clash why -> failAt (location a) ("this pattern can never match here: " <> why)
+                  Stuck why -> failAt (location a) ("cannot match on this value: " <> why)
+              pure (acc <> [(p, vs)], st'')
+          )
+          ([], s1)
+          (zip (zip entries fields) valueArgs)
+      -- The fields its code stores, in order: the explicit ones as matched, the implicit ones not.
+      let runtime = [maybe PWild fst (lookup pos (zip (map fst explicits) subs)) | pos <- [0 .. length (ctorFields ci) - 1]]
+          -- Its preconditions at the entries as matched: a variable of the pattern, a value parameter of the signature, $i, or nothing, ?.
+          entryExpr en = fromMaybe (Var "?") (ixToExprWith (\v -> if "#" `T.isPrefixOf` v then Nothing else Just (Var v)) (\i -> Just (Var ("$" <> T.pack (show i)))) (applyIx s2 (ghost en)))
+          proofs = [(nm, instantiate (\i -> entryExpr (tele !! i)) (fmap absurd prop)) | (nm, (_, prop)) <- zip proofNames (constructorProofs g)]
+      pure (PCon (Ref RefConstructor (ctorCore ci)) runtime, concatMap snd subs, proofs, s2)
     -- A proof of a constructor under another pattern is not named, for now: its proposition is at hand at the top of an argument's pattern only.
     nested r@(_, _, ps, _) = case [n | (Just n, _) <- ps] of
       n : _ -> failAt sp ("the proof " <> T.unpack n <> " is named under another pattern: a constructor's proof is named at the top of an argument's pattern, for now")
@@ -1969,7 +1999,9 @@ elabTerm proofArguments env givens ctx le@(Located sp e) expected = case e of
         t <- agree env sp expected ty
         elabTerm proofArguments env givens ctx l t
   R.EParen x -> elabTerm proofArguments env givens ctx x expected
-  R.ENat n -> (At (Irrelevant sp) (Nat n),) <$> agree env sp expected TNat
+  R.ENat n -> do
+    t <- agree env sp expected TNat
+    pure (At (Irrelevant sp) (Typed t [] [] (Nat n)), t)
   R.EInfix (Located osp op) l r -> application (Located osp (R.EName (R.operatorName op))) [] [l, r]
   R.EIf {} -> failAt sp "if is not supported yet"
   R.ECase {} -> failAt sp "case is not supported yet"
@@ -2025,7 +2057,7 @@ elabTerm proofArguments env givens ctx le@(Located sp e) expected = case e of
             | Just p <- lookup i proofs = p : inOrder (i + 1) ts
             | x : ts' <- ts = x : inOrder (i + 1) ts'
             | otherwise = []
-      pure (At (Irrelevant sp) (apply (inOrder (0 :: Int) terms)), t)
+      pure (At (Irrelevant sp) (Typed t [substScheme n s2 (TParam i []) | i <- [0 .. fst n - 1]] (IM.toList (asValues s2)) (apply (inOrder (0 :: Int) terms))), t)
     -- An implicit argument: an index over what is in scope, of its parameter's type, which it fixes.
     implicitArg n s ((key, kind), x) = do
       let values = [(v, IxVar v) | (v, _) <- ctx] <> tsValues (envScope env)
@@ -2102,7 +2134,7 @@ elabTerm proofArguments env givens ctx le@(Located sp e) expected = case e of
             fn = Global (Ref RefFunction (funCore f))
             -- The implicit values it takes at runtime, as found: terms of what is in scope.
             passed s = forM (funRuntime f) \i -> case valueAt s i of
-              Just x -> pure x
+              Just x -> pure (Typed (substScheme n s (snd (schemeValues (funScheme f) !! i))) [] [] x)
               Nothing -> failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> " is not determined here, as a value")
             -- Its preconditions at the parameters found: the propositions its proofs are of.
             proofAt =
@@ -2122,44 +2154,40 @@ elabTerm proofArguments env givens ctx le@(Located sp e) expected = case e of
             else do
               -- Its dictionary at the types its parameters are at, after its arguments.
               dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]])
-              pure \as -> apps fn (pre <> as <> map vacuous dict)
+              pure \as -> apps fn (pre <> as <> zipWith (\slot entry -> Dictionary (dictionaryType slot [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]) (vacuous entry)) (funSlots f) dict)
       GCtor c -> case dataOfCtor env c of
         Just d -> do
           let n = length (dataParams d)
               self = TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. n - 1]]
               ref = Global (Ref RefConstructor (ctorCore c))
-          case ctorGadt c of
-            Nothing -> pure (plain (n, 0) (ctorFields c) (self []) ref)
-            -- In the GADT style: its implicit arguments are value parameters, found by matching; those its code stores are given it before its fields.
-            -- A named field its result or a field after it mentions is a value parameter too, the argument it is applied to there.
-            Just g -> do
-              let tele = gcTele g
-                  doms = [t | TeleEntry _ t (Explicit _) <- tele]
-                  positions = [k | TeleEntry _ _ (Explicit k) <- tele]
-                  mentioned = nub (concatMap paramsOf (gcResult g <> concatMap (tyIndices . teType) tele) <> [i | (_, prop) <- gcProofs g, B i <- toList (fromScope prop)])
-                  -- Each by its position among the arguments, the fields in order, which is not its position in the code where implicit arguments are stored before them.
-                  depends = [(fi, pos) | (fi, pos) <- zip [0 :: Int ..] [pos | (pos, TeleEntry _ _ (Explicit _)) <- zip [0 ..] tele], pos `elem` mentioned]
-                  cname = T.unpack (segmentText (last (ctorQual c)))
-                  -- Its preconditions at the entries found: the propositions its proofs are of.
-                  proofAt =
-                    [ ( a
-                      , \s -> do
-                          forM_ [i | B i <- toList (fromScope prop)] \i ->
-                            when (isNothing (valueAt s i)) $
-                              failAt hsp ("the argument " <> T.unpack (teName (tele !! i)) <> " of " <> cname <> ", which its precondition mentions, is not determined here")
-                          pure (instantiate (fromMaybe Hole . valueAt s) (fmap absurd prop))
-                      )
-                    | (a, prop) <- gcProofs g
-                    ]
-              pure $ AppHead (n, length tele) doms (self (gcResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt \s -> do
-                stored <- forM [(k, pos, en) | (pos, en@(TeleEntry _ _ (Stored k))) <- zip [0 ..] tele] \(k, pos, en) ->
-                  case IM.lookup pos (asValues s) >>= ixToExpr (\v -> Var . fst <$> lookup v ctx) of
-                    Just x -> pure (k, x)
-                    Nothing -> failAt hsp ("the implicit argument " <> T.unpack (teName en) <> " of " <> cname <> " is not determined here, as a value")
-                -- Its fields, the implicit arguments stored before them; its proofs after, kept for their obligations and erased from the code.
-                pure \as ->
-                  let (values, proofs) = partition (not . isProofArg) as
-                   in apps ref ([fromMaybe Hole (lookup k (stored <> zip positions values)) | k <- [0 .. length (ctorFields c) - 1]] <> proofs)
+          let g = ctorSignature c
+          let tele = constructorTele g
+              doms = [t | TeleEntry _ t (Explicit _) <- tele]
+              positions = [k | TeleEntry _ _ (Explicit k) <- tele]
+              mentioned = nub (concatMap paramsOf (constructorResult g <> concatMap (tyIndices . teType) tele) <> [i | (_, prop) <- constructorProofs g, B i <- toList (fromScope prop)])
+              -- Each by its position among the arguments, the fields in order, which is not its position in the code where implicit arguments are stored before them.
+              depends = [(fi, pos) | (fi, pos) <- zip [0 :: Int ..] [pos | (pos, TeleEntry _ _ (Explicit _)) <- zip [0 ..] tele], pos `elem` mentioned]
+              cname = T.unpack (segmentText (last (ctorQual c)))
+              -- Its preconditions at the entries found: the propositions its proofs are of.
+              proofAt =
+                [ ( a
+                  , \s -> do
+                      forM_ [i | B i <- toList (fromScope prop)] \i ->
+                        when (isNothing (valueAt s i)) $
+                          failAt hsp ("the argument " <> T.unpack (teName (tele !! i)) <> " of " <> cname <> ", which its precondition mentions, is not determined here")
+                      pure (instantiate (fromMaybe Hole . valueAt s) (fmap absurd prop))
+                  )
+                | (a, prop) <- constructorProofs g
+                ]
+          pure $ AppHead (n, length tele) doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt \s -> do
+            stored <- forM [(k, pos, en) | (pos, en@(TeleEntry _ _ (Stored k))) <- zip [0 ..] tele] \(k, pos, en) ->
+              case IM.lookup pos (asValues s) >>= ixToExpr (\v -> Var . fst <$> lookup v ctx) of
+                Just x -> pure (k, Typed (substScheme (n, length tele) s (teType en)) [] [] x)
+                Nothing -> failAt hsp ("the implicit argument " <> T.unpack (teName en) <> " of " <> cname <> " is not determined here, as a value")
+            -- Its fields, the implicit arguments stored before them; its proofs after, kept for their obligations and erased from the code.
+            pure \as ->
+              let (values, proofs) = partition (not . isProofArg) as
+               in apps ref ([fromMaybe Hole (lookup k (stored <> zip positions values)) | k <- [0 .. length (ctorFields c) - 1]] <> proofs)
         Nothing -> failAt sp "internal: a constructor of no data type"
       -- A method: the function of the instance for the type its class is at, or a place of the dictionary given.
       GMethod m -> do
@@ -2169,7 +2197,7 @@ elabTerm proofArguments env givens ctx le@(Located sp e) expected = case e of
         pure $ AppHead n doms res [] [] [] \s ->
           ( \case
               AtPlace r -> apps (Global r)
-              AtInstance f dict -> \as -> apps (Global (Ref RefFunction (funCore f))) (as <> map vacuous dict)
+              AtInstance f dict -> \as -> apps (Global (Ref RefFunction (funCore f))) (as <> zipWith (\slot entry -> Dictionary (dictionaryType slot [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]) (vacuous entry)) (funSlots f) dict)
           )
             <$> resolution (methodAt env givens m (substScheme n s (TParam 0 [])))
       GTheorem t -> failAt sp (T.unpack (displayQualName (thmQual t)) <> " is a theorem, not a term")
@@ -2178,6 +2206,13 @@ elabTerm proofArguments env givens ctx le@(Located sp e) expected = case e of
       GClass c -> failAt sp (T.unpack (displayQualName (classQual c)) <> " is a class, not a term")
       GInstance i -> failAt sp (T.unpack (displayQualName (instQual i)) <> " is an instance, not a term")
       GModule m -> failAt sp (T.unpack (displayQualName (modQual m)) <> " is a module, not a term")
+    dictionaryType slot types
+      | isMembershipSlot slot = TArrow (at (slotParam slot)) TNat
+      | Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env) =
+          substScheme (length (schemeParams (methodScheme method)), 0) emptyAssignment {asTypes = IM.singleton 0 (at (slotParam slot))} (schemeType (methodScheme method))
+      | otherwise = foldr TArrow TNat (replicate (slotArity slot) TNat)
+      where
+        at i = fromMaybe TNat (listToMaybe (drop i types))
     -- A method not resolved: undetermined while its type is not known, else refused.
     resolution :: Either Unresolved r -> TC r
     resolution = either (\case Pending why -> undetermined sp why; Refusal why -> failAt sp why) pure

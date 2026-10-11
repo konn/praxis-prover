@@ -1,0 +1,52 @@
+module ProofFlow where
+
+-- Proofs are erased, but membership retains their propositions.
+data Witness where
+  Mk : (n : nat) -> n = 0 -> Witness
+
+data Box a = box a
+
+value : Witness -> Nat
+value (Mk n _) = n
+
+repack : Witness -> Witness
+repack (Mk n h) = Mk n h
+
+identity : Witness -> Witness
+identity p = p
+
+pack : Witness -> Box Witness
+pack p = box p
+
+unpack : Box Witness -> Witness
+unpack (box p) = p
+
+zero : (p : Witness) -> value p ≡ 0
+zero (Mk n h) = h
+
+-- Here the proof expression needs the membership of an unpatterned argument.
+-- Its obligation must retain p : Witness, rather than treating p as a Nat.
+rebuild : Witness -> Witness
+rebuild p = Mk (value p) (zero p)
+
+through-functions : (p : Witness) -> value (unpack (pack (rebuild (identity (repack p))))) ≡ 0
+through-functions p = zero (unpack (pack (rebuild (identity (repack p)))))
+
+-- The proof is recovered from the argument's membership, used as an explicit
+-- argument to a different function, and then retained by the new value.
+with-proof : {n : nat} -> n = 0 -> Witness
+with-proof {n} h = Mk n h
+
+forward : Witness -> Witness
+forward (Mk n h) = with-proof {n} h
+
+forward-zero : (p : Witness) -> value (forward p) ≡ 0
+forward-zero p = zero (forward p)
+
+-- An impossible branch has no source value. Its total numerical code may use
+-- zero only after the membership/index contradiction has been certified.
+data OnlyOne n where
+  One : OnlyOne 1
+
+vacuous : OnlyOne 0 -> Witness
+vacuous ()

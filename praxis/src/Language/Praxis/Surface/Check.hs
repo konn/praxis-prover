@@ -45,9 +45,12 @@ module Language.Praxis.Surface.Check (
   -- * The core state
   Core (..),
   coreLemmas,
+  surfaceCore,
   initialCore,
   addDefinitions,
+  addEquations,
   certifyDecl,
+  certifyDeclaration,
 ) where
 
 import Control.Exception (displayException)
@@ -61,18 +64,19 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.PRA.Certificate
-import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (parseEquations)
+import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (Equation, parseEquations)
 import Language.Praxis.PRA.PrimitiveRecursion.Environment (CompiledEnv, compileDefinitions, environmentSignature, extendEnvironment)
 import Language.Praxis.PRA.Signature (Signature)
 import Language.Praxis.PRA.Tactic qualified as PRA
 import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, renderSchemaTacticError, schemaScope)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
+import Language.Praxis.Surface.Core qualified as SurfaceCore
 import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
-import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData)
+import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
 import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), Hyp (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
-import Language.Praxis.Surface.Env (DataInfo (..), Env, FunInfo (..), QualName, TheoremInfo (..), displayQualName, emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), QualName, TheoremInfo (..), displayQualName, emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
@@ -82,6 +86,7 @@ import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), Renamed, Sco
 import Language.Praxis.Surface.Syntax (Expr (..), RelOp (..), stripLocations)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span (..))
 import Language.Praxis.Surface.Syntax.Raw qualified as R
+import Language.Praxis.Surface.Types (Ty (..))
 
 -- * Reports
 
@@ -119,6 +124,8 @@ data Core = Core
   , coreSignature :: !Signature
   , coreEnv :: !PRA.Env
   , coreCertificates :: !(Map String Certificate)
+  , coreBodies :: !(Map Text [SurfaceCore.Body Certificate])
+  -- ^ Explicit typed bodies whose evidence has been replaced by checked PRA certificates.
   , coreMembership :: !(Map Text (Text, [Int]))
   -- ^ the membership predicate of each data type encoded, by its qualified name, with the parameters it takes the predicates of
   , coreVariadic :: !(Set Text)
@@ -129,13 +136,24 @@ data Core = Core
 coreLemmas :: Core -> Map String (PRA.Lemma SchemaName)
 coreLemmas = fmap certificateLemma . coreCertificates
 
+{- | Readable explicit bodies, with type and index arguments, dictionaries and
+the number of checked evidence objects retained by each clause.
+-}
+surfaceCore :: Core -> [Text]
+surfaceCore core = [name <> " = " <> SurfaceCore.dump body | (name, bodies) <- Map.toAscList (coreBodies core), body <- bodies]
+
 initialCore :: Prelude -> Core
-initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeCertificates p) Map.empty Set.empty
+initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeCertificates p) Map.empty Map.empty Set.empty
 
 -- | Extend the core with definitions, as @prf@ equations.
 addDefinitions :: [Text] -> Core -> Either String Core
 addDefinitions eqns core = do
   eqs <- first displayException (parseEquations (T.unlines eqns))
+  addEquations eqs core
+
+-- | The structured definition boundary; text parsing is only an adapter.
+addEquations :: [Equation Text] -> Core -> Either String Core
+addEquations eqs core = do
   block <- first displayException (compileDefinitions (coreCompiled core) eqs)
   compiled <- first displayException (extendEnvironment (coreCompiled core) block)
   let sig = environmentSignature compiled
@@ -146,11 +164,15 @@ addDefinitions eqns core = do
 certifyDecl :: Text -> Core -> Either String Core
 certifyDecl text core = do
   decls <- first displayException (parseDeclsIn (fmap (map snd . PRA.lemmaMetas) (coreLemmas core)) (schemaScope (coreSignature core)) (T.unpack text))
-  foldM one core decls
-  where
-    one c d = case checkCertificate (coreEnv c) (coreCertificates c) d of
-      Right certificate -> Right c {coreCertificates = Map.insert (declName d) certificate (coreCertificates c)}
-      Left err -> Left (renderSchemaTacticError (coreSignature c) err)
+  foldM (flip certifyDeclaration) core decls
+
+{- | Admit an elaborated sequent derivation, retaining its lexical dependencies
+for independent expansion to primitive PRA rules.
+-}
+certifyDeclaration :: Decl SchemaName -> Core -> Either String Core
+certifyDeclaration declaration core = case checkCertificate (coreEnv core) (coreCertificates core) declaration of
+  Right certificate -> Right core {coreCertificates = Map.insert (declName declaration) certificate (coreCertificates core)}
+  Left err -> Left (renderSchemaTacticError (coreSignature core) err)
 
 -- * The build
 
@@ -287,34 +309,38 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
     entries; the predicate; and then what the index functions' own lemmas
     need of the predicate. -}
     encode info sp fns r =
-      let self = renderQualName (dataQual info)
-          encoded = coreMembership (runCore r)
+      let encoded = coreMembership (runCore r)
           -- The index functions of the data types encoded before, and of this one, defined before its predicate.
           indexFns dn = if dn == self || Map.member dn encoded then indexFunctionCores env dn else Nothing
           enc = encodeData (`Map.lookup` encoded) (`Set.member` coreVariadic (runCore r)) indexFns info
           rejected (r', err) = report sp SevError ("the encoding of " <> T.unpack (displayQualName (dataQual info)) <> " was rejected: " <> err) r'
-       in case define (encodedCodes enc) r of
-            Left failure -> rejected failure
-            Right r1 ->
-              let r2 = certifyAll sp r1 (encodedCodeLemmas enc)
-                  (r3, defined) = foldl (\(acc, done) fd -> either (,done) (,done <> [fd]) (defineFunction fd acc)) (r2, []) fns
-               in case define (encodedPredicate enc) r3 of
-                    Left failure -> rejected failure
-                    Right r4 ->
-                      let core = runCore r4
-                          core' =
-                            core
-                              { coreMembership = Map.insert self (dataIs info, encodedParams enc) (coreMembership core)
-                              , coreVariadic = (if encodedVariadic enc then Set.insert (dataIs info) else id) (coreVariadic core)
-                              }
-                          r5 =
-                            r4
-                              { runCore = core'
-                              , runMembers = Map.union (Map.fromList (encodedMembers enc)) (runMembers r4)
-                              , runIndexEqs = Map.union (Map.fromList (encodedIndexEquations enc)) (runIndexEqs r4)
-                              , runProps = Map.union (Map.fromList (encodedProps enc)) (runProps r4)
-                              }
-                       in foldl (flip finishFunction) (certifyAll sp r5 (encodedLemmas enc)) defined
+       in case validateEncoding indexFns info of
+            Left err -> rejected (r, err)
+            Right () -> encodeValidated enc rejected
+      where
+        self = renderQualName (dataQual info)
+        encodeValidated enc rejected = case define (encodedCodes enc) r of
+          Left failure -> rejected failure
+          Right r1 ->
+            let r2 = certifyAll sp r1 (encodedCodeLemmas enc)
+                (r3, defined) = foldl (\(acc, done) fd -> either (,done) (,done <> [fd]) (defineFunction fd acc)) (r2, []) fns
+             in case define (encodedPredicate enc) r3 of
+                  Left failure -> rejected failure
+                  Right r4 ->
+                    let core = runCore r4
+                        core' =
+                          core
+                            { coreMembership = Map.insert self (dataIs info, encodedParams enc) (coreMembership core)
+                            , coreVariadic = (if encodedVariadic enc then Set.insert (dataIs info) else id) (coreVariadic core)
+                            }
+                        r5 =
+                          r4
+                            { runCore = core'
+                            , runMembers = Map.union (Map.fromList (encodedMembers enc)) (runMembers r4)
+                            , runIndexEqs = Map.union (Map.fromList (encodedIndexEquations enc)) (runIndexEqs r4)
+                            , runProps = Map.union (Map.fromList (encodedProps enc)) (runProps r4)
+                            }
+                     in foldl (flip finishFunction) (certifyAll sp r5 (encodedLemmas enc)) defined
 
     -- Definitions extending the core, emitted first; when the core rejects them, what was emitted and why.
     define eqns r
@@ -332,7 +358,12 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
           let r2 = certifyAll (fdSpan fd) r1 lemmas
               certified = [Unfolding n l rhs | (n, l, rhs) <- unfolds, Map.member (T.unpack n) (coreLemmas (runCore r2))]
            in -- Then what the proofs its clauses give must prove.
-              Right (foldl proveAndCertify (r2 {runUnfoldings = runUnfoldings r2 <> certified}) obligations)
+              let r3 = foldl proveAndCertify (r2 {runUnfoldings = runUnfoldings r2 <> certified}) obligations
+                  core = runCore r3
+                  certificate td = maybe (Left ()) Right (Map.lookup (T.unpack (thmCore (tdInfo td))) (coreCertificates core))
+               in case traverse (SurfaceCore.traverseObligations certificate . fcTerm) (fdClauses fd) of
+                    Left () -> Left r3
+                    Right bodies -> Right r3 {runCore = core {coreBodies = Map.insert (funCore (fdInfo fd)) bodies (coreBodies core)}}
 
     -- A function's lemmas about its results: its closure, their indices, and the specifications asked of it.
     finishFunction fd r = (specify fd (indexed fd (closure fd (r {runObligations = obligationFacts r fd})))) {runObligations = []}
@@ -365,9 +396,23 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
     closure fd r = case proveClosure (knowledge r) fd of
       Left (EngineError sp msg) -> report sp SevError ("internal: the closure of " <> funName fd <> ": " <> msg) r
       Right Nothing
-        | not (null (fdImpossible fd)) -> report (fdSpan fd) SevError (funName fd <> ": the membership of its results, under the indices of its arguments, could not be proved") r
+        | not (null (fdImpossible fd)) || requiresEvidence [] (fdResult fd) -> report (fdSpan fd) SevError (funName fd <> ": the membership of its results, under the indices of its arguments, could not be proved") r
         | otherwise -> r
       Right (Just (cl, decls)) -> certifyClosure fd cl r decls
+    -- A result carrying erased evidence, possibly inside a container, must
+    -- have a certified membership contract before its evidence can be used.
+    requiresEvidence seen = \case
+      TData name args _ ->
+        any (requiresEvidence seen) args
+          || ( name `notElem` seen
+                 && or
+                   [ not (null (constructorProofs (ctorSignature c))) || any (requiresEvidence (name : seen)) (ctorFields c)
+                   | GData d <- Map.elems (envGlobals env)
+                   , renderQualName (dataQual d) == name
+                   , c <- dataCtors d
+                   ]
+             )
+      _ -> False
     certifyClosure fd cl r = \case
       [] -> r {runClosures = Map.insert (funCore (fdInfo fd)) cl (runClosures r)}
       (name, text) : rest ->

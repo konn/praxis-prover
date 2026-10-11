@@ -61,6 +61,8 @@ library
     Language.Praxis.Package.Version
     Language.Praxis.Surface.Check
     Language.Praxis.Surface.Compile
+    Language.Praxis.Surface.Core
+    Language.Praxis.Surface.Core.Types
     Language.Praxis.Surface.CoreText
     Language.Praxis.Surface.Elab
     Language.Praxis.Surface.Encode
@@ -123,6 +125,7 @@ test-suite praxis-test
     Language.Praxis.Package.PackageTest
     Language.Praxis.Surface.AdequacyTest
     Language.Praxis.Surface.CheckTest
+    Language.Praxis.Surface.CoreTest
     Language.Praxis.Surface.ParserTest
     Language.Praxis.Surface.ResolveTest
     Language.Praxis.Surface.TermTest

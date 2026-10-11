@@ -14,10 +14,11 @@ import Data.Text.IO qualified as TIO
 import Language.Praxis.PRA.Certificate
 import Language.Praxis.PRA.Tactic (Appeal (..))
 import Language.Praxis.Surface.Check
+import Language.Praxis.Surface.Core qualified as SurfaceCore
 import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, predicateOver, predicateParam)
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, membershipProof, theoremStatement)
-import Language.Praxis.Surface.Env (CtorInfo (..), Env, FunInfo (..), Global (..), constructorsNamed, emptyEnv, resolve)
+import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), Env, FunInfo (..), Global (..), TeleEntry (..), constructorsNamed, emptyEnv, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Index (Unified (..), emptySubst, unifyIx)
 import Language.Praxis.Surface.Parser (parseModule)
@@ -25,7 +26,7 @@ import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..), RelOp (..))
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..), segmentText)
-import Language.Praxis.Surface.Types (Ix (..))
+import Language.Praxis.Surface.Types (Ix (..), Ty (..))
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -33,7 +34,42 @@ checkTests :: TestTree
 checkTests =
   testGroup
     "checker"
-    [ testCase "surface theorems retain independently replayable certificates" $ do
+    [ testCase "ordinary and indexed syntax share a constructor telescope" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module Uniform where", "data Plain a = plain a", "data Explicit a where", "  explicit : a -> Explicit a"]
+            checked = checkSource p "uniform.px" source
+        errors checked @?= []
+        (k, _) <- maybe (assertFailure "no checked module") pure (checkedFinal checked)
+        let constructors = constructorsNamed (knowEnv k)
+        case (constructors (Ident "plain"), constructors (Ident "explicit")) of
+          ([ordinary], [indexed]) -> do
+            let shape c = let signature = ctorSignature c in (map (\e -> (teType e, teRole e)) (constructorTele signature), constructorResult signature, length (constructorProofs signature))
+            shape ordinary @?= shape indexed
+          _ -> assertFailure "missing constructors"
+    , testCase "erased evidence survives functions, containers, projection and repacking" $ do
+        c <- checkFile "test/data/proof-flow.px"
+        errors c @?= []
+        assertBool "the function and container boundary is certified" ("ProofFlow.through-functions" `elem` checkedTheorems c)
+        assertBool "an extracted proof can be passed to another function" ("ProofFlow.forward-zero" `elem` checkedTheorems c)
+        case checkedFinal c of
+          Nothing -> assertFailure "missing final core"
+          Just (_, core) -> do
+            let evidence = concatMap SurfaceCore.obligations (concat (Map.elems (coreBodies core)))
+            assertBool "typed core retained checked evidence" (not (null evidence))
+            case Map.lookup "u_ProofFlow_svacuous" (coreBodies core) of
+              Just [body] -> SurfaceCore.bodyType body @?= TData "ProofFlow.Witness" [] []
+              _ -> assertFailure "missing impossible branch"
+            cert <- maybe (assertFailure "missing projection certificate") pure (Map.lookup "u_ProofFlow_szero" (coreCertificates core))
+            either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal "u_ProofFlow_szero" [] [] MS.empty) [])
+    , testCase "invalid constructor evidence does not establish membership" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module InvalidEvidence where", "data Witness where", "  Mk : (n : nat) -> n = 0 -> Witness", "bad : Witness", "bad = Mk 1 rfl"]
+            c = checkSource p "invalid-evidence.px" source
+        assertBool "invalid proof was checked" (not (null (errors c)))
+        case checkedFinal c of
+          Nothing -> pure ()
+          Just (k, _) -> assertBool "no result membership is published" (Map.notMember "u_InvalidEvidence_sbad" (knowClosures k))
+    , testCase "surface theorems retain independently replayable certificates" $ do
         p <- either assertFailure pure prelude
         let source = T.unlines ["module Replay where", "same : (x : Nat) -> x ≡ x", "same x = rfl", "again : 0 ≡ 0", "again = same 0"]
             result = checkSource p "Replay.px" source

@@ -26,7 +26,8 @@ module Language.Praxis.Surface.Env (
   QualName,
   DataInfo (..),
   CtorInfo (..),
-  GadtCtor (..),
+  constructorValueTypes,
+  ConstructorSignature (..),
   TeleEntry (..),
   Role (..),
   FunInfo (..),
@@ -58,7 +59,7 @@ module Language.Praxis.Surface.Env (
   moduleEnv,
   qualify,
   addData,
-  addGadtData,
+  addIndexedData,
   addFunction,
   addTheorem,
   setTheoremIndices,
@@ -84,7 +85,7 @@ import Bound (Scope)
 import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -156,8 +157,8 @@ data CtorInfo = CtorInfo
   , ctorFields :: ![Ty]
   -- ^ over the parameters of the data type
   , ctorCore :: !Text
-  , ctorGadt :: !(Maybe GadtCtor)
-  -- ^ its signature, for a constructor in the GADT style
+  , ctorSignature :: !ConstructorSignature
+  -- ^ its full signature, also for an ordinary constructor (with no result indices)
   }
   deriving stock (Show)
 
@@ -166,16 +167,27 @@ A constructor in the GADT style, beyond the fields its code stores: its
 telescope, its implicit arguments and its fields in order, and the indices of
 its result over the telescope, @IxParam i@ for its @i@-th entry.
 -}
-data GadtCtor = GadtCtor
-  { gcTele :: ![TeleEntry]
-  , gcResult :: ![Ix]
-  , gcProofs :: ![(Int, Scope Int Expr Void)]
+data ConstructorSignature = ConstructorSignature
+  { constructorTele :: ![TeleEntry]
+  , constructorResult :: ![Ix]
+  , constructorProofs :: ![(Int, Scope Int Expr Void)]
   {- ^ its proof arguments, preconditions its code does not store: each by
   its position among the explicit arguments, fields and proofs in order,
   and the proposition, over the entries of the telescope
   -}
   }
   deriving stock (Show)
+
+{- | The logical types of the stored values in physical argument order. Unlike
+'ctorFields', these retain the indices of the constructor telescope.
+-}
+constructorValueTypes :: CtorInfo -> [Ty]
+constructorValueTypes c =
+  [ fromMaybe fallback (lookup j fields)
+  | (j, fallback) <- zip [0 ..] (ctorFields c)
+  ]
+  where
+    fields = [(j, teType e) | e <- constructorTele (ctorSignature c), j <- case teRole e of Explicit i -> [i]; Stored i -> [i]; Recovered _ _ -> []]
 
 -- | An entry of a constructor's telescope: its name, its type over the type's parameters and the entries before it, and where the code has it.
 data TeleEntry = TeleEntry
@@ -428,11 +440,11 @@ coreOf = mangleGlobal . map segmentRaw
 
 -- | Add a data type and its constructors; the type opens a namespace holding them.
 addData :: Env -> Segment -> [(Text, Kind)] -> [(Segment, [Ty])] -> (Env, DataInfo)
-addData env name params ctors = addGadtData env name params [] (map (const False) params) [] [(c, fs, Nothing) | (c, fs) <- ctors]
+addData env name params ctors = addIndexedData env name params [] (map (const False) params) [] [(c, fs, ConstructorSignature [TeleEntry ("#" <> T.pack (show i)) t (Explicit i) | (i, t) <- zip [0 ..] fs] [] []) | (c, fs) <- ctors]
 
 -- | Add a data type whose constructors may be in the GADT style, with the types of its indices, which of its parameters are implicit, and its index functions.
-addGadtData :: Env -> Segment -> [(Text, Kind)] -> [Ty] -> [Bool] -> [QualName] -> [(Segment, [Ty], Maybe GadtCtor)] -> (Env, DataInfo)
-addGadtData env name params indices implicits indexFns ctors = (env', info)
+addIndexedData :: Env -> Segment -> [(Text, Kind)] -> [Ty] -> [Bool] -> [QualName] -> [(Segment, [Ty], ConstructorSignature)] -> (Env, DataInfo)
+addIndexedData env name params indices implicits indexFns ctors = (env', info)
   where
     q = qualify env [name]
     info = DataInfo q params [CtorInfo (q <> [c]) q i fs (coreOf (q <> [c])) g | (i, (c, fs, g)) <- zip [0 ..] ctors] (coreOf (q <> [Ident "is"])) indices indexFns implicits

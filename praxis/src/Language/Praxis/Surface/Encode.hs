@@ -38,6 +38,7 @@ module Language.Praxis.Surface.Encode (
   FieldPred (..),
   ParamPred (..),
   encodeData,
+  validateEncoding,
   paramName,
 
   -- * Equations of indices
@@ -56,6 +57,7 @@ module Language.Praxis.Surface.Encode (
 ) where
 
 import Bound (Var (..), fromScope)
+import Control.Monad (forM_, unless)
 import Data.List (nub, sort)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
@@ -201,14 +203,13 @@ positions of the code ('positionVar').  An entry is the field at its
 position; an implicit argument the code does not store, the index of the
 field it is recovered from, so that the equation it is recovered by is left
 out, as every one which is so as it stands.  The index functions of a type
-are those the function given knows, by its qualified name: an index of a type
-whose index functions it does not know, one encoded later, is not checked.
+are those the function given knows, by its qualified name: unavailable index functions are rejected by 'validateEncoding' before
+this encoding is admitted.
 -}
 ctorIndexEquations :: (Text -> Maybe [Text]) -> CtorInfo -> [(CT, CT)]
-ctorIndexEquations indexFns c = case ctorGadt c of
-  Nothing -> []
-  Just g ->
-    let tele = gcTele g
+ctorIndexEquations indexFns c = case ctorSignature c of
+  g ->
+    let tele = constructorTele g
         entry = entryTerm indexFns c
         index = \case
           IxParam i -> entry i
@@ -231,7 +232,7 @@ ctorIndexEquations indexFns c = case ctorGadt c of
 
 -- | The term an entry of a constructor's telescope is, over the positions of its code: a field or a stored implicit argument its position, a recovered one the index of a field.
 entryTerm :: (Text -> Maybe [Text]) -> CtorInfo -> Int -> Maybe CT
-entryTerm indexFns c e = case ctorGadt c >>= \g -> teRole <$> listToMaybe (drop e (gcTele g)) of
+entryTerm indexFns c e = case teRole <$> listToMaybe (drop e (constructorTele (ctorSignature c))) of
   Just (Explicit p) -> Just (positionVar p)
   Just (Stored p) -> Just (positionVar p)
   Just (Recovered p j) -> case drop p (ctorFields c) of
@@ -244,13 +245,12 @@ The preconditions of a constructor, the propositions of its proofs, as the
 equations the core states them by, over the positions of its code: the
 membership predicate checks them as it checks the equations of indices,
 after those, the introduction takes them as hypotheses, and the inversion
-gives them.  A comparison is the equation of its truth, @lt s t = 1@.  One
-mentioning an entry the code does not determine is left out.
+gives them.  A comparison is the equation of its truth, @lt s t = 1@.  A proposition mentioning an entry the code does not determine is
+rejected by 'validateEncoding' before this encoding is admitted.
 -}
 ctorPropositions :: (Text -> Maybe [Text]) -> CtorInfo -> [(CT, CT)]
-ctorPropositions indexFns c = case ctorGadt c of
-  Nothing -> []
-  Just g ->
+ctorPropositions indexFns c = case ctorSignature c of
+  g ->
     let term = termCT \case
           B e -> fromMaybe (CVar "?") (entryTerm indexFns c e)
           F v -> absurd v
@@ -262,7 +262,32 @@ ctorPropositions indexFns c = case ctorGadt c of
           S.Rel S.RelGt a b -> holds "lt" b a
           S.Rel S.RelGe a b -> holds "le" b a
           _ -> Left "a precondition which is no equation or comparison"
-     in [(l, r) | (_, p) <- gcProofs g, Right (l, r) <- [equation p], "?" `notElem` varsCT (CSym "eq" [l, r])]
+     in [(l, r) | (_, p) <- constructorProofs g, Right (l, r) <- [equation p], "?" `notElem` varsCT (CSym "eq" [l, r])]
+
+{- | Refuse an encoding which would silently omit a logical condition. A
+missing membership predicate is an explicitly weaker representation; a
+missing constructor precondition or index equation is never eliminable.
+-}
+validateEncoding :: (Text -> Maybe [Text]) -> DataInfo -> Either String ()
+validateEncoding indexFns d = forM_ (dataCtors d) $ \c -> do
+  let signature = ctorSignature c
+      failure why = Left (T.unpack (displayQualName (ctorQual c)) <> ": " <> why)
+      knownIndex = \case
+        IxParam i -> maybe False (const True) (entryTerm indexFns c i)
+        IxNat _ -> True
+        IxSucc x -> knownIndex x
+        IxCon _ xs -> all knownIndex xs
+        IxFun _ xs -> all knownIndex xs
+        _ -> False
+  unless (length (ctorPropositions indexFns c) == length (constructorProofs signature)) $
+    failure "a proof field's proposition cannot be represented by the PRA membership predicate"
+  forM_ (zip [0 ..] (constructorTele signature)) $ \(i, entry) -> case teType entry of
+    TData name _ indices@(_ : _) -> do
+      unless (maybe False ((== length indices) . length) (indexFns name)) $
+        failure "a field's index functions are unavailable to its PRA membership predicate"
+      unless (maybe False (const True) (entryTerm indexFns c i) && all knownIndex indices) $
+        failure "a field's indices are not determined by its numerical representation"
+    _ -> pure ()
 
 -- | The equations of indices a constructor's branch checks, at a code: each as the code of its truth, @s == t@.
 indexEquationCodes :: (CtorInfo -> [(CT, CT)]) -> CtorInfo -> CT -> [CT]

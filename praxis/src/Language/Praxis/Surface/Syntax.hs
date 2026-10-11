@@ -53,6 +53,7 @@ import Data.List (elemIndex)
 import Data.Text (Text)
 import Language.Praxis.Surface.Syntax.Raw (Located, Quantifier (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
+import Language.Praxis.Surface.Types (Ix, Ty)
 import Numeric.Natural (Natural)
 import Text.Show (showListWith)
 
@@ -148,6 +149,10 @@ data Expr a
   | App (Expr a) (Expr a)
   | -- | where the expression was written
     At !(Irrelevant Span) (Expr a)
+  | -- | Checked type and explicit instantiation, retained until core construction.
+    Typed !Ty ![Ty] ![(Int, Ix)] (Expr a)
+  | -- | A resolved dictionary entry, including its static function signature.
+    Dictionary !Ty (Expr a)
   | Lam ![Hint] (Scope Int Expr a)
   | Case (Expr a) [(Pattern, Scope Int Expr a)]
   | If (Expr a) (Expr a) (Expr a)
@@ -186,6 +191,8 @@ instance Monad Expr where
     Nat n -> Nat n
     App f x -> App (f >>= k) (x >>= k)
     At sp e -> At sp (e >>= k)
+    Typed t ts is e -> Typed t ts is (e >>= k)
+    Dictionary t e -> Dictionary t (e >>= k)
     Lam hs b -> Lam hs (b >>>= k)
     Case s alts -> Case (s >>= k) [(p, b >>>= k) | (p, b) <- alts]
     If c t e -> If (c >>= k) (t >>= k) (e >>= k)
@@ -206,6 +213,10 @@ instance Monad Expr where
 instance Eq1 Expr where
   liftEq eq = go
     where
+      go (Typed _ _ _ e) f = go e f
+      go e (Typed _ _ _ f) = go e f
+      go (Dictionary _ e) f = go e f
+      go e (Dictionary _ f) = go e f
       go (At _ e) f = go e f
       go e (At _ f) = go e f
       go (Var a) (Var b) = eq a b
@@ -241,6 +252,8 @@ instance Show1 Expr where
         Nat n -> con d "Nat" [flip showsPrec n]
         App f x -> con d "App" [flip go f, flip go x]
         At _ e -> go d e
+        Typed _ _ _ e -> go d e
+        Dictionary _ e -> go d e
         Lam hs b -> con d "Lam" [flip showsPrec hs, scope b]
         Case s alts -> con d "Case" [flip go s, \_ -> showListWith (\(p, b) -> showChar '(' . showsPrec 0 p . showString ", " . scope b 0 . showChar ')') alts]
         If a b c -> con d "If" [flip go a, flip go b, flip go c]
@@ -270,6 +283,8 @@ instance (Show a) => Show (Expr a) where
 stripLocations :: Expr a -> Expr a
 stripLocations = \case
   At _ e -> stripLocations e
+  Typed _ _ _ e -> stripLocations e
+  Dictionary _ e -> stripLocations e
   App f x -> App (stripLocations f) (stripLocations x)
   e -> e
 
@@ -280,6 +295,8 @@ spine = go []
     go args = \case
       App f x -> go (x : args) f
       At _ e -> go args e
+      Typed _ _ _ e -> go args e
+      Dictionary _ e -> go args e
       e -> (e, args)
 
 -- | A head applied to arguments.
@@ -290,6 +307,7 @@ apps = foldl App
 isProofArg :: Expr a -> Bool
 isProofArg = \case
   At _ e -> isProofArg e
+  Typed _ _ _ e -> isProofArg e
   ProofArg {} -> True
   _ -> False
 
@@ -308,6 +326,8 @@ mapGlobals f = go
       Nat n -> Nat n
       App g x -> App (go g) (go x)
       At sp e -> At sp (go e)
+      Typed t ts is e -> Typed t ts is (go e)
+      Dictionary t e -> Dictionary t (go e)
       Lam hs b -> Lam hs (hoistScope go b)
       Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]
       If c t e -> If (go c) (go t) (go e)
@@ -333,6 +353,8 @@ globalsOf = go
       Global r -> [r]
       App f x -> go f <> go x
       At _ e -> go e
+      Typed _ _ _ e -> go e
+      Dictionary _ e -> go e
       Lam _ b -> go (fromScope b)
       Case s alts -> go s <> concatMap (go . fromScope . snd) alts
       If c t e -> go c <> go t <> go e
