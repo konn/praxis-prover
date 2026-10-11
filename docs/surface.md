@@ -4,7 +4,7 @@ The surface language is what a user of praxis writes: modules of data types,
 functions defined by pattern matching, and theorems proved by clauses, by
 calculations or by tactics, in a syntax close to Agda and Haskell. It lives in
 the `praxis` package. It elaborates into Praxis Core, the explicit typed
-intermediate language, then lowers to Copra, the internal PRA kernel language
+intermediate language, then lowers to CoPRA, the internal PRA kernel language
 in `praxis-copra`. Every definition becomes a primitive recursive `prf`
 definition, and every proof a `pra` declaration checked by its declaration
 certifier and the PRA kernel. That the resulting arithmetic statement
@@ -47,9 +47,9 @@ source ──Lexer/Parser──▶ raw syntax (named, operators unassociated)
        ──Fixity─────────▶ operators associated by the module's fixities, and the imports'
        ──Rename─────────▶ scope resolved: imports, openings, nested modules, privacy; every global by its canonical name
        ──Elab───────────▶ resolved syntax and Praxis Core (explicit typed intermediate language)
-       ──Encode/Compile─▶ prf equations + generated lemmas (Copra)
-       ──Engine─────────▶ theorem proofs as pra declarations (Copra)
-       ──Check──────────▶ Copra definitions and proofs certified by the PRA kernel, in order
+       ──Encode/Compile─▶ prf equations + generated lemmas (CoPRA)
+       ──Engine─────────▶ theorem proofs as pra declarations (CoPRA)
+       ──Check──────────▶ CoPRA definitions and proofs certified by the PRA kernel, in order
 ```
 
 Each stage is a module of `Language.Praxis.Surface`: `Lexer`, `Parser` and

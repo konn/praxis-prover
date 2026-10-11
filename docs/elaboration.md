@@ -1,24 +1,24 @@
-# Elaboration: from Praxis Surface through Praxis Core to Copra
+# Elaboration: from Praxis Surface through Praxis Core to CoPRA
 
 This document explains how a module of the surface language
-([surface.md](surface.md)) elaborates into Praxis Core and becomes Copra
+([surface.md](surface.md)) elaborates into Praxis Core and becomes CoPRA
 definitions and certified theorems
 ([kernel.md](kernel.md), [pra-and-prf.md](pra-and-prf.md)), why a
 certified theorem means what the user wrote, and the invariants that keep
 the translation sound and fast. The code is in
 `praxis/src/Language/Praxis/Surface/`.
 
-Praxis Core is the explicit typed intermediate language. Copra is the
+Praxis Core is the explicit typed intermediate language. CoPRA is the
 internal codename for the subsequent PRA kernel language, implemented in
 `praxis-copra`; the user-facing system remains Praxis. The pipeline is
-Praxis Surface → Praxis Core → Copra → PRA kernel checking. Below, arithmetic
-terms, statements and tactics described as "core" belong to Copra; references
+Praxis Surface → Praxis Core → CoPRA → PRA kernel checking. Below, arithmetic
+terms, statements and tactics described as "core" belong to CoPRA; references
 to Praxis Core and `Surface.Core` mean the typed intermediate language.
 
 ## The trust architecture
 
 The surface layer produces proofs and statements through the explicit Praxis
-Core boundary. Its generators emit Copra text — `prf` equations for definitions
+Core boundary. Its generators emit CoPRA text — `prf` equations for definitions
 and `pra` declarations for lemmas and theorems — which is parsed into the
 structured admission APIs of `praxis-copra` and checked:
 
@@ -57,10 +57,10 @@ fixities and the resolution of names give a statement the meaning its author
 intended. Every proof assistant shares this last step; `praxis check
 --dump-pra` prints each core statement that was certified, for inspection.
 
-## Names in Copra
+## Names in CoPRA
 
-The surface names things the Copra syntax cannot spell (`Data.List.(<>)`,
-`append-nil`), and the Copra parser reads a name the signature defines as that
+The surface names things the CoPRA syntax cannot spell (`Data.List.(<>)`,
+`append-nil`), and the CoPRA parser reads a name the signature defines as that
 symbol before any variable. `Mangle` therefore maps every surface name into a
 namespace of its own: globals to `u_…`, variables to `v_…`, with an injective
 escape (`_s` separates segments, `_d` is a dash, `_x<hex>_` any other

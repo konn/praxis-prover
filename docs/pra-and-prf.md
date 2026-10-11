@@ -1,6 +1,6 @@
-# Copra: the PRA kernel language of `prf` definitions and `pra` proofs
+# CoPRA: the PRA kernel language of `prf` definitions and `pra` proofs
 
-Copra is the internal codename for the PRA kernel language, implemented in
+CoPRA is the internal codename for the PRA kernel language, implemented in
 `praxis-copra`. It is separate from Praxis Core, the typed intermediate
 language in the user-facing Praxis system. Its two concrete frontends sit
 over the kernel of [kernel.md](kernel.md): `prf`, in which primitive recursive functions are

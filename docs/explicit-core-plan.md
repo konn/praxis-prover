@@ -4,9 +4,9 @@
 
 Keep the PRA calculus unchanged. Elaborate the existing surface fragment into
 Praxis Core, an explicit typed intermediate language with dictionary arguments
-and evidence; lower it to Copra, the internal PRA kernel language of
+and evidence; lower it to CoPRA, the internal PRA kernel language of
 primitive-recursive definitions and checked PRA derivations in `praxis-copra`.
-Praxis Core remains the name of the typed intermediate language; Copra names
+Praxis Core remains the name of the typed intermediate language; CoPRA names
 the arithmetic layer that follows it.
 Ordinary data declarations and indexed declarations use the same constructor
 signature. Recovering an erased proof field means applying a certified

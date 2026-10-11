@@ -3,10 +3,10 @@
 This document describes the trusted PRA kernel of Praxis, in `praxis-copra`: the
 terms, formulas and sequents of Primitive Recursive Arithmetic (PRA), the
 inference rules, definitional equality, and the checker. Everything else —
-Copra's `prf` and `pra` frontends, the tactic engine, the surface language — is
+CoPRA's `prf` and `pra` frontends, the tactic engine, the surface language — is
 built on top of it and trusted only as far as the kernel re-checks it.
 
-Copra names the internal PRA kernel language; Praxis Core is the separate
+CoPRA names the internal PRA kernel language; Praxis Core is the separate
 typed intermediate language that lowers to it. The package rename does not
 change the PRA calculus or its `Language.Praxis.PRA` module namespace.
 

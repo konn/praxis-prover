@@ -1,11 +1,11 @@
 # praxis-copra
 
-Copra is the internal codename for Praxis's PRA kernel language: `prf`
+CoPRA is the internal codename for Praxis's PRA kernel language: `prf`
 primitive-recursive definitions and `pra` arithmetic proofs. This package
 provides both frontends, their quasiquoters, and the trusted PRA kernel.
 The user-facing system is Praxis; Praxis Core is its separate typed
-intermediate language, which lowers to Copra before PRA kernel checking.
-Copra keeps the `.prf` and `.pra` file extensions and the
+intermediate language, which lowers to CoPRA before PRA kernel checking.
+CoPRA keeps the `.prf` and `.pra` file extensions and the
 `Language.Praxis.PRA` Haskell namespace.
 
 ## Defining primitive-recursive functions

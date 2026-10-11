@@ -185,7 +185,7 @@ and this project adheres to the
 
 ### Changed
 
-- Renamed the kernel package and executable to `praxis-copra`. Copra is the
+- Renamed the kernel package and executable to `praxis-copra`. CoPRA is the
   internal codename for the PRA kernel language; the user-facing Praxis name,
   separate Praxis Core intermediate language, `.pra` and `.prf` syntax, and
   `Language.Praxis.PRA` modules retain their names.
