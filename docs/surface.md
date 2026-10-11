@@ -290,15 +290,44 @@ Hindley–Milner: a signature's free type variables are its implicit
 parameters, in order, and implicit binders `{a : Type}` may also be written in
 front.
 
-Values are first-order. A field of a data type, a value a theorem quantifies
-over, and a function's arguments and result have types without arrows, and a
-function or a constructor is always applied to all its arguments; an arrow
-stands only at the top of a function's signature. The encoding gives a
-meaning to first-order values only (see [elaboration.md](elaboration.md),
-§ Statements and their adequacy). Types guide elaboration only: the core
-never sees them, except through the membership predicates of data types,
-which take the predicates of their type parameters. A theorem over a type
-parameter holds at every type it stands for.
+Values are first-order. Data fields, type arguments and function results
+cannot contain function values. An explicit function argument or theorem
+binder may instead be a **fixed function schema** whose own arguments and
+result are first-order. A schema is applied to all of its arguments and
+cannot be stored or compared as a value. The encoding gives a meaning to
+first-order values and separately checked schemas (see
+[elaboration.md](elaboration.md), § Statements and their adequacy). A theorem
+over a type parameter holds at every first-order type it stands for.
+
+## Fixed function schemas
+
+```
+apply : (Nat -> Nat) -> Nat -> Nat
+apply f x = f x
+
+iterate : (Nat -> Nat) -> Nat -> Nat -> Nat
+iterate f 0 x = x
+iterate f (S n) x = f (iterate f n x)
+
+apply-law : (f : Nat -> Nat) -> (x : Nat) -> apply f x = f x
+apply-law f x = rfl
+```
+
+A schema parameter is bound by a name or `_`, with no constructor matching
+or induction on the function. Recursive calls keep the same function
+parameter. Function names and lambdas are accepted where a schema argument
+is expected, including lambdas that capture ordinary values:
+
+```
+captured : (n : Nat) -> apply (\x -> x + n) 2 = 2 + n
+captured n = rfl
+```
+
+The expected domain determines a lambda's argument types. Functions still
+cannot be returned, placed in data constructors, or passed through a
+polymorphic value parameter. Write a pointwise law such as `f x = g x`
+instead of `f = g`. Proof arguments inside lambdas are currently rejected;
+their obligations would need to be checked in the lambda's bound scope.
 
 ## Type synonyms
 
@@ -588,6 +617,13 @@ A theorem may quantify over values only in front, `(xs : List a) -> …` or
 `∀ (xs : List a), …`: its statement is Π₁, as PRA's theorems are. A
 quantifier elsewhere must be bounded. Σ₁ statements, `∃ y, A` at the top,
 proved by a witness term, are planned (see below).
+
+The final relation in a theorem statement may call a function that needs
+evidence. Leading implication antecedents provide the hypotheses for that
+evidence; for example, `k < n -> bounded {k} {n} (by assumption) = k`.
+The checker certifies every supplied proof before erasing it from the
+statement. Proof arguments inside an antecedent, a quantifier or another
+logical connective are not supported yet.
 
 A theorem means what it says of the values it quantifies over: a data type
 denotes the finite trees its constructors build, a function the unique

@@ -22,6 +22,8 @@ module Language.Praxis.Surface.CoreText (
   CT (..),
   render,
   isParameter,
+  applyCallback,
+  callbackEnvironment,
   hdT,
   tlT,
   fieldT,
@@ -52,10 +54,12 @@ module Language.Praxis.Surface.CoreText (
 ) where
 
 import Bound (Var (..), fromScope)
-import Data.List (intersperse, mapAccumL, partition)
+import Control.Monad (unless)
+import Data.List (intersperse, mapAccumL, nub, partition)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec)
+import Data.Traversable qualified as Traversable
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Term qualified as Term
 import Numeric.Natural (Natural)
@@ -74,6 +78,7 @@ data CT
   | CNum !Natural
   | CRaw !Text
   | CStatic !Text
+  | CCallback !CT !CT
   | {- | a function applied to the dictionary its schema takes, standing as
     the parameter of a schema: its name, that dictionary — parameters and
     values, in order — and the number of values it takes before the
@@ -100,15 +105,32 @@ render = \case
   CNum n -> fromUnboundedDec n
   CSym f [] -> fromText f
   CSym f args ->
-    let (statics, others) = partition isParameter args
-     in "(" <> unwordsB (fromText f : map render (statics <> others)) <> ")"
+    let callbacks = [code | CCallback code _ <- args]
+        (statics, others) = partition isParameter (map callbackEnvironment args)
+     in "(" <> unwordsB (fromText f : map render (callbacks <> statics <> others)) <> ")"
   CRaw t -> "(" <> fromText t <> ")"
+  CCallback _ environment -> render environment
   CStatic f -> "{" <> fromText f <> "}"
   CPartial f dict n ->
     let ys = [CVar ("y_" <> T.pack (show i)) | i <- [1 .. n]]
         (statics, values) = partition isParameter dict
      in "{λ " <> unwordsB (map render ys) <> ". " <> render (CSym f (statics <> ys <> values)) <> "}"
   CClosure params body _ -> "{λ " <> unwordsB (map fromText params) <> ". " <> render body <> "}"
+
+-- | The ordinary runtime argument of a fixed callback: its packed environment.
+callbackEnvironment :: CT -> CT
+callbackEnvironment (CCallback _ environment) = environment
+callbackEnvironment term = term
+
+-- | Apply the fixed code of a callback to its environment and source arguments.
+applyCallback :: CT -> [CT] -> Either String CT
+applyCallback (CCallback code environment) arguments = case code of
+  CStatic name -> Right (CSym name (environment : arguments))
+  CClosure binders body []
+    | length binders == 1 + length arguments ->
+        Right (replaceCT (\case CVar name -> lookup name (zip binders (environment : arguments)); _ -> Nothing) body)
+  _ -> Left "an invalid fixed callback code"
+applyCallback _ _ = Left "an application whose head is no fixed callback"
 
 -- | Whether a term stands as the parameter of a schema.
 isParameter :: CT -> Bool
@@ -141,6 +163,7 @@ replaceCT f t = case f t of
   Nothing -> case t of
     CSym g args -> CSym g (map (replaceCT f) args)
     CPartial g dict n -> CPartial g (map (replaceCT f) dict) n
+    CCallback code environment -> CCallback (replaceCT f code) (replaceCT f environment)
     -- A closure's body is closed over its binders: only what it captures is replaced.
     CClosure ps body captured -> CClosure ps body (map (replaceCT f) captured)
     _ -> t
@@ -151,6 +174,7 @@ varsCT = \case
   CVar v -> [v]
   CSym _ args -> concatMap varsCT args
   CPartial _ dict _ -> concatMap varsCT dict
+  CCallback code environment -> varsCT code <> varsCT environment
   CClosure _ _ captured -> concatMap varsCT captured
   _ -> []
 
@@ -198,6 +222,36 @@ lowerTermWith lowering = go
     go = \case
       Term.Variable v -> Right (lowerVariable lowering v)
       Term.Literal n -> Right (CNum n)
+      Term.Parameter ref environment -> CCallback (CStatic (refName ref)) <$> go environment
+      Term.Closure arity body -> do
+        let capture accumulated = \case
+              B i -> (accumulated, Left i)
+              F a -> (accumulated <> [lowerVariable lowering a], Right (length accumulated))
+            (captured, closed) = Traversable.mapAccumL capture [] body
+            parameters = ["schema_x" <> T.pack (show i) | i <- [0 .. arity - 1]]
+            environment = CVar "schema_env"
+            variable = \case
+              Left i -> if i >= 0 && i < arity then CVar (parameters !! i) else CVar "invalid_schema_argument"
+              Right i -> fieldT i environment
+            dictionary = nub (dictionaryValues body)
+            positions = zip dictionary [length captured ..]
+            dictionaryValue index = case lookup index positions of
+              Just position -> Right (fieldT position environment)
+              Nothing -> Left "a callback dictionary value was not captured"
+        dictionaryCaptured <- traverse (lowerDictionaryValue lowering) dictionary
+        code <- lowerTermWith (standardLowering variable) {lowerDictionaryValue = dictionaryValue} closed
+        pure (CCallback (CClosure ("schema_env" : parameters) code []) (consSeq 0 (captured <> dictionaryCaptured)))
+      Term.PackedClosure hints body environment -> do
+        let parameters = map hintText hints
+            arity = length parameters
+        unless (arity >= 2 && length (nub parameters) == arity && all (\i -> i >= 0 && i < arity) body) $
+          Left "an invalid closed callback binder"
+        code <- lowerTermWith (standardLowering (CVar . (parameters !!))) body
+        CCallback (CClosure parameters code []) <$> go environment
+      Term.Invoke callback arguments -> do
+        code <- go callback
+        values <- traverse go arguments
+        applyCallback code values
       Term.Call r@(Ref kind core) args -> case (kind, args) of
         (RefStatic, []) -> Right (CStatic core)
         (RefValueParam, []) -> do
@@ -208,6 +262,19 @@ lowerTermWith lowering = go
         _ -> do
           translated <- traverse go args
           lowerApplication lowering r (zip args translated)
+
+    -- Nullary class methods are runtime dictionary values, so lambdas must
+    -- capture them just as they capture ordinary variables. Static methods
+    -- remain fixed schema references and require no environment field.
+    dictionaryValues :: Term.Term b -> [Int]
+    dictionaryValues = \case
+      Term.Call (Ref RefValueParam name) [] -> maybe [] pure (readMaybe (T.unpack name))
+      Term.Call _ arguments -> concatMap dictionaryValues arguments
+      Term.Parameter _ environment -> dictionaryValues environment
+      Term.Closure _ body -> dictionaryValues body
+      Term.PackedClosure _ body environment -> dictionaryValues body <> dictionaryValues environment
+      Term.Invoke callback arguments -> dictionaryValues callback <> concatMap dictionaryValues arguments
+      _ -> []
 
 {- |
 The text of a core formula for a surface proposition, the bound variables of

@@ -263,7 +263,7 @@ data Run = Run
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
   , runIndexSpecs :: !(Map Text IndexSpec)
-  , runObligations :: ![(Text, [Text], CT, CT, [(CT, CT)])]
+  , runObligations :: ![(TheoremInfo, [Text], CT, CT, [(CT, CT)])]
   -- ^ the certified obligations of the function whose lemmas are being proved
   }
 
@@ -384,7 +384,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
 
     -- The obligations of a function certified: each lemma's name, its variables, the equation it concludes, and its hypotheses, the clause's preconditions, as equations.
     obligationFacts r fd =
-      [ (thmCore (tdInfo td), thmBinders (tdInfo td), l, rhs, hyps)
+      [ (tdInfo td, thmBinders (tdInfo td), l, rhs, hyps)
       | td <- fdObligations fd
       , Map.member (T.unpack (thmCore (tdInfo td))) (coreLemmas (runCore r))
       , Right gl <- [statementGoal (coreMembership (runCore r)) td]
@@ -402,7 +402,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
     -- The lemmas of the library a proof may cite by name: those certified, but the modules' own, which are mangled.
-    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"])
+    knowledge r = Knowledge env fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"])
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of

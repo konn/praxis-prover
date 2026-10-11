@@ -361,9 +361,13 @@ Proof arguments may be erased only after their obligations are collected for
 certification. Function bodies, including instance methods, retain these
 obligations. Theorem applications and calculations include each supplied
 proof as a premise of a core `Cut`, so it is checked even when computation
-erases the argument. Statements currently reject proof arguments because
-statement elaboration does not yet support certifying their obligations. In
-particular, `absurd rfl` cannot become a numeral in a theorem's statement.
+erases the argument. A theorem statement may supply proof arguments in its
+final relation, following zero or more proof-free implication antecedents.
+`Term.prepareProposition` retains these obligations for certification under
+those antecedents before erasing them from the statement. Evidence in an
+antecedent, a quantified formula, or another connective is rejected until
+its local scope can be certified. In particular, invalid evidence such as
+`absurd rfl` cannot become a numeral in a theorem's statement.
 
 `Term.prepareTerm` performs proof erasure once, returning an abstract
 `PendingTerm`: a first-order computation and all the propositions and source
@@ -450,13 +454,42 @@ predicate or additional axiom reaches Core or the PRA kernel.
 
 The encoding gives a meaning to values of first-order types only: `Nat`,
 data types applied to first-order types, and type parameters. The elaborator
-keeps every value first-order — a field of a data type, a value a theorem
-quantifies over, and a function's arguments and result have types without
-arrows, and every function and constructor is applied to all its arguments
-(`Types.firstOrder`, `Elab.checkTerm`). So no term of a statement denotes a
-function, and a type parameter only ever stands for a first-order type.
-`statementGoal` checks the values once more: the translation refuses what it
-could not give a meaning to.
+keeps every value first-order: fields, type arguments and function results
+have types without arrows. Explicit arrow domains and theorem binders are
+fixed schema parameters, handled separately from values. Their own domains
+and result must be first-order, and a function or constructor in an ordinary
+term is fully applied (`Types.firstOrder`, `Elab.checkTerm`). No side of a
+statement's equality denotes a function, and a type parameter only ever
+stands for a first-order type. `statementGoal` checks the distinction again.
+
+### Explicit function schemas
+
+An explicit callback has two separate components: a fixed primitive
+recursive schema parameter and a numerical environment. A source binder
+`f : A -> B` retains that arrow type in the checked Surface core. Its
+`SchemaParameter` node records the static reference as well as the
+environment variable; an arrow-typed variable cannot pass through ordinary
+value lowering on its own. Applying it calls the fixed parameter with the
+environment before its value arguments. The fixed parameters `f_1`, `f_2`,
+and so on precede the existing class dictionary parameters.
+
+A `SchemaClosure` contains a checked lambda. Its arguments are bound in a
+`Scope`, and its free first-order values form the numerical environment.
+Closure conversion replaces captures with projections from that
+environment. The body is typechecked at the explicit core boundary before
+conversion. It is never accepted merely because the outer expression has
+an arrow annotation. Lambda proof arguments are rejected until evidence
+under the bound scope can be retained and certified.
+
+A schema theorem is a core rule, with a typed closure premise for each
+callback at its fixed environment. The premise requires domain memberships
+and index equations and concludes membership and index facts for the
+result. An appeal must discharge that contract for the actual callback.
+Thus the runtime environment alone is never mistaken for a function:
+function equality, constructor storage, higher-order schema domains and
+function-valued results are refused. Function equality is expressed
+pointwise. Recursive calls must preserve the schema parameter, so recursion
+cannot inspect or change the function code.
 
 ### What a statement means
 
@@ -789,8 +822,10 @@ asked of members.
 1. Every name the surface hands to the core is mangled into `u_…`/`v_…`.
 2. Projections of codes are `hd`/`tl`; `Defeq` is used on statements over
    variables only.
-3. Values are first-order: no field, theorem value, argument or result of
-   function type, and every application complete.
+3. Values are first-order: no function-valued field, type argument or
+   result, and every ordinary application is complete. Explicit function
+   schemas are separate static parameters with checked environments and
+   closure contracts; they cannot be stored or compared as values.
 4. The code of every value of a data type is a member at the predicates of
    its type's arguments (`C.#intro`), and membership hypotheses stand only on
    a theorem's values, where a wider predicate only strengthens the

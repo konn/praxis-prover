@@ -54,9 +54,9 @@ reverse-twice xs = L.reverse-reverse xs
 | --- | --- |
 | `Data.Nat` | Builtin natural arithmetic laws; exponentiation `^^`; total quotient `/` and remainder `%`, with division algorithm and remainder bound |
 | `Data.Nat.Order` | Builtin linear ordering laws; addition and multiplication monotonicity; inductive `PLt`/`PLeq` and gap-based `ELt`/`ELeq`, with both round-trip laws and conversions to and from builtin comparisons |
-| `Data.Fin` | Inductive `Fin n` and bounded-natural `EFin n`, conversions and both inverse laws, natural-number bounds and weakening |
-| `Data.List` | `Nil`, `(::)`, `(<>)`, length, replication, reversal, take/drop, concatenation, sum/product, class-schema fold and algebraic proofs |
-| `Data.Vec` | Length-indexed `Vec n a`, head/tail, replication, lookup, reversal, append and list conversions |
+| `Data.Fin` | Inductive `Fin n` and bounded-natural `EFin n`, conversions and both inverse laws, bounds, weakening and ordinal reversal |
+| `Data.List` | `Nil`, `(::)`, `(<>)`, map, length, replication, reversal, take/drop, concatenation, sum/product, class-schema fold and algebraic proofs |
+| `Data.Vec` | Length-indexed `Vec n a`, head/tail, map, bounded take, replication, lookup/tabulate with inverse laws, reversal, append and list conversions |
 
 Natural subtraction is truncated: `n - m = 0` when `m` exceeds `n`.
 Division is total, with `n / 0 = 0` and `n % 0 = n`. For every divisor,
@@ -81,8 +81,24 @@ conversions have inverse laws.
 subclass supplies checked identity and associativity laws. Lists have an
 instance, with `fold-concat` proving that folding a list of lists is `concat`.
 
-The PRA core supports fixed function schemas, and Surface class-constrained
-functions use those schemas for class methods. Explicit function-valued
-arguments such as `(f : a -> b)` are currently rejected by the Surface
-elaborator. Thus a literal function-space bijection `Vec n a` ↔ `(Fin n -> a)`
-cannot yet be stated as an ordinary pair of Surface functions.
+Both `Data.List.map` and `Data.Vec.map` take a fixed function argument. Their
+identity and composition laws are proved; list mapping also preserves
+concatenation, length, and flattening.
+
+`Data.Vec.tabulate : {n : Nat} -> (Fin n -> a) -> Vec n a` constructs the vector
+of a function's values in ordinal order. Together with `lookup`, it gives the
+finite function/vector isomorphism: `lookup-tabulate` proves
+`lookup i (tabulate f) = f i`, and `tabulate-lookup` proves
+`tabulate (\i -> lookup i xs) = xs`. The function-side inverse is pointwise,
+so no function-extensionality axiom is needed. The empty case constructs `Nil`
+without calling the function or requiring a default element of `a`.
+
+Function arguments compile to fixed PRA schemas. Recursion can apply the
+callback and pass it unchanged; it cannot recurse on the callback or change
+it at a recursive call. Lambdas may capture values in scope, as the vector
+round-trip example does. Callbacks take and return ordinary values; they
+are not stored in data fields or passed to other callbacks.
+
+Every declared callback must be used somewhere in its function's definition.
+Base cases need not apply it; empty lists and zero-length vectors use no
+callback results.

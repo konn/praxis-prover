@@ -114,3 +114,24 @@ strict-product n m k h positive = N.mul-lt-left n m k h positive
 
 subtraction-monotone : (n m k : nat) -> n <= m -> n - k <= m - k
 subtraction-monotone n m k h = N.sub-le-left n m k h
+
+list-map : L.map (\x -> S x) (0 :: 1 :: Nil) = (1 :: 2 :: Nil)
+list-map = rfl
+
+list-map-append : (xs ys : L.List Nat) -> L.map S (xs <> ys) = (L.map S xs <> L.map S ys)
+list-map-append xs ys = L.map-append S xs ys
+
+vector-tabulate-values : V.to-list (V.tabulate {3} (\i -> F.to-nat i)) = (0 :: 1 :: 2 :: Nil)
+vector-tabulate-values = rfl
+
+vector-tabulate-empty : V.tabulate {0} (\i -> (i : F.Fin 0)) = V.Vec.Nil
+vector-tabulate-empty = rfl
+
+vector-function-roundtrip : (xs : V.Vec n a) -> V.tabulate (\i -> V.lookup i xs) = xs
+vector-function-roundtrip xs = V.tabulate-lookup xs
+
+function-vector-roundtrip : (i : F.Fin n) -> V.lookup i (V.tabulate (\j -> F.to-nat j)) = F.to-nat i
+function-vector-roundtrip i = V.lookup-tabulate (\j -> F.to-nat j) i
+
+vector-tabulate-capture : (offset : Nat) -> (i : F.Fin n) -> V.lookup i (V.tabulate (\j -> offset + F.to-nat j)) = offset + F.to-nat i
+vector-tabulate-capture offset i = V.lookup-tabulate (\j -> offset + F.to-nat j) i

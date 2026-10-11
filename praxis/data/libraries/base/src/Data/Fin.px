@@ -44,11 +44,62 @@ to-nat-last : {n : Nat} -> to-nat (last {n}) ≡ n
 to-nat-last {0} = rfl
 to-nat-last {S n} = cong (to-nat-last {n})
 
+-- Reflect an ordinal across the midpoint of its finite set.
+reverse : Fin n -> Fin n
+reverse (FZero {n}) = last {n}
+reverse (FSucc i) = weaken (reverse i)
+
+reverse-zero : {n : Nat} -> reverse (FZero {n}) = last {n}
+reverse-zero = rfl
+
+reverse-succ : (i : Fin n) -> reverse (FSucc i) = weaken (reverse i)
+reverse-succ i = rfl
+
+reverse-last : {n : Nat} -> reverse (last {n}) = FZero {n}
+reverse-last {0} = rfl
+reverse-last {S n} = calc
+  reverse (last {S n})
+  = weaken (reverse (last {n}))
+  = weaken (FZero {n}) := cong (reverse-last {n})
+  = FZero {S n}
+
+reverse-weaken : (i : Fin n) -> reverse (weaken i) = FSucc (reverse i)
+reverse-weaken FZero = rfl
+reverse-weaken (FSucc i) = calc
+  reverse (weaken (FSucc i))
+  = weaken (reverse (weaken i))
+  = weaken (FSucc (reverse i)) := cong (reverse-weaken i)
+  = FSucc (reverse (FSucc i))
+
+reverse-reverse : (i : Fin n) -> reverse (reverse i) = i
+reverse-reverse (FZero {n}) = calc
+  reverse (reverse (FZero {n}))
+  = reverse (last {n})
+  = FZero {n} := reverse-last {n}
+reverse-reverse (FSucc i) = calc
+  reverse (reverse (FSucc i))
+  = reverse (weaken (reverse i))
+  = FSucc (reverse (reverse i)) := reverse-weaken (reverse i)
+  = FSucc i := cong (reverse-reverse i)
+
 -- Construct an ordinal from its builtin strict bound.
 from-nat : {k n : Nat} -> k < n -> Fin n
 from-nat {0} {S n} h = FZero
 from-nat {S k} {S n} h = FSucc (from-nat {k} {n} h)
 from-nat {k} {0} h = absurd h
+
+to-nat-from-nat : {k n : Nat} -> k < n -> to-nat (from-nat {k} {n} (by assumption)) = k
+to-nat-from-nat {0} {S n} h = rfl
+to-nat-from-nat {S k} {S n} h = by
+  have ih := to-nat-from-nat {k} {n}
+  cong
+to-nat-from-nat {k} {0} h = absurd h
+
+from-nat-to-nat : (i : Fin n) -> from-nat {to-nat i} {n} (to-nat-lt i) = i
+from-nat-to-nat FZero = rfl
+from-nat-to-nat (FSucc i) = by
+  have ih := from-nat-to-nat i
+  cong
 
 -- An alternative presentation retains the ordinal as a builtin natural and
 -- certifies its bound; the proof is erased, but checked by membership.

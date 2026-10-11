@@ -44,6 +44,9 @@ module Language.Praxis.Surface.Env (
   staticSlots,
   valueSlots,
   staticName,
+  schemaName,
+  schemaArguments,
+  funSchemaArguments,
   membershipSlot,
   isMembershipSlot,
   Premise (..),
@@ -308,6 +311,14 @@ valueSlots = filter ((== 0) . slotArity)
 staticName :: Int -> Text
 staticName j = "w_" <> T.pack (show j)
 
+-- | A fixed explicit function parameter, distinct from class dictionary slots.
+schemaName :: Int -> Text
+schemaName j = "f_" <> T.pack (show j)
+
+-- | The function domains of a signature, retaining their original positions.
+schemaArguments :: [Ty] -> [(Int, Ty)]
+schemaArguments ts = [(i, t) | (i, t@TArrow {}) <- zip [0 ..] ts]
+
 {- |
 The place of a dictionary for the membership predicate of a type parameter
 which a class with laws constrains: a parameter of the schema, of one
@@ -327,6 +338,7 @@ results are members of the parameter's type.
 data Premise
   = PLaw !QualName !Int
   | PClosure !QualName !Int
+  | PSchema !Int !Ty
   deriving stock (Show, Eq)
 
 {- |
@@ -455,6 +467,16 @@ globalCore = \case
   GTheorem t -> thmCore t
   g -> coreOf (globalQualName g)
 
+-- | Fixed callbacks of a function, at their runtime environment positions.
+funSchemaArguments :: FunInfo -> [(Int, Ref, Ty)]
+funSchemaArguments info =
+  [ (length (funRuntime info) + position, Ref RefStatic (schemaName ordinal), ty)
+  | (ordinal, (position, ty)) <- zip [1 ..] (schemaArguments (domains (schemeType (funScheme info))))
+  ]
+  where
+    domains (TArrow a b) = a : domains b
+    domains _ = []
+
 -- * Environments
 
 data Env = Env
@@ -469,13 +491,15 @@ data Env = Env
   -- ^ every core name, with the surface name it stands for
   , envInstances :: !(Map (QualName, Text) InstanceInfo)
   -- ^ each instance, by its class and the head of its type: one for each
+  , envSchemas :: ![(Text, Ref, Ty)]
+  -- ^ local fixed callbacks: source binder, schema reference and source signature
   , envScope :: !TyScope
   -- ^ what the names of a type written in a term stand for: the enclosing signature's parameters
   }
 
 -- | No module, and nothing known: what a build starts from.
 emptyEnv :: Env
-emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty emptyScope
+emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty [] emptyScope
 
 {- |
 The environment a module of the name given is elaborated in, with the
@@ -484,7 +508,7 @@ environment given — the globals, namespaces, instances and display names of
 the modules before it.
 -}
 moduleEnv :: QualName -> [QualName] -> Env -> Env
-moduleEnv q visible env = env {envModule = q, envVisible = visible, envScope = emptyScope}
+moduleEnv q visible env = env {envModule = q, envVisible = visible, envSchemas = [], envScope = emptyScope}
 
 -- | A name of the module, qualified.
 qualify :: Env -> [Segment] -> QualName

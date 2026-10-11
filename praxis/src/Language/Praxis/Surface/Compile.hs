@@ -49,7 +49,7 @@ module Language.Praxis.Surface.Compile (
   ruleBinders,
 ) where
 
-import Control.Monad (forM, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import Data.List (nub)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
@@ -64,7 +64,7 @@ import Language.Praxis.Surface.Match
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (segmentRaw)
 import Language.Praxis.Surface.Term qualified as Term
-import Language.Praxis.Surface.Types (Ty (TNat))
+import Language.Praxis.Surface.Types (Ty (TArrow, TNat))
 
 -- | A function in the core: its definition, and its lemmas with their declarations, in order.
 data Compiled = Compiled
@@ -138,6 +138,7 @@ compileFunction :: Env -> FunDef -> Either String Compiled
 compileFunction env fd = do
   let columns = nub [i | fc <- clauses, (i, p) <- zip [0 ..] (fcPatterns fc), matchesOn p]
   when (null clauses) $ Left "a function with no clauses"
+  when (any (nestedRecursion . fcBody) clauses) $ Left "a recursive call cannot occur inside a callback lambda"
   case columns of
     [] -> do
       -- No case analysis: one clause, and no recursion.
@@ -148,7 +149,7 @@ compileFunction env fd = do
       when (callsSelf core (fcBody fc)) $ Left "a recursive function must match on a constructor of the argument it recurses on"
       b <- body (\i -> args !! argIndex ps i) inDef (const (Left "unreachable")) fc
       rhs <- clauseRhs ps fc
-      let triples = [(CSym core (patternArgs ps fc <> dict), rhs, "refl")]
+      let triples = [(call (patternArgs ps fc <> dict), rhs, "refl")]
       pure (compiled [definition b] (unfoldings triples) (table triples))
     [c] | fdArgs fd !! c == TNat -> natColumn c
     [c] -> do
@@ -175,7 +176,7 @@ compileFunction env fd = do
           orderedM = [lookup i byIndex | i <- [0 .. length ctors - 1]]
           ordered = catMaybes orderedM
           defLemma = functionLemma info "#def"
-          defLhs = CSym core (take userArity vargs <> dict)
+          defLhs = call (take userArity vargs <> dict)
       if not recursive
         then do
           branches <- forM orderedM $ maybe (Right (CNum 0)) \(fc, ps, _) ->
@@ -185,7 +186,7 @@ compileFunction env fd = do
           proofs <- forM ordered \(fc, ps, ci) -> do
             rhs <- clauseRhs ps fc
             let scr = CSym (ctorCore ci) (fieldVars ps fc ci)
-                lhs = CSym core (patternArgs ps fc <> dict)
+                lhs = call (patternArgs ps fc <> dict)
                 start = dispatchAt scr (argVar ps fc)
                 tagged = replaceCT (\t -> if t == hdT scr then Just (CNum (fromIntegral (ctorIndex ci))) else Nothing) start
                 branch = branchAt scr ps fc
@@ -214,7 +215,7 @@ compileFunction env fd = do
                 scr = CSym (ctorCore ci) fields
                 rest = [argVar ps fc i | i <- others]
                 h = hist scr rest
-                lhs = CSym core (patternArgs ps fc <> dict)
+                lhs = call (patternArgs ps fc <> dict)
                 start = betaBody scr rest
                 tagged = replaceCT (\t -> if t == hdT scr then Just (CNum (fromIntegral (ctorIndex ci))) else Nothing) start
                 branch = stepAt scr rest ps fc
@@ -226,7 +227,7 @@ compileFunction env fd = do
                     | j <- recFields
                     ]
                     afterFields
-                recursiveAt x = CSym core (argsWith c x (take (userArity - 1) rest) <> dict)
+                recursiveAt x = call (argsWith c x (take (userArity - 1) rest) <> dict)
                 defSteps = scanl1' [(j, replaceCT (\u -> if u == cvrec (fields !! j) rest then Just (recursiveAt (fields !! j)) else Nothing)) | j <- recFields] (lastOf afterFields histSteps)
                 haves =
                   mconcat
@@ -267,7 +268,24 @@ compileFunction env fd = do
     info = fdInfo fd
     core = funCore info
     slots = funSlots info
-    statics = staticSlots slots
+    schemas = funSchemaArguments info
+    statics =
+      [(refName ref, 1 + callbackArity ty) | (_, ref, ty) <- schemas]
+        <> [(staticName j, slotArity slot) | (j, slot) <- zip [1 ..] (staticSlots slots)]
+    callbackArity (TArrow _ b) = 1 + callbackArity b
+    callbackArity _ = 0
+    call actual = CSym core [wrap i value | (i, value) <- zip [0 ..] actual]
+    wrap _ callback@CCallback {} = callback
+    wrap i value = case [ref | (column, ref, _) <- schemas, column == i] of
+      ref : _ -> CCallback (CStatic (refName ref)) value
+      [] -> value
+    nestedRecursion = \case
+      Term.Closure _ body' -> callsSelf core body'
+      Term.PackedClosure _ body' environment -> callsSelf core body' || nestedRecursion environment
+      Term.Call _ xs -> any nestedRecursion xs
+      Term.Parameter _ x -> nestedRecursion x
+      Term.Invoke f xs -> nestedRecursion f || any nestedRecursion xs
+      _ -> False
     userArity = length (fdArgs fd)
     -- The arguments of the definition: the function's own, then the values of its dictionary.
     arity = userArity + length (valueSlots slots)
@@ -316,7 +334,7 @@ compileFunction env fd = do
           others = [i | i <- [0 .. arity - 1], i /= c]
           userOthers = [i | i <- [0 .. userArity - 1], i /= c]
           defLemma = functionLemma info "#def"
-          defLhs = CSym core (take userArity vargs <> dict)
+          defLhs = call (take userArity vargs <> dict)
           sgnT x = CSym "sgn" [x]
           natPlace scr other ps i = case ps !! i of
             Arg a -> other a
@@ -331,7 +349,7 @@ compileFunction env fd = do
           proofs <- forM clauses \fc -> do
             let ps = placesOf fc
             rhs <- clauseRhs ps fc
-            let lhs = CSym core (patternArgs ps fc <> dict)
+            let lhs = call (patternArgs ps fc <> dict)
             pure (lhs, rhs, calc lhs [(dispatchAt (scrOf fc) (argVar ps fc), "exact " <> fromText defLemma), (rhs, "refl")])
           pure (compiled [definition (ifChain (sgnT (args !! c)) [b0, bS])] ((defLemma, lemma defLemma vargs defLhs (dispatchAt (vargs !! c) (vargs !!)) "refl") : unfoldings proofs) (table proofs))
         else do
@@ -353,12 +371,12 @@ compileFunction env fd = do
                 scr = scrOf fc
                 rest = [argVar ps fc i | i <- others]
                 h = hist scr rest
-                lhs = CSym core (patternArgs ps fc <> dict)
+                lhs = call (patternArgs ps fc <> dict)
                 -- The branch at the value, the predecessor of a successor its variable.
                 branch = replaceCT (\u -> if u == CSym "prd" [scr] then Just n else Nothing) (stepAt scr rest ps fc)
                 recursiveHere = not (isZero fc) && callsSelf core (fcBody fc)
                 viaHist = replaceCT (\u -> if u == CSym "at" [h, scr, n] then Just (cvrec n rest) else Nothing) branch
-                viaDef = replaceCT (\u -> if u == cvrec n rest then Just (CSym core (argsWith c n (take (userArity - 1) rest) <> dict)) else Nothing) viaHist
+                viaDef = replaceCT (\u -> if u == cvrec n rest then Just (call (argsWith c n (take (userArity - 1) rest) <> dict)) else Nothing) viaHist
                 haves
                   | recursiveHere = "have L: ((lt " <> render n <> " " <> render scr <> ") = 1) { exact ltSucc }; have E: (" <> render (CSym "at" [h, scr, n]) <> " = " <> render (cvrec n rest) <> ") { exact histAt }; "
                   | otherwise = ""
@@ -401,7 +419,7 @@ compileFunction env fd = do
           userOthers = [i | i <- [0 .. userArity - 1], i `notElem` cs]
           defLemma = functionLemma info "#def"
           betaLemma = functionLemma info "#beta"
-          defLhs = CSym core (take userArity vargs <> dict)
+          defLhs = call (take userArity vargs <> dict)
           component i t = hdT (iterate tlT t !! i)
           tupleT = foldr (\x acc -> CSym "cons" [x, acc]) (CNum 0)
           roles fc =
@@ -467,7 +485,7 @@ compileFunction env fd = do
             rest = map otherArg others
             scr = tupleT vals
             h = hist scr rest
-            lhs = CSym core ([maybe (otherArg a) (vals !!) (lookup a colIdx) | a <- [0 .. userArity - 1]] <> dict)
+            lhs = call ([maybe (otherArg a) (vals !!) (lookup a colIdx) | a <- [0 .. userArity - 1]] <> dict)
             start = betaBody scr rest
             apart = takeApart start
             afterApart = maybe start fst (listToMaybe (reverse apart))
@@ -500,7 +518,7 @@ compileFunction env fd = do
                                   then (True, tailSteps <> "have " <> fromText (nm "P" i) <> ": (" <> render c <> " <= " <> render c <> ") { exact leSelf }; " <> fact <> " { exact consLtR on " <> fromText (nm "P" i) <> " " <> fromText (nm "Q" (i + 1)) <> " }; ")
                                   else (False, tailSteps)
                in snd (go 0)
-            callOf tup = CSym core ([maybe (otherArg a) (untuple tup !!) (lookup a colIdx) | a <- [0 .. userArity - 1]] <> dict)
+            callOf tup = call ([maybe (otherArg a) (untuple tup !!) (lookup a colIdx) | a <- [0 .. userArity - 1]] <> dict)
             haves = mconcat [ltProof j tup <> "have E" <> fromDec j <> ": (" <> render u <> " = " <> render (cvrec tup rest) <> ") { exact histAt }; " | (j, (u, tup)) <- zip [0 ..] lookups]
             histSteps = drop 1 (scanl (\(t, _) (j, (u, tup)) -> (replaceCT (\x -> if x == u then Just (cvrec tup rest) else Nothing) t, "cong E" <> fromDec j)) (branch, "") (zip [0 :: Int ..] lookups))
             afterHist = maybe branch fst (listToMaybe (reverse histSteps))
@@ -511,7 +529,7 @@ compileFunction env fd = do
                 <> [(t, "cong " <> lem) | (t, lem) <- collapsing afterApart]
                 <> histSteps
                 <> defSteps
-        rhs <- body (\v -> maybe (CVar "?") caseTerm (roleOf fc v)) inLemma (\callArgs -> Right (CSym core (map snd callArgs <> dict))) fc
+        rhs <- body (\v -> maybe (CVar "?") caseTerm (roleOf fc v)) inLemma (\callArgs -> Right (call (map snd callArgs <> dict))) fc
         pure (combo, (lhs, rhs, haves <> calc lhs steps))
       let named = [(functionLemma info ("unfold-" <> T.intercalate "-" (map shapeName (comboShapes combo))), p) | (combo, p) <- proofs]
       pure
@@ -599,7 +617,7 @@ compileFunction env fd = do
     -- The definition, over the parameters of its schema, in braces, and its arguments.
     definition b =
       runBuilder
-        ( unwordsB (fromText core : ["{" <> intercalateB ", " [fromText (staticName j) | j <- [1 .. length statics]] <> "}" | not (null statics)] <> map (fromText . argName) [0 .. arity - 1])
+        ( unwordsB (fromText core : ["{" <> intercalateB ", " [fromText name | (name, _) <- statics] <> "}" | not (null statics)] <> map (fromText . argName) [0 .. arity - 1])
             <> " = "
             <> render b
         )
@@ -607,7 +625,7 @@ compileFunction env fd = do
     -- A lemma: a theorem, or, for a function under constraints, a rule over the parameters of its schema, its variables all term metavariables.
     lemma name vs lhs rhs proof
       | null statics = runBuilder ("theorem " <> fromText name <> " : |- " <> equation lhs rhs <> "\nby " <> proof)
-      | otherwise = runBuilder ("rule " <> fromText name <> ruleBinders [(staticName j, slotArity s) | (j, s) <- zip [1 :: Int ..] statics] (nub (concatMap varsCT vs)) <> " : |- " <> equation lhs rhs <> "\nby " <> proof)
+      | otherwise = runBuilder ("rule " <> fromText name <> ruleBinders statics (nub (concatMap varsCT vs)) <> " : |- " <> equation lhs rhs <> "\nby " <> proof)
     calc lhs steps = "calc " <> render lhs <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
     unfoldings triples =
       concat
@@ -634,7 +652,7 @@ compileFunction env fd = do
       _ -> argVar ps fc i
     -- The predecessor a successor pattern binds, or a variable of its own.
     natFieldVar ps fc = maybe (CVar "v__x23_f0") (varOf fc) (lookup (Field 0) (zip ps [0 ..]))
-    clauseRhs ps fc = body (varOf fc) inLemma (\callArgs -> Right (CSym core (map snd callArgs <> dict))) fc <* pure ps
+    clauseRhs ps fc = body (varOf fc) inLemma (\callArgs -> Right (call (map snd callArgs <> dict))) fc <* pure ps
     table triples = [(functionLemma info n, lhs, rhs) | (n, (lhs, rhs, _)) <- zip names triples]
     argIndex ps i = case ps !! i of
       Arg a -> a
@@ -686,6 +704,10 @@ ruleBinders statics vs =
 callsSelf :: Text -> Term.Term a -> Bool
 callsSelf core = \case
   Term.Call (Ref _ r) args -> r == core || any (callsSelf core) args
+  Term.Parameter _ environment -> callsSelf core environment
+  Term.Closure _ body -> callsSelf core body
+  Term.PackedClosure _ body environment -> callsSelf core body || callsSelf core environment
+  Term.Invoke callback arguments -> callsSelf core callback || any (callsSelf core) arguments
   _ -> False
 
 -- | The pattern variables of a clause which are arguments of its recursive calls.
@@ -694,6 +716,8 @@ recVars core fc = [i | Term.Variable i <- calls (fcBody fc)]
   where
     calls = \case
       Term.Call (Ref _ r) args -> [arg | r == core, arg <- args] <> concatMap calls args
+      Term.Parameter _ environment -> calls environment
+      Term.Invoke callback arguments -> calls callback <> concatMap calls arguments
       _ -> []
 
 {- |
@@ -714,11 +738,16 @@ bodyCT info userArity var dvar rec fc = lowerTermWith lowering (fcBody fc)
             if r == funCore info
               then do
                 let (users, passed) = splitAt userArity args
+                forM_ (funSchemaArguments info) \(position, expected, _) ->
+                  case fst (users !! position) of
+                    Term.Parameter actual _ | actual == expected -> Right ()
+                    _ -> Left "a recursive call must keep its fixed callback unchanged"
                 unless (map (Term.toExpr . fst) passed == ownDictionary (funSlots info)) $
                   Left "a recursive call passes the dictionary on unchanged: primitive recursion keeps the parameters of its schema"
-                rec [(variable arg, ct) | (arg, ct) <- users]
+                rec [(variable arg, callbackEnvironment ct) | (arg, ct) <- users]
               else lowerApplication (standardLowering var) ref args
         }
     variable = \case
       Term.Variable i -> Just i
+      Term.Parameter _ (Term.Variable i) -> Just i
       _ -> Nothing

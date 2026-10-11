@@ -10,6 +10,9 @@ in order of appearance, as in Hindley–Milner; implicit binders @{a : Type}@
 may also be written, and only in front: polymorphism is rank 1.  A theorem
 may quantify over values in front of its proposition, @(xs : List a) -> …@,
 and the proposition is quantifier-free but for bounded quantifiers.
+An arrow domain is a fixed function-schema parameter, with first-order
+arguments and result. Its static identity is retained separately from its
+captured values; it cannot be stored, returned or compared as a value.
 
 Terms are checked bidirectionally, without unification variables: an
 application takes its head's type parameters from the type expected of it
@@ -53,8 +56,10 @@ module Language.Praxis.Surface.Elab (
   inferTerm,
   inferTermWithObligations,
   inferTermWithHypotheses,
+  inferTermExpectedWithHypotheses,
   checkTerm,
   elabProp,
+  elabPropWithProofArguments,
   elabType,
   extendCtx,
 
@@ -64,7 +69,7 @@ module Language.Praxis.Surface.Elab (
 
 import Bound (Scope, Var (..), fromScope, instantiate, toScope)
 import Control.Applicative ((<|>))
-import Control.Monad (foldM, forM, forM_, join, unless, when)
+import Control.Monad (foldM, forM, forM_, join, unless, when, zipWithM)
 import Control.Monad.State.Strict qualified as State
 import Data.Bifunctor (first)
 import Data.Foldable (toList)
@@ -1007,6 +1012,10 @@ placesUsed siblings refs = foldMap (go . fcBody)
       Term.Call (Ref (RefPartial _) n) _ | Just (q, _) <- Map.lookup n siblings -> ([], [q])
       Term.Call (Ref _ n) as | Just (q, arity) <- Map.lookup n siblings -> ([], [q]) <> foldMap go (take arity as)
       Term.Call r as -> ([r | r `elem` refs], []) <> foldMap go as
+      Term.Parameter r environment -> ([r | r `elem` refs], []) <> go environment
+      Term.Closure _ body -> go body
+      Term.PackedClosure _ body environment -> go body <> go environment
+      Term.Invoke f as -> go f <> foldMap go as
       _ -> ([], [])
 
 -- | Each method's places: its own, and those of the methods it calls, to a fixpoint.
@@ -1336,22 +1345,23 @@ elabDecl fx env sp name ty0 clauses = do
       _ <- foldM checkBinder [] (map (Located sp . fst) values <> map fst binders)
       binderTys <- forM binders \(Located nsp n, t) -> do
         bty <- elabTypeIn env scope t
-        unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a theorem quantifies over values, which are first-order"))
+        unless (argumentType bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " must be a value or a fixed function schema over first-order values"))
         pure (n, bty)
       full <- dictionaryOf env paramNames constraints
       given <- constraintClasses env paramNames constraints
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] (values <> binderTys)]
-      prop0 <- runTC (elabProp env {envScope = scope} full ctx0 body)
+      prop0 <- runTC (elabPropWithProofArguments env {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
       let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
           prop = keepPlaces full' kept prop0
-          premises = premisesFor env given kept
+          premises = premisesFor env given kept <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd binderTys)]
           q = qualify env [name]
-          (env0, info0) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (if null values then Just (toScope (fmap B prop)) else Nothing)
+      (clean, _) <- first (ElabError sp) (Term.prepareProposition prop)
+      let (env0, info0) = addTheorem env q (map (mangleVariable . fst) binderTys) (map snd binderTys) kept (map pdPremise premises) (if null values then Just (toScope (fmap B clean)) else Nothing)
           -- The indices of its binders' types, which its statement states of them.
           indexHyps = [(k, fn, x) | (k, (_, TData dn _ xs@(_ : _))) <- zip [0 ..] binderTys, (fn, x) <- zip (indexFnsOf env dn) xs]
-          (env', info) = setTheoremIndices indexHyps (map fst values) (if null values then Nothing else Just (toScope (fmap B prop))) (env0, info0)
+          (env', info) = setTheoremIndices indexHyps (map fst values) (if null values then Nothing else Just (toScope (fmap B clean))) (env0, info0)
       -- The implicit parameters a clause may give in braces, in the order the signature has them:
       -- each a value, by its position and its type, matched on as a binder is; or a type, whose name does not matter.
       let declared = map fst implicits
@@ -1389,7 +1399,7 @@ elabDecl fx env sp name ty0 clauses = do
           runtimeTys = [snd (values !! i) | i <- runtime]
           scheme = Scheme params values fty
           (env1, info1) = setFunProofs proofs (setFunRuntime runtime (addFunction env name scheme (length args) full))
-      unless (all firstOrder (result : args)) $ Left (ElabError (location body) "a function of functions: its arguments and its result are values, which are first-order")
+      unless (firstOrder result && all argumentType args) $ Left (ElabError (location body) "a function returns a first-order value; its arguments are values or fixed function schemas over values")
       forM_ (zip runtime runtimeTys) \(i, t) ->
         when (t == THole) $ Left (ElabError sp ("the type of the implicit value " <> T.unpack (fst (values !! i)) <> " is not known; write it, {" <> T.unpack (fst (values !! i)) <> " : T}"))
       fcs1 <- forM clauses \c -> runTC (elabFunClause fx env1 {envScope = scope} info1 runtimeTys args result c)
@@ -1423,6 +1433,18 @@ elabDecl fx env sp name ty0 clauses = do
       PCon {} -> True
       PAbsurd -> True
       _ -> False
+
+-- | A schema parameter has first-order domains and result: schemas are not values.
+argumentType :: Ty -> Bool
+argumentType t =
+  firstOrder t || case t of
+    TArrow {} -> let (args, result) = arrows t in all firstOrder (result : args)
+    _ -> False
+
+-- | Explicit schema parameters have stable names independent of clause patterns.
+localSchemas :: [(Text, Ty)] -> [(Text, Ref, Ty)]
+localSchemas binders =
+  [(name, Ref RefStatic (schemaName serial), ty) | (serial, (name, ty)) <- zip [1 ..] [binder | binder@(_, TArrow {}) <- binders]]
 
 -- | Constraints in front of a type, @C a => …@: the constraints, and the type under them.
 constraintsOf :: Located R.Expr -> ([R.TyConstraint], Located R.Expr)
@@ -1551,11 +1573,19 @@ pruneDictionary info fcs = (kept, map prune fcs)
     usedIn = \case
       Term.Call (Ref _ n) as | n == self -> concatMap usedIn (take arity as)
       Term.Call r as -> [r | r `elem` refs] <> concatMap usedIn as
+      Term.Parameter r environment -> [r | r `elem` refs] <> usedIn environment
+      Term.Closure _ body -> usedIn body
+      Term.PackedClosure _ body environment -> usedIn body <> usedIn environment
+      Term.Invoke f as -> usedIn f <> concatMap usedIn as
       _ -> []
     rewrite :: Term.Term x -> Term.Term x
     rewrite = \case
       Term.Call r@(Ref _ n) as | n == self -> Term.Call r (map rewrite (take arity as) <> [Term.Call (renamed ref) [] | (Term.Call ref [], True) <- zip (drop arity as) keep])
       Term.Call r as -> Term.Call (renamed r) (map rewrite as)
+      Term.Parameter r environment -> Term.Parameter (renamed r) (rewrite environment)
+      Term.Closure n body -> Term.Closure n (rewrite body)
+      Term.PackedClosure hints body environment -> Term.PackedClosure hints (rewrite body) (rewrite environment)
+      Term.Invoke f as -> Term.Invoke (rewrite f) (map rewrite as)
       other -> other
     renamed r = Map.findWithDefault r r renumber
 
@@ -1710,10 +1740,16 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     [] -> pure ()
   -- What matching concluded of the signature's value parameters holds in the body.
   let scope = envScope env
-      aliases = nub (concatMap implicitPatternNames explicitTerms)
-      envBody = env {envScope = scope {tsValues = [(v, IxVar v) | v <- aliases] <> [(v, applyIx refined x) | (v, x) <- tsValues scope, v `notElem` aliases]}}
+      aliases = nub (map fst vars <> concatMap implicitPatternNames explicitTerms)
+      schemas =
+        [ (name, Ref RefStatic (schemaName serial), fromMaybe (applyTy refined ty) (lookup name vars))
+        | (serial, (position, ty)) <- zip [1 ..] (schemaArguments (runtimeTys <> args))
+        , PVar (Hint name) <- [pats !! position]
+        ]
+      envBody = env {envScope = scope {tsValues = [(v, IxVar v) | v <- aliases] <> [(v, applyIx refined x) | (v, x) <- tsValues scope, v `notElem` aliases]}, envSchemas = schemas}
   let varIndex v = lookup v (zip (map fst vars) [0 ..])
-      valueExpr i = ixToExpr (fmap Var . varIndex) (applyIx refined (IxParam i))
+      namedContext = [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] vars]
+      valueExpr i = indexTermIn envBody namedContext (applyIx refined (IxParam i))
       ownProp prop
         | all (isJust . valueExpr) [i | B i <- toList (fromScope prop)] = Just (instantiate (fromMaybe Hole . valueExpr) (fmap absurd prop))
         | otherwise = Nothing
@@ -1741,16 +1777,19 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
         let (l, col) = R.spanStart (location raw)
             q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col) <> "-" <> T.pack (show serial))]
             indices =
-              [ Rel RelEq (App (Global (Ref RefFunction fn)) (Var i)) term
+              [ Rel RelEq projection term
               | (i, (_, TData dn _ xs)) <- zip [0 ..] vars
               , (fn, x) <- zip (indexFnsOf env dn) xs
-              , Just term <- [ixToExprWith (fmap Var . varIndex) valueExpr x]
+              , Just term <- [indexTermIn envBody namedContext x]
+              , let projection = App (Global (Ref RefFunction fn)) (Var i)
+              , term /= projection
               ]
             statement = foldr Arrow (foldr (Arrow . snd) prop own) indices
             (slots, _) = theoremPlaces (funSlots info) statement (map snd vars)
-            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots [] Nothing [] [] Nothing
+            premises = closurePremises env slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd vars)]
+            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots (map pdPremise premises) Nothing [] [] Nothing
             pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] []
-         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots (closurePremises env slots) [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) []
+         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) []
   prepared <-
     either (failAt rsp) pure $
       if PAbsurd `elem` pats
@@ -1910,6 +1949,9 @@ elabPattern :: Env -> [Text] -> Subst -> Ty -> Located R.Expr -> TC (Pattern, [(
 elabPattern env bound s expected le@(Located sp e) = case e of
   R.EParen x -> elabPattern env bound s expected x
   R.EWildcard -> pure (PWild, [], [], s)
+  _ | TArrow {} <- expected -> case e of
+    R.EName (QName [] (Ident n)) -> pure (PVar (Hint n), [(n, expected)], [], s)
+    _ -> failAt sp "a fixed function schema is matched by a name or _: it has no constructors"
   -- The absurd pattern: a value of a data type none of whose constructors can match here, the indices of each's result clashing with those expected.
   R.EAbsurd -> case expected of
     TData dn _ idxs
@@ -2103,8 +2145,12 @@ inferTermWithObligations = inferTermWithHypotheses []
 obligations and must still be certified by the caller.
 -}
 inferTermWithHypotheses :: [(Text, Expr Text)] -> Env -> [Slot] -> Ctx a -> Located R.Expr -> TC (Term.PendingTerm (Term.ProofArgument a) a, Ty)
-inferTermWithHypotheses hypotheses env givens ctx le = do
-  (e, ty) <- elabTerm (CollectProofArguments hypotheses) env givens ctx le THole
+inferTermWithHypotheses hypotheses env givens ctx le = inferTermExpectedWithHypotheses hypotheses env givens ctx le THole
+
+-- | The same checked evidence boundary, with an expected schema or value type.
+inferTermExpectedWithHypotheses :: [(Text, Expr Text)] -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Term.PendingTerm (Term.ProofArgument a) a, Ty)
+inferTermExpectedWithHypotheses hypotheses env givens ctx le expected = do
+  (e, ty) <- elabTerm (CollectProofArguments hypotheses) env givens ctx le expected
   prepared <- either (failAt (location le)) pure (Term.prepareTerm e)
   pure (prepared, ty)
 
@@ -2190,11 +2236,22 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected =
       CollectProofArguments (_ : _)
         | expected /= THole
         , Right (value, actual) <- elabTermDirect proofArguments env givens ctx le THole
-        , Just pairs@(_ : _) <- transportIndices actual expected
+        , Just target <- completeTypes actual expected
+        , Just pairs@(_ : _) <- transportIndices actual target
         , Just propositions <- traverse (\(x, y) -> Rel RelEq <$> indexTermIn env ctx x <*> indexTermIn env ctx y) pairs ->
             let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
-             in Right (At (Irrelevant sp) (Transport expected value [ProofArg prop (Irrelevant proof) | prop <- propositions]), expected)
+             in Right (At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | prop <- propositions]), target)
       _ -> Left original
+  where
+    -- A proof can determine an index before an ordinary argument determines
+    -- its element type. Fill those type holes before collecting the index
+    -- equalities, preserving every index of a type inferred for a hole.
+    completeTypes source THole = Just source
+    completeTypes (TData name ts _) (TData other us indices)
+      | name == other, length ts == length us = TData name <$> zipWithM completeTypes ts us <*> pure indices
+    completeTypes (TParam i ts) (TParam j us)
+      | i == j, length ts == length us = TParam i <$> zipWithM completeTypes ts us
+    completeTypes source target = mergeTy source target
 
 elabTermDirect :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
 elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e of
@@ -2204,13 +2261,14 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         t <- agree env sp expected ty
         elabTerm proofArguments env givens ctx l t
   R.EParen x -> elabTerm proofArguments env givens ctx x expected
+  _ | TArrow {} <- expected -> schema
   R.ENat n -> do
     t <- agree env sp expected TNat
     pure (At (Irrelevant sp) (Typed t [] [] (Nat n)), t)
   R.EInfix (Located osp op) l r -> application (Located osp (R.EName (R.operatorName op))) [] [l, r]
   R.EIf {} -> failAt sp "if is not supported yet"
   R.ECase {} -> failAt sp "case is not supported yet"
-  R.ELam {} -> failAt sp "a λ: functions are not values here"
+  R.ELam {} -> undetermined sp "a lambda needs the expected type of a fixed function schema"
   R.EAbsurd -> failAt sp "(), the absurd pattern, is no term: it stands for an argument no constructor can match"
   _ -> do
     let (hd, args0) = rawArgs le
@@ -2218,6 +2276,34 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     forM_ (take 1 late) \x -> failAt (location x) "an implicit argument, in braces, comes before the explicit ones"
     application hd imps args
   where
+    -- Functions occur only at an explicit schema domain. A named parameter
+    -- retains its static identity; other functions are checked eta expansions.
+    schema = do
+      unless (argumentType expected) $ failAt sp "a fixed function schema takes and returns first-order values"
+      case e of
+        R.EName (QName [] (Ident name))
+          | Just (v, actual@TArrow {}) <- lookup name ctx
+          , (_, ref, _) : _ <- [entry | entry@(n, _, _) <- envSchemas env, n == name] -> do
+              ty <- agree env sp expected actual
+              pure (At (Irrelevant sp) (SchemaParameter ty ref (Var v)), ty)
+        _ -> lambdaSchema
+    lambdaSchema = do
+      let (domains, result) = arrows expected
+      unless (all determined domains) $ undetermined sp "the argument types of this function schema are not determined yet"
+      let fresh = take (length domains) ["#schema-argument-" <> T.pack (show i) | i <- [0 :: Int ..], ("#schema-argument-" <> T.pack (show i)) `notElem` map fst ctx]
+          (names, body) = case e of
+            R.ELam ns b -> (map unLocated ns, b)
+            _ -> (fresh, foldl (\f name -> Located sp (R.EApp f (Located sp (R.EName (QName [] (Ident name)))))) le fresh)
+      unless (length names == length domains) $ failAt sp ("this function schema takes " <> show (length domains) <> " arguments, but the lambda binds " <> show (length names))
+      unless (length names == length (nub names)) $ failAt sp "a lambda binds the same name twice"
+      let local = [(name, (B i, ty)) | (i, (name, ty)) <- zip [0 ..] (zip names domains)] <> [(name, (F v, ty)) | (name, (v, ty)) <- ctx, name `notElem` names]
+          scoped = env {envSchemas = [entry | entry@(name, _, _) <- envSchemas env, name `notElem` names]}
+      -- Evidence under a lambda needs its own quantified obligation. Until
+      -- that is supported, reject it instead of erasing or mis-scoping it.
+      (body', actual) <- elabTerm NoProofArguments scoped givens local body result
+      unless (firstOrder actual) $ failAt sp "a function schema returns a first-order value"
+      let ty = foldr TArrow actual domains
+      pure (At (Irrelevant sp) (SchemaClosure ty (Lam (map Hint names) (toScope body'))), ty)
     {- A type ascribed, @(e : T)@, in the scope of the enclosing signature: a
     value its indices mention which nothing binds stands for any value, so
     that the ascription holds of every value it may take.  What is no type is
@@ -2253,10 +2339,11 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       -- term, for the proof to be checked there, and erased from the code.
       proofs <- forM proofAt \(i, prop) -> (\p -> (i, ProofArg p (Irrelevant (args !! i)))) <$> prop s2
       case (proofArguments, proofs) of
-        (NoProofArguments, _ : _) -> failAt sp "proof arguments in statements are not supported: their proof obligations must be checked before erasure"
+        (NoProofArguments, _ : _) -> failAt sp "proof arguments are not supported in this scope: their proof obligations must be checked before erasure"
         _ -> pure ()
       apply <- ahApply h s2
       t <- agree env sp expected (substScheme n s2 (ahResult h))
+      unless (firstOrder t) $ failAt sp "a function-valued result is not a first-order value"
       let terms = [done' IM.! j | j <- [0 .. length (ahDomains h) - 1]]
           inOrder i ts
             | i >= arity = []
@@ -2272,7 +2359,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       | otherwise = s
     -- An implicit argument: an index over what is in scope, of its parameter's type, which it fixes.
     implicitArg n s ((key, kind), x) = do
-      let values = [(v, IxVar v) | (v, _) <- ctx] <> tsValues (envScope env)
+      let values = tsValues (envScope env) <> [(v, IxVar v) | (v, _) <- ctx]
           sc = (envScope env) {tsValues = values, tsValueTys = [(v, t) | (v, (_, t)) <- ctx] <> tsValueTys (envScope env)}
       ix <- liftE (elabIx env values x)
       s' <- case ixType env sc ix of
@@ -2289,7 +2376,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     dependent deps i a s = case lookup i deps of
       Nothing -> pure s
       Just pos -> do
-        let values = [(v, IxVar v) | (v, _) <- ctx] <> tsValues (envScope env)
+        let values = tsValues (envScope env) <> [(v, IxVar v) | (v, _) <- ctx]
         x <- either (\_ -> failAt (location a) "an argument the type depends on is an index: a variable, a numeral, S, or a constructor or a function applied") pure (elabIx env values a)
         pure s {asValues = IM.insert pos (normIx x) (asValues s)}
     -- The arguments put off, each again once its domain is known further, until none is.
@@ -2312,7 +2399,13 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     found n asp d t s = maybe (failAt asp (mismatch env (substScheme n s d) t)) pure (matchTy n d t s)
     -- The head of an application: a variable, a builtin, a function, a constructor or a method.
     headOf (Located hsp h) = case h of
-      R.EName (QName [] (Ident x)) | Just (v, t) <- lookup x ctx -> pure (plain (0, 0) [] t (Var v))
+      R.EName (QName [] (Ident x)) | Just (v, t) <- lookup x ctx -> case t of
+        TArrow {}
+          | (_, ref, _) : _ <- [entry | entry@(name, _, _) <- envSchemas env, name == x] ->
+              let (domains, result) = arrows t
+               in pure (plain (0, 0) domains result (SchemaParameter t ref (Var v)))
+          | otherwise -> failAt hsp "a function variable without a fixed schema parameter"
+        _ -> pure (plain (0, 0) [] t (Var v))
       R.EName (QName [] (Ident x))
         | Just ix <- lookup x (tsValues (envScope env))
         , Just value <- valueIndex ix ->
@@ -2484,35 +2577,49 @@ determines its type without the other, the other against it, so that both
 are numbers.
 -}
 elabProp :: Env -> [Slot] -> Ctx a -> Located R.Expr -> TC (Expr a)
-elabProp env givens ctx (Located sp e) =
+elabProp = elabProposition NoProofArguments
+
+{- | The theorem checker must prepare this proposition and certify all retained
+proof arguments before using its proof-free statement.
+-}
+elabPropWithProofArguments :: Env -> [Slot] -> Ctx a -> Located R.Expr -> TC (Expr a)
+elabPropWithProofArguments = elabProposition (CollectProofArguments [])
+
+elabProposition :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> TC (Expr a)
+elabProposition proofArguments env givens ctx (Located sp e) =
   At (Irrelevant sp) <$> case e of
-    R.EParen x -> stripLocations <$> elabProp env givens ctx x
+    R.EParen x -> stripLocations <$> elabProposition proofArguments env givens ctx x
     R.EInfix op l r
       | Just rel <- relation (opText op) ->
           if rel `elem` [RelLt, RelLe, RelGt, RelGe]
-            then Rel rel <$> checkTerm env givens ctx l TNat <*> checkTerm env givens ctx r TNat
+            then Rel rel <$> check l TNat <*> check r TNat
             else
-              attempt (inferTerm env givens ctx l) >>= \case
-                Right (l', t) -> Rel rel l' <$> codeOf r t
+              attempt (infer l) >>= \case
+                Right (l', t) -> do
+                  unless (firstOrder t) $ failAt sp "functions are fixed schemas, not values to compare; state equality at each argument"
+                  Rel rel l' <$> codeOf r t
                 Left _ -> do
-                  (r', t) <- inferTerm env givens ctx r
+                  (r', t) <- infer r
+                  unless (firstOrder t) $ failAt sp "functions are fixed schemas, not values to compare; state equality at each argument"
                   (\l' -> Rel rel l' r') <$> codeOf l t
-      | Just c <- connective (opText op) -> Conn c <$> elabProp env givens ctx l <*> elabProp env givens ctx r
-    R.ENot x -> Not <$> elabProp env givens ctx x
-    R.EArrow a b -> Arrow <$> elabProp env givens ctx a <*> elabProp env givens ctx b
+      | Just c <- connective (opText op) -> Conn c <$> elabProposition proofArguments env givens ctx l <*> elabProposition proofArguments env givens ctx r
+    R.ENot x -> Not <$> elabProposition proofArguments env givens ctx x
+    R.EArrow a b -> Arrow <$> elabProposition proofArguments env givens ctx a <*> elabProposition proofArguments env givens ctx b
     R.EName (QName [] (Op "⊤")) -> pure Top
     R.EName (QName [] (Op "⊥")) -> pure Bottom
     R.EQuant q bs (Just (bop, bound)) body -> do
-      bound' <- checkTerm env givens ctx bound TNat
+      bound' <- check bound TNat
       let names = [unLocated n | R.Binder _ ns _ <- bs, n <- ns]
           rel = if opText bop `elem` ["≤", "<="] then AtMost else Below
       stripLocations <$> quantified q rel body ctx bound' names
     R.EQuant {} -> failAt sp "an unbounded quantifier inside a proposition: only bounded ones, ∀ x < t, may stand there (rank 1)"
     _ -> failAt sp "a proposition: an equation, a comparison, or propositions joined by connectives"
   where
+    infer x = elabTerm proofArguments env givens ctx x THole
+    check x ty = fst <$> elabTerm proofArguments env givens ctx x ty
     -- A side of an equation at the other's type, or else at it erased: codes are compared, whatever the indices of their types.
-    codeOf x t = case checkTerm env givens ctx x t of
-      Left (Refused _) -> checkTerm env givens ctx x (erase t)
+    codeOf x t = case check x t of
+      Left (Refused _) -> check x (erase t)
       checked -> checked
     relation = \case
       o | o `elem` ["≡", "="] -> Just RelEq
@@ -2530,7 +2637,7 @@ elabProp env givens ctx (Located sp e) =
     -- The names bound one inside the other, each below the same bound, the body innermost.
     quantified :: Quantifier -> BoundRel -> Located R.Expr -> Ctx b -> Expr b -> [Text] -> TC (Expr b)
     quantified q rel body c bnd = \case
-      [] -> elabProp env givens c body
+      [] -> elabProposition proofArguments env givens c body
       n : ns -> do
         inner <- quantified q rel body (extendCtx n TNat c) (fmap F bnd) ns
         pure (Quant q (Hint n) (Just (rel, bnd)) Nothing (toScope inner))

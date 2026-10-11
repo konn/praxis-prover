@@ -3,6 +3,7 @@ module Data.Vec where
 import Data.Fin as F
 import Data.List as L
 import Data.Nat as N
+import Data.Nat.Order as O
 
 -- The length precedes the element type, as in Vec n a.
 data Vec (n : Nat) (a : Type) where
@@ -45,6 +46,181 @@ lookup : F.Fin n -> Vec n a -> a
 lookup (FZero {n}) (Cons x xs) = x
 lookup (FSucc i) (Cons x xs) = lookup i xs
 
+-- Keep a prefix whose requested length is bounded by the input's length.
+take : {m n : Nat} -> m <= n -> Vec n a -> Vec m a
+take {0} h xs = Nil
+take {S m} h Nil = absurd h
+take {S m} h (Cons x xs) = Cons x (take {m} (by cong) xs)
+
+take-zero : (xs : Vec n a) -> take {0} O.zero-le xs = Nil
+take-zero Nil = rfl
+take-zero (Cons x xs) = rfl
+
+lookup-weaken-snoc : (i : F.Fin n) -> (xs : Vec n a) -> (x : a) -> lookup (F.weaken i) (snoc xs x) = lookup i xs
+lookup-weaken-snoc FZero (Cons y ys) x = rfl
+lookup-weaken-snoc (FSucc i) (Cons y ys) x = lookup-weaken-snoc i ys x
+
+lookup-last-snoc : (xs : Vec n a) -> (x : a) -> lookup (F.last {n}) (snoc xs x) = x
+lookup-last-snoc Nil x = rfl
+lookup-last-snoc (Cons y ys) x = lookup-last-snoc ys x
+
+take-self : (xs : Vec n a) -> take {n} O.le-refl xs = xs
+take-self Nil = rfl
+take-self (Cons x xs) = cong (take-self xs)
+
+private
+  snoc-take-lookup : {m : Nat} -> (xs : Vec n a) -> m < n -> snoc (take {m} (O.le-of-lt (by assumption)) xs) (lookup (F.from-nat {m} {n} (by assumption)) xs) = take {S m} (O.succ-le-of-lt (by assumption)) xs
+  snoc-take-lookup {0} (Cons x xs) h = calc
+    Vec.Cons x Vec.Nil
+    = Vec.Cons x (take {0} O.zero-le xs) := cong (take-zero xs)
+  snoc-take-lookup {S m} (Cons {n} x xs) h = by
+    have lifted : S m < S n := by cong
+    have bound : m < n := O.lt-of-succ-lt-succ lifted
+    calc
+      snoc (take {S m} {S n} (O.le-of-lt h) (Cons x xs)) (lookup (F.from-nat {S m} {S n} h) (Cons x xs))
+      = Cons x (snoc (take {m} {n} (O.le-of-lt bound) xs) (lookup (F.from-nat {m} {n} bound) xs))
+      = Cons x (take {S m} {n} (O.succ-le-of-lt bound) xs) := cong (snoc-take-lookup {m} xs)
+      = take {S (S m)} {S n} (O.succ-le-of-lt h) (Cons x xs)
+
+map : (a -> b) -> Vec n a -> Vec n b
+map f Nil = Nil
+map f (Cons x xs) = Cons (f x) (map f xs)
+
+private
+  shrink-bound : {m n : Nat} -> S m <= n -> m <= n
+  shrink-bound h = by
+    have step : m <= S m := O.le-succ
+    exact O.le-trans
+
+  tabulate-prefix : {n m : Nat} -> (F.Fin n -> a) -> m <= n -> Vec m a
+  tabulate-prefix {n} {0} f h = Nil
+  tabulate-prefix {n} {S m} f h = snoc (tabulate-prefix {n} {m} f (shrink-bound h)) (f (F.from-nat {m} {n} (O.lt-of-succ-le h)))
+
+-- Recursion keeps the original bound and callback fixed. Each callback
+-- argument is constructed with its certified strict bound.
+tabulate : {n : Nat} -> (F.Fin n -> a) -> Vec n a
+tabulate {n} f = tabulate-prefix {n} {n} f O.le-refl
+
+map-id : (xs : Vec n a) -> map (\x -> x) xs = xs
+map-id Nil = rfl
+map-id (Cons x xs) = cong (map-id xs)
+
+map-compose : (f : a -> b) -> (g : b -> c) -> (xs : Vec n a) -> map g (map f xs) = map (\x -> g (f x)) xs
+map-compose f g Nil = rfl
+map-compose f g (Cons x xs) = calc
+  map g (map f (Cons x xs))
+  = Cons (g (f x)) (map g (map f xs))
+  = Cons (g (f x)) (map (\y -> g (f y)) xs) := cong (map-compose f g xs)
+  = map (\y -> g (f y)) (Cons x xs)
+
+lookup-map : (f : a -> b) -> (i : F.Fin n) -> (xs : Vec n a) -> lookup i (map f xs) = f (lookup i xs)
+lookup-map f FZero (Cons x xs) = rfl
+lookup-map f (FSucc i) (Cons x xs) = lookup-map f i xs
+
+private
+  embed-bound : {n : Nat} -> (i : F.Fin m) -> m <= n -> F.to-nat i < n
+  embed-bound {n} i h = by
+    have finite := F.to-nat-lt i
+    exact O.lt-le-trans
+
+  embed-index : {n : Nat} -> F.Fin m -> m <= n -> F.Fin n
+  embed-index {n} i h = F.from-nat {F.to-nat i} {n} (embed-bound i h)
+
+  embed-last : {n m : Nat} -> S m <= n -> embed-index {n} (F.last {m}) (by assumption) = F.from-nat {m} {n} (O.lt-of-succ-le (by assumption))
+  embed-last {n} {m} h = cong (F.to-nat-last {m})
+
+  embed-weaken-bound : {n : Nat} -> (i : F.Fin m) -> S m <= n -> F.to-nat (F.weaken i) < n
+  embed-weaken-bound {n} i h = by
+    have smaller : m <= n := shrink-bound h
+    have bounded : F.to-nat i < n := embed-bound {n} i smaller
+    have gap : F.to-nat i + S (n - S (F.to-nat i)) = n := N.lt-gap bounded
+    have moved : F.to-nat (F.weaken i) + S (n - S (F.to-nat i)) = n := calc
+      F.to-nat (F.weaken i) + S (n - S (F.to-nat i))
+      = F.to-nat i + S (n - S (F.to-nat i)) := cong (F.to-nat-weaken i)
+      = n := gap
+    exact ltOfAdd moved
+
+  embed-weaken : {n : Nat} -> (i : F.Fin m) -> S m <= n -> embed-index {n} (F.weaken i) (by assumption) = embed-index {n} i (shrink-bound (by assumption))
+  embed-weaken {n} i h = calc
+    embed-index {n} (F.weaken i) h
+    = F.from-nat {F.to-nat (F.weaken i)} {n} (embed-weaken-bound {n} i h)
+    = F.from-nat {F.to-nat i} {n} (embed-bound i (shrink-bound h)) := cong (F.to-nat-weaken i)
+    = embed-index {n} i (shrink-bound h)
+
+  embed-weaken-evidence : {n : Nat} -> (i : F.Fin m) -> (bound : O.PLeq (S m) n) -> embed-index {n} (F.weaken i) (O.le-of-pleq bound) = embed-index {n} i (shrink-bound (O.le-of-pleq bound))
+  embed-weaken-evidence {n} i bound = by
+    have h : S m <= n := by O.le-of-pleq bound
+    embed-weaken {n} i h
+
+  embedding-lower-bound : {n : Nat} -> (i : F.Fin m) -> O.PLeq (S m) n -> m <= n
+  embedding-lower-bound {n} i bound = by
+    have upper : S m <= n := by O.le-of-pleq bound
+    shrink-bound upper
+
+  embed-weaken-function : {n : Nat} -> (f : F.Fin n -> a) -> (i : F.Fin m) -> (bound : O.PLeq (S m) n) -> f (embed-index {n} i (embedding-lower-bound i bound)) = f (embed-index {n} (F.weaken i) (O.le-of-pleq bound))
+  embed-weaken-function {n} f i bound = cong (embed-weaken-evidence {n} i bound)
+
+  embed-self : (i : F.Fin n) -> embed-index {n} i O.le-refl = i
+  embed-self i = F.from-nat-to-nat i
+
+  prefix-lookup-reverse : {n : Nat} -> (f : F.Fin n -> a) -> (i : F.Fin m) -> m <= n -> lookup (F.reverse i) (tabulate-prefix {n} {m} f (by assumption)) = f (embed-index {n} (F.reverse i) (by assumption))
+  prefix-lookup-reverse {n} f (FZero {m}) h = by
+    have lifted : S m <= n := by cong
+    have smaller : m <= n := shrink-bound lifted
+    calc
+      lookup (F.reverse (F.Fin.FZero {m})) (tabulate-prefix {n} {S m} f lifted)
+      = lookup (F.last {m}) (snoc (tabulate-prefix {n} {m} f smaller) (f (F.from-nat {m} {n} (O.lt-of-succ-le lifted))))
+      = f (F.from-nat {m} {n} (O.lt-of-succ-le lifted)) := lookup-last-snoc (tabulate-prefix {n} {m} f smaller) (f (F.from-nat {m} {n} (O.lt-of-succ-le lifted)))
+      = f (embed-index {n} (F.last {m}) lifted) := cong (embed-last {n} {m} lifted)
+      = f (embed-index {n} (F.reverse (F.Fin.FZero {m})) lifted)
+  prefix-lookup-reverse {n} f (FSucc {m} i) h = by
+    have lifted : S m <= n := by cong
+    have smaller : m <= n := shrink-bound lifted
+    calc
+      lookup (F.reverse (F.Fin.FSucc i)) (tabulate-prefix {n} {S m} f lifted)
+      = lookup (F.weaken (F.reverse i)) (snoc (tabulate-prefix {n} {m} f smaller) (f (F.from-nat {m} {n} (O.lt-of-succ-le lifted))))
+      = lookup (F.reverse i) (tabulate-prefix {n} {m} f smaller) := lookup-weaken-snoc (F.reverse i) (tabulate-prefix {n} {m} f smaller) (f (F.from-nat {m} {n} (O.lt-of-succ-le lifted)))
+      = f (embed-index {n} (F.reverse i) smaller) := prefix-lookup-reverse {n} f i
+      = f (embed-index {n} (F.weaken (F.reverse i)) lifted) := embed-weaken-function {n} f (F.reverse i) (O.pleq-of-le {S m} {n} lifted)
+      = f (embed-index {n} (F.reverse (F.Fin.FSucc i)) lifted)
+
+  prefix-lookup-evidence : {n : Nat} -> (f : F.Fin n -> a) -> (i : F.Fin m) -> (bound : O.PLeq m n) -> lookup (F.reverse i) (tabulate-prefix {n} {m} f (O.le-of-pleq bound)) = f (embed-index {n} (F.reverse i) (O.le-of-pleq bound))
+  prefix-lookup-evidence {n} f i bound = by
+    have h : m <= n := by O.le-of-pleq bound
+    exact prefix-lookup-reverse {n} f i h
+
+lookup-tabulate : (f : F.Fin n -> a) -> (i : F.Fin n) -> lookup i (tabulate f) = f i
+lookup-tabulate f i = by
+  have refl-bound : n <= n := O.le-refl
+  calc
+    lookup i (tabulate f)
+    = lookup (F.reverse (F.reverse i)) (tabulate f) := cong (F.reverse-reverse i)
+    = lookup (F.reverse (F.reverse i)) (tabulate-prefix {n} {n} f refl-bound)
+    = f (embed-index {n} (F.reverse (F.reverse i)) refl-bound) := prefix-lookup-evidence f (F.reverse i) (O.pleq-of-le {n} {n} refl-bound)
+    = f (embed-index {n} i refl-bound) := cong (F.reverse-reverse i)
+    = f i := cong (embed-self i)
+
+private
+  prefix-lookup-take : {m : Nat} -> (xs : Vec n a) -> m <= n -> tabulate-prefix {n} {m} (\i -> lookup i xs) (by assumption) = take {m} (by assumption) xs
+  prefix-lookup-take {0} xs h = calc
+    tabulate-prefix {n} {0} (\i -> lookup i xs) h
+    = Vec.Nil
+    = take {0} h xs := cong (take-zero xs)
+  prefix-lookup-take {S m} xs h = by
+    have smaller : m <= n := shrink-bound h
+    calc
+      tabulate-prefix {n} {S m} (\i -> lookup i xs) h
+      = snoc (tabulate-prefix {n} {m} (\i -> lookup i xs) smaller) (lookup (F.from-nat {m} {n} (O.lt-of-succ-le h)) xs)
+      = snoc (take {m} smaller xs) (lookup (F.from-nat {m} {n} (O.lt-of-succ-le h)) xs) := cong (prefix-lookup-take {m} xs)
+      = take {S m} h xs := snoc-take-lookup {m} xs (O.lt-of-succ-le h)
+
+tabulate-lookup : (xs : Vec n a) -> tabulate (\i -> lookup i xs) = xs
+tabulate-lookup xs = calc
+  tabulate {n} (\i -> lookup i xs)
+  = tabulate-prefix {n} {n} (\i -> lookup i xs) O.le-refl
+  = take {n} O.le-refl xs := prefix-lookup-take {n} xs O.le-refl
+  = xs := take-self xs
+
 to-list : Vec n a -> L.List a
 to-list Nil = L.List.Nil
 to-list (Cons x xs) = L.List.(::) x (to-list xs)
@@ -53,9 +229,7 @@ length-to-list : (xs : Vec n a) -> L.length (to-list xs) ≡ n
 length-to-list Nil = rfl
 length-to-list (Cons x xs) = cong (length-to-list xs)
 
--- lookup is the evaluation map.  The core supports fixed function schemas,
--- exposed in Surface by class methods.  Surface does not yet admit function
--- values, so a literal bijection with Fin n -> a cannot be quantified here.
+-- lookup evaluates a vector at one of its finite ordinals.
 
 -- Equality transport changes the length index without changing the entries.
 cast : {n m : Nat} -> n ≡ m -> Vec n a -> Vec m a

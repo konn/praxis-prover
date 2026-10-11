@@ -51,6 +51,7 @@ import Control.Monad (ap)
 import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1, showsPrec1)
 import Data.List (elemIndex)
 import Data.Text (Text)
+import Data.Void (Void)
 import Language.Praxis.Surface.Syntax.Raw (Located, Quantifier (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ix, Ty)
@@ -155,6 +156,12 @@ data Expr a
     Dictionary !Ty (Expr a)
   | -- | An erased index transport: target type, source value and equality evidence.
     Transport !Ty (Expr a) [Expr a]
+  | -- | A fixed callback parameter and the value holding its environment.
+    SchemaParameter !Ty !Ref (Expr a)
+  | -- | A typed lambda admitted only as a fixed callback argument.
+    SchemaClosure !Ty (Expr a)
+  | -- | Internal closed callback code and its already packed environment.
+    SchemaPacked ![Hint] !(Scope Int Expr Void) (Expr a)
   | Lam ![Hint] (Scope Int Expr a)
   | Case (Expr a) [(Pattern, Scope Int Expr a)]
   | If (Expr a) (Expr a) (Expr a)
@@ -196,6 +203,13 @@ instance Monad Expr where
     Typed t ts is e -> Typed t ts is (e >>= k)
     Dictionary t e -> Dictionary t (e >>= k)
     Transport t e ps -> Transport t (e >>= k) (map (>>= k) ps)
+    SchemaParameter t r e -> case e >>= k of
+      actual | SchemaParameter {} <- stripLocations actual -> actual
+      actual | SchemaClosure {} <- stripLocations actual -> actual
+      actual | SchemaPacked {} <- stripLocations actual -> actual
+      environment -> SchemaParameter t r environment
+    SchemaClosure t e -> SchemaClosure t (e >>= k)
+    SchemaPacked hs body e -> SchemaPacked hs body (e >>= k)
     Lam hs b -> Lam hs (b >>>= k)
     Case s alts -> Case (s >>= k) [(p, b >>>= k) | (p, b) <- alts]
     If c t e -> If (c >>= k) (t >>= k) (e >>= k)
@@ -228,6 +242,9 @@ instance Eq1 Expr where
       go (Global r) (Global s) = r == s
       go (Nat m) (Nat n) = m == n
       go (App f x) (App g y) = go f g && go x y
+      go (SchemaParameter _ r e) (SchemaParameter _ s f) = r == s && go e f
+      go (SchemaClosure _ e) (SchemaClosure _ f) = go e f
+      go (SchemaPacked hs b e) (SchemaPacked ks c f) = length hs == length ks && b == c && go e f
       go (Lam _ b) (Lam _ c) = liftEq eq b c
       go (Case s as) (Case t bs) = go s t && liftEq (\(p, b) (q, c) -> p == q && liftEq eq b c) as bs
       go (If a b c) (If a' b' c') = go a a' && go b b' && go c c'
@@ -260,6 +277,9 @@ instance Show1 Expr where
         Typed _ _ _ e -> go d e
         Dictionary _ e -> go d e
         Transport t e ps -> con d "Transport" [flip showsPrec t, flip go e, \_ -> showListWith (go 0) ps]
+        SchemaParameter t r e -> con d "SchemaParameter" [flip showsPrec t, flip showsPrec r, flip go e]
+        SchemaClosure t e -> con d "SchemaClosure" [flip showsPrec t, flip go e]
+        SchemaPacked hs b e -> con d "SchemaPacked" [flip showsPrec hs, flip showsPrec b, flip go e]
         Lam hs b -> con d "Lam" [flip showsPrec hs, scope b]
         Case s alts -> con d "Case" [flip go s, \_ -> showListWith (\(p, b) -> showChar '(' . showsPrec 0 p . showString ", " . scope b 0 . showChar ')') alts]
         If a b c -> con d "If" [flip go a, flip go b, flip go c]
@@ -335,6 +355,9 @@ mapGlobals f = go
       Typed t ts is e -> Typed t ts is (go e)
       Dictionary t e -> Dictionary t (go e)
       Transport t e ps -> Transport t (go e) (map go ps)
+      SchemaParameter t r e -> SchemaParameter t (f r) (go e)
+      SchemaClosure t e -> SchemaClosure t (go e)
+      SchemaPacked hs b e -> SchemaPacked hs (hoistScope go b) (go e)
       Lam hs b -> Lam hs (hoistScope go b)
       Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]
       If c t e -> If (go c) (go t) (go e)
@@ -363,6 +386,9 @@ globalsOf = go
       Typed _ _ _ e -> go e
       Dictionary _ e -> go e
       Transport _ e ps -> go e <> concatMap go ps
+      SchemaParameter _ r e -> r : go e
+      SchemaClosure _ e -> go e
+      SchemaPacked _ b e -> go (fromScope b) <> go e
       Lam _ b -> go (fromScope b)
       Case s alts -> go s <> concatMap (go . fromScope . snd) alts
       If c t e -> go c <> go t <> go e

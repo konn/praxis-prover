@@ -9,6 +9,10 @@ open List public
 singleton : a -> List a
 singleton x = (x :: Nil)
 
+map : (a -> b) -> List a -> List b
+map f Nil = Nil
+map f (x :: xs) = f x :: map f xs
+
 (<>) : List a -> List a -> List a
 (<>) Nil ys = ys
 (<>) (x :: xs) ys = x :: (xs <> ys)
@@ -48,6 +52,39 @@ sum (x :: xs) = x + sum xs
 product : List Nat -> Nat
 product Nil = 1
 product (x :: xs) = x * product xs
+
+map-id : (xs : List a) -> map (\x -> x) xs = xs
+map-id Nil = rfl
+map-id (x :: xs) = cong (map-id xs)
+
+map-compose : (f : a -> b) -> (g : b -> c) -> (xs : List a) -> map g (map f xs) = map (\x -> g (f x)) xs
+map-compose f g Nil = rfl
+map-compose f g (x :: xs) = calc
+  map g (map f (x :: xs))
+  = g (f x) :: map g (map f xs)
+  = g (f x) :: map (\y -> g (f y)) xs := cong (map-compose f g xs)
+  = map (\y -> g (f y)) (x :: xs)
+
+map-append : (f : a -> b) -> (xs ys : List a) -> map f (xs <> ys) = (map f xs <> map f ys)
+map-append f Nil ys = rfl
+map-append f (x :: xs) ys = cong (map-append f xs ys)
+
+length-map : (f : a -> b) -> (xs : List a) -> length (map f xs) = length xs
+length-map f Nil = rfl
+length-map f (x :: xs) = calc
+  length (map f (x :: xs))
+  = S (length (map f xs))
+  = S (length xs) := cong (length-map f xs)
+  = length (x :: xs)
+
+map-concat : (f : a -> b) -> (xss : List (List a)) -> map f (concat xss) = concat (map (\xs -> map f xs) xss)
+map-concat f Nil = rfl
+map-concat f (xs :: xss) = calc
+  map f (concat (xs :: xss))
+  = map f (xs <> concat xss)
+  = (map f xs <> map f (concat xss)) := map-append f xs (concat xss)
+  = (map f xs <> concat (map (\ys -> map f ys) xss)) := cong (map-concat f xss)
+  = concat (map (\ys -> map f ys) (xs :: xss))
 
 nil-append : (xs : List a) -> (Nil <> xs) = xs
 nil-append xs = rfl

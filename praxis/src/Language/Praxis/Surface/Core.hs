@@ -22,6 +22,7 @@ module Language.Praxis.Surface.Core (
   pretty,
 ) where
 
+import Bound (Var (..), fromScope)
 import Control.Monad (foldM, unless)
 import Data.Bifunctor (first)
 import Data.Foldable (toList)
@@ -54,6 +55,8 @@ data Value o ctx t where
   Literal :: Natural -> Value o ctx 'Natural
   Apply :: Signature args t -> List (Value o ctx) args -> [o] -> Value o ctx t
   Dictionary :: SType t -> Tm.Term Void -> Value o ctx t
+  Callback :: SType t -> Tm.Term Int -> Value o ctx t
+  Invoke :: SType t -> Value o ctx u -> List (Value o ctx) args -> Value o ctx t
   Transport :: SType t -> Value o ctx u -> [o] -> Value o ctx t
   Absurd :: SType t -> o -> Value o ctx t
 
@@ -120,9 +123,37 @@ elaborateNamed env slots variables expression = do
       evidence <- traverse transportProof proofs
       unless (map fst evidence == expected) $ Left "index transport evidence does not match its index equalities"
       pure (SomeValue ty (Transport ty value evidence))
+    infer ctx (S.SchemaParameter source ref child) = do
+      SomeType ty <- reflectType (complete source)
+      _ <- callbackSignature source
+      i <- case S.stripLocations child of
+        S.Var position -> Right position
+        _ -> Left "a callback parameter must keep its original environment variable"
+      SomeVariable actual _ <- variable ctx i
+      unless (forgetType ty == forgetType actual) $ Left "a callback environment has the wrong source signature"
+      unless (any (\(name, known, signature) -> known == ref && name == fst (variables !! i) && complete signature == forgetType ty) (envSchemas env)) $
+        Left "an unknown callback parameter at the explicit core boundary"
+      pure (SomeValue ty (Callback ty (Tm.Parameter ref (Tm.Variable i))))
+    infer _ S.SchemaPacked {} = Left "an internal packed callback cannot be supplied as a source term"
+    infer _ (S.SchemaClosure source child) = do
+      SomeType ty <- reflectType (complete source)
+      (domains, result) <- callbackSignature source
+      (hints, scope) <- case S.stripLocations child of
+        S.Lam hs body -> Right (hs, body)
+        _ -> Left "a callback closure must contain a lambda"
+      let count = length domains
+      unless (length hints == count) $ Left "a callback lambda has the wrong arity"
+      let binders = zip (map S.hintText hints) domains
+          opened = fmap (\case B i -> i; F i -> count + i) (fromScope scope)
+      body <- elaborateNamed env slots (binders <> variables) opened
+      unless (null (obligations body)) $ Left "proof obligations inside a callback lambda are not supported"
+      unless (bodyType body == complete result) $ Left "a callback lambda returns the wrong type"
+      let closed = fmap (\i -> if i < count then B i else F (i - count)) (computation body)
+      pure (SomeValue ty (Callback ty (Tm.Closure count closed)))
     infer _ (S.Nat n) = Right (SomeValue SNatural (Literal n))
     infer ctx (S.Var i) = do
       SomeVariable t v <- variable ctx i
+      unless (Ty.firstOrder (forgetType t)) $ Left "a callback variable requires its fixed schema identity"
       pure (SomeValue t (Variable v))
     infer _ (S.Dictionary t e) = do
       SomeType ty <- first (\message -> message <> " in " <> show t) (reflectType (complete t))
@@ -132,6 +163,13 @@ elaborateNamed env slots variables expression = do
       validateDictionary env slots (forgetType ty) closed
       pure (SomeValue ty (Dictionary ty closed))
     infer _ _ = Left "a value without a checked type at the explicit core boundary"
+    callbackSignature source = case arrows source of
+      ([], _) -> Left "a callback needs a function signature"
+      (domains, result)
+        | all Ty.firstOrder (result : domains) -> Right (domains, result)
+        | otherwise -> Left "callbacks take and return first-order values"
+    arrows (Ty.TArrow a b) = let (rest, result) = arrows b in (a : rest, result)
+    arrows t = ([], t)
     indexTerm ix = maybe (Left "an index transport has no scoped index term") Right (indexTermIn env [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] variables] ix)
     transportProof e = case S.stripLocations e of
       S.ProofArg prop (S.Irrelevant raw)
@@ -142,8 +180,11 @@ elaborateNamed env slots variables expression = do
       (transport@S.Transport {}, []) -> do
         SomeValue actual value <- infer ctx transport
         equal ty actual value
+      (callback@S.SchemaParameter {}, args) -> invocation ctx ty callback args
+      (callback@S.SchemaClosure {}, args) -> invocation ctx ty callback args
       (S.Var i, []) -> do
         SomeVariable actual v <- variable ctx i
+        unless (Ty.firstOrder (forgetType actual)) $ Left "a callback variable requires its fixed schema identity"
         equal ty actual (Variable v)
       (S.Nat n, []) -> equal ty SNatural (Literal n)
       (S.Absurd (S.Irrelevant raw), []) -> pure (Absurd ty (S.Bottom, raw))
@@ -154,6 +195,18 @@ elaborateNamed env slots variables expression = do
         (types, indices) <- validateGlobal env slots ref (length proofs) is (mapTypes forgetType domains) (forgetType ty)
         pure (Apply (Signature ref types indices domains ty) values proofs)
       _ -> Left "a non-first-order value at the explicit core boundary"
+    invocation :: List SType ctx -> SType t -> S.Expr Int -> [S.Expr Int] -> Either String (Value (Tm.ProofArgument Int) ctx t)
+    invocation ctx expected callback [] = do
+      SomeValue actual value <- infer ctx callback
+      equal expected actual value
+    invocation ctx expected callback args = do
+      SomeValue callbackTy value <- infer ctx callback
+      (domains, result) <- callbackSignature (forgetType callbackTy)
+      (Arguments actual values, proofs) <- arguments ctx args
+      unless (null proofs) $ Left "a callback application cannot take proof arguments"
+      unless (domains == mapTypes forgetType actual && complete result == forgetType expected) $
+        Left "a callback application disagrees with its checked signature"
+      pure (Invoke expected value values)
     equal :: SType t -> SType u -> Value o ctx u -> Either String (Value o ctx t)
     equal expected actual v = case sameType expected actual of
       Just Refl -> Right v
@@ -216,6 +269,8 @@ validateGlobal env slots ref proofCount explicitIndices actual result = case S.r
       let seed = Ty.emptyAssignment {Ty.asValues = IM.fromList [(i, x) | (i, x) <- explicitIndices, i >= 0, i < snd n]}
       initial <- match r result seed
       assignment <- foldM (\s (a, b) -> match a b s) initial (zip ds actual)
+      unless (all Ty.firstOrder (IM.elems (Ty.asTypes assignment))) $ Left "type parameters cannot contain fixed callbacks"
+      unless (Ty.firstOrder result) $ Left "a global value cannot return a fixed callback"
       pure ([complete (Ty.substScheme n assignment (Ty.TParam i [])) | i <- [0 .. fst n - 1]], IM.toList (Ty.asValues assignment))
     arrows (Ty.TArrow a b) = let (as, r) = arrows b in (a : as, r)
     arrows t = ([], t)
@@ -279,7 +334,7 @@ complete :: Ty.Ty -> Ty.Ty
 complete = \case
   Ty.THole -> Ty.TNat
   Ty.TParam n ts -> Ty.TParam n (map complete ts)
-  Ty.TData n ts is -> Ty.TData n (map complete ts) is
+  Ty.TData n ts is -> Ty.TData n (map complete ts) (map Ty.normIx is)
   Ty.TArrow a b -> Ty.TArrow (complete a) (complete b)
   t -> t
 
@@ -293,6 +348,8 @@ lower = \case
   Literal n -> Tm.Literal n
   Apply (Signature r _ _ _ _) vs _ -> Tm.Call r (lowerArgs vs)
   Dictionary _ code -> fmap absurd code
+  Callback _ code -> code
+  Invoke _ callback arguments -> Tm.Invoke (lower callback) (lowerArgs arguments)
   Transport _ child _ -> lower child
   Absurd _ _ -> Tm.Literal 0
   where
@@ -314,6 +371,7 @@ obligations (Body _ _ v _) = evidence v
     evidence :: Value o ctx t -> [o]
     evidence = \case
       Apply _ vs os -> children vs <> os
+      Invoke _ callback args -> evidence callback <> children args
       Transport _ child os -> evidence child <> os
       Absurd _ o -> [o]
       _ -> []
@@ -338,6 +396,8 @@ traverseObligations f (Body ctx t value optimize) = (\v -> Body ctx t v optimize
       Literal n -> pure (Literal n)
       Apply s vs os -> Apply s <$> args vs <*> traverse f os
       Dictionary ty code -> pure (Dictionary ty code)
+      Callback ty code -> pure (Callback ty code)
+      Invoke ty callback values -> Invoke ty <$> go callback <*> args values
       Transport ty child os -> Transport ty <$> go child <*> traverse f os
       Absurd ty o -> Absurd ty <$> f o
     args :: List (Value o ctx) ts -> f (List (Value p ctx) ts)
@@ -391,6 +451,8 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
          in if p == 0 && T.length flat > 88
               then T.intercalate "\n  " (Pretty.reference ref : args)
               else flat
+      Callback _ _ -> "[fixed callback]"
+      Invoke _ callback values -> Pretty.application p (term 11 callback) (arguments values)
       Dictionary ty code -> "[dict (" <> dictionary code <> " : " <> Pretty.typeText env sc 0 (forgetType ty) <> ")]"
       Transport ty child proofs -> Pretty.parens (p > 0) ("transport " <> term 11 child <> " [" <> T.intercalate ", " (map proofName proofs) <> "] : " <> Pretty.typeText env sc 0 (forgetType ty))
       Absurd ty proof -> Pretty.parens (p > 0) ("absurd [proof " <> proofName proof <> "] : " <> Pretty.typeText env sc 0 (forgetType ty))
@@ -401,6 +463,9 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
       Tm.Variable v -> absurd v
       Tm.Literal n -> T.pack (show n)
       Tm.Call r xs -> Pretty.application 0 (Pretty.reference r) ["[dict " <> dictionary x <> "]" | x <- xs]
+      Tm.Parameter _ _ -> "[fixed callback]"
+      Tm.Closure _ _ -> "[callback lambda]"
+      Tm.Invoke _ _ -> "[callback application]"
     layout ref = case [g | g <- Map.elems (envGlobals env), matches ref g] of
       GFun f : _ -> (map fst (Ty.schemeValues (funScheme f)), zip (funRuntime f) [0 ..], [], map fst (funProofs f))
       GCtor c : _ ->

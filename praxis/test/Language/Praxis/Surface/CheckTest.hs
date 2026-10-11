@@ -382,12 +382,72 @@ checkTests =
         mapM_ (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls)) [("wrong", [13 .. 19]), ("loop", [22 .. 24]), ("unfinished", [27, 28]), ("uses", [31, 32])]
         assertBool "the non-structural call is named" (any ("recursive call" `T.isInfixOf`) (map reportMessage (checkedReports c)))
         assertBool "sorry shows its goal" (any ("sorry" `T.isInfixOf`) (map reportMessage (checkedReports c)))
-    , testCase "values are first-order: a field, an argument or a variable of function type, and a partial application, are refused" $ do
+    , testCase "fixed function schemas support named, captured and recursive callbacks" $ do
+        c <- checkFile "test/data/function-schemas.px"
+        errors c @?= []
+        forM_ ["applied-global", "applied-lambda", "captured", "nested", "schema-reflexive", "schema-forward", "schema-tactic", "schema-specialized", "schema-captured", "schema-constant", "recursive-schema", "twice-schema", "map-identity", "map-value", "consume-law", "indexed-callback", "explicit-index", "last-zero", "constructor-index-calc", "schema-indexed-law", "schema-indexed-recovered", "chain-law", "callback-inference", "roundtrip", "map-roundtrip", "captured-roundtrip", "nested-captured-roundtrip", "guarded-box-law", "grow-captured"] $ \name ->
+          assertBool (T.unpack name) (("FunctionSchemas." <> name) `elem` checkedTheorems c)
+        (_, core) <- maybe (assertFailure "missing checked schema core") pure (checkedFinal c)
+        cert <- maybe (assertFailure "missing instantiated schema certificate") pure (Map.lookup "u_FunctionSchemas_sapplied_dglobal" (coreCertificates core))
+        either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal "u_FunctionSchemas_sapplied_dglobal" [] [] MS.empty) [])
+    , testCase "fixed schemas cannot become values, change under recursion or erase lambda evidence" $ do
+        p <- either assertFailure pure prelude
+        let prefix = T.unlines ["module BadSchema where", "apply : (Nat -> Nat) -> Nat -> Nat", "apply f x = f x", "unsafe : 0 = 1 -> Nat", "unsafe h = 0", "ignore : Nat -> Nat", "ignore x = 0", "data Box a = Mk a"]
+        errors (checkSource p "schema-prefix.px" prefix) @?= []
+        forM_
+          [ "bad : (f g : Nat -> Nat) -> (f : Nat -> Nat) = (g : Nat -> Nat)\nbad f g = rfl"
+          , "bad : ((Nat -> Nat) -> Nat) -> Nat\nbad f = 0"
+          , "bad : (Nat -> Nat) -> Nat\nbad (S f) = 0"
+          , "bad : (Nat -> Nat) -> Nat -> Nat\nbad f 0 = 0\nbad f (S n) = bad (\\x -> f (S x)) n"
+          , "bad : Nat\nbad = apply 0 1"
+          , "bad : Nat\nbad = apply (\\x -> ignore (unsafe (by rfl))) 0"
+          , "bad : Box (Nat -> Nat)\nbad = Mk (\\x -> x)"
+          , "bad : (f : Nat -> Nat) -> f 0 = 1\nbad f = by induction f"
+          ]
+          $ \declaration -> do
+            let c = checkSource p "bad-schema.px" (prefix <> declaration <> "\n")
+            assertBool (T.unpack declaration <> ": invalid schema was accepted") (not (null (errors c)))
+            assertBool "an invalid schema theorem was certified" ("BadSchema.bad" `notElem` checkedTheorems c)
+    , testCase "function-valued fields, nested schemas, function equality and partial values are refused" $ do
         c <- checkFile "test/data/higher-order.px"
         checkedTheorems c @?= ["HigherOrder.fine"]
         let errs = [(l, m) | Report (Span (l, _) _) SevError m <- checkedReports c]
         mapM_ (\(n, l) -> assertBool ("an error for " <> n) (any ((== l) . fst) errs)) [("Box", 9 :: Int), ("apply", 12), ("fun-refl", 16), ("partly", 20)]
         assertBool "the partial application is named" (any (("applied to 1 of its 2 arguments" `T.isInfixOf`) . snd) errs)
+    , testCase "theorem clauses support simultaneous structural induction" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module TupleTheorems where", "", "data Chain = End | Next Chain", "", "both : Chain -> Chain -> Nat", "both End End = 0", "both End (Next ys) = 0", "both (Next xs) End = 0", "both (Next xs) (Next ys) = S (both xs ys)", "", "both-comm : (xs ys : Chain) -> both xs ys = both ys xs", "both-comm End End = rfl", "both-comm End (Next ys) = rfl", "both-comm (Next xs) End = rfl", "both-comm (Next xs) (Next ys) = calc", "  both (Next xs) (Next ys)", "  = S (both xs ys)", "  = S (both ys xs) := cong (both-comm xs ys)", "  = both (Next ys) (Next xs)", "", "both-zero : (xs ys : Chain) -> both xs ys = 0 -> both ys xs = 0", "both-zero End End h = rfl", "both-zero End (Next ys) h = rfl", "both-zero (Next xs) End h = rfl", "both-zero (Next xs) (Next ys) h = by", "  have comm := both-comm (Next xs) (Next ys)", "  cong"]
+            c = checkSource p "tuple-theorems.px" source
+        errors c @?= []
+        checkedTheorems c @?= ["TupleTheorems.both-comm", "TupleTheorems.both-zero"]
+    , testCase "simultaneous induction retains named proof arguments in calculations" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module TupleGuardedCalc where", "", "bounded : {m n : Nat} -> m < n -> Nat", "bounded {m} {n} h = m", "", "bounded-id : {m n : Nat} -> m < n -> bounded {m} {n} (by assumption) = m", "bounded-id {0} {S n} h = rfl", "bounded-id {S m} {S n} h = calc", "  bounded {S m} {S n} h", "  = S (bounded {m} {n} h)", "  = S m := cong (bounded-id {m} {n})", "bounded-id {m} {0} h = absurd h"]
+            c = checkSource p "tuple-guarded-calc.px" source
+        errors c @?= []
+        checkedTheorems c @?= ["TupleGuardedCalc.bounded-id"]
+    , testCase "a proved precondition specializes guarded induction hypotheses" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module HaveSpecializesIH where", "", "bounded : {n p : Nat} -> n <= p -> Nat", "bounded {n} {p} h = n", "", "bounded-id : {n p : Nat} -> n <= p -> bounded {n} {p} (by assumption) = n", "bounded-id {0} {p} h = rfl", "bounded-id {S n} {p} h = by", "  have successor : n <= S n := by exact leSucc", "  have smaller : n <= p := by exact leTrans", "  calc", "    bounded {S n} {p} h", "    = S (bounded {n} {p} smaller)", "    = S n := cong (bounded-id {n} {p})"]
+            c = checkSource p "have-specializes-ih.px" source
+        errors c @?= []
+        checkedTheorems c @?= ["HaveSpecializesIH.bounded-id"]
+    , testCase "simultaneous induction rejects unchanged recursive tuples" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module TupleBad where", "", "data Chain = End | Next Chain", "", "bad : (xs ys : Chain) -> 0 = 1", "bad End End = rfl", "bad End (Next ys) = rfl", "bad (Next xs) End = rfl", "bad (Next xs) (Next ys) = bad (Next xs) (Next ys)"]
+            c = checkSource p "tuple-bad.px" source
+        assertBool "the unchanged tuple was rejected" (any (T.isInfixOf "a recursive call must be at a field" . T.pack) (errors c))
+        assertBool "the invalid theorem was not certified" ("TupleBad.bad" `notElem` checkedTheorems c)
+    , testCase "statement proof arguments are certified under their leading antecedents" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module StatementEvidence where", "bounded : {k n : Nat} -> k < n -> Nat", "bounded {k} {n} h = k", "bound-law : (k n : Nat) -> k < n -> bounded {k} {n} (by assumption) = k", "bound-law k n h = rfl", "closed : bounded {0} {1} (by rfl) = 0", "closed = rfl"]
+            c = checkSource p "statement-evidence.px" source
+        errors c @?= []
+        forM_ ["StatementEvidence.bound-law", "StatementEvidence.closed"] $ \name ->
+          assertBool (T.unpack name) (name `elem` checkedTheorems c)
+        (_, core) <- maybe (assertFailure "missing statement evidence core") pure (checkedFinal c)
+        cert <- maybe (assertFailure "missing statement evidence certificate") pure (Map.lookup "u_StatementEvidence_sclosed" (coreCertificates core))
+        either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal "u_StatementEvidence_sclosed" [] [] MS.empty) [])
     , testCase "proof arguments cannot be erased from statements without checking" $ do
         p <- either assertFailure pure prelude
         mapM_
@@ -396,12 +456,13 @@ checkTests =
                   c = checkSource p "unchecked.px" src
               assertBool "the statement was rejected" (not (null (errors c)))
               assertBool "the theorem was not certified" ("Unchecked.bad" `notElem` checkedTheorems c)
-              assertBool "the unchecked proof argument is diagnosed" (any ("proof arguments" `T.isInfixOf`) (map reportMessage (checkedReports c)))
           )
           [ "f rfl ≡ 0"
           , "(absurd rfl : Nat) ≡ 0"
           , "∀ n < 2, f rfl ≡ n"
           , "∀ n < f rfl, n ≡ n"
+          , "(f rfl = 0) -> 0 = 0"
+          , "(f rfl = 0) /\\ (0 = 0)"
           ]
     , testCase "proof arguments in theorem applications and calculations are certified before erasure" $ do
         p <- either assertFailure pure prelude

@@ -1,0 +1,170 @@
+module FunctionSchemas where
+
+apply : (Nat -> Nat) -> Nat -> Nat
+apply f x = f x
+
+twice : (Nat -> Nat) -> Nat -> Nat
+twice f x = f (f x)
+
+iterate : (Nat -> Nat) -> Nat -> Nat -> Nat
+iterate f 0 x = x
+iterate f (S n) x = f (iterate f n x)
+
+bump : Nat -> Nat
+bump x = S x
+
+applied-global : apply bump 4 = 5
+applied-global = rfl
+
+applied-lambda : apply (\x -> S x) 4 = 5
+applied-lambda = rfl
+
+captured : (n : Nat) -> apply (\x -> x + n) 2 = 2 + n
+captured n = rfl
+
+nested : (n : Nat) -> apply (\x -> apply (\y -> x + y) n) 3 = 3 + n
+nested n = rfl
+
+schema-reflexive : (f : Nat -> Nat) -> (n : Nat) -> apply f n = f n
+schema-reflexive f n = rfl
+
+schema-forward : (f : Nat -> Nat) -> (n : Nat) -> apply f n = f n
+schema-forward f n = schema-reflexive f n
+
+schema-tactic : (f : Nat -> Nat) -> (n : Nat) -> apply f n = f n
+schema-tactic f n = by schema-reflexive f n
+
+schema-specialized : (n : Nat) -> apply bump n = S n
+schema-specialized n = schema-reflexive bump n
+
+schema-captured : (n : Nat) -> apply (\x -> x + n) 2 = 2 + n
+schema-captured n = schema-reflexive (\x -> x + n) 2
+
+-- A literal stays inside the fixed callback code when specializing a law.
+schema-constant : (n : Nat) -> apply (\x -> x + 2) n = n + 2
+schema-constant n = schema-reflexive (\x -> x + 2) n
+
+recursive-schema : iterate bump 3 0 = 3
+recursive-schema = rfl
+
+twice-schema : twice bump 2 = 4
+twice-schema = rfl
+
+data Box a = Mk a
+
+map-box : (a -> b) -> Box a -> Box b
+map-box f (Mk x) = Mk (f x)
+
+map-identity : (x : a) -> map-box (\y -> y) (Mk x) = Mk x
+map-identity x = rfl
+
+map-value : map-box bump (Mk 3) = Mk 4
+map-value = rfl
+
+data At n where
+  MkAt : (n : Nat) -> At n
+
+at-pair : At n -> At n -> Nat
+at-pair x y = 0
+
+consume : (At n -> Nat) -> At n -> Nat
+consume f x = f x
+
+consume-law : (f : At n -> Nat) -> (x : At n) -> consume f x = f x
+consume-law f x = rfl
+
+indexed-callback : consume (\x -> at-pair x (MkAt 3)) (MkAt 3) = 0
+indexed-callback = consume-law (\x -> at-pair x (MkAt 3)) (MkAt 3)
+
+use-at : {n : Nat} -> At n -> Nat
+use-at {n} x = 0
+
+explicit-index : (x : At n) -> use-at {n} x = 0
+explicit-index x = calc
+  use-at {n} x
+  = 0
+
+data Ord n where
+  First : Ord (S n)
+  Next : Ord n -> Ord (S n)
+
+last-ord : {n : Nat} -> Ord (S n)
+last-ord {0} = First
+last-ord {S n} = Next (last-ord {n})
+
+last-zero : last-ord {0} = Ord.First {0}
+last-zero = rfl
+
+use-ord : {n : Nat} -> Ord n -> Nat
+use-ord {n} i = 0
+
+constructor-index-calc : (i : Ord n) -> use-ord {n} i = 0
+constructor-index-calc (First {m}) = calc
+  use-ord {S m} (Ord.First {m})
+  = 0
+constructor-index-calc (Next {m} i) = calc
+  use-ord {S m} (Ord.Next {m} i)
+  = 0
+
+schema-indexed : {n : Nat} -> (At n -> At n) -> At n
+schema-indexed {n} f = f (MkAt n)
+
+schema-indexed-law : {n : Nat} -> (f : At n -> At n) -> schema-indexed {n} f = f (MkAt n)
+schema-indexed-law f = rfl
+
+schema-indexed-recovered : (f : At n -> At n) -> (x : At n) -> schema-indexed {n} f = f (MkAt n)
+schema-indexed-recovered f x = schema-indexed-law f
+
+chain : (Nat -> a) -> (a -> Nat) -> Nat -> Nat
+chain f g x = g (f x)
+
+chain-law : (f : Nat -> a) -> (g : a -> Nat) -> (x : Nat) -> chain f g x = g (f x)
+chain-law f g x = rfl
+
+callback-inference : chain bump (\x -> x) 2 = 3
+callback-inference = chain-law bump (\x -> x) 2
+
+-- A precondition keeps the index recovered from its data argument even
+-- though that index has no separate runtime binder.
+require-bound : {n m : Nat} -> n <= m -> At m -> At m
+require-bound {n} h x = x
+
+forward-bound : {n m : Nat} -> n <= m -> At m -> At m
+forward-bound {n} h x = require-bound {n} h x
+
+data IndexedBox n a where
+  IndexedMk : (n : Nat) -> a -> IndexedBox n a
+
+guarded-box : {m n : Nat} -> m <= n -> IndexedBox n a -> IndexedBox n a
+guarded-box {m} {n} h xs = xs
+
+guarded-box-law : (xs : IndexedBox n a) -> 0 <= n -> guarded-box {0} (by assumption) xs = xs
+guarded-box-law xs h = calc
+  guarded-box {0} h xs
+  = xs
+
+unbox : Box a -> a
+unbox (Mk x) = x
+roundtrip : (xs : Box a) -> Mk (unbox xs) = xs
+roundtrip (Mk x) = rfl
+map-roundtrip : (f : a -> b) -> (xs : Box a) -> Mk (unbox (map-box f xs)) = map-box f xs
+map-roundtrip f xs = roundtrip (map-box f xs)
+captured-roundtrip : (x : a) -> (xs : Box Nat) -> Mk (unbox (map-box (\n -> x) xs)) = map-box (\n -> x) xs
+captured-roundtrip x xs = roundtrip (map-box (\n -> x) xs)
+
+data Pair a b = MkPair a b
+
+-- Inner callback code and both polymorphic captures survive reconstruction.
+nested-captured-roundtrip : (xs : Box a) -> (ys : Box b) -> Mk (unbox (map-box (\x -> map-box (\y -> MkPair x y) ys) xs)) = map-box (\x -> map-box (\y -> MkPair x y) ys) xs
+nested-captured-roundtrip xs ys = roundtrip (map-box (\x -> map-box (\y -> MkPair x y) ys) xs)
+
+data Branch a = Tip | Fork (Branch a) a
+
+grow : (Nat -> a) -> Nat -> Branch a
+grow f 0 = Tip
+grow f (S n) = Fork (grow f n) (f n)
+
+-- The same captured environment survives in the recursive call and is
+-- projected by the adjacent callback application.
+grow-captured : (x : a) -> (n : Nat) -> grow (\j -> x) (S n) = Fork (grow (\j -> x) n) x
+grow-captured x n = rfl
