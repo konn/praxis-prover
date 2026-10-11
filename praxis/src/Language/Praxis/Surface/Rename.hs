@@ -578,6 +578,9 @@ renameLevel cx sc0 decls0 = let (sc1, out) = foldl step (predeclared, []) flat i
                       }
                in (namespace q (scExports scInner) (declare (Ident name) q left), reverse ds <> out)
             DPrivate _ -> (sc', out)
+            DBuiltin role (Located nsp name) -> case rename cx sc' Set.empty nsp name of
+              Left err -> (failed err sc', out)
+              Right name' -> emit sc' [Located sp (DBuiltin role (Located nsp name'))]
             DData dd -> case renameData cx sc' dd of
               Left err -> (failed err sc', out)
               Right dd' -> emit sc' [Located sp (DData dd')]

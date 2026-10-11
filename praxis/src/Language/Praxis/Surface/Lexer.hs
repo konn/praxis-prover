@@ -5,7 +5,8 @@ Tokens and layout of the surface language.
 
 Whitespace includes line comments, @--@ to the end of the line (a run of
 dashes not followed by another operator character), and nestable block
-comments @{\- … -\}@.
+comments @{\- … -\}@. A block starting with @{\-#@ is a pragma,
+read by the declaration grammar rather than skipped as whitespace.
 
 Identifiers are alphanumeric segments joined by single dashes, as in Agda:
 @append-nil@, @unfold-Nil@; so binary minus needs spaces around it.  The
@@ -141,8 +142,9 @@ locatedFrom start p = do
 -- * Whitespace
 
 whitespace :: Parser ()
-whitespace = L.space space1 lineComment (L.skipBlockCommentNested "{-" "-}")
+whitespace = L.space space1 lineComment blockComment
   where
+    blockComment = notFollowedBy (string "{-#") *> L.skipBlockCommentNested "{-" "-}"
     lineComment = do
       _ <- try (string "--" *> takeWhileP Nothing (== '-') <* notFollowedBy (satisfy isOperatorChar))
       void (takeWhileP Nothing (/= '\n'))
@@ -247,6 +249,7 @@ that @=@ is not the start of @==@, or one of the punctuation characters.
 -}
 symbol :: Text -> Parser ()
 symbol s
+  | s == "{" = token (void (try (char '{' <* notFollowedBy (char '-')))) <?> show s
   | T.all isOperatorChar s = token (try (opRaw >>= guard . (== s))) <?> show s
   | otherwise = token (void (string s)) <?> show s
 

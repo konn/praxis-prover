@@ -153,6 +153,8 @@ data Decl
     DModule !(Located Text) ![Located Decl]
   | -- | @private@ and its declarations, which the module does not export
     DPrivate ![Located Decl]
+  | -- | A builtin role assigned to a name by a @BUILTIN@ pragma.
+    DBuiltin !(Located Text) !(Located QName)
   | DData !DataDecl
   | -- | @type Board n a = Vec n (Vec n a)@: a transparent type synonym
     DTypeAlias !(Located Text) ![DataParam] !(Located Expr)

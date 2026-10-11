@@ -310,6 +310,7 @@ elabModule fx env0 rn = withModules (walk envData decls [])
             R.DData dd -> walk env rest (reverse (Map.findWithDefault [IFailed (ElabError sp "internal: a data type not declared")] (owner, unLocated (R.dataName dd)) dataItems) <> acc)
             R.DTypeAlias n _ _ -> walk env rest (maybe acc (\err -> IFailed err : acc) (Map.lookup (owner, unLocated n) aliasErrors))
             R.DFixity {} -> walk env rest acc
+            R.DBuiltin role _ -> walk env rest (IFailed (ElabError (location role) "BUILTIN registration is not available yet") : acc)
             R.DKindSig (Located ksp n) _
               | (owner, n) `elem` dataNames -> walk env rest acc
               | otherwise -> walk env rest (IFailed (ElabError ksp ("a kind signature for no data type of this module: " <> T.unpack n)) : acc)

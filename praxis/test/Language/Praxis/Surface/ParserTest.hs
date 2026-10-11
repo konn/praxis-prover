@@ -3,10 +3,16 @@
 -- | The grammar and the layout of the surface language, on the examples of @test/data@.
 module Language.Praxis.Surface.ParserTest (parserTests) where
 
+import Control.Monad (forM_)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import Language.Praxis.Surface.Env (emptyEnv)
+import Language.Praxis.Surface.Fixity (builtinFixities)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
 import Language.Praxis.Surface.Parser
+import Language.Praxis.Surface.Rename
 import Language.Praxis.Surface.Syntax.Raw
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -122,7 +128,69 @@ parserTests =
         case parseModule "<test>" "f x = x\ng y = y\n" of
           Right m -> length (moduleDecls m) @?= 2
           Left err -> assertFailure (renderSyntaxError err)
+    , testCase "builtin pragmas are declarations with precise role and target spans" $ do
+        m <- parsed "{-# BUILTIN FINITE Fin #-}\n"
+        moduleDecls m
+          @?= [Located (Span (1, 1) (1, 27)) (DBuiltin (Located (Span (1, 13) (1, 19)) "FINITE") (Located (Span (1, 20) (1, 23)) (QName [] (Ident "Fin"))))]
+    , testCase "builtin pragmas accept qualified operators and suspend layout inside their delimiters" $ do
+        m <- parsed "module Main where {\n  {-# BUILTIN ROLE A.(:<) #-};\n  module Nested where\n    {-#\nBUILTIN ROLE\nA.B.name\n#-}\n}\n"
+        case map unLocated (moduleDecls m) of
+          [DBuiltin role target, DModule _ [Located _ (DBuiltin role' target')]] -> do
+            map unLocated [role, role'] @?= ["ROLE", "ROLE"]
+            map unLocated [target, target'] @?= [QName [Ident "A"] (Op ":<"), QName [Ident "A", Ident "B"] (Ident "name")]
+          other -> assertFailure (show other)
+    , testCase "ordinary nested comments remain whitespace, including pragma-like text inside them" $ do
+        m <- parsed "{- outer {- nested -} {-# BUILTIN IGNORED Hidden #-} -}\nf : Nat {- a comment -}\nf = 0 -- a line comment\n{-# BUILTIN ROLE f #-}\n"
+        map (declKind . unLocated) (moduleDecls m) @?= ["signature", "clause", "builtin"]
+    , testCase "malformed and unknown pragmas are rejected instead of ignored as comments" $
+        forM_
+          [ "{-# BUILTIN #-}"
+          , "{-# BUILTIN ROLE #-}"
+          , "{-# BUILTIN ROLE Name"
+          , "{-# BUILTIN ROLE Name -}"
+          , "{-# BUILTIN ROLE Name extra #-}"
+          , "{-# BUILTIN ROLE 0 #-}"
+          , "{-# BUILTIN ROLE A. #-}"
+          , "{-# UNKNOWN ROLE Name #-}"
+          ]
+          \source -> case parseModule "<test>" source of
+            Left _ -> pure ()
+            Right m -> assertFailure ("accepted " <> T.unpack source <> ": " <> show m)
+    , testCase "builtin targets resolve in their nested module and retain their original spans" $ do
+        m <- parsed "module Main where\ndata Outer = O\nmodule Inner where\n  data Fin = F\n  {-# BUILTIN FINITE Fin #-}\n  {-# BUILTIN FINITE Outer #-}\n{-# BUILTIN FINITE Inner.Fin #-}\n"
+        let (renamed, errors) = renameModule builtinFixities emptyEnv Map.empty [Ident "Main"] m
+            bindings = [(owner, role, target) | RDecl owner (Located _ (DBuiltin role target)) <- rnDecls renamed]
+        errors @?= []
+        [(owner, unLocated role, unLocated target) | (owner, role, target) <- bindings]
+          @?= [ ([Ident "Main", Ident "Inner"], "FINITE", QName [Ident "Main", Ident "Inner"] (Ident "Fin"))
+              , ([Ident "Main", Ident "Inner"], "FINITE", QName [Ident "Main"] (Ident "Outer"))
+              , ([Ident "Main"], "FINITE", QName [Ident "Main", Ident "Inner"] (Ident "Fin"))
+              ]
+        [location target | (_, _, target) <- bindings] @?= [Span (5, 22) (5, 25), Span (6, 22) (6, 27), Span (7, 20) (7, 29)]
+    , testCase "builtin targets honor import aliases and member renamings, including operators" $ do
+        m <- parsed "module Main where\nimport Source as S renaming (Finite to Small; (:<) to (:<=))\n{-# BUILTIN FINITE S.Small #-}\n{-# BUILTIN ROLE S.(:<=) #-}\nopen import Source renaming (Finite to Small)\n{-# BUILTIN FINITE Small #-}\n"
+        let source = [Component "package:lib", Ident "Source"]
+            exports = ModuleExports source (Map.fromList [(Ident "Finite", source <> [Ident "Finite"]), (Op ":<", source <> [Op ":<"])]) Map.empty
+            imports = Map.singleton (Nothing, [Ident "Source"]) (Right exports)
+            (renamed, errors) = renameModule builtinFixities emptyEnv imports [Ident "Main"] m
+        errors @?= []
+        [unLocated target | RDecl _ (Located _ (DBuiltin _ target)) <- rnDecls renamed]
+          @?= [QName source (Ident "Finite"), QName source (Op ":<"), QName source (Ident "Finite")]
+    , testCase "ambiguous builtin targets fail at the target name" $ do
+        m <- parsed "open import A\nopen import B\n{-# BUILTIN FINITE Fin #-}\n"
+        let exports name = ModuleExports [Ident name] (Map.singleton (Ident "Fin") [Ident name, Ident "Fin"]) Map.empty
+            imports = Map.fromList [((Nothing, [Ident name]), Right (exports name)) | name <- ["A", "B"]]
+            (renamed, errors) = renameModule builtinFixities emptyEnv imports [Ident "Main"] m
+        case errors of
+          [ScopeError sp message] -> do
+            sp @?= Span (3, 20) (3, 23)
+            assertBool message ("ambiguous" `T.isInfixOf` T.pack message)
+          other -> assertFailure (show other)
+        [() | RDecl _ (Located _ (DBuiltin {})) <- rnDecls renamed] @?= []
     ]
+
+parsed :: Text -> IO Module
+parsed = either (assertFailure . renderSyntaxError) pure . parseModule "<test>"
 
 parseFile :: FilePath -> IO Module
 parseFile path = do
@@ -143,6 +211,7 @@ declKind = \case
   DOpenImport {} -> "open import"
   DModule {} -> "module"
   DPrivate {} -> "private"
+  DBuiltin {} -> "builtin"
   DData {} -> "data"
   DTypeAlias {} -> "type synonym"
   DFixity {} -> "fixity"

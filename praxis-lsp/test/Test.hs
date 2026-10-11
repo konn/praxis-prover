@@ -165,6 +165,18 @@ tests =
           , (5, "a", SemanticTokenTypes_TypeParameter, [])
           ]
         map targetSpan (definitionsAt source doc (Position 4 8)) @?= [Span (4, 6) (4, 11)]
+    , testCase "builtin pragma targets highlight and navigate to the names they bind" $ do
+        let source = T.unlines ["module Builtins where", "data Fin = Zero", "{-# BUILTIN FINITE Fin #-}"]
+        doc <- analyseDocument Px "<document>" source
+        docParsed doc @?= True
+        let toks = tokensOf source doc
+        mapM_
+          (\expected -> assertBool (show expected) (expected `elem` toks))
+          [ (3, "BUILTIN", SemanticTokenTypes_Keyword, [])
+          , (3, "FINITE", SemanticTokenTypes_Keyword, [])
+          , (3, "Fin", SemanticTokenTypes_Type, [])
+          ]
+        map targetSpan (definitionsAt source doc (Position 2 19)) @?= [Span (2, 6) (2, 9)]
     , testCase "classes, instances and tactics: methods, the functions of an instance, keywords in tactic position, the names a tactic introduces" $ do
         doc <- analyseDocument Px "<document>" classes
         assertBool "the module parsed" (docParsed doc)

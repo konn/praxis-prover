@@ -34,7 +34,11 @@ checkTests :: TestTree
 checkTests =
   testGroup
     "checker"
-    [ testCase "ordinary and indexed syntax share a constructor telescope" $ do
+    [ testCase "an unvalidated builtin pragma is never silently ignored" $ do
+        p <- either assertFailure pure prelude
+        let checked = checkSource p "builtin.px" "data T = C\n{-# BUILTIN NOT_A_ROLE T #-}\n"
+        assertBool "the pragma must be rejected" (any (T.isInfixOf "BUILTIN" . T.pack) (errors checked))
+    , testCase "ordinary and indexed syntax share a constructor telescope" $ do
         p <- either assertFailure pure prelude
         let source = T.unlines ["module Uniform where", "data Plain a = plain a", "data Explicit a where", "  explicit : a -> Explicit a"]
             checked = checkSource p "uniform.px" source
