@@ -54,6 +54,10 @@ validateRequirements evidence needed = forM_ (requirements needed) \(Requirement
           demand
             (Set.member name (evidenceDeclarations evidence))
             ("finite quantifier desugaring requires the earlier checked declaration or certificate " <> T.unpack name)
+        AdmittedClass name ->
+          demand
+            (Set.member (classEvidenceName (qualified name)) (evidenceDeclarations evidence))
+            ("surface elaboration requires the earlier successfully checked class " <> named name)
         LawPremise name parameter ->
           demand
             (PLaw (qualified name) parameter `elem` evidencePremises evidence)

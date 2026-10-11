@@ -22,6 +22,7 @@ are those of the enclosing declaration, never de Bruijn value indices.
 data Dependency
   = RegisteredBuiltin !Text !QName
   | CertifiedDeclaration !Text
+  | AdmittedClass !QName
   | LawPremise !QName !Int
   | ClosurePremise !QName !Int
   | MethodPremise !QName !Int

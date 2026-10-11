@@ -959,9 +959,10 @@ elabClass fx env cd = do
       unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a law quantifies over values, which are first-order"))
       pure (n, bty)
     (prop, needed) <- runTCWithRequirements (elabProp env1 {envScope = classScope} slots [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body)
-    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots a needed (envBuiltins env) (SourceView.quantifierViews (classQual info <> [m]) (envBuiltins env) classScope ty) body)
+    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots a (withoutOwnClass info needed) (envBuiltins env) (SourceView.quantifierViews (classQual info <> [m]) (envBuiltins env) classScope ty) body)
   pure (addLaws (classQual info) laws env1)
   where
+    withoutOwnClass cls = foldMap (\entry -> if requirementDependency entry == AdmittedClass (evidenceQName (classQual cls)) then mempty else requirement (requirementSpan entry) (requirementDependency entry)) . requirements
     member className a preceding (msp, m, ty) = do
       let params = a : filter (/= a) (nub (typeVariables env ty))
           values = [(renderQualName (className <> [name]), methodIndex (className <> [name])) | (name, _, 0) <- preceding]
@@ -1020,6 +1021,8 @@ elabInstance fx env sp idl = do
     Left (ElabError (location ty0) "the instance head's index kinds are not determined")
   given <- constraintClasses env vars (R.instanceContext idl)
   full <- dictionaryOf env vars (R.instanceContext idl)
+  contextRequirements <- constraintRequirements env vars (R.instanceContext idl)
+  let instanceRequirements = requirement csp (AdmittedClass (evidenceQName (classQual cls))) <> contextRequirements
   let shortHead = last (T.splitOn "." headName)
       iq = qualify env [Ident (maybe (className' <> "-" <> shortHead) unLocated (R.instanceName idl))]
   when (Map.member (classQual cls, headName) (envInstances env)) $
@@ -1038,7 +1041,7 @@ elabInstance fx env sp idl = do
         let (declared, function) = setFunRuntime (runtimeOf m) (addInstanceFunction e iq (methodName m) (atType slotsOf runtimeOf m) (methodArity m) (slotsOf m))
             logical = nub (funSlots function <> full)
             views = foldMap (SourceView.rhsQuantifierViews (funQual function) (envBuiltins env) headScope . R.clauseRhs) [c | c <- clauses, clauseHead c == Just (methodName m)]
-            (e', f) = rememberFunction logical (Map.findWithDefault mempty (methodQual m) needed) views (declared, function)
+            (e', f) = rememberFunction logical (instanceRequirements <> Map.findWithDefault mempty (methodQual m) needed) views (declared, function)
          in (e', fs <> [(m, f)])
       register e fs laws = addInstance e (InstanceInfo iq (classQual cls) headName (headScheme headTy) full (Map.fromList [(methodQual m, latest f) | (m, f) <- fs]) laws)
         where
@@ -1124,6 +1127,8 @@ elabInstance fx env sp idl = do
           scoped = e {envScope = headScope, envClassDefaults = [(lawClass l, headTy)], envTypeBindings = typeBindings, envBuiltins = lawBuiltinScope l}
       when (null mine) $ Left (ElabError sp ("no proof of the law " <> T.unpack (segmentText lawSeg)))
       (prop0, statementRequirements) <- runTCWithRequirements $ do
+        requireDependency sp (AdmittedClass (evidenceQName (lawClass l)))
+        tell =<< either (\(ElabError esp why) -> failAt esp why) pure (constraintRequirements e vars (R.instanceContext idl))
         replayRequirements scoped full sp [headTy] (lawRequirements l)
         elabProp scoped full ctx0 (lawBody l)
       -- Keep the indexed head universally quantified, with the same index
@@ -1590,6 +1595,7 @@ elabDecl fx env sp name ty0 clauses = do
   let values = valueTys <> [(v, fromMaybe TNat (listToMaybe [t | (w, t) <- mentioned, w == v, t /= THole])) | v <- freeValues]
       basicScope = TyScope paramNames [(v, IxParam i) | (i, (v, _)) <- zip [0 ..] values] values
   full <- dictionaryOf env paramNames constraints
+  contextRequirements <- constraintRequirements env paramNames constraints
   scope <- first (ElabError sp) (dictionaryScope env full basicScope)
   if isProp body
     then do
@@ -1602,7 +1608,7 @@ elabDecl fx env sp name ty0 clauses = do
         pure (n, bty)
       given <- constraintClasses env paramNames constraints
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] (values <> binderTys)]
-      (prop0, statementRequirements) <- runTCWithRequirements (elabPropWithProofArguments env {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
+      (prop0, statementRequirements) <- runTCWithRequirements (tell contextRequirements >> elabPropWithProofArguments env {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
       let (full', kept) = theoremPlacesRequiring env statementRequirements full prop0 (map snd binderTys <> lawPremiseTypes env given full)
@@ -1636,7 +1642,8 @@ elabDecl fx env sp name ty0 clauses = do
           valueCtx = [(v, (i, t)) | (i, (v, t)) <- zip [0 :: Int ..] values]
       domainTys <- forM [d | d <- domains, not (isProp d)] (elabTypeIn env scope)
       resultTy <- elabTypeIn env scope resultE
-      (props, signatureRequirements) <- runTCWithRequirements $
+      (props, signatureRequirements) <- runTCWithRequirements $ do
+        tell contextRequirements
         forM [d | d <- domains, isProp d] \d -> toScope . fmap B <$> elabProp env {envScope = scope} full valueCtx d
       given <- constraintClasses env paramNames constraints
       let fty = foldr TArrow resultTy domainTys
@@ -1725,6 +1732,12 @@ dictionaryOf env params cs = do
   let methods = nub [Slot (methodQual m) i (methodArity m) | (cls, i) <- given, c <- classClosure env cls, m <- classMethods c]
       lawful = nub [i | (cls, i) <- given, any (not . null . classLaws) (classClosure env cls)]
   pure (methods <> map membershipSlot lawful)
+
+-- | Admission of a source constraint survives pruning its entire dictionary.
+constraintRequirements :: Env -> [Text] -> [R.TyConstraint] -> Either ElabError Requirements
+constraintRequirements env parameters constraints = do
+  classes <- constraintClasses env parameters constraints
+  pure (foldMap (\((Located sp _, _), (cls, _)) -> requirement sp (AdmittedClass (evidenceQName (classQual cls)))) (zip constraints classes))
 
 -- | The classes constraints put on a signature's type parameters, each with the parameter it constrains.
 constraintClasses :: Env -> [Text] -> [R.TyConstraint] -> Either ElabError [(ClassInfo, Int)]
@@ -2948,6 +2961,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         Nothing -> failAt sp "internal: a constructor of no data type"
       -- A method: the function of the instance for the type its class is at, or a place of the dictionary given.
       GMethod m -> do
+        requireDependency hsp (AdmittedClass (evidenceQName (methodClass m)))
         let dependencies = methodDependencies m
             n = (length (schemeParams (methodScheme m)), length dependencies)
         template <- either (failAt hsp) pure (methodTypeWith (\q -> IxParam <$> lookup q (zip (map fst dependencies) [0 ..])) m)
@@ -3349,6 +3363,7 @@ requireClassEvidence env givens sp seen className actual
       cls <- case Map.lookup className (envGlobals env) of
         Just (GClass found) -> pure found
         _ -> failAt sp "a finite dictionary dependency refers to no class"
+      requireDependency sp (AdmittedClass (evidenceQName className))
       let visited = (className, actual) : seen
       mapM_ (\parent -> requireClassEvidence env givens sp visited parent actual) (classSuperclasses cls)
       case actual of
@@ -3401,6 +3416,7 @@ replayRequirements env givens callSpan arguments saved = forM_ (requirements sav
   case dependency of
     RegisteredBuiltin {} -> keep
     CertifiedDeclaration {} -> keep
+    AdmittedClass {} -> keep
     DictionaryEntry name parameter _ -> methodClassAt name parameter
     ClosurePremise name parameter -> methodClassAt name parameter
     MethodPremise name parameter -> methodClassAt name parameter
@@ -3594,7 +3610,7 @@ classItem env sp cls = IClass cls sp slots premises needed (envBuiltins env)
   where
     slots = nub ([Slot (methodQual method) 0 (methodArity method) | parent <- classClosure env cls, method <- classMethods parent] <> [membershipSlot 0])
     premises = premisesFor env [(cls, 0)] slots
-    needed = foldMap lawRequirements (classLaws cls)
+    needed = foldMap lawRequirements (classLaws cls) <> foldMap (requirement sp . AdmittedClass . evidenceQName) (classSuperclasses cls)
 
 -- | The class assumptions represented by a logical dictionary.
 classesOfSlots :: Env -> [Slot] -> [(ClassInfo, Int)]

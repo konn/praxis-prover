@@ -88,6 +88,7 @@ import Data.Void (absurd)
 import Language.Praxis.Surface.Builtin (BuiltinRole (..), builtinRoleName)
 import Language.Praxis.Surface.Compile (functionLemma, ruleBinders)
 import Language.Praxis.Surface.CoreText
+import Language.Praxis.Surface.Desugar (Dependency (AdmittedClass))
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), atPositions, ctorLemma, dataLemma)
 import Language.Praxis.Surface.Env
@@ -2206,6 +2207,8 @@ evidence k info g le = case spineOf le of
     _ -> case resolve (knowEnv k) q of
       GTheorem t : _ -> theorem sp t args
       GLaw l : _ -> do
+        let name = lawClass l
+        checkedElaboration k g (goalEnv k info g) (requireDependency sp (AdmittedClass (QName (init name) (last name))))
         checked <- traverse (typedArg k info g) args
         let typed = map fst checked
             checks = map snd checked

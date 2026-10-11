@@ -78,7 +78,7 @@ import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
 import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), Hyp (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
-import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), displayQualName, emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), classEvidenceName, displayQualName, emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Evidence qualified as Evidence
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
@@ -341,6 +341,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
           , coreName <- case global of
               GFun function -> [funCore function]
               GData datatype -> [dataIs datatype]
+              GClass cls -> [classEvidenceName (classQual cls)]
               _ -> []
           ]
 

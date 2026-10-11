@@ -37,6 +37,7 @@ module Language.Praxis.Surface.Env (
   logicalFunSlots,
   TheoremInfo (..),
   ClassInfo (..),
+  classEvidenceName,
   MethodInfo (..),
   methodIndex,
   methodTypeWith,
@@ -399,6 +400,10 @@ data TheoremInfo = TheoremInfo
   -- ^ its proposition, over its value parameters then its binders, when it has value parameters
   }
   deriving stock (Show)
+
+-- | A reserved metadata key, available only after the whole class checks.
+classEvidenceName :: QualName -> Text
+classEvidenceName name = mangleGlobal (map segmentRaw name <> ["#class"])
 
 -- | A class: its superclasses, by their qualified names, its methods, in order, and its laws.
 data ClassInfo = ClassInfo
