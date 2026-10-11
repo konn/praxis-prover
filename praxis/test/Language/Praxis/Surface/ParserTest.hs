@@ -114,6 +114,10 @@ parserTests =
               other -> assertFailure ("the inline kind: " <> show other)
             map dataParamImplicit (dataParams same) @?= [True, True, True, False, False]
           other -> assertFailure ("data declarations: " <> show (length other))
+    , testCase "type synonyms accept annotated and inferred parameters beside kind signatures" $ do
+        m <- either (assertFailure . renderSyntaxError) pure (parseModule "<test>" "type Vec : nat -> Type -> Type\ntype Board n a = Vec n (Vec n a)\ntype Grid (n : nat) a = Board n a\n")
+        map (declKind . unLocated) (moduleDecls m) @?= ["kind", "type synonym", "type synonym"]
+        [map (unLocated . dataParamName) ps | Located _ (DTypeAlias _ ps _) <- moduleDecls m] @?= [["n", "a"], ["n", "a"]]
     , testCase "an offside token ends the item" $
         case parseModule "<test>" "f x = x\ng y = y\n" of
           Right m -> length (moduleDecls m) @?= 2
@@ -140,6 +144,7 @@ declKind = \case
   DModule {} -> "module"
   DPrivate {} -> "private"
   DData {} -> "data"
+  DTypeAlias {} -> "type synonym"
   DFixity {} -> "fixity"
   DSignature {} -> "signature"
   DClause {} -> "clause"

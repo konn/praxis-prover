@@ -300,6 +300,25 @@ never sees them, except through the membership predicates of data types,
 which take the predicates of their type parameters. A theorem over a type
 parameter holds at every type it stands for.
 
+## Type synonyms
+
+Transparent type synonyms abbreviate types, including indexed types:
+
+```
+type Board n a = Vec n (Vec n a)
+type AnnotatedBoard (n : nat) a = Vec n (Vec n a)
+```
+
+Here `Vec` has its length before its element type. The use of `n` at its
+length index infers `n : nat`; `a` is a type parameter. Synonyms expand
+during elaboration, so a `Board n a` and a `Vec n (Vec n a)` are the same
+type, with no wrapping constructor or extra runtime representation.
+Parameters may interleave, and annotations must respect dependency order.
+Synonyms can refer to other synonyms, including ones declared later, but
+cycles are rejected. They participate in imports, openings and renaming.
+`--dump-core` shows their expanded types. An alias for a function type can
+abbreviate a function signature; it does not permit function-valued fields.
+
 ## Indexed data types
 
 A data type may be indexed by values, in the GADT style: its constructors

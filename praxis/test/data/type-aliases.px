@@ -1,0 +1,77 @@
+module TypeAliases where
+
+data Piece = B | W
+data Vec n a where
+  nil : Vec 0 a
+  (::) : a -> Vec n a -> Vec (S n) a
+infixr 5 ::
+
+type Board n a = Vec n (Vec n a)
+type AnnotatedBoard (n : nat) a = Vec n (Vec n a)
+type Rectangle n a m = Vec n (Vec m a)
+type BoardOfPieces n = Board n Piece
+type Forward n a = Later n a
+type Later n a = Board n a
+type Identity a = a
+type Endo a = a -> a
+type Nonempty n a = Vec (S n) a
+type Row n a = Vec n a
+
+empty : Board 0 a
+empty = nil
+
+singleton : a -> Board 1 a
+singleton x = (x :: nil) :: nil
+
+unwrap : Board n a -> Vec n (Vec n a)
+unwrap b = b
+
+wrap : Vec n (Vec n a) -> AnnotatedBoard n a
+wrap b = b
+
+copy : Forward n a -> Rectangle n a n
+copy b = b
+
+identity : Endo (Identity a)
+identity x = x
+
+one-piece : Piece -> BoardOfPieces 1
+one-piece p = (p :: nil) :: nil
+
+filled : a -> Board 1 a
+filled x = singleton x
+
+data Saved (n : nat) a where
+  Save : Row n a -> Saved n a
+
+load : Saved n a -> Row n a
+load (Save b) = b
+
+head : Nonempty n a -> a
+head (x :: xs) = x
+
+roundtrip : (b : Board n a) -> wrap (unwrap b) = b
+roundtrip b = rfl
+
+module Public where
+  type Square n a = Board n a
+
+open Public using (Square) renaming (Square to Grid)
+
+grid : Grid 0 Piece
+grid = nil
+
+-- Alias bodies must use the final datatype header, even when that header
+-- needs another alias first.
+type AA n a = Indexed n a
+data Indexed (n : Count) a where
+  IZ : Indexed 0 a
+  IS : a -> Indexed n a -> Indexed (S n) a
+type Count = Nat
+
+index-copy : AA n a -> Indexed n a
+index-copy xs = xs
+
+-- A datatype may refer to its own alias in a constructor field.
+data Chain a = End | Link a (ChainAlias a)
+type ChainAlias a = Chain a

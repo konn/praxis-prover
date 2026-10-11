@@ -33,7 +33,7 @@ import Data.Text qualified as T
 import Language.LSP.Protocol.Types (SemanticTokenModifiers (..), SemanticTokenTypes (..))
 import Language.Praxis.LSP.Index
 import Language.Praxis.LSP.Position (Lines, charToColumn, columnToChar, lineAt)
-import Language.Praxis.Surface.Env (CtorInfo (..), DataBinder (..), DataInfo (dataBinders), Env, Global (..), QualName, constructorsNamed, explicitPositions, implicitPositions, resolve)
+import Language.Praxis.Surface.Env (CtorInfo (..), DataBinder (..), Env, Global (..), QualName, constructorsNamed, resolve, typeScheme)
 import Language.Praxis.Surface.Fixity (isRelation)
 import Language.Praxis.Surface.Rename (RDecl (..), Renamed (..))
 import Language.Praxis.Surface.Shape (opText, rawArgs)
@@ -55,6 +55,7 @@ moduleDefinitions path rn = Map.fromListWith (\_ old -> old) (headers <> concatM
     headers = [(q, at sp) | (sp, q) <- rnHeaders rn]
     decl (RDecl owner (Located _ d)) = case d of
       DSignature (Located sp n) _ -> [(owner <> [n], at sp)]
+      DTypeAlias (Located sp n) _ _ -> [(owner <> [Ident n], at sp)]
       DData dd ->
         let q = owner <> [Ident (unLocated (dataName dd))]
          in (q, at (location (dataName dd)))
@@ -136,6 +137,7 @@ global env q = case q of
 globalKind :: Global -> (SemanticTokenTypes, [SemanticTokenModifiers])
 globalKind = \case
   GData _ -> (SemanticTokenTypes_Type, [])
+  GAlias _ -> (SemanticTokenTypes_Type, [])
   GCtor _ -> (SemanticTokenTypes_EnumMember, [])
   GFun _ -> (SemanticTokenTypes_Function, [])
   GTheorem _ -> (SemanticTokenTypes_Function, [])
@@ -318,7 +320,10 @@ application cx mode locals le =
   let (h, args) = rawArgs le
       parameterMode = \case TypeParameter _ -> TypeMode; IndexParameter _ -> ValueMode
       (implicitModes, explicitModes) = case (mode, unLocated h) of
-        (TypeMode, EName q) | Just (GData d) <- global (cxEnv cx) (segments q) -> (map parameterMode (implicitPositions d) <> repeat mode, map parameterMode (explicitPositions d) <> repeat mode)
+        (TypeMode, EName q)
+          | Just g <- global (cxEnv cx) (segments q)
+          , Just (_, bs) <- typeScheme g ->
+              (map (parameterMode . dbParameter) (filter dbImplicit bs) <> repeat mode, map (parameterMode . dbParameter) (filter (not . dbImplicit) bs) <> repeat mode)
         _ -> (repeat mode, repeat mode)
       assign ims ms = \case
         [] -> []
@@ -374,6 +379,9 @@ declIndex cx (RDecl owner (Located _ d)) = case d of
   DSignature (Located nsp n) ty -> declared cx nsp (owner <> [n]) <> expr cx TypeMode Map.empty ty
   DClause c -> clauseIndex cx owner c
   DData dd -> dataIndex cx owner dd
+  DTypeAlias n ps body ->
+    let dd = DataDecl n ps Nothing [] []
+     in dataIndex cx owner dd <> expr cx TypeMode (parameterLocals cx owner dd) body
   DKindSig (Located ksp n) k -> refer cx ksp (owner <> [Ident n]) <> kindIndex cx Map.empty k
   DClass cd -> classIndex cx owner cd
   DInstance idl -> instanceIndex cx owner idl
@@ -466,9 +474,18 @@ dataIndex cx owner dd =
     <> foldMap ctor (dataConstructors dd)
     <> foldMap sig (dataSignatures dd)
   where
-    declared = case global (cxEnv cx) (owner <> [Ident (unLocated (dataName dd))]) of
-      Just (GData d) -> [(dbName b, dbParameter b) | b <- dataBinders d]
-      _ -> []
+    locals = parameterLocals cx owner dd
+    paramKind p = Map.findWithDefault SemanticTokenTypes_TypeParameter (unLocated (dataParamName p)) locals
+    param p = token (location (dataParamName p)) (paramKind p) [SemanticTokenModifiers_Declaration] <> maybe mempty (kindIndex cx locals) (dataParamKind p)
+    ctor (Located _ (Constructor (Located csp _) fields)) = token csp SemanticTokenTypes_EnumMember [SemanticTokenModifiers_Declaration] <> foldMap (expr cx TypeMode locals) fields
+    sig (Located csp _, ty) = token csp SemanticTokenTypes_EnumMember [SemanticTokenModifiers_Declaration] <> expr cx TypeMode locals ty
+
+parameterLocals :: Cx -> QualName -> DataDecl -> Locals
+parameterLocals cx owner dd = Map.fromList [(unLocated (dataParamName p), paramKind p) | p <- dataParams dd]
+  where
+    declared = case global (cxEnv cx) (owner <> [Ident (unLocated (dataName dd))]) >>= typeScheme of
+      Just (_, bs) -> [(dbName b, dbParameter b) | b <- bs]
+      Nothing -> []
     paramKind p = case lookup (unLocated (dataParamName p)) declared of
       Just (TypeParameter _) -> SemanticTokenTypes_TypeParameter
       Just (IndexParameter _) -> SemanticTokenTypes_Parameter
@@ -476,10 +493,6 @@ dataIndex cx owner dd =
         Just KType -> SemanticTokenTypes_TypeParameter
         Just _ -> SemanticTokenTypes_Parameter
         Nothing -> SemanticTokenTypes_TypeParameter
-    locals = Map.fromList [(unLocated (dataParamName p), paramKind p) | p <- dataParams dd]
-    param p = token (location (dataParamName p)) (paramKind p) [SemanticTokenModifiers_Declaration] <> maybe mempty (kindIndex cx locals) (dataParamKind p)
-    ctor (Located _ (Constructor (Located csp _) fields)) = token csp SemanticTokenTypes_EnumMember [SemanticTokenModifiers_Declaration] <> foldMap (expr cx TypeMode locals) fields
-    sig (Located csp _, ty) = token csp SemanticTokenTypes_EnumMember [SemanticTokenModifiers_Declaration] <> expr cx TypeMode locals ty
 
 classIndex :: Cx -> QualName -> ClassDecl -> Index
 classIndex cx _ cd =

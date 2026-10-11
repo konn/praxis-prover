@@ -154,6 +154,8 @@ data Decl
   | -- | @private@ and its declarations, which the module does not export
     DPrivate ![Located Decl]
   | DData !DataDecl
+  | -- | @type Board n a = Vec n (Vec n a)@: a transparent type synonym
+    DTypeAlias !(Located Text) ![DataParam] !(Located Expr)
   | -- | @type T : kind@: the kind of a data type declared after it
     DKindSig !(Located Text) !Kind
   | -- | @infixr 4 <>@: associativity, precedence, operators

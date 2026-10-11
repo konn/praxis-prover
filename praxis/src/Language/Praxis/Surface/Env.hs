@@ -26,6 +26,8 @@ module Language.Praxis.Surface.Env (
   QualName,
   DataInfo (..),
   DataBinder (..),
+  AliasInfo (..),
+  typeScheme,
   CtorInfo (..),
   constructorValueTypes,
   ConstructorSignature (..),
@@ -97,7 +99,7 @@ import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Syntax (Expr)
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ix, Kind, Parameter (..), Scheme, Ty, TyScope, emptyScope, renderTyWithOrder)
+import Language.Praxis.Surface.Types (Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope, emptyScope, renderTyWithOrder)
 
 -- * Globals
 
@@ -157,6 +159,28 @@ data DataBinder = DataBinder
   , dbParameter :: !Parameter
   }
   deriving stock (Show, Eq)
+
+-- | A transparent synonym, with an expanded body over its ordered parameters.
+data AliasInfo = AliasInfo
+  { aliasQual :: !QualName
+  , aliasScheme :: !Scheme
+  , aliasBinders :: ![DataBinder]
+  }
+  deriving stock (Show)
+
+{- | The telescope and result of a type constructor or synonym. Synonyms have
+no runtime representation: instantiating this scheme expands their body.
+-}
+typeScheme :: Global -> Maybe (Scheme, [DataBinder])
+typeScheme = \case
+  GAlias a -> Just (aliasScheme a, aliasBinders a)
+  GData d ->
+    let ts = dataParams d
+        is = dataIndices d
+        names = [(i, dbName b) | b <- dataBinders d, IndexParameter i <- [dbParameter b]]
+        values = [(fromMaybe ("#" <> T.pack (show i)) (lookup i names), t) | (i, t) <- zip [0 ..] is]
+     in Just (Scheme ts values (TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. length ts - 1]] [IxParam i | i <- [0 .. length is - 1]]), dataBinders d)
+  _ -> Nothing
 
 data CtorInfo = CtorInfo
   { ctorQual :: !QualName
@@ -376,6 +400,7 @@ newtype ModuleInfo = ModuleInfo
 
 data Global
   = GData !DataInfo
+  | GAlias !AliasInfo
   | GCtor !CtorInfo
   | GFun !FunInfo
   | GTheorem !TheoremInfo
@@ -389,6 +414,7 @@ data Global
 globalQualName :: Global -> QualName
 globalQualName = \case
   GData d -> dataQual d
+  GAlias a -> aliasQual a
   GCtor c -> ctorQual c
   GFun f -> funQual f
   GTheorem t -> thmQual t

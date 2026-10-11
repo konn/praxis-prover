@@ -46,6 +46,46 @@ checkTests =
             let shape c = let signature = ctorSignature c in (map (\e -> (teType e, teRole e)) (constructorTele signature), constructorResult signature, length (constructorProofs signature))
             shape ordinary @?= shape indexed
           _ -> assertFailure "missing constructors"
+    , testCase "type synonyms infer indices and expand through functions, fields and proofs" $ do
+        c <- checkFile "test/data/type-aliases.px"
+        errors c @?= []
+        assertBool "a theorem over the synonym certifies" ("TypeAliases.roundtrip" `elem` checkedTheorems c)
+        (k, core) <- maybe (assertFailure "missing checked synonyms") pure (checkedFinal c)
+        let output = T.unlines (surfaceCore core)
+        assertBool "core uses the underlying nested vectors" ("TypeAliases.Vec n (TypeAliases.Vec n a)" `T.isInfixOf` output)
+        assertBool "synonyms generate no membership predicates" (Map.notMember "TypeAliases.Board" (knowMembership k))
+        case Map.lookup "u_TypeAliases_sunwrap" (coreBodies core) of
+          Just [body] -> SurfaceCore.bodyType body @?= TData "TypeAliases.Vec" [TData "TypeAliases.Vec" [TParam 0 []] [IxParam 0]] [IxParam 0]
+          _ -> assertFailure "missing synonym identity"
+    , testCase "type synonyms reject cycles, invalid arguments and forward binder dependencies" $ do
+        p <- either assertFailure pure prelude
+        let prefix = "module BadAlias where\ndata Vec n a where\n  Nil : Vec 0 a\n"
+        forM_
+          [ ("type Loop a = Loop a", "recursive type synonyms")
+          , ("type Loop a = Other a\ntype Other a = Loop a", "recursive type synonyms")
+          , ("type Bad n n = Vec n Nat", "duplicate data parameter")
+          , ("type Bad (n : Type) = Vec n Nat", "not a value in scope")
+          , ("type Bad (xs : Vec n a) n a = Vec n a", "not a type")
+          , ("type Board n a = Vec n (Vec n a)\nf : Board 0\nf = Nil", "takes 1 type arguments and 1 indices")
+          , ("type Board n a = Vec n (Vec n a)\nf : Board Nat 0\nf = Nil", "a type")
+          , ("type Hidden = Nat -> Nat\ndata Bad = Mk Hidden", "a field of function type")
+          , ("type Apply f a = f a\ntype Bad = Apply Nat Nat", "well-formed type")
+          , ("type Bad (a : Type) = a Nat", "incompatible kinds")
+          , ("type Board n a = Vec n (Vec n a)\nf : Board 0 a -> Board 1 a\nf b = b", "type mismatch")
+          , ("type Board n a = Vec n (Vec n a)\nf : Nat\nf = Board", "not in scope")
+          ]
+          $ \(declaration, expected) -> do
+            let c = checkSource p "bad-alias.px" (prefix <> declaration <> "\n")
+            assertBool (T.unpack declaration <> ": " <> show (errors c)) (any (expected `T.isInfixOf`) (map T.pack (errors c)))
+    , testCase "type synonyms retain their telescopes across imports and renaming" $ do
+        p <- either assertFailure pure prelude
+        let source = "module A where\ndata Vec n a where\n  Nil : Vec 0 a\ntype Board n a = Vec n (Vec n a)\n"
+            (a, build) = checkModule (\_ _ -> []) (initialBuild p) Map.empty Nothing "A.px" source
+        errors a @?= []
+        exports <- maybe (assertFailure "no alias exports") pure (Map.lookup [Ident "A"] (buildExports build))
+        let imports = Map.singleton (Nothing, [Ident "A"]) (Right exports)
+            (b, _) = checkModule (\_ _ -> []) build imports Nothing "B.px" "module B where\nimport A as V\nopen V using (Board) renaming (Board to Grid)\ncopy : Grid n a -> V.Board n a\ncopy b = b\n"
+        errors b @?= []
     , testCase "erased evidence survives functions, containers, projection and repacking" $ do
         c <- checkFile "test/data/proof-flow.px"
         errors c @?= []

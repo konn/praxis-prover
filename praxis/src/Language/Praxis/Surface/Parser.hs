@@ -165,25 +165,26 @@ dataP :: Parser Decl
 dataP = do
   keyword "data"
   n <- identifier
-  params <- many paramP
+  params <- many dataParamP
   kind <- optional (symbol ":" *> kindP)
   (ctors, sigs) <-
     (keyword "where" *> (([],) <$> block ((,) <$> nameSegment <* symbol ":" <*> exprP)))
       <|> ((,[]) <$> option [] (symbol "=" *> (ctorP `sepBy1` symbol "|")))
   pure (DData (DataDecl n params kind ctors sigs))
-  where
-    paramP =
-      ((\x -> DataParam x False Nothing) <$> identifier)
-        <|> bracketed "(" ")" ((\x k -> DataParam x False (Just k)) <$> identifier <* symbol ":" <*> kindP)
-        <|> bracketed "{" "}" ((\x k -> DataParam x True k) <$> identifier <*> optional (symbol ":" *> kindP))
 
--- | The kind of a data type declared after it: @type Vec : type -> nat -> type@.
+dataParamP :: Parser DataParam
+dataParamP =
+  ((\x -> DataParam x False Nothing) <$> identifier)
+    <|> bracketed "(" ")" ((\x k -> DataParam x False (Just k)) <$> identifier <* symbol ":" <*> kindP)
+    <|> bracketed "{" "}" ((\x k -> DataParam x True k) <$> identifier <*> optional (symbol ":" *> kindP))
+
+-- | A datatype kind signature, or a transparent type synonym.
 kindSigP :: Parser Decl
 kindSigP = do
   keyword "type"
   n <- identifier
-  symbol ":"
-  DKindSig n <$> kindP
+  (symbol ":" *> (DKindSig n <$> kindP))
+    <|> (DTypeAlias n <$> many dataParamP <* symbol "=" <*> exprP)
 
 {- |
 A kind: @Type@ (also @type@), the kind of types; a value kind, the type of an

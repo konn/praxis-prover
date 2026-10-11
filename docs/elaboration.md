@@ -435,6 +435,17 @@ clash, once unfolded, is refuted; an appeal proves the equations the
 theorem's hypotheses need of its arguments, as an application of a function
 does its index premises.
 
+### Type synonyms
+
+A type synonym records an ordered parameter telescope and a checked,
+expanded type in the surface environment. Its unannotated index parameters
+are inferred from their positions in the body, such as the length argument
+of `Vec`. Alias dependencies are elaborated in dependency order; recursive
+synonyms are rejected. Applying a synonym uses the same argument checking
+and implicit argument inference as applying a datatype, then substitutes
+the arguments into its body. No alias node, constructor, membership
+predicate or additional axiom reaches Core or the PRA kernel.
+
 ### First-order values
 
 The encoding gives a meaning to values of first-order types only: `Nat`,

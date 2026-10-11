@@ -150,6 +150,21 @@ tests =
           , (8, "a", SemanticTokenTypes_TypeParameter, [])
           , (8, "xs", SemanticTokenTypes_Parameter, [])
           ]
+    , testCase "type synonyms highlight inferred indices and navigate to their definitions" $ do
+        let source = T.unlines ["module Aliases where", "data Vec n a where", "  Nil : Vec 0 a", "type Board n a = Vec n (Vec n a)", "copy : Board n a -> Board n a", "copy b = b"]
+        analyse Px source @?= []
+        doc <- analyseDocument Px "<document>" source
+        let toks = tokensOf source doc
+        mapM_
+          (\expected -> assertBool (show expected) (expected `elem` toks))
+          [ (4, "Board", SemanticTokenTypes_Type, [SemanticTokenModifiers_Declaration])
+          , (4, "n", SemanticTokenTypes_Parameter, [SemanticTokenModifiers_Declaration])
+          , (4, "a", SemanticTokenTypes_TypeParameter, [SemanticTokenModifiers_Declaration])
+          , (5, "Board", SemanticTokenTypes_Type, [])
+          , (5, "n", SemanticTokenTypes_Parameter, [])
+          , (5, "a", SemanticTokenTypes_TypeParameter, [])
+          ]
+        map targetSpan (definitionsAt source doc (Position 4 8)) @?= [Span (4, 6) (4, 11)]
     , testCase "classes, instances and tactics: methods, the functions of an instance, keywords in tactic position, the names a tactic introduces" $ do
         doc <- analyseDocument Px "<document>" classes
         assertBool "the module parsed" (docParsed doc)

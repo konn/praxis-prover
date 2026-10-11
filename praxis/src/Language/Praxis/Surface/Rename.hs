@@ -530,7 +530,9 @@ renameLevel cx sc0 decls0 = let (sc1, out) = foldl step (predeclared, []) flat i
     flatten p = concatMap \d@(Located _ decl) -> case decl of
       DPrivate inner -> flatten True inner
       _ -> [(p, d)]
-    predeclared = foldl predeclare sc0 [(p, d) | (p, Located _ (DData d)) <- flat]
+    predeclared = foldl predeclareAlias (foldl predeclare sc0 [(p, d) | (p, Located _ (DData d)) <- flat]) [(p, n) | (p, Located _ (DTypeAlias n _ _)) <- flat]
+    predeclareAlias sc (p, n) =
+      (declare (Ident (unLocated n)) (scModule sc <> [Ident (unLocated n)]) sc {scPrivate = p}) {scPrivate = scPrivate sc}
     predeclare sc (p, d) =
       let name = Ident (unLocated (dataName d))
           q = scModule sc <> [name]
@@ -579,6 +581,12 @@ renameLevel cx sc0 decls0 = let (sc1, out) = foldl step (predeclared, []) flat i
             DData dd -> case renameData cx sc' dd of
               Left err -> (failed err sc', out)
               Right dd' -> emit sc' [Located sp (DData dd')]
+            DTypeAlias n ps body ->
+              let locals = Set.fromList (map (unLocated . dataParamName) ps)
+                  renamed = do
+                    ps' <- forM ps \param -> (\k -> param {dataParamKind = k}) <$> traverse (renameKind cx sc' locals) (dataParamKind param)
+                    DTypeAlias n ps' <$> expression cx sc' locals body
+               in either (\err -> (failed err sc', out)) (\d' -> emit sc' [Located sp d']) renamed
             DKindSig n k -> case renameKind cx sc' Set.empty k of
               Left err -> (failed err sc', out)
               Right k' -> emit sc' [Located sp (DKindSig n k')]
