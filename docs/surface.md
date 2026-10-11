@@ -346,6 +346,21 @@ data VecByLength (n : Nat) (a : Type) where
   Cons : {n : Nat} -> a -> VecByLength n a -> VecByLength (S n) a
 ```
 
+An equality hypothesis can transport a value between different indices of the
+same data type. For example:
+
+```
+cast : {n m : Nat} -> n = m -> VecByLength n a -> VecByLength m a
+cast {n} {m} h xs = xs
+```
+
+When a value's indices differ from its expected type, the elaborator tries to
+prove the required equalities by congruence from the proof hypotheses in
+scope. It records explicit transport evidence, which the core checks before
+erasing the transport from computation. The data type and element types must
+still agree. To use a theorem such as commutativity, pass its proof to `cast`;
+the `base` library uses this to give vector append the result index `n + m`.
+
 An implicit argument's slot follows the same declaration order among implicit
 binders. Explicitly supplied implicit arguments still go in braces before the
 ordinary arguments. A header such as `(xs : VecByLength n a) (n : Nat)
@@ -621,16 +636,23 @@ goal and must close it, so `induction xs { … } { … }` solves the cases in
 turn. The engine translates, so far: `rfl` (`refl`, `reflexivity`), `exact`,
 `cong` (`congr`), `calc`, `induction x`, `intro`/`intros` (naming what a case
 introduces: the constructor's fields, then the induction hypotheses, `IH` by
-default, `IH1 …` when there are several), `assumption`, `sorry` (`admit`),
+default, `IH1 …` when there are several, then any implications reverted into
+the goal), `have h : P := proof`, `assumption`, `sorry` (`admit`),
 focused blocks, and a bare proof term, `by IH`, which closes the goal by the
 term or else by congruence. A goal reported — by `sorry`, when unsolved, or
 when a `calc` does not prove it — is over the names the clause and `intro`
 gave its variables, not the eigenvariables the core introduces for them, `e_0`.
 The grammar also accepts `apply`, `rw [e, ← e'] at
 h`, `unfold`, `simp only`, `constructor`, `left`, `right`, `exfalso`,
-`contradiction`, `cases`, `obtain`, `exists`/`use`, `have`, `show`, `revert`,
+`contradiction`, `cases`, `obtain`, `exists`/`use`, `show`, `revert`,
 `clear`, `by_cases`, `try`, `repeat`, `first`, `all_goals`, `any_goals`, `<;>`
 and `case`; their translations are the next step of the engine.
+
+`have` checks its proof before making the proposition available to subsequent
+tactics. Its annotation can be omitted when a theorem application or named
+hypothesis determines the proposition: `have bound := lt-of-plt p`. This is
+particularly useful for facts about GADT indices. The proof remains checked
+even when the following tactics do not use the local fact.
 
 `rfl` is *surface* definitional equality: the sides are rewritten by the
 unfolding lemmas wherever a function meets a constructor — a module's

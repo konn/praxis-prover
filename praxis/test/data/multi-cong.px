@@ -1,0 +1,17 @@
+module MultiCong where
+
+-- Constructor fields may be equal by distinct hypotheses.
+data Pair = MkPair Nat Nat
+
+pair-cong : (a b c d : Nat) -> a = c -> b = d -> MkPair a b = MkPair c d
+pair-cong a b c d first second = by cong
+
+-- Congruence descends through common function heads and repeated arguments.
+nested-cong : (a b c d : Nat) -> a = c -> b = d -> S (a + b) * (a + b) = S (c + d) * (c + d)
+nested-cong a b c d first second = by cong
+
+reverse-cong : (a b c d : Nat) -> c = a -> d = b -> MkPair a b = MkPair c d
+reverse-cong a b c d first second = by cong
+
+unchanged-field : (a b k : Nat) -> a = b -> MkPair a k = MkPair b k
+unchanged-field a b k eq = by cong

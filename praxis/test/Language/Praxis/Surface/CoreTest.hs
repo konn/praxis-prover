@@ -7,6 +7,7 @@ import Language.Praxis.Surface.Core qualified as Core
 import Language.Praxis.Surface.Env (emptyEnv)
 import Language.Praxis.Surface.Pretty qualified as Pretty
 import Language.Praxis.Surface.Syntax
+import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Term qualified as Term
 import Language.Praxis.Surface.Types
 import Test.Tasty
@@ -30,6 +31,25 @@ coreTests =
         assertBool "a free dictionary value" (isLeft (Core.elaborate emptyEnv [] [TNat] (Dictionary TNat (Var 0))))
     , testCase "unresolved value indices cannot cross the explicit boundary" $ do
         assertBool "unknown index" (isLeft (Core.elaborate emptyEnv [] [TData "Vec" [TNat] [IxHole]] (Var 0)))
+    , testCase "index transport validates all equalities before retaining their obligations" $ do
+        let vec ix = TData "Vec" [TNat] [ix]
+            vars = [("n", TNat), ("m", TNat), ("xs", vec (IxVar "n"))]
+            target = vec (IxVar "m")
+            raw = R.Located R.noSpan (R.EProof (R.RBy []))
+            proof p = ProofArg p (Irrelevant raw)
+            transport ps = Transport target (Var 2) ps
+            equality = Rel RelEq (Var 0) (Var 1)
+            check = Core.elaborateNamed emptyEnv [] vars
+        assertBool "missing equality" (isLeft (check (transport [])))
+        assertBool "wrong equality" (isLeft (check (transport [proof (Rel RelEq (Var 0) (Var 0))])))
+        assertBool "different type structure" (isLeft (check (Transport (TData "Other" [TNat] [IxVar "m"]) (Var 2) [proof equality])))
+        body <- either assertFailure pure (check (transport [proof equality]))
+        Core.bodyType body @?= target
+        Core.computation body @?= Term.Variable 2
+        length (Core.obligations body) @?= 1
+        Core.obligations (Core.mapObligations (const ()) body) @?= [()]
+        pending <- either assertFailure pure (Term.prepareTerm (transport [proof equality]))
+        assertBool "term lowering erased equality evidence" (isLeft (Term.withoutObligations pending))
     , testCase "core printing uses surface types and preserves application precedence" $ do
         let successor x = Typed TNat [] [] (App (Global (Ref RefBuiltin "S")) x)
         value <- either assertFailure pure (Core.elaborate emptyEnv [] [TNat] (successor (successor (Var 0))))

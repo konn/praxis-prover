@@ -153,6 +153,8 @@ data Expr a
     Typed !Ty ![Ty] ![(Int, Ix)] (Expr a)
   | -- | A resolved dictionary entry, including its static function signature.
     Dictionary !Ty (Expr a)
+  | -- | An erased index transport: target type, source value and equality evidence.
+    Transport !Ty (Expr a) [Expr a]
   | Lam ![Hint] (Scope Int Expr a)
   | Case (Expr a) [(Pattern, Scope Int Expr a)]
   | If (Expr a) (Expr a) (Expr a)
@@ -193,6 +195,7 @@ instance Monad Expr where
     At sp e -> At sp (e >>= k)
     Typed t ts is e -> Typed t ts is (e >>= k)
     Dictionary t e -> Dictionary t (e >>= k)
+    Transport t e ps -> Transport t (e >>= k) (map (>>= k) ps)
     Lam hs b -> Lam hs (b >>>= k)
     Case s alts -> Case (s >>= k) [(p, b >>>= k) | (p, b) <- alts]
     If c t e -> If (c >>= k) (t >>= k) (e >>= k)
@@ -217,6 +220,8 @@ instance Eq1 Expr where
       go e (Typed _ _ _ f) = go e f
       go (Dictionary _ e) f = go e f
       go e (Dictionary _ f) = go e f
+      go (Transport _ e _) f = go e f
+      go e (Transport _ f _) = go e f
       go (At _ e) f = go e f
       go e (At _ f) = go e f
       go (Var a) (Var b) = eq a b
@@ -254,6 +259,7 @@ instance Show1 Expr where
         At _ e -> go d e
         Typed _ _ _ e -> go d e
         Dictionary _ e -> go d e
+        Transport t e ps -> con d "Transport" [flip showsPrec t, flip go e, \_ -> showListWith (go 0) ps]
         Lam hs b -> con d "Lam" [flip showsPrec hs, scope b]
         Case s alts -> con d "Case" [flip go s, \_ -> showListWith (\(p, b) -> showChar '(' . showsPrec 0 p . showString ", " . scope b 0 . showChar ')') alts]
         If a b c -> con d "If" [flip go a, flip go b, flip go c]
@@ -328,6 +334,7 @@ mapGlobals f = go
       At sp e -> At sp (go e)
       Typed t ts is e -> Typed t ts is (go e)
       Dictionary t e -> Dictionary t (go e)
+      Transport t e ps -> Transport t (go e) (map go ps)
       Lam hs b -> Lam hs (hoistScope go b)
       Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]
       If c t e -> If (go c) (go t) (go e)
@@ -355,6 +362,7 @@ globalsOf = go
       At _ e -> go e
       Typed _ _ _ e -> go e
       Dictionary _ e -> go e
+      Transport _ e ps -> go e <> concatMap go ps
       Lam _ b -> go (fromScope b)
       Case s alts -> go s <> concatMap (go . fromScope . snd) alts
       If c t e -> go c <> go t <> go e

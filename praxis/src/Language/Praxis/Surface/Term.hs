@@ -74,10 +74,17 @@ prepareTerm = go
       (Global r, args) -> do
         translated <- traverse argument args
         pure (PendingTerm (Call r (catMaybes (map fst translated))) (concatMap snd translated))
+      (Transport _ child proofs, []) -> do
+        PendingTerm t os <- go child
+        evidence <- traverse transportProof proofs
+        pure (PendingTerm t (os <> evidence))
       (Absurd (Irrelevant raw), []) -> Right (PendingTerm (Literal 0) [(Bottom, raw)])
       (Var _, _ : _) -> Left "a variable applied to arguments"
       (ProofArg {}, _) -> Left "a proof argument used as a computational term"
       _ -> Left "no first-order computational term for this expression"
+    transportProof e = case stripLocations e of
+      ProofArg p (Irrelevant raw) -> Right (p, raw)
+      _ -> Left "an index transport without equality evidence"
     argument e = case stripLocations e of
       ProofArg p (Irrelevant raw) -> Right (Nothing, [(p, raw)])
       _ -> do

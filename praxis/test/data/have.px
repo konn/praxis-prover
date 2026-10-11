@@ -1,0 +1,70 @@
+module Have where
+
+data PLt (n : Nat) (m : Nat) where
+  Zero : {m : Nat} -> PLt 0 (S m)
+  Succ : {n m : Nat} -> PLt n m -> PLt (S n) (S m)
+
+lt-of-plt : {n m : Nat} -> PLt n m -> n < m
+lt-of-plt Zero = rfl
+lt-of-plt (Succ p) = lt-of-plt p
+
+-- A computed proof supplies a premise of another theorem.
+transitive : {n m k : Nat} -> PLt n m -> PLt m k -> n < k
+transitive p q = by
+  have h := lt-of-plt p
+  have h' := lt-of-plt q
+  exact ltTrans h h'
+
+-- A local induction emits auxiliary theorems retained by the enclosing proof.
+zero-add : (n : Nat) -> 0 + n = n
+zero-add n = by
+  have h : 0 + n = n := by
+    induction n
+    { rfl }
+    { cong IH }
+  exact h
+
+-- New facts can be used in calculations and anonymous facts by assumption.
+calculation : (n : Nat) -> (0 + n) + 0 = n
+calculation n = by
+  have h : 0 + n = n := zero-add n
+  calc
+    (0 + n) + 0
+    = 0 + n
+    = n := h
+
+anonymous : (n : Nat) -> 0 + n = n
+anonymous n = by
+  have : 0 + n = n := zero-add n
+  assumption
+
+-- Shadowing a surface name keeps the previous core hypothesis distinct.
+shadow : (n : Nat) -> 0 + n = n
+shadow n = by
+  have h : n = n := rfl
+  have h : 0 + n = n := zero-add n
+  exact h
+
+inferred : (n : Nat) -> 0 + n = n
+inferred n = by
+  have h := zero-add n
+  have h' := h
+  exact h'
+
+data Box = box Nat
+
+value : Box -> Nat
+value (box n) = n
+
+-- Induction reverts dependent premises; intros names the constructor fields
+-- and then introduces the implication left in the case's conclusion.
+box-ext : (x y : Box) -> value x = value y -> x = y
+box-ext x y = by
+  induction x
+  { intros n
+    induction y
+    { intros m eq
+      have normalized := eq
+      cong normalized
+    }
+  }

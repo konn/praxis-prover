@@ -57,6 +57,7 @@ module Language.Praxis.Surface.Types (
   emptyAssignment,
   mergeTy,
   mergeIx,
+  transportIndices,
   matchTy,
   matchIx,
   substScheme,
@@ -331,6 +332,22 @@ instValues vs = go
       x -> x
 
 -- * Comparison
+
+{- | The equalities needed to transport a value between two types. Only
+indices may change: datatype heads, type parameters and their applications
+must retain their structure. Every returned pair needs certified evidence.
+-}
+transportIndices :: Ty -> Ty -> Maybe [(Ix, Ix)]
+transportIndices source target = case (source, target) of
+  (TNat, TNat) -> Just []
+  (TParam i xs, TParam j ys) | i == j, length xs == length ys -> concat <$> zipWithM transportIndices xs ys
+  (TData n ts xs, TData m us ys)
+    | n == m
+    , length ts == length us
+    , length xs == length ys -> do
+        nested <- concat <$> zipWithM transportIndices ts us
+        pure (nested <> [(normIx x, normIx y) | (x, y) <- zip xs ys, normIx x /= normIx y])
+  _ -> Nothing
 
 -- | The types and the indices found so far for the parameters of a scheme, by index.
 data Assignment = Assignment

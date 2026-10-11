@@ -65,6 +65,7 @@ module Language.Praxis.Surface.Elab (
 import Bound (Scope, Var (..), fromScope, instantiate, toScope)
 import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM, forM_, join, unless, when)
+import Control.Monad.State.Strict qualified as State
 import Data.Bifunctor (first)
 import Data.Foldable (toList)
 import Data.Graph (SCC (..), stronglyConnComp)
@@ -1736,9 +1737,9 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     _ -> failAt rsp "a function's clause is a term, not a proof"
   -- Each proof the body gives is an obligation: its proposition, under the clause's own
   -- preconditions, named by its proof patterns, a theorem proved by what was written.
-  let obligation (prop, raw) =
+  let obligation serial (prop, raw) =
         let (l, col) = R.spanStart (location raw)
-            q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col))]
+            q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col) <> "-" <> T.pack (show serial))]
             indices =
               [ Rel RelEq (App (Global (Ref RefFunction fn)) (Var i)) term
               | (i, (_, TData dn _ xs)) <- zip [0 ..] vars
@@ -1754,8 +1755,9 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     either (failAt rsp) pure $
       if PAbsurd `elem` pats
         then Core.emptyBranch (applyTy refined result)
-        else Core.elaborate envBody (funSlots info) (map snd vars) body
-  pure (FunClause pats vars (Core.mapObligations obligation prepared) (R.spanning (location lhs) rsp))
+        else Core.elaborateNamed envBody (funSlots info) vars body
+  let numbered = State.evalState (Core.traverseObligations (\o -> State.state (\i -> (obligation i o, i + 1))) prepared) (0 :: Int)
+  pure (FunClause pats vars numbered (R.spanning (location lhs) rsp))
 
 {- | Names bound in a constructor's implicit patterns. Recovered indices have
 no numerical field to bind; their values come from projections of typed fields.
@@ -2181,7 +2183,21 @@ determined more of its domain, and the application is undetermined itself
 when none do.
 -}
 elabTerm :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
-elabTerm proofArguments env givens ctx le@(Located sp e) expected = case e of
+elabTerm proofArguments env givens ctx le@(Located sp _) expected =
+  case elabTermDirect proofArguments env givens ctx le expected of
+    Right result -> Right result
+    Left original -> case proofArguments of
+      CollectProofArguments (_ : _)
+        | expected /= THole
+        , Right (value, actual) <- elabTermDirect proofArguments env givens ctx le THole
+        , Just pairs@(_ : _) <- transportIndices actual expected
+        , Just propositions <- traverse (\(x, y) -> Rel RelEq <$> indexTermIn env ctx x <*> indexTermIn env ctx y) pairs ->
+            let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
+             in Right (At (Irrelevant sp) (Transport expected value [ProofArg prop (Irrelevant proof) | prop <- propositions]), expected)
+      _ -> Left original
+
+elabTermDirect :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
+elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e of
   R.EParen (Located _ (R.EInfix (Located _ op) l r))
     | R.operatorName op == QName [] (Op ":")
     , Right ty <- ascribed r -> do

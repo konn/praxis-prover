@@ -1,0 +1,52 @@
+module IndexTransport where
+
+data Vec n a where
+  Nil : Vec 0 a
+  Cons : a -> Vec n a -> Vec (S n) a
+
+data Box a = Mk a
+
+cast : {n m : Nat} -> n = m -> Vec n a -> Vec m a
+cast {n} {m} h xs = xs
+
+reverse : {n m : Nat} -> m = n -> Vec n a -> Vec m a
+reverse {n} {m} h xs = xs
+
+successor : {n m : Nat} -> n = m -> Vec (S n) a -> Vec (S m) a
+successor {n} {m} h xs = xs
+
+nested : {n m : Nat} -> n = m -> Box (Vec n a) -> Box (Vec m a)
+nested {n} {m} h xs = xs
+
+chained : {n m k : Nat} -> n = m -> m = k -> Vec n a -> Vec k a
+chained {n} {m} {k} h j xs = xs
+
+wrap : {n m : Nat} -> n = m -> Vec n a -> Box (Vec m a)
+wrap {n} {m} h xs = Mk xs
+
+one : Nat -> Vec 1 Nat
+one x = cast {1} {1} (by rfl) (Cons x Nil)
+
+one-value : (x : Nat) -> one x = Cons x Nil
+one-value x = rfl
+
+data Grid n m a where
+  GNil : Grid 0 0 a
+  Row : Vec m a -> Grid n m a -> Grid (S n) m a
+
+two-indices : {n m k l : Nat} -> n = k -> m = l -> Grid n m a -> Grid k l a
+two-indices {n} {m} {k} {l} h j xs = xs
+
+nested-casts : {n m : Nat} -> n = m -> Vec n a -> Box (Vec m a)
+nested-casts {n} {m} h xs = Mk (cast {n} {m} h xs)
+
+append-left : Vec n a -> Vec m a -> Vec (m + n) a
+append-left Nil ys = ys
+append-left (Cons x xs) ys = Cons x (append-left xs ys)
+
+append : {n m : Nat} -> Vec n a -> Vec m a -> Vec (n + m) a
+append {n} {m} xs ys = cast {m + n} {n + m} (by exact addComm) (append-left xs ys)
+
+-- Recovered runtime indices make the callee's index premises reflexive.
+append-inferred : Vec n a -> Vec m a -> Vec (n + m) a
+append-inferred xs ys = append xs ys

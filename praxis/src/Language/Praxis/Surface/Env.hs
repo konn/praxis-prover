@@ -84,24 +84,46 @@ module Language.Praxis.Surface.Env (
   constructorsNamed,
   dataOfCtor,
   indexFunctionCores,
+  indexTermIn,
   displayName,
 ) where
 
 import Bound (Scope)
+import Control.Applicative ((<|>))
 import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
+import Language.Praxis.Surface.Index (ixToExprWith)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
-import Language.Praxis.Surface.Syntax (Expr)
+import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..))
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope, emptyScope, renderTyWithOrder)
+import Language.Praxis.Surface.Types (Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope (..), emptyScope, normIx, renderTyWithOrder)
 
 -- * Globals
+
+{- | An index as a term in a named value context. An implicit index can also
+be recovered by the certified index projection of a value that carries it.
+-}
+indexTermIn :: Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a)
+indexTermIn env ctx = ixToExprWith variable parameter
+  where
+    variable v = (Var . fst <$> lookup v ctx) <|> recovered (IxVar v)
+    parameter i =
+      (listToMaybe [v | (v, IxParam j) <- tsValues (envScope env), i == j] >>= \v -> Var . fst <$> lookup v ctx)
+        <|> recovered (IxParam i)
+    recovered wanted =
+      listToMaybe
+        [ App (Global (Ref RefFunction fn)) (Var v)
+        | (_, (v, TData dn _ indices)) <- ctx
+        , Just fns <- [indexFunctionCores env dn]
+        , (ix, fn) <- zip indices fns
+        , normIx ix == normIx wanted
+        ]
 
 {- |
 A qualified name as its segments: the library the module belongs to, when

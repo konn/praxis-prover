@@ -945,16 +945,18 @@ conclude k g eqs concl = case stripLocations concl of
 
 -- | An equation of indices: both sides unfolded, and what is left closed by 'closeEq'.
 indexEquation :: Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> CT -> Either String Builder
-indexEquation k g eqs l r = do
-  let ls = reductionsOf k l
-      rs = reductionsOf k r
-      l' = lastTerm l ls
-      r' = lastTerm r rs
-  mid <- closeEq indexFuel k g eqs l' r'
-  pure
-    if null ls && null rs
-      then mid
-      else "calc " <> render l <> forth ls <> (if l' == r' then "" else " = " <> render r' <> " by (" <> mid <> ")") <> back rs r
+indexEquation k g eqs l r
+  | Right proof <- closeEq indexFuel k g eqs l r = Right proof
+  | otherwise = do
+      let ls = reductionsOf k l
+          rs = reductionsOf k r
+          l' = lastTerm l ls
+          r' = lastTerm r rs
+      mid <- closeEq indexFuel k g eqs l' r'
+      pure
+        if null ls && null rs
+          then mid
+          else "calc " <> render l <> forth ls <> (if l' == r' then "" else " = " <> render r' <> " by (" <> mid <> ")") <> back rs r
 
 -- | How many index specifications a proof of an equation of indices goes through, one after another.
 indexFuel :: Int
@@ -962,8 +964,9 @@ indexFuel = 16
 
 {- |
 An equation of indices, both sides unfolded: equal; an equation at hand,
-either way round, or rewriting by one; or the index the specification of a
-function gives an index function's application, and on from there.
+either way round, or rewriting by one; congruence of corresponding arguments
+at a common head; or the index the specification of a function gives an
+index function's application, and on from there.
 -}
 closeEq :: Int -> Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> CT -> Either String Builder
 closeEq fuel k g eqs l r
@@ -972,6 +975,14 @@ closeEq fuel k g eqs l r
   | n : _ <- [h | (h, a, b) <- eqs, a == r, b == l] = Right ("symmetry " <> fromText n <> " as IxS; exact IxS")
   | n : _ <- [h | (h, a, b) <- eqs, rewrites a b] = Right ("cong " <> fromText n)
   | fuel <= 0 = Left ("cannot show " <> shown)
+  | Just path <- equationPath fuel [] l =
+      Right ("calc " <> render l <> mconcat [" = " <> render t <> " by cong " <> fromText h | (h, t) <- path])
+  | CSym f xs <- l
+  , CSym h ys <- r
+  , f == h
+  , length xs == length ys
+  , Right proof <- congruent f xs ys =
+      Right proof
   | Right (e, p) <- indexOf k g eqs l
   , e /= l =
       if e == r
@@ -987,6 +998,30 @@ closeEq fuel k g eqs l r
   where
     shown = T.unpack (runBuilder (equationText l r))
     rewrites a b = replaceCT (\t -> if t == a then Just b else Nothing) l == r || replaceCT (\t -> if t == b then Just a else Nothing) l == r
+    -- Follow equations already in the context, in either direction. Fuel
+    -- bounds the path length and visited terms prevent equality cycles.
+    equationPath remaining seen x
+      | x == r = Just []
+      | remaining <= 0 || x `elem` seen = Nothing
+      | otherwise =
+          listToMaybe
+            [ (h, y) : path
+            | (h, a, b) <- eqs
+            , y <- [b | a == x] <> [a | b == x]
+            , Just path <- [equationPath (remaining - 1) (x : seen) y]
+            ]
+    -- Replace one argument at a time. Each sub-equation is proved before
+    -- the core's single-equation congruence rule uses it, so different
+    -- arguments may rely on different hypotheses without adding an axiom.
+    congruent f xs ys = do
+      steps <- forM [(i, x, y) | (i, (x, y)) <- zip [0 :: Int ..] (zip xs ys), x /= y] \(i, x, y) -> do
+        proof <- closeEq (fuel - 1) k g eqs x y
+        let name = freshPrefix <> fromDec fuel <> "_" <> fromDec i
+            next = CSym f (take (i + 1) ys <> drop (i + 1) xs)
+        pure (" = " <> render next <> " by (have " <> name <> ": " <> equationText x y <> " { " <> proof <> " }; cong " <> name <> ")")
+      pure ("calc " <> render l <> mconcat steps)
+    freshPrefix = fromText (head [p | p <- "IxCong" : ["IxCong" <> T.pack (show i) <> "_" | i <- [1 :: Int ..]], all (not . T.isPrefixOf p) names])
+    names = map fst (goalHyps g) <> [h | (h, _, _) <- eqs]
 
 {- |
 The index an index function gives a term, and a proof of the equation: an
@@ -998,26 +1033,31 @@ indexOf :: Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> Either String (CT, Bui
 indexOf k g eqs t0 = case t0 of
   CSym fn [t]
     | (n, e) : _ <- [(h, b) | (h, a, b) <- eqs, a == t0] -> Right (e, "exact " <> fromText n)
-    | steps@(_ : _) <- reductionsOf k t0 -> Right (lastTerm t0 steps, "calc " <> render t0 <> forth steps)
-    | CSym h args <- t
-    , Just s <- Map.lookup h (knowIndexSpecs k)
-    , Just post <- lookup fn (ixsPost s) -> do
-        let byArg = zip (ixsArgs s) args
-        (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) byArg
-        props <- preconditionsAt k g (Map.fromList byArg <> sigma) (ixsProps s)
-        mems <- argMemberships k g h args
-        let at = substCT (Map.fromList byArg <> sigma)
-            appeal = mems <> haves <> props <> "exact " <> fromText (ixsLemma s)
-            posts = ixsPost s
-            -- A lemma of several indices concludes their conjunction: the one wanted is taken from it.
-            proof = case posts of
-              [_] -> appeal
-              _ ->
-                let conj = foldr1 (\x acc -> "(" <> x <> " /\\ " <> acc <> ")") [equationText (CSym f [t]) (at x) | (f, x) <- posts]
-                    (split, c) = conjunct "IxC" (length posts) (length (takeWhile ((/= fn) . fst) posts))
-                 in "have IxC: " <> conj <> " { " <> appeal <> " }; " <> split <> "exact " <> c
-        Right (at post, proof)
-  _ -> Left ("no index is known of " <> T.unpack (runBuilder (render t0)))
+    | Right result <- specification fn t -> Right result
+    | Just (tac, t') <- unfoldStep k t0 -> Right (t', "calc " <> render t0 <> " = " <> render t' <> " by " <> tac)
+  _ -> missing
+  where
+    missing = Left ("no index is known of " <> T.unpack (runBuilder (render t0)))
+    specification fn t = case t of
+      CSym h args
+        | Just s <- Map.lookup h (knowIndexSpecs k)
+        , Just post <- lookup fn (ixsPost s) -> do
+            let byArg = zip (ixsArgs s) args
+            (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) byArg
+            props <- preconditionsAt k g (Map.fromList byArg <> sigma) (ixsProps s)
+            mems <- argMemberships k g h args
+            let at = substCT (Map.fromList byArg <> sigma)
+                appeal = mems <> haves <> props <> "exact " <> fromText (ixsLemma s)
+                posts = ixsPost s
+                -- A lemma of several indices concludes their conjunction: the one wanted is taken from it.
+                proof = case posts of
+                  [_] -> appeal
+                  _ ->
+                    let conj = foldr1 (\x acc -> "(" <> x <> " /\\ " <> acc <> ")") [equationText (CSym f [t]) (at x) | (f, x) <- posts]
+                        (split, c) = conjunct "IxC" (length posts) (length (takeWhile ((/= fn) . fst) posts))
+                     in "have IxC: " <> conj <> " { " <> appeal <> " }; " <> split <> "exact " <> c
+            Right (at post, proof)
+      _ -> missing
 
 {- |
 The indices a lemma's arguments must have, at the arguments given by the
@@ -1033,7 +1073,11 @@ premisesAt k g eqs pre values byArg = foldM one (Map.empty, "") pre
     one (sigma, acc) (fn, a, pat) = do
       arg <- maybe (Left "internal: an index of no argument") (Right . snd) (listToMaybe (drop a byArg))
       let lhs = CSym fn [arg]
-      (e, proof) <- indexOf k g eqs lhs
+          known = substCT (argMap <> sigma) pat
+          determined = all (\v -> v `notElem` values || Map.member v sigma) (varsCT (substCT argMap pat))
+      (e, proof) <- case (determined, closeEq indexFuel k g eqs lhs known) of
+        (True, Right proof) -> Right (known, proof)
+        _ -> indexOf k g eqs lhs
       sigma' <- case matchCT values (substCT argMap pat) e sigma of
         Just found -> Right found
         Nothing
@@ -1273,7 +1317,7 @@ termProof k info n g le@(Located sp e) = case e of
       -- A hypothesis as it is, an induction hypothesis a recursive call names among them: taken to the goal once both are unfolded, where they differ.
       -- A lemma at its arguments: taken to the goal once the indices its conclusion gives terms are rewritten, where they differ.
       let bare = T.null (runBuilder (evBefore ev)) && T.null (runBuilder (evAfter ev))
-      pure (evidenceOut ev (fromMaybe (evBefore ev <> exactAppeal ev) (if bare then hypothesisBridge k g (evName ev) else indexedAppeal k g ev)))
+      pure (evidenceOut ev (fromMaybe (evBefore ev <> exactAppeal ev) ((if bare then hypothesisBridge k g (evName ev) else indexedAppeal k g ev) <|> lemmaBridge k g ev)))
 
 {- |
 What a proof term refers to in the core — a hypothesis, an induction
@@ -1299,6 +1343,31 @@ named n = Evidence n "" "" Nothing [] Nothing
 -- | Keep auxiliary declarations when an appeal becomes a proof.
 evidenceOut :: Evidence -> Builder -> Out
 evidenceOut ev tactic = Out tactic (evAux ev)
+
+{- | State a lemma's conclusion before transporting it by the same certified
+unfoldings and index equations used for a hypothesis. In particular, two
+indexed arguments may share an index through an equation in the context.
+-}
+lemmaBridge :: Knowledge -> Goal -> Evidence -> Maybe Builder
+lemmaBridge k g ev = do
+  prop <- evConclusion ev
+  let name = "LemmaConclusion"
+      extended = g {goalHyps = goalHyps g <> [(name, HProp prop)]}
+  bridge <- hypothesisBridge k extended name
+  stated <- either (const Nothing) Just (formula prop)
+  pure ("have " <> fromText name <> ": " <> stated <> " { " <> evBefore ev <> exactAppeal ev <> " }; " <> bridge)
+
+{- | Inferred facts use the indices already identified by the surrounding
+context. Their proofs still pass through 'lemmaBridge' and the kernel.
+-}
+normalizeFact :: Knowledge -> Goal -> Expr Text -> Expr Text
+normalizeFact k g prop = case stripLocations prop of
+  Rel op a b -> Rel op (normal a) (normal b)
+  _ -> prop
+  where
+    normal e = case termCT CVar e of
+      Right t -> maybe e (fromCT . snd) (listToMaybe (reverse (bridgeChain k g t)))
+      Left _ -> e
 
 {- |
 A lemma's appeal where its conclusion at its arguments is the goal once the
@@ -1470,7 +1539,10 @@ evidence k info g le = case spineOf le of
           premisesAt k g (goalEquations g) pre [v | (i, v) <- zip [0 ..] values, i `notElem` map fst defined] (zip (thmBinders t) args)
     -- What a theorem with value parameters concludes at its arguments: each value parameter the index of an argument, or found from one.
     conclusionAt t typed sigma = do
-      sc <- thmProp t
+      sc <-
+        thmProp t <|> do
+          guard (all isMembershipSlot (thmSlots t))
+          thmStatement t
       guard (length typed == length (thmBinders t))
       args <- either (const Nothing) Just (traverse (termCT CVar . fst) typed)
       let values = map mangleVariable (thmValues t)
@@ -1914,18 +1986,55 @@ runTactics k info n g0 sp tacs0 = do
     goal g = \case
       [] -> Left (EngineError sp ("unsolved goal:\n" <> T.unpack (renderGoal (knowEnv k) g)))
       Located tsp t : more -> case t of
-        R.TIntros names -> goal (introduce (map unLocated names) g) more
-        R.TIntro names -> goal (introduce (map unLocated names) g) more
+        R.TIntros names -> introGoal tsp (map unLocated names) g more
+        R.TIntro names -> introGoal tsp (map unLocated names) g more
         R.TRefl -> (\x -> (closed x, more)) <$> rflTactic k g tsp
         R.TAssumption -> Right (closed "assumption", more)
         R.TSorry -> Left (EngineError tsp ("sorry: the goal is\n" <> T.unpack (renderGoal (knowEnv k) g)))
         R.TExact e -> (\ev -> (evidenceOut ev (evBefore ev <> exactAppeal ev), more)) <$> evidence k info g e
         R.TCong (Just e) -> (\ev -> (evidenceOut ev (evBefore ev <> congUnfolded k g ev), more)) <$> evidence k info g e
-        R.TCong Nothing -> Right (closed "cong", more)
+        R.TCong Nothing ->
+          let (prep, eqs) = digest k g
+           in case conclude k g eqs (asEquation (goalConcl g)) of
+                Right proof -> Right (closed (prep <> proof), more)
+                Left _ -> Right (closed "cong", more)
         R.TTerm e -> case unLocated e of
           R.EProof rhs -> (,more) <$> proveRhs k info n g (Located tsp rhs)
-          _ -> (\ev -> (evidenceOut ev (evBefore ev <> "(" <> exactAppeal ev <> " | " <> congAppeal ev <> ")"), more)) <$> evidence k info g e
+          _ -> do
+            ev <- evidence k info g e
+            let bare = T.null (runBuilder (evBefore ev)) && T.null (runBuilder (evAfter ev))
+                bridged = (if bare then hypothesisBridge k g (evName ev) else indexedAppeal k g ev) <|> lemmaBridge k g ev
+                appeal = fromMaybe (evBefore ev <> "(" <> exactAppeal ev <> " | " <> congAppeal ev <> ")") bridged
+            Right (evidenceOut ev appeal, more)
         R.TCalc c -> (,more) <$> calcProof k info n g tsp c
+        R.THave name annotation rhs -> do
+          prop <- case annotation of
+            Just rawProp -> do
+              resolved <- either (\err -> let (esp, msg) = renderFixityError err in Left (EngineError esp msg)) Right (resolveExpr (knowFixities k) rawProp)
+              either (\(ElabError esp msg) -> Left (EngineError esp msg)) Right (runTC (elabProp (knowEnv k) (goalDict g) (goalVars g) resolved))
+            Nothing -> do
+              ev <- case unLocated rhs of
+                R.RExpr e -> evidence k info g e
+                _ -> Left (EngineError tsp "have needs a proposition for this proof: write have h : P := proof")
+              let hyp = case lookup (evName ev) (goalHyps g) of
+                    Just (HProp p) -> Just p
+                    _ -> Nothing
+              maybe (Left (EngineError tsp "cannot infer this local proposition: write have h : P := proof")) (Right . normalizeFact k g) (evConclusion ev <|> hyp)
+          stated <- either (Left . EngineError tsp) Right (formula prop)
+          proof <- proveRhs k info n g {goalConcl = prop} rhs
+          let (line, col) = R.spanStart tsp
+              core = "HaveL" <> T.pack (show line) <> "C" <> T.pack (show col)
+              names = case name of
+                Nothing -> goalNames g
+                Just (Located _ source) -> (source, core) : [(s, h) | (s, h) <- goalNames g, s /= source]
+              extended = g {goalHyps = goalHyps g <> [(core, HProp prop)], goalNames = names}
+          (next, rest) <- goal extended more
+          pure
+            ( Out
+                ("have " <> fromText core <> ": " <> stated <> " { " <> outTactic proof <> " }; " <> outTactic next)
+                (outAux proof <> outAux next)
+            , rest
+            )
         R.TFocus inner -> do
           out <- runTactics k info n g tsp inner
           Right (out, more)
@@ -1935,6 +2044,30 @@ runTactics k info n g0 sp tacs0 = do
           out <- finish proofs
           Right (out, rest)
         _ -> Left (EngineError tsp "this tactic is not supported yet")
+    -- Name induction fields and hypotheses first, then introduce implications
+    -- reverted by an inner induction. The kernel checks each implication rule.
+    introGoal tsp names g more = do
+      let pending = length [() | (v, _) <- goalVars g, "#" `T.isPrefixOf` v]
+          ihs = length [() | (v, _) <- goalNames g, "IH" `T.isPrefixOf` v]
+          remaining = drop (pending + ihs) names
+          renamed = introduce names g
+          (line, col) = R.spanStart tsp
+          prefix = "IntroL" <> T.pack (show line) <> "C" <> T.pack (show col) <> "N"
+          introduceOne (script, current) (i, source) = case stripLocations (goalConcl current) of
+            Arrow premise conclusion ->
+              let core = prefix <> T.pack (show i)
+               in Right
+                    ( script <> "ImplR as " <> fromText core <> "; "
+                    , current
+                        { goalHyps = goalHyps current <> [(core, HProp premise)]
+                        , goalNames = (source, core) : [(s, h) | (s, h) <- goalNames current, s /= source]
+                        , goalConcl = conclusion
+                        }
+                    )
+            _ -> Left (EngineError tsp "intro: no implication remains to introduce")
+      (script, extended) <- foldM introduceOne ("", renamed) (zip [1 :: Int ..] remaining)
+      (out, rest) <- goal extended more
+      pure (out {outTactic = script <> outTactic out}, rest)
     -- Each goal in turn, by the tactics left: a focused block solves one, anything else the first.
     solveAll [] rest = Right ([], rest)
     solveAll (c : cs) rest = do
@@ -2120,11 +2253,16 @@ unfoldRedex k = redex
     match p t s = case (p, t) of
       (CVar v, _) -> bind v t s
       (CStatic v, _) | isParameter t -> bind v t s
+      -- Numerals stand for successors in the core. Match the source's
+      -- successor clauses at literals too, without expanding a numeral
+      -- into a complete unary tree before looking at the pattern.
+      (CSym "S" [p'], CNum n) | n > 0 -> match p' (CNum (n - 1)) s
+      (CNum n, CSym "S" [t']) | n > 0 -> match (CNum (n - 1)) t' s
       (CSym f ps, CSym f' ts) | f == f', length ps == length ts -> foldl' (\acc (x, y) -> acc >>= match x y) (Just s) (zip ps ts)
       (CNum a, CNum b) | a == b -> Just s
       _ -> Nothing
     bind v t s = case lookup v s of
-      Just u -> if u == t then Just s else Nothing
+      Just u -> if canonical u == canonical t then Just s else Nothing
       Nothing -> Just ((v, t) : s)
     -- A side of a lemma at the bindings: a parameter of its schema, applied, is the function bound to it.
     instantiated s = \case

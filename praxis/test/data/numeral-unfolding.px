@@ -1,0 +1,28 @@
+module NumeralUnfolding where
+
+-- Source successor clauses apply to compact numerals as well as S-patterns.
+predecessor : Nat -> Nat
+predecessor 0 = 0
+predecessor (S n) = n
+
+pred-three : predecessor 3 = 2
+pred-three = rfl
+
+-- Each unfolding exposes another function or constructor under a projection.
+data Counter = MkCounter Nat
+
+value : Counter -> Nat
+value (MkCounter n) = n
+
+advance : Counter -> Counter
+advance (MkCounter n) = MkCounter (S n)
+
+count : Nat -> Counter
+count 0 = MkCounter 0
+count (S n) = advance (count n)
+
+count-five : value (count 5) = 5
+count-five = rfl
+
+nested-literals : predecessor (value (count 4)) = 3
+nested-literals = rfl

@@ -105,6 +105,68 @@ checkTests =
         c <- checkFile "test/data/natural.px"
         errors c @?= []
         assertBool "the conversion's result indices are certified" ("Natural.elt-of-plt.#index" `elem` checkedTheorems c)
+    , testCase "have checks local proofs and retains their facts and auxiliary inductions" $ do
+        c <- checkFile "test/data/have.px"
+        errors c @?= []
+        forM_ ["Have.transitive", "Have.zero-add", "Have.calculation", "Have.anonymous", "Have.shadow", "Have.inferred", "Have.box-ext"] $ \name ->
+          assertBool (T.unpack name) (name `elem` checkedTheorems c)
+        (_, core) <- maybe (assertFailure "missing checked local proofs") pure (checkedFinal c)
+        cert <- maybe (assertFailure "missing local induction certificate") pure (Map.lookup "u_Have_szero_dadd" (coreCertificates core))
+        either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal "u_Have_szero_dadd" [] [] MS.empty) [])
+    , testCase "have rejects invalid proofs even when its fact is unused" $ do
+        p <- either assertFailure pure prelude
+        forM_ ["0 = 1", "0 < 0"] $ \proposition -> do
+          let source = T.unlines ["module BadHave where", "bad : 0 = 0", "bad = by", "  have h : " <> proposition <> " := rfl", "  rfl"]
+              c = checkSource p "bad-have.px" source
+          assertBool "an invalid local proof was discarded" (not (null (errors c)))
+          assertBool "the invalid theorem was certified" ("BadHave.bad" `notElem` checkedTheorems c)
+    , testCase "intros cannot strengthen an equality reverted by nested induction" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module BadIntro where", "data Box = box Nat", "value : Box -> Nat", "value (box n) = n", "bad : (x y : Box) -> value x = value y -> x = box 0", "bad x y = by", "  induction x", "  { intros n", "    induction y", "    { intros m eq", "      have normalized := eq", "      cong normalized", "    }", "  }"]
+            c = checkSource p "bad-intro.px" source
+        assertBool "the false strengthened conclusion was accepted" (not (null (errors c)))
+        assertBool "the invalid theorem was certified" ("BadIntro.bad" `notElem` checkedTheorems c)
+    , testCase "successor clauses unfold at compact numerals under constructor projections" $ do
+        c <- checkFile "test/data/numeral-unfolding.px"
+        errors c @?= []
+        forM_ ["NumeralUnfolding.pred-three", "NumeralUnfolding.count-five", "NumeralUnfolding.nested-literals"] $ \name ->
+          assertBool (T.unpack name) (name `elem` checkedTheorems c)
+    , testCase "congruence checks every differing constructor and function argument" $ do
+        c <- checkFile "test/data/multi-cong.px"
+        errors c @?= []
+        forM_ ["MultiCong.pair-cong", "MultiCong.nested-cong", "MultiCong.reverse-cong", "MultiCong.unchanged-field"] $ \name ->
+          assertBool (T.unpack name) (name `elem` checkedTheorems c)
+        p <- either assertFailure pure prelude
+        let bad = checkSource p "bad-cong.px" "module BadCong where\ndata Pair = Mk Nat Nat\nbad : (a b : Nat) -> a = b -> Mk a 0 = Mk b 1\nbad a b h = by cong\n"
+        assertBool "congruence ignored a differing field" (not (null (errors bad)))
+    , testCase "index transport preserves checked equality evidence in the typed core" $ do
+        c <- checkFile "test/data/index-transport.px"
+        errors c @?= []
+        forM_ ["IndexTransport.cast.#index", "IndexTransport.reverse.#index", "IndexTransport.successor.#index", "IndexTransport.chained.#index", "IndexTransport.two-indices.#index", "IndexTransport.append.#index", "IndexTransport.append-inferred.#index", "IndexTransport.one-value"] $ \name ->
+          assertBool (T.unpack name) (name `elem` checkedTheorems c)
+        (_, core) <- maybe (assertFailure "missing checked transport core") pure (checkedFinal c)
+        case Map.lookup "u_IndexTransport_scast" (coreBodies core) of
+          Just [body] -> do
+            assertBool "transport evidence was erased" (not (null (SurfaceCore.obligations body)))
+            assertBool "transport is not visible in the typed core" ("transport" `T.isInfixOf` SurfaceCore.dump body)
+          _ -> assertFailure "missing cast core"
+        case Map.lookup "u_IndexTransport_stwo_dindices" (coreBodies core) of
+          Just [body] -> length (SurfaceCore.obligations body) @?= 2
+          _ -> assertFailure "missing two-index cast core"
+    , testCase "index transport cannot erase invalid casts through ignored values or proofs" $ do
+        p <- either assertFailure pure prelude
+        let prefix = T.unlines ["module BadTransport where", "data Vec n a where", "  Nil : Vec 0 a", "  Cons : a -> Vec n a -> Vec (S n) a", "cast : {n m : Nat} -> n = m -> Vec n a -> Vec m a", "cast {n} {m} h xs = xs", "ignore : Vec n a -> Nat", "ignore xs = 0", "same : (n : Nat) -> n = n", "same n = rfl"]
+        forM_
+          [ "bad : Vec n a -> Vec m a\nbad xs = xs"
+          , "bad : {n m : Nat} -> n = n -> Vec n a -> Vec m a\nbad {n} {m} h xs = xs"
+          , "bad : {n m : Nat} -> n = m -> Vec n Nat -> Vec m (Vec 0 Nat)\nbad {n} {m} h xs = xs"
+          , "bad : Nat\nbad = ignore (cast {0} {1} (by rfl) Nil)"
+          , "bad : 0 = 0\nbad = by\n  have unused := same (ignore (cast {0} {1} (by rfl) Nil))\n  rfl"
+          ]
+          $ \declaration -> do
+            let c = checkSource p "bad-transport.px" (prefix <> declaration <> "\n")
+            assertBool (T.unpack declaration <> ": invalid transport was accepted") (not (null (errors c)))
+            assertBool "invalid function or theorem was certified" ("BadTransport.bad" `notElem` checkedTheorems c)
     , testCase "interleaved type parameters and indices elaborate and certify" $ do
         c <- checkFile "test/data/interleaved.px"
         errors c @?= []

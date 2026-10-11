@@ -10,6 +10,7 @@ its evidence. The PRA checker remains the authority for that evidence.
 module Language.Praxis.Surface.Core (
   Body,
   elaborate,
+  elaborateNamed,
   emptyBranch,
   computation,
   obligations,
@@ -53,6 +54,7 @@ data Value o ctx t where
   Literal :: Natural -> Value o ctx 'Natural
   Apply :: Signature args t -> List (Value o ctx) args -> [o] -> Value o ctx t
   Dictionary :: SType t -> Tm.Term Void -> Value o ctx t
+  Transport :: SType t -> Value o ctx u -> [o] -> Value o ctx t
   Absurd :: SType t -> o -> Value o ctx t
 
 data SomeVariable ctx where
@@ -90,8 +92,12 @@ irrelevant type arguments are instantiated at Nat; value indices must be
 determined. This instantiation is recorded in the core signature.
 -}
 elaborate :: Env -> [Slot] -> [Ty.Ty] -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
-elaborate env slots tys expression = do
-  Context ctx <- context tys
+elaborate env slots tys = elaborateNamed env slots [("v" <> T.pack (show i), ty) | (i, ty) <- zip [0 :: Int ..] tys]
+
+-- | The named context also identifies the terms denoted by source type indices.
+elaborateNamed :: Env -> [Slot] -> [(Text, Ty.Ty)] -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
+elaborateNamed env slots variables expression = do
+  Context ctx <- context (map snd variables)
   SomeValue ty value <- infer ctx expression
   pure (Body ctx ty value id)
   where
@@ -106,6 +112,14 @@ elaborate env slots tys expression = do
       SomeType ty <- first (\message -> message <> " in " <> show t) (reflectType (complete t))
       value <- check ctx ty (map complete ts) is e
       pure (SomeValue ty value)
+    infer ctx (S.Transport target child proofs) = do
+      SomeType ty <- reflectType (complete target)
+      SomeValue actual value <- infer ctx child
+      pairs <- maybe (Left "an index transport changes the type structure") Right (Ty.transportIndices (forgetType actual) (forgetType ty))
+      expected <- traverse (\(x, y) -> S.Rel S.RelEq <$> indexTerm x <*> indexTerm y) pairs
+      evidence <- traverse transportProof proofs
+      unless (map fst evidence == expected) $ Left "index transport evidence does not match its index equalities"
+      pure (SomeValue ty (Transport ty value evidence))
     infer _ (S.Nat n) = Right (SomeValue SNatural (Literal n))
     infer ctx (S.Var i) = do
       SomeVariable t v <- variable ctx i
@@ -118,8 +132,16 @@ elaborate env slots tys expression = do
       validateDictionary env slots (forgetType ty) closed
       pure (SomeValue ty (Dictionary ty closed))
     infer _ _ = Left "a value without a checked type at the explicit core boundary"
+    indexTerm ix = maybe (Left "an index transport has no scoped index term") Right (indexTermIn env [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] variables] ix)
+    transportProof e = case S.stripLocations e of
+      S.ProofArg prop (S.Irrelevant raw)
+        | all (\i -> i >= 0 && i < length variables) (toList prop) -> Right (prop, raw)
+      _ -> Left "an index transport without scoped equality evidence"
     check :: List SType ctx -> SType t -> [Ty.Ty] -> [(Int, Ty.Ix)] -> S.Expr Int -> Either String (Value (Tm.ProofArgument Int) ctx t)
     check ctx ty _types is e = case S.spine e of
+      (transport@S.Transport {}, []) -> do
+        SomeValue actual value <- infer ctx transport
+        equal ty actual value
       (S.Var i, []) -> do
         SomeVariable actual v <- variable ctx i
         equal ty actual (Variable v)
@@ -271,6 +293,7 @@ lower = \case
   Literal n -> Tm.Literal n
   Apply (Signature r _ _ _ _) vs _ -> Tm.Call r (lowerArgs vs)
   Dictionary _ code -> fmap absurd code
+  Transport _ child _ -> lower child
   Absurd _ _ -> Tm.Literal 0
   where
     lowerArgs :: List (Value o ctx) ts -> [Tm.Term Int]
@@ -291,6 +314,7 @@ obligations (Body _ _ v _) = evidence v
     evidence :: Value o ctx t -> [o]
     evidence = \case
       Apply _ vs os -> children vs <> os
+      Transport _ child os -> evidence child <> os
       Absurd _ o -> [o]
       _ -> []
     children :: List (Value o ctx) ts -> [o]
@@ -314,6 +338,7 @@ traverseObligations f (Body ctx t value optimize) = (\v -> Body ctx t v optimize
       Literal n -> pure (Literal n)
       Apply s vs os -> Apply s <$> args vs <*> traverse f os
       Dictionary ty code -> pure (Dictionary ty code)
+      Transport ty child os -> Transport ty <$> go child <*> traverse f os
       Absurd ty o -> Absurd ty <$> f o
     args :: List (Value o ctx) ts -> f (List (Value p ctx) ts)
     args Nil = pure Nil
@@ -367,6 +392,7 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
               then T.intercalate "\n  " (Pretty.reference ref : args)
               else flat
       Dictionary ty code -> "[dict (" <> dictionary code <> " : " <> Pretty.typeText env sc 0 (forgetType ty) <> ")]"
+      Transport ty child proofs -> Pretty.parens (p > 0) ("transport " <> term 11 child <> " [" <> T.intercalate ", " (map proofName proofs) <> "] : " <> Pretty.typeText env sc 0 (forgetType ty))
       Absurd ty proof -> Pretty.parens (p > 0) ("absurd [proof " <> proofName proof <> "] : " <> Pretty.typeText env sc 0 (forgetType ty))
     arguments :: List (Value o ctx) ts -> [Text]
     arguments Nil = []
