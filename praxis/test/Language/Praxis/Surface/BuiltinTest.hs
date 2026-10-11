@@ -29,12 +29,16 @@ builtinTests =
     , testCase "complete, coherent signatures and bridge propositions register" $ do
         registry <- either assertFailure pure (registerAll fixture)
         Map.size registry @?= length roles
+    , testCase "finite retractions do not require a vector registration" $ do
+        let withoutVectors = filter (`notElem` [BuiltinVec, BuiltinVecLookup]) roles
+        registry <- either assertFailure pure (foldM (\known role -> fst <$> registerBuiltin known fixture (builtinRoleName role) (target role)) Map.empty withoutVectors)
+        Map.size registry @?= length withoutVectors
     , testCase "registrations retain their proof dependencies" $ do
-        binding <- either assertFailure pure (validate BuiltinFiniteCoverage fixture)
-        builtinDependencies binding @?= map target (rolePrerequisites BuiltinFiniteCoverage)
+        binding <- either assertFailure pure (validate BuiltinFiniteDecodeCode fixture)
+        builtinDependencies binding @?= map target (rolePrerequisites BuiltinFiniteDecodeCode)
         assertBool "bound requires a certified theorem" (requiresCertificate BuiltinFinToNatBound)
         assertBool "inverse requires a certified theorem" (requiresCertificate BuiltinFinFromToNat)
-        assertBool "coverage is a law checked at each instance" (not (requiresCertificate BuiltinFiniteCoverage))
+        assertBool "coverage is a law checked at each instance" (not (requiresCertificate BuiltinFiniteDecodeCode))
     , testCase "roles cannot be duplicated or rebound" $ do
         let existing = Map.singleton "FIN" (target BuiltinFin)
         rejected "already registered" (registerBuiltin existing fixture "FIN" (target BuiltinFin))
@@ -57,21 +61,23 @@ builtinTests =
     , testCase "a generated theorem without a surface statement is not a bridge" $
         rejected "explicit bridge theorem statement" (validate BuiltinFinToFromNat (changeTheorem BuiltinFinToFromNat (\t -> t {thmProp = Nothing}) fixture))
     , testCase "finite methods belong to the same registered class" $
-        rejected "exact dependent method signature" (validate BuiltinFiniteLocate (changeMethod BuiltinFiniteLocate (\m -> m {methodClass = [Ident "OtherFinite"]}) fixture))
-    , testCase "enumeration and locator depend on this dictionary's cardinality" $ do
+        rejected "exact dependent method signature" (validate BuiltinFiniteCode (changeMethod BuiltinFiniteCode (\m -> m {methodClass = [Ident "OtherFinite"]}) fixture))
+    , testCase "both directions depend on this dictionary's cardinality" $ do
         let otherCard = IxVar "#method:Other.card"
-        rejected "exact dependent method signature" (validate BuiltinFiniteEnumeration (changeMethod BuiltinFiniteEnumeration (\m -> m {methodScheme = (methodScheme m) {schemeType = vec otherCard}}) fixture))
-        rejected "exact dependent method signature" (validate BuiltinFiniteLocate (changeMethod BuiltinFiniteLocate (\m -> m {methodScheme = (methodScheme m) {schemeType = TArrow parameter (fin otherCard)}}) fixture))
-    , testCase "coverage uses the registered lookup, locator and enumeration" $ do
-        let wrong = Rel RelEq (apps (Global (Ref RefFunction "otherLookup")) [Global cardRef, App (Global locateRef) (Var 0), Global enumRef]) (Var 0)
-        rejected "same dictionary" (validate BuiltinFiniteCoverage (changeLaw (\l -> l {lawProp = scoped wrong}) fixture))
-        let wrongDictionary = Rel RelEq (lookupCall [Global cardRef, App (Global (Ref RefStatic "foreign")) (Var 0), Global enumRef]) (Var 0)
-        rejected "same dictionary" (validate BuiltinFiniteCoverage (changeLaw (\l -> l {lawProp = scoped wrongDictionary}) fixture))
+        rejected "exact dependent method signature" (validate BuiltinFiniteDecode (changeMethod BuiltinFiniteDecode (\m -> m {methodScheme = (methodScheme m) {schemeType = TArrow (fin otherCard) parameter}}) fixture))
+        rejected "exact dependent method signature" (validate BuiltinFiniteCode (changeMethod BuiltinFiniteCode (\m -> m {methodScheme = (methodScheme m) {schemeType = TArrow parameter (fin otherCard)}}) fixture))
+    , testCase "the retraction law uses the registered decoder and encoder" $ do
+        let wrong = Rel RelEq (App (Global (Ref RefStatic "otherDecode")) (App (Global codeRef) (Var 0))) (Var 0)
+        rejected "same dictionary" (validate BuiltinFiniteDecodeCode (changeLaw (\l -> l {lawProp = scoped wrong}) fixture))
+        let wrongDictionary = Rel RelEq (App (Global decodeRef) (App (Global (Ref RefStatic "foreign")) (Var 0))) (Var 0)
+        rejected "same dictionary" (validate BuiltinFiniteDecodeCode (changeLaw (\l -> l {lawProp = scoped wrongDictionary}) fixture))
     , testCase "coverage is unconditional and quantifies exactly one element" $ do
-        rejected "same dictionary" (validate BuiltinFiniteCoverage (changeLaw (\l -> l {lawProp = scoped (Arrow Top coverageProp)}) fixture))
-        rejected "exactly one value" (validate BuiltinFiniteCoverage (changeLaw (\l -> l {lawBinders = [("x", parameter), ("y", parameter)]}) fixture))
+        rejected "same dictionary" (validate BuiltinFiniteDecodeCode (changeLaw (\l -> l {lawProp = scoped (Arrow Top coverageProp)}) fixture))
+        rejected "exactly one value" (validate BuiltinFiniteDecodeCode (changeLaw (\l -> l {lawBinders = [("x", parameter), ("y", parameter)]}) fixture))
     , testCase "coverage cannot use another class's method slots" $
-        rejected "own class dictionary" (validate BuiltinFiniteCoverage (changeLaw (\l -> l {lawSlots = [s {slotParam = 1} | s <- lawSlots l]}) fixture))
+        rejected "own class dictionary" (validate BuiltinFiniteDecodeCode (changeLaw (\l -> l {lawSlots = [s {slotParam = 1} | s <- lawSlots l]}) fixture))
+    , testCase "the retraction law's slots retain the registered method arities" $
+        rejected "own class dictionary" (validate BuiltinFiniteDecodeCode (changeLaw (\l -> l {lawSlots = [if slotMethod s == target BuiltinFiniteCode then s {slotArity = 2} else s | s <- lawSlots l]}) fixture))
     ]
 
 roles :: [BuiltinRole]
@@ -102,9 +108,9 @@ target = \case
   BuiltinVecLookup -> [Ident "Bridge", Ident "lookup"]
   BuiltinFinite -> [Ident "Bridge", Ident "Finite"]
   BuiltinFiniteCard -> [Ident "Bridge", Ident "Finite", Ident "card"]
-  BuiltinFiniteEnumeration -> [Ident "Bridge", Ident "Finite", Ident "enumeration"]
-  BuiltinFiniteLocate -> [Ident "Bridge", Ident "Finite", Ident "locate"]
-  BuiltinFiniteCoverage -> [Ident "Bridge", Ident "Finite", Ident "coverage"]
+  BuiltinFiniteDecode -> [Ident "Bridge", Ident "Finite", Ident "decode"]
+  BuiltinFiniteCode -> [Ident "Bridge", Ident "Finite", Ident "code"]
+  BuiltinFiniteDecodeCode -> [Ident "Bridge", Ident "Finite", Ident "decode-code"]
 
 parameter :: Ty
 parameter = TParam 0 []
@@ -141,12 +147,12 @@ fixture = withCoverage
         (Ident "Finite")
         []
         [ (Ident "card", Scheme [("a", KType)] [] TNat, 0)
-        , (Ident "enumeration", Scheme [("a", KType)] [] (vec cardIndex), 0)
-        , (Ident "locate", Scheme [("a", KType)] [] (TArrow parameter (fin cardIndex)), 1)
+        , (Ident "code", Scheme [("a", KType)] [] (TArrow parameter (fin cardIndex)), 1)
+        , (Ident "decode", Scheme [("a", KType)] [] (TArrow (fin cardIndex) parameter), 1)
         ]
-    law = LawInfo (target BuiltinFiniteCoverage) (target BuiltinFinite) [("x", parameter)] (scoped coverageProp) slots (Located (Span (1, 1) (1, 1)) R.EWildcard)
+    law = LawInfo (target BuiltinFiniteDecodeCode) (target BuiltinFinite) [("x", parameter)] (scoped coverageProp) slots (Located (Span (1, 1) (1, 1)) R.EWildcard)
     withCoverage = addLaws (target BuiltinFinite) [law] withClass
-    slots = [Slot (target BuiltinFiniteCard) 0 0, Slot (target BuiltinFiniteEnumeration) 0 0, Slot (target BuiltinFiniteLocate) 0 1]
+    slots = [Slot (target BuiltinFiniteCard) 0 0, Slot (target BuiltinFiniteCode) 0 1, Slot (target BuiltinFiniteDecode) 0 1]
 
 addBridge :: BuiltinRole -> [Text] -> [Ty] -> Expr Int -> Env -> Env
 addBridge role values types proposition env = fst (setTheoremIndices [] values (Just (scoped proposition)) (addTheorem env (target role) ["i" | not (null types)] types [] [] Nothing))
@@ -160,19 +166,15 @@ fromCall k n = apps (Global (functionRef BuiltinFinFromNat)) [k, n]
 toCall :: Expr Int -> Expr Int
 toCall i = App (Global (functionRef BuiltinFinToNat)) i
 
-lookupCall :: [Expr Int] -> Expr Int
-lookupCall = apps (Global (functionRef BuiltinVecLookup))
-
 boundProp, fromToProp, toFromProp, coverageProp :: Expr Int
 boundProp = Rel RelLt (toCall (Var 1)) (Var 0)
 fromToProp = Rel RelEq (fromCall (toCall (Var 1)) (Var 0)) (Var 1)
 toFromProp = Arrow (Rel RelLt (Var 0) (Var 1)) (Rel RelEq (toCall (fromCall (Var 0) (Var 1))) (Var 0))
-coverageProp = Rel RelEq (lookupCall [Global cardRef, App (Global locateRef) (Var 0), Global enumRef]) (Var 0)
+coverageProp = Rel RelEq (App (Global decodeRef) (App (Global codeRef) (Var 0))) (Var 0)
 
-cardRef, enumRef, locateRef :: Ref
-cardRef = Ref RefValueParam "0"
-enumRef = Ref RefValueParam "1"
-locateRef = Ref RefStatic (staticName 1)
+codeRef, decodeRef :: Ref
+codeRef = Ref RefStatic (staticName 1)
+decodeRef = Ref RefStatic (staticName 2)
 
 changeData :: BuiltinRole -> (DataInfo -> DataInfo) -> Env -> Env
 changeData role f env = env {envGlobals = Map.adjust (\case GData d -> GData (f d); other -> other) (target role) (envGlobals env)}
@@ -187,4 +189,4 @@ changeMethod :: BuiltinRole -> (MethodInfo -> MethodInfo) -> Env -> Env
 changeMethod role f env = env {envGlobals = Map.adjust (\case GMethod d -> GMethod (f d); other -> other) (target role) (envGlobals env)}
 
 changeLaw :: (LawInfo -> LawInfo) -> Env -> Env
-changeLaw f env = env {envGlobals = Map.adjust (\case GLaw d -> GLaw (f d); other -> other) (target BuiltinFiniteCoverage) (envGlobals env)}
+changeLaw f env = env {envGlobals = Map.adjust (\case GLaw d -> GLaw (f d); other -> other) (target BuiltinFiniteDecodeCode) (envGlobals env)}

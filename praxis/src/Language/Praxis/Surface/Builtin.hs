@@ -46,9 +46,9 @@ data BuiltinRole
   | BuiltinVecLookup
   | BuiltinFinite
   | BuiltinFiniteCard
-  | BuiltinFiniteEnumeration
-  | BuiltinFiniteLocate
-  | BuiltinFiniteCoverage
+  | BuiltinFiniteDecode
+  | BuiltinFiniteCode
+  | BuiltinFiniteDecodeCode
   deriving stock (Eq, Ord, Show, Enum, Bounded)
 
 -- | Text keys allow the environment to store this without importing its validator.
@@ -74,9 +74,9 @@ builtinRoleName = \case
   BuiltinVecLookup -> "VEC_LOOKUP"
   BuiltinFinite -> "FINITE"
   BuiltinFiniteCard -> "FINITE_CARD"
-  BuiltinFiniteEnumeration -> "FINITE_ENUMERATION"
-  BuiltinFiniteLocate -> "FINITE_LOCATE"
-  BuiltinFiniteCoverage -> "FINITE_COVERAGE"
+  BuiltinFiniteDecode -> "FINITE_DECODE"
+  BuiltinFiniteCode -> "FINITE_CODE"
+  BuiltinFiniteDecodeCode -> "FINITE_DECODE_CODE"
 
 parseBuiltinRole :: Text -> Either String BuiltinRole
 parseBuiltinRole name = case [role | role <- [minBound .. maxBound], builtinRoleName role == name] of
@@ -96,9 +96,9 @@ rolePrerequisites = \case
   BuiltinVecLookup -> [BuiltinFin, BuiltinVec]
   BuiltinFinite -> []
   BuiltinFiniteCard -> [BuiltinFinite]
-  BuiltinFiniteEnumeration -> [BuiltinFinite, BuiltinFiniteCard, BuiltinVec]
-  BuiltinFiniteLocate -> [BuiltinFinite, BuiltinFiniteCard, BuiltinFin]
-  BuiltinFiniteCoverage -> [BuiltinFinite, BuiltinFiniteCard, BuiltinFiniteEnumeration, BuiltinFiniteLocate, BuiltinVecLookup]
+  BuiltinFiniteDecode -> [BuiltinFinite, BuiltinFiniteCard, BuiltinFin]
+  BuiltinFiniteCode -> [BuiltinFinite, BuiltinFiniteCard, BuiltinFin]
+  BuiltinFiniteDecodeCode -> [BuiltinFinite, BuiltinFiniteCard, BuiltinFiniteDecode, BuiltinFiniteCode]
 
 -- | A class law is checked at every instance; bridge theorems need a certificate now.
 requiresCertificate :: BuiltinRole -> Bool
@@ -169,30 +169,27 @@ validateBuiltin registry env role target = do
       GClass _ -> pure ()
       _ -> expect "a class" False
     BuiltinFiniteCard -> finiteMethod declaration TNat 0
-    BuiltinFiniteEnumeration -> do
-      vec <- typeName BuiltinVec
+    BuiltinFiniteDecode -> do
+      fin <- typeName BuiltinFin
       card <- registered BuiltinFiniteCard
-      finiteMethod declaration (TData vec [TParam 0 []] [cardIndex card]) 0
-    BuiltinFiniteLocate -> do
+      finiteMethod declaration (TArrow (TData fin [] [cardIndex card]) (TParam 0 [])) 1
+    BuiltinFiniteCode -> do
       fin <- typeName BuiltinFin
       card <- registered BuiltinFiniteCard
       finiteMethod declaration (TArrow (TParam 0 []) (TData fin [] [cardIndex card])) 1
-    BuiltinFiniteCoverage -> do
+    BuiltinFiniteDecodeCode -> do
       cls <- registered BuiltinFinite
-      enum <- registered BuiltinFiniteEnumeration
-      locate <- registered BuiltinFiniteLocate
-      card <- registered BuiltinFiniteCard
-      lookupFn <- registeredFunction BuiltinVecLookup
+      decode <- registered BuiltinFiniteDecode
+      code <- registered BuiltinFiniteCode
       l <- case declaration of
         GLaw l -> pure l
         _ -> reject "requires a class law"
       expect "a law of the registered FINITE class, over exactly one value of its parameter" $
         lawClass l == cls && map snd (lawBinders l) == [TParam 0 []]
-      enumRef <- lawMethod l enum
-      locateRef <- lawMethod l locate
-      cardRef <- lawMethod l card
-      let expected = Rel RelEq (call lookupFn [Global cardRef] [App (Global locateRef) (Var 0), Global enumRef]) (Var 0)
-      expect "lookup (locate x) enumeration = x, using the registered methods of the same dictionary" (open (lawProp l) == expected)
+      decodeRef <- lawMethod l decode
+      codeRef <- lawMethod l code
+      let expected = Rel RelEq (App (Global decodeRef) (App (Global codeRef) (Var 0))) (Var 0)
+      expect "decode (code x) = x, using the registered methods of the same dictionary" (open (lawProp l) == expected)
   pure (BuiltinBinding role target prerequisites)
   where
     roleName = builtinRoleName role
@@ -250,7 +247,7 @@ validateBuiltin registry env role target = do
           && null (thmPremises t)
       p <- maybe (reject "requires an explicit bridge theorem statement") Right (thmProp t)
       expect "the registered numeric bridge's exact proposition" (open p == proposition)
-    lawMethod law name = case [ref | (slot, ref) <- zip (lawSlots law) (dictionaryRefs (lawSlots law)), slotMethod slot == name, slotParam slot == 0] of
+    lawMethod law name = case [ref | (slot, ref) <- zip (lawSlots law) (dictionaryRefs (lawSlots law)), slotMethod slot == name, slotParam slot == 0, Just (GMethod method) <- [Map.lookup name (envGlobals env)], slotArity slot == methodArity method] of
       [ref] -> pure ref
       _ -> reject "requires every finite method to refer to its own class dictionary"
 

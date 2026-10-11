@@ -330,14 +330,20 @@ The finite-domain protocol uses these roles:
 | `VEC_LOOKUP` | `Fin n -> Vec n a -> a` |
 | `FINITE` | The finite class |
 | `FINITE_CARD` | Its `card : Nat` method |
-| `FINITE_ENUMERATION` | Its `enumeration : Vec card a` method |
-| `FINITE_LOCATE` | Its `locate : a -> Fin card` method |
-| `FINITE_COVERAGE` | Its law `lookup (locate x) enumeration = x` |
+| `FINITE_CODE` | Its `code : a -> Fin card` method |
+| `FINITE_DECODE` | Its `decode : Fin card -> a` method |
+| `FINITE_DECODE_CODE` | Its law `decode (code x) = x` |
 
-The dependent member signatures and coverage law must use the same registered
+The dependent member signatures and retraction law must use the same registered
 class and cardinality. The bridge theorems must have exactly the required
 statements, without extra assumptions. Names alone do not establish these
 properties: the kernel checks the ordinary proofs.
+
+The finite interface requires only the round trip from an element through
+its code and back. Different ordinals may decode to the same element, so
+`card` is an upper bound on the number of elements. A vector enumeration and
+lookup are not prerequisites of the finite roles. When useful, an enumeration
+can be built separately by tabulating `decode`.
 
 ## Types
 
