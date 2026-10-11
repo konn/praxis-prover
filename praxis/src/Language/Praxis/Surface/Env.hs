@@ -25,6 +25,7 @@ module Language.Praxis.Surface.Env (
   -- * Globals
   QualName,
   DataInfo (..),
+  DataBinder (..),
   CtorInfo (..),
   constructorValueTypes,
   ConstructorSignature (..),
@@ -66,6 +67,9 @@ module Language.Praxis.Surface.Env (
   setFunRuntime,
   setFunProofs,
   explicitPositions,
+  implicitPositions,
+  dataParameterOrder,
+  renderType,
   addClass,
   addLaws,
   addInstanceFunction,
@@ -93,7 +97,7 @@ import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Syntax (Expr)
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ix, Kind, Scheme, Ty, TyScope, emptyScope)
+import Language.Praxis.Surface.Types (Ix, Kind, Parameter (..), Scheme, Ty, TyScope, emptyScope, renderTyWithOrder)
 
 -- * Globals
 
@@ -142,13 +146,17 @@ data DataInfo = DataInfo
   -- ^ the types of its indices, in order, for a data type in the GADT style; none otherwise
   , dataIndexFns :: ![QualName]
   -- ^ its index functions, one for each index, @T.#idx@ or @T.#idx-i@
-  , dataImplicits :: ![Bool]
-  {- ^ whether each of its parameters, its type parameters then its indices,
-  is implicit: not written where the type is used, but found from the types
-  of the indices written, by their kinds
-  -}
+  , dataBinders :: ![DataBinder]
+  -- ^ Binders in declaration order, mapping to the separate type/index lists.
   }
   deriving stock (Show)
+
+data DataBinder = DataBinder
+  { dbName :: !Text
+  , dbImplicit :: !Bool
+  , dbParameter :: !Parameter
+  }
+  deriving stock (Show, Eq)
 
 data CtorInfo = CtorInfo
   { ctorQual :: !QualName
@@ -440,14 +448,14 @@ coreOf = mangleGlobal . map segmentRaw
 
 -- | Add a data type and its constructors; the type opens a namespace holding them.
 addData :: Env -> Segment -> [(Text, Kind)] -> [(Segment, [Ty])] -> (Env, DataInfo)
-addData env name params ctors = addIndexedData env name params [] (map (const False) params) [] [(c, fs, ConstructorSignature [TeleEntry ("#" <> T.pack (show i)) t (Explicit i) | (i, t) <- zip [0 ..] fs] [] []) | (c, fs) <- ctors]
+addData env name params ctors = addIndexedData env name params [] [DataBinder n False (TypeParameter i) | (i, (n, _)) <- zip [0 ..] params] [] [(c, fs, ConstructorSignature [TeleEntry ("#" <> T.pack (show i)) t (Explicit i) | (i, t) <- zip [0 ..] fs] [] []) | (c, fs) <- ctors]
 
 -- | Add a data type whose constructors may be in the GADT style, with the types of its indices, which of its parameters are implicit, and its index functions.
-addIndexedData :: Env -> Segment -> [(Text, Kind)] -> [Ty] -> [Bool] -> [QualName] -> [(Segment, [Ty], ConstructorSignature)] -> (Env, DataInfo)
-addIndexedData env name params indices implicits indexFns ctors = (env', info)
+addIndexedData :: Env -> Segment -> [(Text, Kind)] -> [Ty] -> [DataBinder] -> [QualName] -> [(Segment, [Ty], ConstructorSignature)] -> (Env, DataInfo)
+addIndexedData env name params indices binders indexFns ctors = (env', info)
   where
     q = qualify env [name]
-    info = DataInfo q params [CtorInfo (q <> [c]) q i fs (coreOf (q <> [c])) g | (i, (c, fs, g)) <- zip [0 ..] ctors] (coreOf (q <> [Ident "is"])) indices indexFns implicits
+    info = DataInfo q params [CtorInfo (q <> [c]) q i fs (coreOf (q <> [c])) g | (i, (c, fs, g)) <- zip [0 ..] ctors] (coreOf (q <> [Ident "is"])) indices indexFns binders
     members = Map.fromList [(c, q <> [c]) | (c, _, _) <- ctors]
     env' =
       env
@@ -456,12 +464,23 @@ addIndexedData env name params indices implicits indexFns ctors = (env', info)
         , envDisplay = Map.union (Map.fromList ((dataIs info, displayQualName (q <> [Ident "is"])) : [(ctorCore c, segmentText (last (ctorQual c))) | c <- dataCtors info])) (envDisplay env)
         }
 
--- | The positions of a data type's explicit parameters, which a use of it writes: its type parameters', then its indices'.
-explicitPositions :: DataInfo -> ([Int], [Int])
-explicitPositions dd = ([i | i <- [0 .. np - 1], not (implicitAt i)], [j | j <- [0 .. length (dataIndices dd) - 1], not (implicitAt (np + j))])
-  where
-    np = length (dataParams dd)
-    implicitAt i = or (take 1 (drop i (dataImplicits dd)))
+-- | Explicit argument slots in declaration order.
+explicitPositions :: DataInfo -> [Parameter]
+explicitPositions = map dbParameter . filter (not . dbImplicit) . dataBinders
+
+-- | Implicit argument slots in declaration order.
+implicitPositions :: DataInfo -> [Parameter]
+implicitPositions = map dbParameter . filter dbImplicit . dataBinders
+
+-- | The source order for a canonical datatype name; empty when unknown.
+dataParameterOrder :: Env -> Text -> [Parameter]
+dataParameterOrder env name = case [d | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == name] of
+  d : _ -> map dbParameter (dataBinders d)
+  [] -> []
+
+-- | A diagnostic type, using each datatype's declared argument order.
+renderType :: Env -> [Text] -> [Text] -> Ty -> String
+renderType env = renderTyWithOrder (dataParameterOrder env)
 
 -- | Add a function, with its dictionary; it opens a namespace for its lemmas.
 addFunction :: Env -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)

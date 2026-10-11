@@ -34,5 +34,5 @@ coreTests =
         let successor x = Typed TNat [] [] (App (Global (Ref RefBuiltin "S")) x)
         value <- either assertFailure pure (Core.elaborate emptyEnv [] [TNat] (successor (successor (Var 0))))
         Core.dump value @?= "\\(v0 : Nat) -> (S (S v0) : Nat)"
-        Pretty.typeText (Pretty.Scope ["a"] ["n"] []) 0 (TArrow (TArrow TNat TNat) (TData "Example.Vec" [TParam 0 []] [IxSucc (IxParam 0)])) @?= "(Nat -> Nat) -> Example.Vec a (S n)"
+        Pretty.typeText emptyEnv (Pretty.Scope ["a"] ["n"] []) 0 (TArrow (TArrow TNat TNat) (TData "Example.Vec" [TParam 0 []] [IxSucc (IxParam 0)])) @?= "(Nat -> Nat) -> Example.Vec a (S n)"
     ]

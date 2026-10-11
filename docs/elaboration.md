@@ -209,8 +209,13 @@ the induction hypothesis proves the goal once unfolded
 the equations its introduction takes as it proves the indices of an
 application's arguments (`Engine.indexEquation`).
 
-The head is a telescope: the type of an index may mention the type
-parameters and the indices before it, `(l : Vec a n)`. An implicit parameter
+The head is an ordered telescope: type parameters and value indices may
+interleave, and the type of each index may mention only earlier binders,
+`(n : Nat) (a : Type) (l : Vec a n)`. `DataInfo.dataBinders` records each
+binder's name, implicitness and slot in the separate internal type/index
+lists. Elaboration uses these slots to normalize applications; printing
+restores declaration order. This does not change the PRA encoding.
+An implicit parameter
 of the head, `{n}`, is a type parameter or an index like any other, in the
 types and in the codes; only a use of the type does not write it, and it is
 found by matching the kind of each index written against the index's type,

@@ -22,9 +22,10 @@ import Data.List (find)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Language.Praxis.Surface.Env (Env, dataParameterOrder)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Syntax
-import Language.Praxis.Surface.Types (Ix (..), Ty (..))
+import Language.Praxis.Surface.Types (Ix (..), Ty (..), orderArguments)
 
 data Scope = Scope
   { typeNames :: [Text]
@@ -72,14 +73,18 @@ reference r = case refName r of
           then prefix <> "(" <> lastPart <> ")"
           else decoded
 
-typeText :: Scope -> Int -> Ty -> Text
-typeText sc = go
+typeText :: Env -> Scope -> Int -> Ty -> Text
+typeText env sc = go
   where
     go p = \case
       TNat -> "Nat"
       THole -> "_"
       TParam i ts -> application p (nameAt "a" (typeNames sc) i) (map (go 11) ts)
-      TData n ts is -> application p (demangle n) (map (go 11) ts <> map (indexText sc 11) is)
+      TData n ts is ->
+        let types = map (go 11) ts
+            indices = map (indexText sc 11) is
+            args = case dataParameterOrder env n of [] -> types <> indices; ps -> orderArguments ps types (indices <> repeat "_")
+         in application p (demangle n) args
       TArrow a b -> parens (p > 0) (go 1 a <> " -> " <> go 0 b)
 
 indexText :: Scope -> Int -> Ix -> Text

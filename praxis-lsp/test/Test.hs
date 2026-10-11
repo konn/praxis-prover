@@ -124,6 +124,32 @@ tests =
         -- Every token is on one line, and none overlaps the next.
         let spans = map tokenSpan (indexTokens (docIndex doc))
         assertBool "tokens in order, on one line each" (and (zipWith (\(Span s e) (Span s' _) -> fst s == fst e && e <= s') spans (drop 1 spans)))
+    , testCase "interleaved datatype arguments keep their type and index highlighting" $ do
+        let source =
+              T.unlines
+                [ "module Interleaved where"
+                , "data Vec (n : Nat) (a : Type) where"
+                , "  Nil : Vec 0 a"
+                , "data Tagged {n} {a} (xs : Vec n a) where"
+                , "  Tag : (xs : Vec n a) -> Tagged xs"
+                , "identity : Vec n a -> Vec n a"
+                , "identity xs = xs"
+                , "copy : {xs : Vec n a} -> Tagged {n} {a} xs -> Tagged {n} {a} xs"
+                , "copy p = p"
+                ]
+        analyse Px source @?= []
+        doc <- analyseDocument Px "<document>" source
+        let toks = tokensOf source doc
+        mapM_
+          (\expected -> assertBool (show expected) (expected `elem` toks))
+          [ (4, "n", SemanticTokenTypes_Parameter, [SemanticTokenModifiers_Declaration])
+          , (4, "a", SemanticTokenTypes_TypeParameter, [SemanticTokenModifiers_Declaration])
+          , (6, "n", SemanticTokenTypes_Parameter, [])
+          , (6, "a", SemanticTokenTypes_TypeParameter, [])
+          , (8, "n", SemanticTokenTypes_Parameter, [])
+          , (8, "a", SemanticTokenTypes_TypeParameter, [])
+          , (8, "xs", SemanticTokenTypes_Parameter, [])
+          ]
     , testCase "classes, instances and tactics: methods, the functions of an instance, keywords in tactic position, the names a tactic introduces" $ do
         doc <- analyseDocument Px "<document>" classes
         assertBool "the module parsed" (docParsed doc)

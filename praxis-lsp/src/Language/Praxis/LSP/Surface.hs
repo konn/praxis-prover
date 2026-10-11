@@ -33,11 +33,12 @@ import Data.Text qualified as T
 import Language.LSP.Protocol.Types (SemanticTokenModifiers (..), SemanticTokenTypes (..))
 import Language.Praxis.LSP.Index
 import Language.Praxis.LSP.Position (Lines, charToColumn, columnToChar, lineAt)
-import Language.Praxis.Surface.Env (CtorInfo (..), Env, Global (..), QualName, constructorsNamed, explicitPositions, resolve)
+import Language.Praxis.Surface.Env (CtorInfo (..), DataBinder (..), DataInfo (dataBinders), Env, Global (..), QualName, constructorsNamed, explicitPositions, implicitPositions, resolve)
 import Language.Praxis.Surface.Fixity (isRelation)
 import Language.Praxis.Surface.Rename (RDecl (..), Renamed (..))
 import Language.Praxis.Surface.Shape (opText, rawArgs)
 import Language.Praxis.Surface.Syntax.Raw
+import Language.Praxis.Surface.Types (Parameter (..))
 
 -- * Definitions
 
@@ -315,16 +316,19 @@ application is.
 application :: Cx -> Mode -> Locals -> Located Expr -> Index
 application cx mode locals le =
   let (h, args) = rawArgs le
-      explicitModes = case (mode, unLocated h) of
-        (TypeMode, EName q) | Just (GData d) <- global (cxEnv cx) (segments q) -> replicate (length (fst (explicitPositions d))) TypeMode <> repeat ValueMode
-        _ -> repeat mode
-      assign ms = \case
+      parameterMode = \case TypeParameter _ -> TypeMode; IndexParameter _ -> ValueMode
+      (implicitModes, explicitModes) = case (mode, unLocated h) of
+        (TypeMode, EName q) | Just (GData d) <- global (cxEnv cx) (segments q) -> (map parameterMode (implicitPositions d) <> repeat mode, map parameterMode (explicitPositions d) <> repeat mode)
+        _ -> (repeat mode, repeat mode)
+      assign ims ms = \case
         [] -> []
-        Left x : rest -> (if mode == TypeMode then TypeMode else mode, x) : assign ms rest
+        Left x : rest -> case ims of
+          m : ims' -> (m, x) : assign ims' ms rest
+          [] -> (mode, x) : assign [] ms rest
         Right x : rest -> case ms of
-          m : ms' -> (m, x) : assign ms' rest
-          [] -> (mode, x) : assign [] rest
-   in expr cx mode locals h <> mconcat [expr cx m locals a | (m, a) <- assign explicitModes args]
+          m : ms' -> (m, x) : assign ims ms' rest
+          [] -> (mode, x) : assign ims [] rest
+   in expr cx mode locals h <> mconcat [expr cx m locals a | (m, a) <- assign implicitModes explicitModes args]
 
 -- | Names bound together: type variables when their type is @Type@, or when implicit and untyped; values otherwise.
 binder :: Cx -> Locals -> Binder -> (Index, Locals)
@@ -455,17 +459,23 @@ kindIndex cx locals = \case
   KArrow a b -> kindIndex cx locals a <> kindIndex cx locals b
 
 dataIndex :: Cx -> QualName -> DataDecl -> Index
-dataIndex cx _ dd =
+dataIndex cx owner dd =
   token (location (dataName dd)) SemanticTokenTypes_Type [SemanticTokenModifiers_Declaration]
     <> foldMap param (dataParams dd)
     <> maybe mempty (kindIndex cx locals) (dataKind dd)
     <> foldMap ctor (dataConstructors dd)
     <> foldMap sig (dataSignatures dd)
   where
-    paramKind p = case dataParamKind p of
-      Just KType -> SemanticTokenTypes_TypeParameter
-      Just _ -> SemanticTokenTypes_Parameter
-      Nothing -> SemanticTokenTypes_TypeParameter
+    declared = case global (cxEnv cx) (owner <> [Ident (unLocated (dataName dd))]) of
+      Just (GData d) -> [(dbName b, dbParameter b) | b <- dataBinders d]
+      _ -> []
+    paramKind p = case lookup (unLocated (dataParamName p)) declared of
+      Just (TypeParameter _) -> SemanticTokenTypes_TypeParameter
+      Just (IndexParameter _) -> SemanticTokenTypes_Parameter
+      Nothing -> case dataParamKind p of
+        Just KType -> SemanticTokenTypes_TypeParameter
+        Just _ -> SemanticTokenTypes_Parameter
+        Nothing -> SemanticTokenTypes_TypeParameter
     locals = Map.fromList [(unLocated (dataParamName p), paramKind p) | p <- dataParams dd]
     param p = token (location (dataParamName p)) (paramKind p) [SemanticTokenModifiers_Declaration] <> maybe mempty (kindIndex cx locals) (dataParamKind p)
     ctor (Located _ (Constructor (Located csp _) fields)) = token csp SemanticTokenTypes_EnumMember [SemanticTokenModifiers_Declaration] <> foldMap (expr cx TypeMode locals) fields

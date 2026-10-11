@@ -333,10 +333,10 @@ dump :: Body o -> Text
 dump b = case b of
   EmptyBranch _ -> rendered
   Body ctx _ _ _ ->
-    let binders = ["(v" <> T.pack (show i) <> " : " <> Pretty.typeText Pretty.emptyScope 0 ty <> ")" | (i, ty) <- zip [0 :: Int ..] (mapTypes forgetType ctx)]
+    let binders = ["(v" <> T.pack (show i) <> " : " <> Pretty.typeText emptyEnv Pretty.emptyScope 0 ty <> ")" | (i, ty) <- zip [0 :: Int ..] (mapTypes forgetType ctx)]
      in if null binders then rendered else "\\" <> T.unwords binders <> " -> " <> rendered
   where
-    rendered = "(" <> pretty emptyEnv Pretty.emptyScope (const "<evidence>") b <> " : " <> Pretty.typeText Pretty.emptyScope 0 (bodyType b) <> ")"
+    rendered = "(" <> pretty emptyEnv Pretty.emptyScope (const "<evidence>") b <> " : " <> Pretty.typeText emptyEnv Pretty.emptyScope 0 (bodyType b) <> ")"
 
 {- | Inspect the typed value before numerical lowering or dictionary pruning.
 Evidence is rendered by its caller-supplied, certified declaration name.
@@ -358,7 +358,7 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
             explicitValues = [x | (j, x) <- zip [0 ..] values', j `notElem` map snd runtime]
             evidence = ["[proof " <> proofName proof <> "]" | proof <- proofs]
             args =
-              map (("@" <>) . Pretty.typeText sc 11) ts
+              map (("@" <>) . Pretty.typeText env sc 11) ts
                 <> ["{" <> Pretty.nameAt "i" names i <> " = " <> x <> "}" | (i, x) <- IM.toAscList indices]
                 <> Pretty.interleave (zip proofPositions evidence) explicitValues
                 <> drop (length proofPositions) evidence
@@ -366,8 +366,8 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
          in if p == 0 && T.length flat > 88
               then T.intercalate "\n  " (Pretty.reference ref : args)
               else flat
-      Dictionary ty code -> "[dict (" <> dictionary code <> " : " <> Pretty.typeText sc 0 (forgetType ty) <> ")]"
-      Absurd ty proof -> Pretty.parens (p > 0) ("absurd [proof " <> proofName proof <> "] : " <> Pretty.typeText sc 0 (forgetType ty))
+      Dictionary ty code -> "[dict (" <> dictionary code <> " : " <> Pretty.typeText env sc 0 (forgetType ty) <> ")]"
+      Absurd ty proof -> Pretty.parens (p > 0) ("absurd [proof " <> proofName proof <> "] : " <> Pretty.typeText env sc 0 (forgetType ty))
     arguments :: List (Value o ctx) ts -> [Text]
     arguments Nil = []
     arguments (Cons v vs) = term 11 v : arguments vs

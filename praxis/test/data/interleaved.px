@@ -1,0 +1,69 @@
+module Interleaved where
+
+-- Types and indices follow declaration order, with earlier binders in scope.
+data Vec (n : Nat) (a : Type) where
+  Nil : Vec 0 a
+  Cons : {n : Nat} -> a -> Vec n a -> Vec (S n) a
+
+tail : Vec (S n) a -> Vec n a
+tail (Cons x xs) = xs
+
+length : Vec n a -> Nat
+length Nil = 0
+length (Cons x xs) = S (length xs)
+
+replicate : {n : Nat} -> a -> Vec n a
+replicate {0} x = Nil
+replicate {S n} x = Cons x (replicate x)
+
+length-index : (xs : Vec n a) -> length xs = n
+length-index Nil = rfl
+length-index (Cons x xs) = cong (length-index xs)
+
+data Mixed (n : Nat) (a : Type) (m : Nat) (b : Type) where
+  Pair : {n m : Nat} -> Vec n a -> Vec m b -> Mixed n a m b
+
+swap : Mixed n a m b -> Mixed m b n a
+swap (Pair xs ys) = Pair ys xs
+
+-- Kind signatures and inferred binders preserve the same order.
+type Kinded : Nat -> Type -> Type
+data Kinded n a where
+  KN : Kinded 0 a
+
+kinded : Kinded 0 Nat
+kinded = KN
+
+data Inferred n a where
+  IN : Inferred 0 a
+  IS : {n : Nat} -> a -> Inferred n a -> Inferred (S n) a
+
+inferred : Inferred 1 Nat
+inferred = IS 3 IN
+
+data Higher (n : Nat) (f : Type -> Type) (a : Type) where
+  HZero : f a -> Higher 0 f a
+
+-- Implicit type/index arguments are also supplied in declaration order.
+data Tagged {n} {a} (xs : Vec n a) where
+  Tag : (xs : Vec n a) -> Tagged xs
+
+tag : Tagged {0} {Nat} Nil
+tag = Tag Nil
+
+copy-tag : {xs : Vec n a} -> Tagged xs -> Tagged xs
+copy-tag (Tag xs) = Tag xs
+
+-- A dependent index between type parameters, with another index after it.
+data Dependent (n : Nat) (a : Type) (xs : Vec n a) (b : Type) (m : Nat) where
+  Dep : (xs : Vec n a) -> Vec m b -> Dependent n a xs b m
+
+dependent : Dependent 0 Nat Nil Nat 0
+dependent = Dep Nil Nil
+
+-- An inferred explicit type parameter after an omitted implicit index.
+data Omitted {n} a (xs : Vec n a) where
+  OM : (xs : Vec n a) -> Omitted a xs
+
+omitted : Omitted {0} Nat Nil
+omitted = OM Nil

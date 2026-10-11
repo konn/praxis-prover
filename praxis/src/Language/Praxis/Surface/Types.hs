@@ -27,6 +27,8 @@ arguments and the context determine.
 module Language.Praxis.Surface.Types (
   -- * Kinds and types
   Kind (..),
+  Parameter (..),
+  orderArguments,
   Ty (..),
   Ix (..),
   Scheme (..),
@@ -35,6 +37,7 @@ module Language.Praxis.Surface.Types (
   emptyScope,
   renderTy,
   renderTyWith,
+  renderTyWithOrder,
   renderIx,
   renderKind,
   tyParams,
@@ -70,6 +73,17 @@ import Numeric.Natural (Natural)
 
 data Kind = KType | KArrow !Kind !Kind
   deriving stock (Show, Eq)
+
+-- | A source binder's position in the separate core type and index lists.
+data Parameter = TypeParameter !Int | IndexParameter !Int
+  deriving stock (Show, Eq)
+
+-- | Restore declaration order. Erased indices have no arguments to print.
+orderArguments :: [Parameter] -> [a] -> [a] -> [a]
+orderArguments positions types indices = concatMap at positions
+  where
+    at (TypeParameter i) = take 1 (drop i types)
+    at (IndexParameter i) = take 1 (drop i indices)
 
 data Ty
   = -- | the type parameter of that index of the enclosing signature, applied to types
@@ -189,14 +203,22 @@ renderTy names = renderTyWith names []
 
 -- | A type, its type parameters and its value parameters by the names given.
 renderTyWith :: [Text] -> [Text] -> Ty -> String
-renderTyWith names values = go (0 :: Int)
+renderTyWith = renderTyWithOrder (const [])
+
+-- | Render applications in source order when their declaration is available.
+renderTyWithOrder :: (Text -> [Parameter]) -> [Text] -> [Text] -> Ty -> String
+renderTyWithOrder order names values = go (0 :: Int)
   where
     go d = \case
       TParam i [] -> name i
       TParam i ts -> paren (d > 1) (unwords (name i : map (go 2) ts))
       THole -> "_"
       TData n [] [] -> short n
-      TData n ts xs -> paren (d > 1) (unwords (short n : map (go 2) ts <> map (renderIxAt values 2) xs))
+      TData n ts xs ->
+        let types = map (go 2) ts
+            indices = map (renderIxAt values 2) xs
+            args = case order n of [] -> types <> indices; ps -> orderArguments ps types (indices <> repeat "_")
+         in paren (d > 1) (unwords (short n : args))
       TNat -> "Nat"
       TArrow a b -> paren (d > 0) (go 1 a <> " -> " <> go 0 b)
     name i = if i < length names then T.unpack (names !! i) else "#" <> show i

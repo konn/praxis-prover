@@ -317,8 +317,22 @@ tail (_ :- tl) = tl
 
 A parameter of the head is a type parameter or an index, as its kind says:
 `Type` (also `type`), or an arrow of such kinds, for a type; a value kind for
-an index, `nat` or a data type, which may mention the type parameters and the
-indices before it. The kind is given
+an index, `nat` or a data type. Type parameters and indices may interleave;
+each binder's type may mention only binders before it. Applications follow
+declaration order. For example:
+
+```
+data VecByLength (n : Nat) (a : Type) where
+  Nil : VecByLength 0 a
+  Cons : {n : Nat} -> a -> VecByLength n a -> VecByLength (S n) a
+```
+
+An implicit argument's slot follows the same declaration order among implicit
+binders. Explicitly supplied implicit arguments still go in braces before the
+ordinary arguments. A header such as `(xs : VecByLength n a) (n : Nat)
+(a : Type)` is rejected because `n` and `a` are not yet in scope.
+
+The kind is given
 with the parameter, `data Vec a (n : nat) where`; after the parameters,
 `data Vec : type -> nat -> type where`; or in a kind signature before the
 declaration, `type Vec : type -> nat -> type`. Without one, a parameter is an

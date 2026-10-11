@@ -65,6 +65,36 @@ checkTests =
         c <- checkFile "test/data/natural.px"
         errors c @?= []
         assertBool "the conversion's result indices are certified" ("Natural.elt-of-plt.#index" `elem` checkedTheorems c)
+    , testCase "interleaved type parameters and indices elaborate and certify" $ do
+        c <- checkFile "test/data/interleaved.px"
+        errors c @?= []
+        forM_ ["Interleaved.length-index", "Interleaved.tail.#index", "Interleaved.swap.#index", "Interleaved.copy-tag.#index", "Interleaved.dependent.#index"] $ \name ->
+          assertBool (T.unpack name) (name `elem` checkedTheorems c)
+        (_, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
+        let output = T.unlines (surfaceCore core)
+        forM_
+          [ "data Interleaved.Vec : (n : Nat) -> (a : Type) -> Type where"
+          , "Interleaved.Vec.Nil : @{a : Type} -> Interleaved.Vec 0 a"
+          , "Interleaved.Mixed n a m b -> Interleaved.Mixed m b n a"
+          , "(xs : Interleaved.Vec n a) -> (b : Type) -> (m : Nat)"
+          , "Interleaved.Tagged 0 Nat Interleaved.Vec.Nil"
+          ]
+          $ \fragment -> assertBool (T.unpack fragment) (fragment `T.isInfixOf` output)
+    , testCase "interleaved binders reject forward dependencies and misplaced arguments" $ do
+        p <- either assertFailure pure prelude
+        let prefix = "module BadOrder where\ndata Vec (n : Nat) (a : Type) where\n  Nil : Vec 0 a\n"
+        forM_
+          [ ("data Bad (n : Nat) (xs : Vec n a) (a : Type)", "not a type: a")
+          , ("data Bad (a : Type) (xs : Vec n a) (n : Nat)", "not a value in scope here: n")
+          , ("data Bad (a : Type) (n : Vec n a)", "not a value in scope here: n")
+          , ("data Bad (n : Nat) (n : Type)", "duplicate data parameter n")
+          , ("bad : Vec Nat 0 -> Nat\nbad xs = 0", "a type")
+          , ("data Bad (n : Nat) (a : Type) where\n  B : Bad a 0", "a type parameter of its result is a variable")
+          , ("data Tagged {n} {a} (xs : Vec n a) where\n  Tag : (xs : Vec n a) -> Tagged xs\nbad : Tagged {Nat} {0} Nil\nbad = Tag Nil", "a type")
+          ]
+          $ \(declaration, expected) -> do
+            let c = checkSource p "bad-order.px" (prefix <> declaration <> "\n")
+            assertBool (T.unpack declaration <> ": " <> show (errors c)) (any (expected `T.isInfixOf`) (map T.pack (errors c)))
     , testCase "core dumps preserve elaborated clauses and named evidence" $ do
         p <- either assertFailure pure prelude
         let source = T.unlines ["module Dump where", "data Witness where", "  Mk : (n : Nat) -> n = 0 -> Witness", "repack : Witness -> Witness", "repack (Mk n h) = Mk n h", "data Box a = box a", "pack : Witness -> Box Witness", "pack p = box p", "choose : {n : Nat} -> n = 0 -> Witness -> Witness", "choose {n} h p = p", "use : Witness -> Witness", "use p = choose {0} rfl p"]
@@ -94,7 +124,7 @@ checkTests =
         (_, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
         let output = T.unlines (surfaceCore core)
         forM_
-          [ "data DataDump.PLt : (index0 : Nat) -> (index1 : Nat) -> Type where"
+          [ "data DataDump.PLt : (n : Nat) -> (m : Nat) -> Type where"
           , "  DataDump.PLt.ZeroSucc : {m : Nat} -> DataDump.PLt 0 (S m)"
           , "  DataDump.PLt.SuccSucc : {n : Nat} -> {m : Nat} -> DataDump.PLt n m -> DataDump.PLt (S n) (S m)"
           , "data DataDump.List : (a : Type) -> Type where"
