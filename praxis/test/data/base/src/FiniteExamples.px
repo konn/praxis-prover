@@ -59,8 +59,17 @@ empty = by
 roundtrip : Finite a => a -> a
 roundtrip x = decode (code x)
 
+roundtrip-law : Finite a => (x : a) -> roundtrip x = x
+roundtrip-law x = calc
+  roundtrip x
+  = decode (code x)
+  = x := decode-code x
+
 ordinal-instance : (i : F.Fin n) -> roundtrip i = i
-ordinal-instance i = rfl
+ordinal-instance i = roundtrip-law i
+
+ordinal-result : (i : F.Fin n) -> roundtrip (roundtrip i) = roundtrip i
+ordinal-result i = roundtrip-law (roundtrip i)
 
 first-true : decode (F.Fin.FSucc (F.Fin.FZero {1})) = True
 first-true = rfl

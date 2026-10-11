@@ -74,10 +74,10 @@ import Language.Praxis.Surface.Builtin qualified as Builtin
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.Core qualified as SurfaceCore
 import Language.Praxis.Surface.Core.Pretty qualified as CorePretty
-import Language.Praxis.Surface.CoreText (CT (..), termCT)
+import Language.Praxis.Surface.CoreText (CT (..))
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
-import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), Hyp (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
+import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
 import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), classEvidenceName, displayQualName, emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Evidence qualified as Evidence
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
@@ -86,7 +86,6 @@ import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
 import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), Renamed, ScopeError (..), moduleExports, renameModule)
-import Language.Praxis.Surface.Syntax (Expr (..), RelOp (..), stripLocations)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span (..))
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ty (..))

@@ -514,7 +514,9 @@ proof arguments are erased. Functions retain reusable templates for both
 their signatures and their clauses; applications specialize the templates
 to the selected types and dictionaries. Instance siblings propagate their
 dependencies to a finite fixed point. Repeated requirements are deduplicated,
-so recursion cannot grow the log indefinitely.
+so recursion cannot grow the log indefinitely. Instance class constraints are
+retained independently of method slots and instantiated at the full selected
+head, including constraints whose classes contain only laws.
 
 Checking a declaration and elaborating late proof syntax use its source
 registry snapshot intersected with the verified registry, matching both
@@ -846,6 +848,12 @@ schema. Runtime slots keep their numbering as the prefix of the logical
 table. Generated obligations retain the full propositions, including nested
 quantifiers, and their logical context; an equation-only projection is not
 a replacement for these hypotheses.
+
+When a generic theorem or method contract is instantiated at an indexed type
+such as `Fin n`, its parameter predicate retains both datatype membership
+and the exact index equalities. It does not range over the entire `Fin`
+family. The proof engine derives the component facts using checked kernel
+lemmas before applying an instance law or method contract.
 
 For adequacy, a function under constraints at a known type denotes the
 function its clauses define with the instances' methods in place of the

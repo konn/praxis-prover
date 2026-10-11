@@ -598,7 +598,7 @@ methodPremiseObligation k g slots assign variableTerm valueTerm premise = case p
       value <- methodEntryAt k g s actualValue
       pure (dictionaryName i, value)
     let variable name = fromMaybe (variableTerm name) (lookup name values)
-        predicate = predicateOf (knowMembership k) (\i -> Map.lookup i assign >>= typePredicate k g)
+        predicate = instantiatedPredicate k g assign
     OSchema <$> methodContract k g variable predicate valueTerm entry ty
   _ -> Left "internal: a method contract was expected"
   where
@@ -711,7 +711,15 @@ functionPreconditions k g info argTypes args predicates props = do
 
 functionPremiseObligation :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Premise -> Either String Obligation
 functionPremiseObligation k g info argTypes args given = \case
-  PClosure method parameter -> maybe (Left "the predicate required by a method closure is not known") (Right . OClosure method . siteOfPred k g) (Map.lookup parameter given)
+  PClosure method parameter -> do
+    actual <- maybe (Left "the predicate required by a method closure is not known") Right (Map.lookup parameter given)
+    case actual of
+      PredClosure {} -> do
+        slot <- maybe (Left "a closure premise has no method dictionary entry") Right (find (\entry -> slotMethod entry == method && slotParam entry == parameter) dict)
+        ty <- dictionaryMethodType (knowEnv k) dict slot
+        ref <- maybe (Left "a closure premise has no dictionary reference") Right (lookup slot (zip dict (placeRefs dict)))
+        functionPremiseObligation k g info argTypes args given (PMethod method parameter ty ref)
+      _ -> Right (OClosure method (siteOfPred k g actual))
   PMethod method parameter ty _ -> do
     slot <- maybe (Left "a function contract refers to no dictionary method") Right (find (\s -> slotMethod s == method && slotParam s == parameter) dict)
     entry <- functionEntry k g info argTypes args given slot
@@ -721,7 +729,7 @@ functionPremiseObligation k g info argTypes args given = \case
   PSchema position ty -> do
     callback <- maybe (Left "the callback argument is not given") Right (listToMaybe (drop position args))
     OSchema <$> schemaContract g predicate valueTerm callback ty
-  PLaw law parameter -> OLaw law <$> functionClassType k g info argTypes args given parameter
+  PLaw law parameter -> (\ty -> OLaw law ty True) <$> functionClassType k g info argTypes args given parameter
   where
     dict = functionDictionary info argTypes
     predicate = predicateOf (knowMembership k) (`Map.lookup` given)
@@ -2333,7 +2341,11 @@ evidence k info g le = case spineOf le of
                 TData _ _ _ -> True
                 TParam i [] -> membershipSlot i `elem` thmSlots t
                 _ -> False
-          pre <- memberships k g [(arg, e, typePredicate k g ty) | ((arg, (e, ty)), bty) <- zip (zip args typed) (thmMembered t), membered bty]
+          let appliedPredicate = instantiatedPredicate k g assign
+          required <- forM [((arg, e), bty) | ((arg, (e, _)), bty) <- zip (zip args typed) (thmMembered t), membered bty] \((arg, value), ty) -> do
+            predicate <- maybe (Left (EngineError (location arg) "a theorem argument's exact indexed type predicate is unavailable")) Right (appliedPredicate ty)
+            pure (arg, value, Just predicate)
+          pre <- memberships k g required
           (indices, idx) <- indexPremises sp t typed
           let sigma =
                 indices
@@ -2785,7 +2797,7 @@ finiteWitness k info g sp view value = liftResult do
   selectedCT <- termCT CVar selected
   decodedCT <- termCT CVar decoded
   valueCT <- termCT CVar value
-  coverage <- traverse (\law -> discharge k inverseGoal (OLaw law (finiteElementType domain))) (finiteCoverage domain)
+  coverage <- traverse (\law -> discharge k inverseGoal (OLaw law (finiteElementType domain) False)) (finiteCoverage domain)
   let inverseName = prefix <> "Inverse0"
       roundtripName = prefix <> "Roundtrip0"
       roundtrip = case coverage of
@@ -2867,6 +2879,96 @@ of the goal's theorem's own, a place of the goal's dictionary.
 typePredicate :: Knowledge -> Goal -> Ty -> Maybe Pred
 typePredicate k g = predicateOf (knowMembership k) (\j -> (\n -> Pred n []) <$> lookup (membershipSlot j) (zip (goalDict g) [n | Ref _ n <- placeRefs (goalDict g)]))
 
+{- | Instantiate a type parameter by its complete indexed type. Direct
+datatype contexts retain their separate membership and index hypotheses.
+-}
+exactTypePredicate :: Knowledge -> Goal -> Ty -> Maybe Pred
+exactTypePredicate k g = go
+  where
+    context = goalVars g <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+    go (TData name arguments indices) = do
+      (symbol, used) <- Map.lookup name (knowMembership k)
+      parameters <- traverse (\position -> go =<< lookup position (zip [0 ..] arguments)) used
+      let base = Pred symbol (map predicateParam parameters)
+      if null indices
+        then pure base
+        else do
+          functions <- indexFunctionCores (knowEnv k) name
+          guard (length functions == length indices)
+          values <- traverse (\index -> checkedIndexTerm k (knowEnv k) context index >>= either (const Nothing) Just . termCT CVar) indices
+          let variable = head [candidate | candidate <- iterate (<> "'") "exact_member", candidate `notElem` concatMap varsCT (predicateParam base : values)]
+              value = CVar variable
+              restrictions = [CSym "eq" [CSym function [value], bound] | (function, bound) <- zip functions values]
+          pure (predicateOver variable (foldr (\restriction rest -> CSym "conj" [restriction, rest]) (predicateAt base value) restrictions))
+    go ty = typePredicate k g ty
+
+{- | Substitute assigned type parameters strictly. A missing indexed
+predicate cannot degrade to unrestricted membership in a nested type.
+-}
+instantiatedPredicate :: Knowledge -> Goal -> Map Int Ty -> Ty -> Maybe Pred
+instantiatedPredicate k g assign = go
+  where
+    go (TData name arguments _) = do
+      (symbol, used) <- Map.lookup name (knowMembership k)
+      parameters <- traverse (\position -> go =<< lookup position (zip [0 ..] arguments)) used
+      pure (Pred symbol (map predicateParam parameters))
+    go (TParam parameter []) = Map.lookup parameter assign >>= exactTypePredicate k g
+    go TNat = Just anyPred
+    go _ = Nothing
+
+{- | Expose the ordinary equalities and memberships contained in an exact
+indexed predicate. Every derived fact is justified by a kernel lemma.
+-}
+exposeExactMemberships :: Goal -> (Builder, Goal)
+exposeExactMemberships initial = foldl expose ("", initial) (goalHyps initial)
+  where
+    expose current (name, hyp) = case stripLocations (hypProposition hyp) of
+      Rel RelLt (Nat 0) expression
+        | Right code@CSym {} <- termCT CVar expression -> case code of
+            CSym "conj" _ -> descend current name code
+            _ -> current
+      _ -> current
+    add current@(before, goal) stem proposition rendered proof =
+      case find ((== stripLocations (asEquation proposition)) . stripLocations . asEquation . hypProposition . snd) (goalHyps goal) of
+        Just (name, _) -> (name, current)
+        Nothing ->
+          let name = freshProofName goal stem
+           in (name, (before <> "have " <> fromText name <> ": " <> rendered <> " { " <> proof <> " }; ", goal {goalHyps = goalHyps goal <> [(name, HProp proposition)]}))
+    descend current name = \case
+      CSym "conj" [left, right] ->
+        let positive code = Rel RelLt (Nat 0) (fromCT code)
+            (leftName, first) = add current "ExactMember" (positive left) (equationText (CSym "lt" [CNum 0, left]) (CNum 1)) ("exact conjElim1 on " <> fromText name)
+            afterLeft = descend first leftName left
+            (rightName, second) = add afterLeft "ExactMember" (positive right) (equationText (CSym "lt" [CNum 0, right]) (CNum 1)) ("exact conjElim2 on " <> fromText name)
+         in descend second rightName right
+      CSym "eq" [left, right] -> snd (add current "ExactIndex" (Rel RelEq (fromCT left) (fromCT right)) (equationText left right) ("exact eqElim on " <> fromText name))
+      _ -> current
+
+{- | The caller instantiates a law's type parameter with its full indexed
+predicate. Restate that domain inside the rule premise, then derive its
+membership and index components before appealing to the instance law.
+-}
+lawDomainFacts :: Knowledge -> Goal -> QualName -> Ty -> Either String Builder
+lawDomainFacts k g _ actual | exactTypePredicate k g actual == typePredicate k g actual = Right ""
+lawDomainFacts k g qualified actual = do
+  law <- case Map.lookup qualified (envGlobals (knowEnv k)) of
+    Just (GLaw value) -> Right value
+    _ -> Left "the class law's source signature is unavailable"
+  let argumentTypes = map snd (lawBinders law)
+      dependencies = concatMap (concatMap Types.ixVars . Types.tyIndices) argumentTypes
+  values <- forM [(i, slot) | (i, slot) <- zip [0 :: Int ..] (valueSlots (lawSlots law)), "#d" <> T.pack (show i) `elem` dependencies] \(i, slot) ->
+    ("#d" <> T.pack (show i),) <$> methodEntryAt k g slot actual
+  let predicate = instantiatedPredicate k g (Map.singleton 0 actual)
+      variable source = fromMaybe (CVar (mangleVariable source)) (lookup source values)
+      callback = CCallback (CClosure ("law_environment" : ["law_argument_" <> T.pack (show i) | i <- [0 .. length argumentTypes - 1]]) (CNum 0) []) (CNum 0)
+  contract <- schemaContractUsing False (schemaAvoid g) variable predicate (const (CVar "?")) callback (foldr TArrow TNat argumentTypes)
+  let names = [name | i <- [0 :: Int ..], let name = "LawDomain" <> T.pack (show i), name `notElem` map fst (goalHyps g)]
+      named = zip names (scHyps contract)
+      local = g {goalHyps = goalHyps g <> named}
+      (exposed, _) = exposeExactMemberships local
+  stated <- traverse (hypText . snd) named
+  pure (mconcat ["have " <> fromText name <> ": " <> proposition <> " { assumption }; " | ((name, _), proposition) <- zip named stated] <> exposed)
+
 {- |
 The predicate the values of a type are members by, the predicates of type
 parameters as given: a data type's, at the predicates of its arguments, of
@@ -2930,7 +3032,7 @@ premiseBlocks k g sp t assign typed sigma = either (Left . EngineError sp) Right
       byBinder = Map.fromList (zip (thmBinders t) args)
       valueTerm i = substCT (byBinder <> sigma) (fromMaybe (CVar (values !! i)) (lookup i defined))
       variableTerm name = Map.findWithDefault (CVar (mangleVariable name)) (mangleVariable name) (byBinder <> sigma)
-      predicate = predicateOf (knowMembership k) (\i -> Map.lookup i assign >>= typePredicate k g)
+      predicate = instantiatedPredicate k g assign
   obs <- forM [p | p <- thmPremises t, case p of { PSchema {} -> False; _ -> True }] \case
     premise@PMethod {} -> methodPremiseObligation k g (thmSlots t) assign variableTerm valueTerm premise
     premise -> premiseObligation k g assign t premise
@@ -2945,7 +3047,7 @@ comes from the certified rule, so erased phantom predicates need no guesses.
 -}
 schemaTheoremArguments :: Knowledge -> Goal -> TheoremInfo -> Map Int Ty -> [(Expr Text, Ty)] -> Map Text CT -> Either String Builder
 schemaTheoremArguments k g t assign typed sigma
-  | null schemas && not (any methodPremise (thmPremises t)) = Right ""
+  | null schemas && not (any methodPremise (thmPremises t)) && not refined = Right ""
   | otherwise = do
       args <- traverse (termCT CVar . fst) typed
       callbacks <- forM (zip [1 ..] schemas) \(serial, (position, ty)) -> do
@@ -2961,14 +3063,10 @@ schemaTheoremArguments k g t assign typed sigma
         let values = [CVar ("z_" <> T.pack (show i)) | i <- [1 .. slotArity slot]]
         applied <- applyMethodEntry entry values
         pure (if slotArity slot > 0 then name else valueVar name, parensB (render applied))
-      let predicates =
-            [ (name, parensB (render (predicateAt predicate (CVar "z_1"))))
-            | (slot, Ref _ name) <- zip (thmSlots t) (placeRefs (thmSlots t))
-            , isMembershipSlot slot
-            , Just actual <- [Map.lookup (slotParam slot) assign]
-            , Just predicate <- [typePredicate k g actual]
-            ]
-          parameters = filter (/= "schema_context") (Map.findWithDefault [] (thmCore t) (knowRuleMetas k))
+      predicates <- forM [(name, actual) | (slot, Ref _ name) <- zip (thmSlots t) (placeRefs (thmSlots t)), isMembershipSlot slot, Just actual <- [Map.lookup (slotParam slot) assign]] \(name, actual) -> do
+        predicate <- maybe (Left "a theorem's exact indexed type predicate is unavailable") Right (exactTypePredicate k g actual)
+        pure (name, parensB (render (predicateAt predicate (CVar "z_1"))))
+      let parameters = filter (/= "schema_context") (Map.findWithDefault [] (thmCore t) (knowRuleMetas k))
           byBinder = Map.fromList (zip (thmBinders t) args)
           values = map mangleVariable (thmValues t)
           (defined, _) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
@@ -2981,6 +3079,7 @@ schemaTheoremArguments k g t assign typed sigma
             | otherwise = fromMaybe "_" (lookup name (predicates <> callbacks <> methods <> termArgs))
       pure (mconcat [" " <> argument name | name <- parameters])
   where
+    refined = any (\ty -> exactTypePredicate k g ty /= typePredicate k g ty) (Map.elems assign)
     schemas = [(position, ty) | PSchema position ty <- thmPremises t]
     parensB body = "(" <> body <> ")"
     methodPremise PMethod {} = True
@@ -2992,8 +3091,16 @@ premiseObligations k g assign t = traverse (premiseObligation k g assign t) [p |
 
 premiseObligation :: Knowledge -> Goal -> Map Int Ty -> TheoremInfo -> Premise -> Either String Obligation
 premiseObligation k g assign t = \case
-  PLaw lq i -> OLaw lq <$> at i
-  PClosure mq i -> OClosure mq . siteOfType k g <$> at i
+  PLaw lq i -> (\ty -> OLaw lq ty True) <$> at i
+  PClosure mq i -> do
+    actual <- at i
+    if exactTypePredicate k g actual == typePredicate k g actual
+      then pure (OClosure mq (siteOfType k g actual))
+      else do
+        slot <- maybe (Left "a closure premise has no method dictionary entry") Right (find (\entry -> slotMethod entry == mq && slotParam entry == i) (thmSlots t))
+        ty <- dictionaryMethodType (knowEnv k) (thmSlots t) slot
+        ref <- maybe (Left "a closure premise has no dictionary reference") Right (lookup slot (zip (thmSlots t) (placeRefs (thmSlots t))))
+        methodPremiseObligation k g (thmSlots t) assign (CVar . mangleVariable) (const (CVar "?")) (PMethod mq i ty ref)
   premise@PMethod {} -> methodPremiseObligation k g (thmSlots t) assign (CVar . mangleVariable) (const (CVar "?")) premise
   PSchema {} -> Left "internal: a schema contract needs its callback argument"
   where
@@ -3019,7 +3126,10 @@ appeal leaves.
 -}
 data Obligation
   = OMember !Pred !CT
-  | OLaw !QualName !Ty
+  | {- | The flag marks a rule premise with local law binders; False applies
+    the law directly to the current goal's values.
+    -}
+    OLaw !QualName !Ty !Bool
   | OClosure !QualName !Site
   | OSchema !SchemaContract
   | OEquation !CT !CT
@@ -3040,12 +3150,15 @@ obligationDepth = 64
 
 -- | An obligation discharged in a goal, by backtracking, since which proof is found does not matter.
 discharge :: Knowledge -> Goal -> Obligation -> Either String Builder
-discharge k g = solve Backtrack (obligations k g) obligationDepth
+discharge k initial obligation =
+  let (before, g) = exposeExactMemberships initial
+   in (before <>) <$> solve Backtrack (obligations k g) obligationDepth obligation
 
 proveSchemaContract :: Knowledge -> Goal -> SchemaContract -> Either String Builder
 proveSchemaContract k g contract = do
   stated <- traverse (hypText . snd) namedDomains
-  proof <- prove subgoal (scPost contract)
+  let (exposed, prepared) = exposeExactMemberships subgoal
+  proof <- (exposed <>) <$> prove prepared (scPost contract)
   pure (mconcat ["have " <> fromText name <> ": " <> prop <> " { assumption }; " | ((name, _), prop) <- zip namedDomains stated] <> proof)
   where
     locals = scLocals contract
@@ -3066,18 +3179,22 @@ proveSchemaContract k g contract = do
       Conn And a b -> (\x y -> "ConjR { " <> x <> " } { " <> y <> " }") <$> prove current a <*> prove current b
       Rel RelLt (Nat 0) member -> do
         code <- termCT CVar member
-        (predicate, value) <- maybe (Left "a callback result has no membership predicate") Right (splitMembership code)
-        case membershipProof k current predicate value of
-          Right proof -> Right proof
-          Left why -> do
-            let reductions = reductionsOf k value
-                reduced = lastTerm value reductions
-            proof <- either (const (Left why)) Right (membershipProof k current predicate reduced)
-            let steps = [(tactic, CSym "lt" [CNum 0, predicateAt predicate next]) | (tactic, next) <- reductions]
-            pure ("calc " <> render (CSym "lt" [CNum 0, code]) <> forth steps <> " = 1 by (" <> proof <> ")")
+        if isExact code then discharge k current (OEquation (CSym "lt" [CNum 0, code]) (CNum 1)) else proveMember current code
       prop -> case membershipCase k current {goalConcl = prop} of
         Right proof -> Right proof
         Left _ -> conclude k current (goalEquations current) prop
+    isExact (CSym "conj" _) = True
+    isExact _ = False
+    proveMember current code = do
+      (predicate, value) <- maybe (Left "a callback result has no membership predicate") Right (splitMembership code)
+      case membershipProof k current predicate value of
+        Right proof -> Right proof
+        Left why -> do
+          let reductions = reductionsOf k value
+              reduced = lastTerm value reductions
+          proof <- either (const (Left why)) Right (membershipProof k current predicate reduced)
+          let steps = [(tactic, CSym "lt" [CNum 0, predicateAt predicate next]) | (tactic, next) <- reductions]
+          pure ("calc " <> render (CSym "lt" [CNum 0, code]) <> forth steps <> " = 1 by (" <> proof <> ")")
 
 -- | Use a fixed callback's checked domain/result contract at actual values.
 schemaPremised :: Goal -> Obligation -> Maybe (Step Obligation Builder String)
@@ -3123,9 +3240,11 @@ schemaPremised g wanted =
       HProp prop -> case stripLocations prop of
         Rel RelLt (Nat 0) member -> do
           memberCT <- termCT CVar member
-          case splitMembership memberCT of
-            Just (p, t) -> Right (OMember p t)
-            Nothing -> uncurry OEquation <$> expressionEquation prop
+          case memberCT of
+            CSym "conj" _ -> uncurry OEquation <$> expressionEquation prop
+            _ -> case splitMembership memberCT of
+              Just (p, t) -> Right (OMember p t)
+              Nothing -> uncurry OEquation <$> expressionEquation prop
         _ -> uncurry OEquation <$> expressionEquation prop
 
 {- |
@@ -3144,14 +3263,14 @@ parameter, and at a data type the closure lemma of the instance's function,
 its premises in turn.
 -}
 obligations :: Knowledge -> Goal -> Database ObligationHead Obligation Builder String
-obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPremised g] none deep
+obligations k g = Database obligationHead byHead [assumed, anyMember, exactMember, schemaPremised g] none deep
   where
     env = knowEnv k
     obligationHead = \case
       OMember _ (CSym f _) -> OnTerm f
       OMember _ (CVar v) -> OnTerm v
       OMember _ _ -> OnNothing
-      OLaw lq _ -> OnLaw lq
+      OLaw lq _ _ -> OnLaw lq
       OClosure mq _ -> OnClosure mq
       OSchema {} -> OnNothing
       OEquation {} -> OnNothing
@@ -3164,8 +3283,29 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
       OSchema contract -> Just (either Refuse (Reduce [] . const) (proveSchemaContract k g contract))
       _ -> Nothing
     equationKnown = \case
+      OEquation (CSym "lt" [CNum 0, code]) (CNum 1) | Just result <- positive code -> Just result
       OEquation l r -> Just (either Refuse (Reduce [] . const) (indexEquation k g (goalEquations g) l r))
       _ -> Nothing
+    exactMember = \case
+      OMember predicate value | code@(CSym "conj" _) <- predicateAt predicate value -> positive code
+      _ -> Nothing
+    positive = \case
+      CSym "conj" [left, right] ->
+        Just
+          ( Reduce
+              [truth left, truth right]
+              ( \proofs ->
+                  "have " <> leftName <> ": " <> statement left <> " { " <> proofs !! 0 <> " }; have " <> rightName <> ": " <> statement right <> " { " <> proofs !! 1 <> " }; exact conjIntro on " <> leftName <> " " <> rightName
+              )
+          )
+      CSym "eq" [left, right] -> Just (Reduce [OEquation left right] (\proofs -> "have " <> equalityName <> ": " <> equationText left right <> " { " <> head proofs <> " }; exact eqIntro on " <> equalityName))
+      code | Just (predicate, value) <- splitMembership code -> Just (Reduce [OMember predicate value] head)
+      _ -> Nothing
+    leftName = fromText (freshProofName g "ExactLeft")
+    rightName = fromText (freshProofName g "ExactRight")
+    equalityName = fromText (freshProofName g "ExactEquality")
+    truth code = OEquation (CSym "lt" [CNum 0, code]) (CNum 1)
+    statement code = "((lt 0 " <> render code <> ") = 1)"
     assumed = \case
       OMember p t | hasMembership g p t -> Just (Reduce [] (const "assumption"))
       _ -> Nothing
@@ -3214,14 +3354,17 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
                     Right props -> afterMemberships [(a, q) | (a, Just q) <- zip args argPs] subs (\rs -> haves <> props <> appeal rs)
       _ -> Nothing
     lawPremise = \case
-      OLaw lq (TParam j []) -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (displayQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
+      OLaw lq (TParam j []) _ -> Just (premiseNamed (PLaw lq j) ("no premise of the goal states the law " <> T.unpack (displayQualName lq) <> " at its type parameter: the statement's methods must be the goal's"))
       _ -> Nothing
     -- The theorem proving the law at the instance for the head of the type; under a context, its premises at the type's arguments.
     lawInstance = \case
-      OLaw lq ty
+      OLaw lq ty localDomain
         | Just h <- headOf ty -> Just case lawTheorem lq h of
             Left why -> Refuse why
-            Right t' -> either Refuse (\subs -> Reduce subs (\rs -> "exact " <> fromText (thmCore t') <> blocks rs)) (premiseObligations k g (Map.fromList (zip [0 ..] (typeArgs ty))) t')
+            Right t' -> case (if localDomain then lawDomainFacts k g lq ty else Right "", premiseObligations k g (Map.fromList (zip [0 ..] (typeArgs ty))) t') of
+              (Left why, _) -> Refuse why
+              (_, Left why) -> Refuse why
+              (Right before, Right subs) -> Reduce subs (\rs -> before <> "exact " <> fromText (thmCore t') <> blocks rs)
       _ -> Nothing
     closureAny = \case
       OClosure _ SiteAny -> Just (Reduce [] (const "exact anyIsMember"))
@@ -3295,7 +3438,7 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
       _ -> []
     none = \case
       OMember p t -> "the membership " <> T.unpack (runBuilder (membershipText p t)) <> " is neither a hypothesis nor follows from the closure of a constructor or a function"
-      OLaw lq ty -> "the law " <> T.unpack (displayQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
+      OLaw lq ty _ -> "the law " <> T.unpack (displayQualName lq) <> " at " <> renderTy [] ty <> ": neither an instance nor a premise of the goal gives it"
       OClosure mq _ -> "the closure of " <> T.unpack (displayQualName mq) <> " is not known there"
       OSchema {} -> "the fixed callback's typed closure contract could not be established"
       OEquation l r -> "the required equation " <> T.unpack (runBuilder (equationText l r)) <> " could not be established"
@@ -3481,7 +3624,6 @@ runTactics k info n g0 sp tacs0 = do
               userGoal = maybe context (\view -> bindSourceView (viewSource view) (Var source) ty context) sourceView
           (proof, rest) <- goal userGoal more
           declarationText <- liftAt tsp (auxiliaryDeclaration helper userGoal (outTactic proof))
-          params <- liftAt tsp (ruleParams userGoal)
           limitCode <- liftAt tsp (termCT CVar limit)
           (searchCode, _) <- liftAt tsp (propositionCode (instantiate (const (Var eigen)) body))
           let witness = fromCT (CRaw (runBuilder ("(μ " <> fromText eigen <> " < " <> render limitCode <> ". " <> searchCode <> ")")))
@@ -3496,8 +3638,7 @@ runTactics k info n g0 sp tacs0 = do
           boundText <- liftAt tsp (formula witnessBound)
           bodyText <- liftAt tsp (formula instanceBody)
           (bodyCode, ownCode) <- liftAt tsp (propositionCode instanceBody)
-          let blocks = mconcat [" { exact " <> fromText (gpName premise) <> " }" | premise <- goalPremises base]
-              codeToBody = if ownCode then "have " <> fromText bodyName <> ": " <> bodyText <> " { exact " <> fromText codeName <> " }; " else "reflect " <> fromText codeName <> " as " <> fromText bodyName <> "; "
+          let codeToBody = if ownCode then "have " <> fromText bodyName <> ": " <> bodyText <> " { exact " <> fromText codeName <> " }; " else "reflect " <> fromText codeName <> " as " <> fromText bodyName <> "; "
               tactic =
                 evBefore ev
                   <> "have "

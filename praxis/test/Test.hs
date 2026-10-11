@@ -11,6 +11,7 @@ import Language.Praxis.Surface.ComputationIndexTest (computationIndexTests)
 import Language.Praxis.Surface.CoreTest (coreTests)
 import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
 import Language.Praxis.Surface.EvidenceTest (evidenceTests)
+import Language.Praxis.Surface.ExactPredicateTest (exactPredicateTests)
 import Language.Praxis.Surface.FiniteElaborationTest (finiteElaborationTests)
 import Language.Praxis.Surface.FiniteQuantifierTest (finiteQuantifierTests)
 import Language.Praxis.Surface.FiniteTacticTest (finiteTacticTests)
@@ -47,6 +48,7 @@ main =
       , finiteQuantifierTests
       , finiteTacticTests
       , finiteElaborationTests
+      , exactPredicateTests
       , evidenceTests
       , instanceContextTests
       , logicalPreconditionTests
