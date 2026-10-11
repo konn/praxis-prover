@@ -74,7 +74,7 @@ import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM, forM_, guard, join, unless, zipWithM)
 import Data.Char (isAlphaNum)
 import Data.IntMap.Strict qualified as IM
-import Data.List (elemIndex, find, nub, sort)
+import Data.List (elemIndex, find, nub, nubBy, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
@@ -86,7 +86,7 @@ import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, fromUnboundedDec, runBuilder)
 import Data.Void (absurd)
 import Language.Praxis.Surface.Builtin (BuiltinRole (..), builtinRoleName)
-import Language.Praxis.Surface.Compile (functionLemma, ownDictionary, ruleBinders)
+import Language.Praxis.Surface.Compile (functionLemma, ruleBinders)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), atPositions, ctorLemma, dataLemma)
@@ -254,8 +254,8 @@ data Closure = Closure
   -- ^ the indices its arguments must have, under which it holds: an index function, the argument's position, and the index, over its lemma's variables
   , closureValues :: ![Text]
   -- ^ the variables of those indices its arguments do not give: its value parameters
-  , closureProps :: ![(CT, CT)]
-  -- ^ its preconditions, the propositions its proofs are of, as the equations the core states them as, over its lemma's variables
+  , closureProps :: ![Expr Text]
+  -- ^ the complete propositions of its preconditions, over its lemma's variables
   }
 
 -- | What the engine knows of the module so far.
@@ -288,10 +288,10 @@ data Knowledge = Knowledge
   -}
   , knowIndexSpecs :: !(Map Text IndexSpec)
   -- ^ what each function over indexed types says of indices, by its core name
-  , knowObligations :: ![(TheoremInfo, [Text], CT, CT, [(CT, CT)])]
+  , knowObligations :: ![(TheoremInfo, Goal)]
   {- ^ the obligations of the function whose lemmas are being proved,
-  certified: each lemma's core name, its variables, and the equation it
-  concludes, by which the precondition of a call in its clauses holds
+  certified with their complete sequents, including every hypothesis needed
+  when reusing a proof of a call's precondition
   -}
   , knowRuleMetas :: !(Map Text [Text])
   -- ^ Certified rule binder order, used when a premise alone mentions a type predicate.
@@ -610,7 +610,7 @@ Static entries and runtime values keep the same positions as its code;
 extra membership predicates belong only to the generated lemma.
 -}
 functionDictionary :: FunInfo -> [Ty] -> [Slot]
-functionDictionary info argTypes = funSlots info <> [membershipSlot i | i <- variables, membershipSlot i `notElem` funSlots info]
+functionDictionary info argTypes = funProofSlots info <> [membershipSlot i | i <- variables, membershipSlot i `notElem` funProofSlots info]
   where
     result = snd (schemaArrows (schemeType (funScheme info)))
     variables = nub (concatMap valueVariables (result : argTypes))
@@ -619,22 +619,94 @@ functionEntry :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred ->
 functionEntry k g info argTypes args given slot = case lookup slot (zip (funSlots info) (drop (length argTypes) args)) of
   Just value -> Right value
   Nothing -> do
-    predicate <- maybe (Left "a function contract's dictionary type is not known") Right (Map.lookup (slotParam slot) given)
-    actual <- typeFromPredicate predicate
+    actual <- functionClassType k g info argTypes args given (slotParam slot)
     methodEntryAt k g slot actual
+
+classTypeFromPredicate :: Knowledge -> Goal -> Pred -> Either String Ty
+classTypeFromPredicate k g predicate
+  | predicate == anyPred = Right TNat
+  | Just parameter <- ownParam g predicate = Right (TParam parameter [])
+  | Pred name parameters <- predicate
+  , (dn, used) : _ <- [(dn, used) | (dn, (core, used)) <- Map.toList (knowMembership k), core == name]
+  , [dat] <- [d | GData d <- Map.elems (envGlobals (knowEnv k)), renderQualName (dataQual d) == dn] = do
+      unless (null (dataIndices dat)) $ Left "an indexed class type cannot be recovered from its erased membership predicate"
+      types <- forM [0 .. length (dataParams dat) - 1] \i -> case lookup i (zip used parameters) of
+        Just value -> classTypeFromPredicate k g (parameterPredicate value)
+        Nothing -> Left "a class type parameter cannot be recovered from its erased membership predicate"
+      Right (TData dn types [])
+  | otherwise = Left "a class type cannot be recovered from its membership predicate"
+
+{- | Prefer the full checked type of an actual argument to its erased
+membership predicate. Indices cannot be recovered from predicates alone.
+-}
+functionClassType :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Int -> Either String Ty
+functionClassType k g _ argTypes args predicates parameter =
+  case Map.lookup parameter (assignment argTypes (map (fromMaybe THole . argumentTypeOf 16) args)) of
+    Just ty | ty /= THole -> Right ty
+    _ -> maybe (Left "a proof-only dictionary needs the actual class type") (classTypeFromPredicate k g) (Map.lookup parameter predicates)
   where
-    typeFromPredicate predicate
-      | predicate == anyPred = Right TNat
-      | Just parameter <- ownParam g predicate = Right (TParam parameter [])
-      | Pred name parameters <- predicate
-      , (dn, used) : _ <- [(dn, used) | (dn, (core, used)) <- Map.toList (knowMembership k), core == name]
-      , [dat] <- [d | GData d <- Map.elems (envGlobals (knowEnv k)), renderQualName (dataQual d) == dn] = do
-          unless (null (dataIndices dat)) $ Left "an indexed class type cannot be recovered from its erased membership predicate"
-          types <- forM [0 .. length (dataParams dat) - 1] \i -> case lookup i (zip used parameters) of
-            Just value -> typeFromPredicate (parameterPredicate value)
-            Nothing -> Left "a class type parameter cannot be recovered from its erased membership predicate"
-          Right (TData dn types [])
-      | otherwise = Left "a class type cannot be recovered from its membership predicate"
+    argumentTypeOf remaining term
+      | remaining <= 0 = Nothing
+      | otherwise = case term of
+          CVar core -> listToMaybe [ty | (_, (name, ty)) <- goalVars g, name == core]
+          CNum _ -> Just TNat
+          CSym core actuals
+            | Just function <- find ((== core) . funCore) [f | GFun f <- Map.elems (envGlobals (knowEnv k))] ->
+                let scheme = funScheme function
+                    (domains, result) = schemaArrows (schemeType scheme)
+                    expected = [snd (schemeValues scheme !! i) | i <- funRuntime function] <> take (funArity function) domains
+                    types = assignment expected (map (fromMaybe THole . argumentTypeOf (remaining - 1)) actuals)
+                    values = [(i, index) | i <- [0 .. length (schemeValues scheme) - 1], Right index <- [indexFromCore (functionValueAt (knowEnv k) function expected actuals i)]]
+                    specialized = Types.substScheme (length (schemeParams scheme), length (schemeValues scheme)) (Types.Assignment (IM.fromList (Map.toList types)) (IM.fromList values)) result
+                 in if THole == specialized || any (== IxHole) (Types.tyIndices specialized) then Nothing else Just specialized
+            | Just constructor <- find ((== core) . ctorCore) [c | GCtor c <- Map.elems (envGlobals (knowEnv k))]
+            , Just (GData datatype) <- Map.lookup (ctorData constructor) (envGlobals (knowEnv k))
+            , null (dataParams datatype)
+            , null (dataIndices datatype) ->
+                Just (TData (renderQualName (dataQual datatype)) [] [])
+          _ -> Nothing
+    indexFromCore = \case
+      CVar name -> Right (IxVar name)
+      CNum value -> Right (IxNat value)
+      CSym "S" [value] -> IxSucc <$> indexFromCore value
+      CSym name values -> IxFun name <$> traverse indexFromCore values
+      _ -> Left "a dictionary index is not a first-order term"
+
+{- | A logical precondition mentions the proof dictionary's places. Replace
+both its runtime values and applied static methods by the actual selected
+entries before attempting to prove it at a call.
+-}
+functionEvidenceEntries :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Either String (Map Text CT)
+functionEvidenceEntries k g info argTypes args predicates = Map.fromList <$> traverse selected (zip dict (placeRefs dict))
+  where
+    dict = functionDictionary info argTypes
+    selected (slot, Ref kind name)
+      | isMembershipSlot slot = do
+          predicate <- maybe (Left "a logical function dictionary is missing its membership predicate") Right (Map.lookup (slotParam slot) predicates)
+          pure (name, CClosure ["member_value"] (predicateAt predicate (CVar "member_value")) [])
+      | otherwise = do
+          value <- functionEntry k g info argTypes args predicates slot
+          pure (if kind == RefValueParam then valueVar name else name, value)
+
+instantiateEvidenceEntries :: Map Text CT -> CT -> Either String CT
+instantiateEvidenceEntries entries = go
+  where
+    go (CVar name) = Right (Map.findWithDefault (CVar name) name entries)
+    go (CStatic name) = Right (Map.findWithDefault (CStatic name) name entries)
+    go (CSym name arguments) = do
+      actuals <- traverse go arguments
+      maybe (Right (CSym name actuals)) (`applyMethodEntry` actuals) (Map.lookup name entries)
+    go (CPartial name captured arity) = CPartial name <$> traverse go captured <*> pure arity
+    go (CIndexedPartial name captured arity prefix) = CIndexedPartial name <$> traverse go captured <*> pure arity <*> pure prefix
+    go (CCallback code environment) = CCallback <$> go code <*> go environment
+    go (CClosure binders body captured) = CClosure binders <$> instantiateEvidenceEntries (foldr Map.delete entries binders) body <*> traverse go captured
+    go value = Right value
+
+functionPreconditions :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> [Expr Text] -> Either String [Expr Text]
+functionPreconditions _ _ _ _ _ _ [] = Right []
+functionPreconditions k g info argTypes args predicates props = do
+  entries <- functionEvidenceEntries k g info argTypes args predicates
+  traverse (mapPropositionTerms (Map.keys entries <> concatMap varsCT (Map.elems entries)) (instantiateEvidenceEntries entries)) props
 
 functionPremiseObligation :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Premise -> Either String Obligation
 functionPremiseObligation k g info argTypes args given = \case
@@ -648,7 +720,7 @@ functionPremiseObligation k g info argTypes args given = \case
   PSchema position ty -> do
     callback <- maybe (Left "the callback argument is not given") Right (listToMaybe (drop position args))
     OSchema <$> schemaContract g predicate valueTerm callback ty
-  PLaw {} -> Left "internal: a class law among the premises of a function contract"
+  PLaw law parameter -> OLaw law <$> functionClassType k g info argTypes args given parameter
   where
     dict = functionDictionary info argTypes
     predicate = predicateOf (knowMembership k) (`Map.lookup` given)
@@ -828,7 +900,7 @@ specGoal k fd spec = do
       predicate = lemmaPredicate k dict
       applied = functionApplication fd
       hyps = [HMember p v | (v, Just p) <- zip cores (map predicate (fdArgs fd))] <> map HProp (specPre spec cores)
-  premises <- either (Left . EngineError (fdSpan fd)) Right (renderPremises True predicate cores (functionValueTerm k fd) (specPremises spec (knowEnv k) dict <> functionSchemaPremises fd))
+  premises <- either (Left . EngineError (fdSpan fd)) Right (renderPremises True predicate cores (functionValueTerm k fd) (functionPremises k fd spec))
   pure (Goal (zip (map hname [1 ..]) hyps) (specPost spec cores applied) (zip names (zip cores (fdArgs fd))) [] [] dict premises (initialSourceBindings (zip names (zip cores (fdArgs fd)))) (funQuantifierViews (fdInfo fd)))
 
 {- |
@@ -875,7 +947,7 @@ proveSpec k fd spec = do
       PSucc _ -> True
       PAbsurd -> True
       _ -> False
-    pds = specPremises spec (knowEnv k) dict <> functionSchemaPremises fd
+    pds = functionPremises k fd spec
     -- The joint contract retains recursive result membership as well as
     -- indices. Project its certified index component instead of repeating
     -- induction with an index-only hypothesis that loses that membership.
@@ -902,18 +974,27 @@ proveSpec k fd spec = do
 
 -- | The dictionary of a function's lemmas: its own, then the membership predicate of each type parameter its values are of, parameters of the lemma's rule.
 lemmaDictionary :: FunDef -> [Slot]
-lemmaDictionary fd = funSlots info <> [membershipSlot i | i <- vars, membershipSlot i `notElem` funSlots info]
+lemmaDictionary fd = fdEvidenceSlots fd <> [membershipSlot i | i <- vars, membershipSlot i `notElem` fdEvidenceSlots fd]
   where
-    info = fdInfo fd
     vars = nub (concatMap valueVariables (fdResult fd : fdArgs fd))
+
+{- | Logical dictionaries contain laws and proof-only methods independently
+of the static parameters actually used by executable code.
+-}
+functionPremises :: Knowledge -> FunDef -> Spec -> [PremiseDef]
+functionPremises k fd spec =
+  nubBy
+    (\a b -> pdPremise a == pdPremise b)
+    (fdEvidencePremises fd <> specPremises spec (knowEnv k) (lemmaDictionary fd) <> functionSchemaPremises fd)
 
 functionSchemaPremises :: FunDef -> [PremiseDef]
 functionSchemaPremises fd = [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (fdArgs fd)]
 
 functionApplication :: FunDef -> Expr Text
-functionApplication fd = apps (Global (Ref RefFunction (funCore info))) (arguments <> ownDictionary (funSlots info))
+functionApplication fd = apps (Global (Ref RefFunction (funCore info))) (arguments <> dictionary)
   where
     info = fdInfo fd
+    dictionary = [Global (fromMaybe (error "internal: a runtime dictionary entry is absent from logical evidence") (lookup slot (zip (lemmaDictionary fd) (placeRefs (lemmaDictionary fd))))) | slot <- funSlots info]
     schemas = [(position, Ref RefStatic (schemaName serial)) | (serial, (position, _)) <- zip [1 ..] (schemaArguments (fdArgs fd))]
     arguments =
       [ maybe (Var core) (\ref -> SchemaParameter ty ref (Var core)) (lookup position schemas)
@@ -1034,15 +1115,16 @@ data IndexSpec = IndexSpec
   , ixsValues :: ![Text]
   , ixsPre :: ![(Text, Int, CT)]
   , ixsPost :: ![(Text, CT)]
-  , ixsProps :: ![(CT, CT)]
-  -- ^ its preconditions, the propositions its proofs are of, as the equations the core states them as
+  , ixsPremises :: ![Premise]
+  , ixsProps :: ![Expr Text]
+  -- ^ the complete propositions required by its proof arguments
   }
 
 -- | What a function says of indices, when the types of its signature have any.
 indexSpecOf :: Knowledge -> FunDef -> Maybe IndexSpec
 indexSpecOf k fd
   | null pres0 && null posts0 && null props = Nothing
-  | otherwise = Just (IndexSpec (functionLemma info "#index") cores kept pres posts props)
+  | otherwise = Just (IndexSpec (functionLemma info "#index") cores kept pres posts (map pdPremise (functionPremises k fd (closureSpec "unused" []))) props)
   where
     info = fdInfo fd
     env = knowEnv k
@@ -1066,14 +1148,13 @@ indexSpecOf k fd
     pres = [(fn, a, ct x) | (j, (fn, a, x)) <- zip [0 ..] pres0, j `notElem` defining]
     posts = [(fn, ct x) | (fn, x) <- posts0]
     kept = [paramCore i | i <- [0 .. length values - 1], i `notElem` map fst definitions]
-    -- Its preconditions over the variables of its lemmas, as the equations the core states them as.
+    -- Its complete preconditions over the variables of its lemmas.
     props =
-      [ (l, r)
+      [ mapGlobals rename (instantiate (fromCT . valueTerm) (fmap absurd prop))
       | (_, prop) <- funProofs info
-      , Rel RelEq a b <- [stripLocations (asEquation (instantiate (fromCT . valueTerm) (fmap absurd prop)))]
-      , Right l <- [termCT CVar a]
-      , Right r <- [termCT CVar b]
       ]
+    table = Map.fromList [(old, new) | (slot, old) <- zip (funProofSlots info) (placeRefs (funProofSlots info)), Just new <- [lookup slot (zip (lemmaDictionary fd) (placeRefs (lemmaDictionary fd)))]]
+    rename ref = Map.findWithDefault ref ref table
 
 -- | An index as a core term, the value parameters by the function given.
 ixCT :: (Int -> CT) -> Ix -> CT
@@ -1094,10 +1175,10 @@ ixCTWith variable param = go
       IxPartial name arity prefix xs -> CIndexedPartial name (map go xs) arity prefix
 
 {- | The indices a function's arguments must have, as the propositions of its lemmas' hypotheses, over its arguments' core variables.
-| Preconditions as hypotheses: the equations the core states them as.
+| Preconditions as hypotheses, retaining their full logical shape.
 -}
-propExprs :: [(CT, CT)] -> [Expr Text]
-propExprs props = [Rel RelEq (fromCT l) (fromCT r) | (l, r) <- props]
+propExprs :: [Expr Text] -> [Expr Text]
+propExprs = id
 
 {- |
 The preconditions of a lemma at what the substitution gives its variables:
@@ -1106,28 +1187,137 @@ function being proved, which a proof its clauses give is; stated as a
 hypothesis, for the appeal to the lemma to find.  Left, with the one no
 hypothesis states and no obligation concludes.
 -}
+
+-- Keep the complete logical shape while changing its computational terms.
+-- Bound variables are opened under a fresh name and immediately reabstracted.
+mapPropositionTerms :: [Text] -> (CT -> Either String CT) -> Expr Text -> Either String (Expr Text)
+mapPropositionTerms reserved transform = go
+  where
+    term expression = fromCT <$> (termCT CVar expression >>= transform)
+    go expression = case expression of
+      At span' body -> At span' <$> go body
+      Typed _ _ _ body -> go body
+      Arrow left right -> Arrow <$> go left <*> go right
+      Conn connective left right -> Conn connective <$> go left <*> go right
+      Rel relation left right -> Rel relation <$> term left <*> term right
+      Not body -> Not <$> go body
+      Quant kind hint (Just (relation, bound)) Nothing body -> do
+        let name = head [candidate | candidate <- iterate (<> "'") "precondition_bound", candidate `notElem` (reserved <> foldr (:) [] expression)]
+        limit <- term bound
+        inside <- go (instantiate (const (Var name)) body)
+        pure (Quant kind hint (Just (relation, limit)) Nothing (abstract (\variable -> if variable == name then Just () else Nothing) inside))
+      Top -> pure Top
+      Bottom -> pure Bottom
+      _ -> Left "an unlowered proposition reached a function contract"
+
+-- Match desugared propositions structurally, including arbitrary nesting of
+-- bounded quantifiers. Only the supplied free variables are metavariables.
+matchProposition :: [Text] -> Expr Text -> Expr Text -> Map Text CT -> Maybe (Map Text CT)
+matchProposition variables = go
+  where
+    terms left right known = do
+      patternTerm <- either (const Nothing) Just (termCT CVar left)
+      actualTerm <- either (const Nothing) Just (termCT CVar right)
+      matchCT variables patternTerm actualTerm known
+    go left right known = case (stripLocations (asEquation left), stripLocations (asEquation right)) of
+      (Rel relation a b, Rel actual c d) | relation == actual -> terms a c known >>= terms b d
+      (Arrow a b, Arrow c d) -> go a c known >>= go b d
+      (Conn connective a b, Conn actual c d) | connective == actual -> go a c known >>= go b d
+      (Not a, Not b) -> go a b known
+      (Quant kind _ (Just (relation, limit)) Nothing body, Quant actual _ (Just (actualRelation, actualLimit)) Nothing actualBody)
+        | kind == actual && relation == actualRelation -> do
+            values <- terms limit actualLimit known
+            let taken = variables <> foldr (:) [] left <> foldr (:) [] right <> concatMap varsCT (Map.elems known)
+                name = head [candidate | candidate <- iterate (<> "'") "matched_quantifier", candidate `notElem` taken]
+            matched <- go (instantiate (const (Var name)) body) (instantiate (const (Var name)) actualBody) values
+            guard (all (notElem name . varsCT) (Map.elems matched))
+            pure matched
+      (Top, Top) -> Just known
+      (Bottom, Bottom) -> Just known
+      _ -> Nothing
+
+hypProposition :: Hyp -> Expr Text
+hypProposition (HProp proposition) = proposition
+hypProposition (HMember predicate variable) = Rel RelLt (Nat 0) (fromCT (predicateAt predicate (CVar variable)))
+
+-- The relational fast path remains available, but collecting it cannot erase
+-- a nonrelational requirement from the full checked obligation table.
+equationObligations :: Knowledge -> [(TheoremInfo, [Text], CT, CT, [Expr Text])]
+equationObligations knowledge =
+  [ (theorem, sequentVars goal, left, right, hypotheses)
+  | (theorem, goal) <- knowObligations knowledge
+  , Rel RelEq a b <- [stripLocations (asEquation (goalConcl goal))]
+  , Right left <- [termCT CVar a]
+  , Right right <- [termCT CVar b]
+  , let hypotheses = map (hypProposition . snd) (goalHyps goal)
+  ]
+
+-- Every full precondition must be present or follow from an earlier certified
+-- erased-proof obligation whose own hypotheses are established here.
+propositionsAt :: Knowledge -> Goal -> Map Text CT -> [Expr Text] -> Either String Builder
+propositionsAt k g sigma = fmap mconcat . traverse establish
+  where
+    apply known = mapPropositionTerms (Map.keys known <> concatMap varsCT (Map.elems known)) (Right . substCT known)
+    establish original = do
+      target <- apply sigma original
+      case stripLocations (asEquation target) of
+        Rel RelEq left right -> do
+          l <- termCT CVar left
+          r <- termCT CVar right
+          preconditionsAt k g Map.empty [(l, r)]
+        _ | any (matches target . hypProposition . snd) (goalHyps g) -> pure ""
+        _ -> case [result | (theorem, obligation) <- knowObligations k, Just assignment <- [matchProposition (sequentVars obligation) (goalConcl obligation) target Map.empty], Right result <- [appeal target theorem obligation assignment]] of
+          proof : _ -> pure proof
+          [] -> Left ("the full precondition " <> either id (T.unpack . runBuilder) (formula target) <> " is not established here")
+    matches a b = isJust (matchProposition [] a b Map.empty)
+    appeal target theorem obligation initial = do
+      (known, before) <- obligationHypotheses k g (sequentVars obligation) initial (map (hypProposition . snd) (goalHyps obligation))
+      proof <- obligationAppeal k g theorem known
+      stated <- formula target
+      pure (before <> "have (" <> stated <> ") { " <> proof <> " }; ")
+
+-- Check every assumption of a certified obligation, retaining quantified and
+-- connective propositions alongside the ordinary arithmetic equations.
+obligationHypotheses :: Knowledge -> Goal -> [Text] -> Map Text CT -> [Expr Text] -> Either String (Map Text CT, Builder)
+obligationHypotheses k g variables initial = solve initial
+  where
+    matches a b = isJust (matchProposition [] a b Map.empty)
+    solve known [] = pure (known, "")
+    solve known (proposition : rest) =
+      let extensions = [next | (_, hyp) <- goalHyps g, Just next <- [matchProposition variables proposition (hypProposition hyp) known]]
+          -- Several values can have the same membership. Keep every
+          -- consistent choice until the remaining indices and propositions
+          -- establish which value this obligation's binder denotes.
+          candidates = nub (extensions <> [known])
+       in choose [establish selected proposition rest | selected <- candidates]
+    choose [] = Left "a checked obligation's hypotheses are not established here"
+    choose (Right result : _) = Right result
+    choose (Left why : alternatives) = case alternatives of
+      [] -> Left why
+      _ -> choose alternatives
+    establish selected proposition rest = do
+      target <- mapPropositionTerms (Map.keys selected <> concatMap varsCT (Map.elems selected)) (Right . substCT selected) proposition
+      before <-
+        if any (matches target . hypProposition . snd) (goalHyps g)
+          then pure ""
+          else case stripLocations (asEquation target) of
+            Rel RelEq a b -> do
+              left <- termCT CVar a
+              right <- termCT CVar b
+              maybe (Left "a checked obligation's hypothesis is not established here") Right (equationFromHyps k g left right)
+            _ -> Left "a checked obligation's quantified hypothesis is not established here"
+      (known, after) <- solve selected rest
+      pure (known, before <> after)
+
 preconditionsAt :: Knowledge -> Goal -> Map Text CT -> [(CT, CT)] -> Either String Builder
 preconditionsAt k g sigma props = fmap mconcat . forM props $ \(l0, r0) -> do
   let l = substCT sigma l0
       r = substCT sigma r0
       concludes t (_, vs, ol, or', _) = matchCT vs ol t Map.empty >>= matchCT vs or' r
-      found t = listToMaybe [(o, sub) | o <- knowObligations k, Just sub <- [concludes t o]]
+      found t = listToMaybe [(o, sub) | o <- equationObligations k, Just sub <- [concludes t o]]
       -- The obligation's own hypotheses, the clause's preconditions, at what the match gives its
       -- variables: each at hand, or from a hypothesis by the equations between variables.
-      hypotheses (o, vs, _, _, hs) sub = foldM premise (sub, "") hs
-        where
-          premise (known, tac) (hl0, hr0) = do
-            -- A premise may determine a value absent from the conclusion,
-            -- such as the vector in an obligation proving the constant 0 < 2.
-            let matches = [s' | (_, l', r') <- goalEquations g, Just s <- [matchCT vs hl0 l' known], Just s' <- [matchCT vs hr0 r' s]]
-                known' = fromMaybe known (listToMaybe matches)
-                hl = substCT known' hl0
-                hr = substCT known' hr0
-            proof <-
-              if hasEquation g hl hr
-                then Right ""
-                else maybe (Left ("the precondition " <> T.unpack (runBuilder (equationText hl hr)) <> " of the obligation " <> T.unpack (thmCore o) <> " is not established here")) Right (equationFromHyps k g hl hr)
-            pure (known', tac <> proof)
+      hypotheses (_, vs, _, _, hs) sub = obligationHypotheses k g vs sub hs
       -- The left side rewritten by the equations of indices at hand, as the obligation
       -- states it at them: each step, with the hypothesis doing it.
       rewrites = rewriting l (goalEquations g)
@@ -1470,7 +1660,13 @@ indexOf k g eqs t0 = case t0 of
         , Just post <- lookup fn (ixsPost s) -> do
             let byArg = zip (ixsArgs s) args
             (sigma, haves) <- premisesAt k g eqs (ixsPre s) (ixsValues s) byArg
-            props <- preconditionsAt k g (Map.fromList byArg <> sigma) (ixsProps s)
+            actualProps <- case find ((== h) . funCore) [f | GFun f <- Map.elems (envGlobals (knowEnv k))] of
+              Nothing -> Right (ixsProps s)
+              Just info ->
+                let argTypes = [snd (schemeValues (funScheme info) !! i) | i <- funRuntime info] <> take (funArity info) (fst (schemaArrows (schemeType (funScheme info))))
+                    given = knownPredicates k g argTypes args <> dictionaryPredicates k g info argTypes args
+                 in functionPreconditions k g info argTypes args given (ixsProps s)
+            props <- propositionsAt k g (Map.fromList byArg <> sigma) actualProps
             mems <- argMemberships k g h args
             callbacks <- case find ((== h) . funCore) [f | GFun f <- Map.elems (envGlobals (knowEnv k))] of
               Nothing -> Right ""
@@ -1479,7 +1675,7 @@ indexOf k g eqs t0 = case t0 of
                     dict = functionDictionary info argTypes
                     given0 = knownPredicates k g argTypes args <> dictionaryPredicates k g info argTypes args
                     given = given0 <> Map.fromList [(slotParam slot, anyPred) | slot <- dict, isMembershipSlot slot]
-                    premises = map pdPremise (closurePremises (knowEnv k) dict) <> [PSchema position ty | (position, ty) <- schemaArguments argTypes]
+                    premises = ixsPremises s
                 forM_ [parameter | PMethod _ parameter _ _ <- premises] \parameter ->
                   unless (Map.member parameter given0) $ Left "an indexed function's method contract needs its actual class predicate"
                 required <- traverse (functionPremiseObligation k g info argTypes args given) premises
@@ -2941,7 +3137,10 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
              in Just case (closureAppeal cl given args, premisesAt k g (goalEquations g) (closurePre cl) (closureValues cl) (zip names args)) of
                   (Left why, _) -> Refuse why
                   (_, Left why) -> Refuse why
-                  (Right (subs, appeal), Right (sigma, haves)) -> case preconditionsAt k g (Map.fromList (zip names args) <> sigma) (closureProps cl) of
+                  (Right (subs, appeal), Right (sigma, haves)) -> case do
+                    info <- maybe (Left "the closure's function metadata is unavailable") Right (find ((== f) . funCore) [fn | GFun fn <- Map.elems (envGlobals env)])
+                    actualProps <- functionPreconditions k g info (closureArgTys cl) args given (closureProps cl)
+                    propositionsAt k g (Map.fromList (zip names args) <> sigma) actualProps of
                     Left why -> Refuse why
                     Right props -> afterMemberships [(a, q) | (a, Just q) <- zip args argPs] subs (\rs -> haves <> props <> appeal rs)
       _ -> Nothing
@@ -2973,10 +3172,11 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
     closureAppeal cl given args = do
       info <- maybe (Left "the closure's enclosing function is not known") Right (find (\f -> functionLemma f "#closed" == closureLemma cl) [f | GFun f <- Map.elems (envGlobals env)])
       subs <- traverse (functionPremiseObligation k g info (closureArgTys cl) args given) (closurePremisesOf cl)
-      explicit <- if any typedPremise (closurePremisesOf cl) then functionRuleArguments k g info (closureArgTys cl) args given (closureLemma cl) else Right ""
+      explicit <- if any explicitPremise (closurePremisesOf cl) then functionRuleArguments k g info (closureArgTys cl) args given (closureLemma cl) else Right ""
       Right (subs, \rs -> "exact " <> fromText (closureLemma cl) <> explicit <> blocks rs)
-    typedPremise PMethod {} = True
-    typedPremise _ = False
+    explicitPremise PMethod {} = True
+    explicitPremise PLaw {} = True
+    explicitPremise _ = False
     -- The predicates a function's closure lemma needs of its arguments, at the
     -- predicates of the type parameters the result's gives: none when it does
     -- not give them all.

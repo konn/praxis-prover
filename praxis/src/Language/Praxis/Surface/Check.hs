@@ -269,7 +269,7 @@ data Run = Run
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
   , runIndexSpecs :: !(Map Text IndexSpec)
-  , runObligations :: ![(TheoremInfo, [Text], CT, CT, [(CT, CT)])]
+  , runObligations :: ![(TheoremInfo, Goal)]
   -- ^ the certified obligations of the function whose lemmas are being proved
   }
 
@@ -451,16 +451,13 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
 
     funName fd = T.unpack (displayQualName (funQual (fdInfo fd)))
 
-    -- The obligations of a function certified: each lemma's name, its variables, the equation it concludes, and its hypotheses, the clause's preconditions, as equations.
+    -- Retain each certified obligation with its complete sequent, including
+    -- quantified preconditions which an equation-only view would omit.
     obligationFacts r fd =
-      [ (tdInfo td, thmBinders (tdInfo td), l, rhs, hyps)
+      [ (tdInfo td, gl)
       | td <- fdObligations fd
       , Map.member (T.unpack (thmCore (tdInfo td))) (coreLemmas (runCore r))
       , Right gl <- [statementGoal (coreMembership (runCore r)) td]
-      , Rel RelEq a b <- [stripLocations (asEquation (goalConcl gl))]
-      , Right l <- [termCT CVar a]
-      , Right rhs <- [termCT CVar b]
-      , let hyps = [(hl, hr) | (_, HProp p) <- goalHyps gl, Rel RelEq a' b' <- [stripLocations (asEquation p)], Right hl <- [termCT CVar a'], Right hr <- [termCT CVar b']]
       ]
 
     -- A theorem, or the obligation a proof in a function's clause is: proved, and certified.
