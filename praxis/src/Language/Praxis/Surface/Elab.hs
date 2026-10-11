@@ -48,6 +48,7 @@ module Language.Praxis.Surface.Elab (
   resolvedDictionaryEntry,
   instanceAssignment,
   instanceContext,
+  instanceClassContext,
 
   -- * Names of generated lemmas
   unfoldingNames,
@@ -1051,7 +1052,7 @@ elabInstance fx env sp idl = do
             views = foldMap (SourceView.rhsQuantifierViews (funQual function) (envBuiltins env) headScope . R.clauseRhs) [c | c <- clauses, clauseHead c == Just (methodName m)]
             (e', f) = rememberFunction logical (instanceRequirements <> Map.findWithDefault mempty (methodQual m) needed) views (declared, function)
          in (e', fs <> [(m, f)])
-      register e fs laws = addInstance e (InstanceInfo iq (classQual cls) headName (headScheme headTy) full (Map.fromList [(methodQual m, latest f) | (m, f) <- fs]) laws)
+      register e fs laws = addInstance e (InstanceInfo iq (classQual cls) headName (headScheme headTy) full [(classQual contextClass, parameter) | (contextClass, parameter) <- given] (Map.fromList [(methodQual m, latest f) | (m, f) <- fs]) laws)
         where
           latest f = case Map.lookup (funQual f) (envGlobals e) of Just (GFun updated) -> updated; _ -> f
   -- A dependency's dictionary appears in the indices of later methods.
@@ -1349,6 +1350,14 @@ instanceContext _ instance' ty = do
   let scheme = instScheme instance'
       n = (length (schemeParams scheme), length (schemeValues scheme))
   pure [(slot, substScheme n assignment (TParam (slotParam slot) [])) | slot <- instContext instance']
+
+-- | Every declared class constraint, including those with no method slots.
+instanceClassContext :: InstanceInfo -> Ty -> Either String [(QualName, Ty)]
+instanceClassContext instance' ty = do
+  assignment <- instanceAssignment instance' ty
+  let scheme = instScheme instance'
+      n = (length (schemeParams scheme), length (schemeValues scheme))
+  pure [(cls, substScheme n assignment (TParam parameter [])) | (cls, parameter) <- instClassContext instance']
 
 {- |
 The dictionary a function takes at the types of its parameters: each place,
@@ -3206,10 +3215,6 @@ elabProposition proofArguments env givens ctx (Located sp e) =
       o | o `elem` ["↔", "<->"] -> Just Iff
       _ -> Nothing
 
--- Append to Elab.hs after the proposition elaborator. This uses the Stage B
--- resolveMethod/resolvedDictionaryEntry/instanceContext API, and Desugar's
--- separate requirements writer. It introduces no Expr constructors.
-
 {- | A type annotation under the current value binders. Names assigned by
 enterQuantifier distinguish shadowed source variables in dependent indices.
 -}
@@ -3422,9 +3427,6 @@ quantifierAnnotations = go []
       [(bound, ty) | ty <- maybeToList annotation]
         <> bind (bound <> map unLocated names) rest body
 
--- Append to Elab.hs with Lowering.fragment.hs. These are metadata operations,
--- never new surface Core constructors. Import Desugar constructors, and tell.
-
 -- | Canonical names are always nonempty; all callers use Env declarations.
 evidenceQName :: QualName -> QName
 evidenceQName name = QName (init name) (last name)
@@ -3477,7 +3479,7 @@ requireClassEvidence env givens sp seen className actual
             TNat -> pure "Nat"
             TData name _ _ -> pure name
             _ -> failAt sp "a finite quantifier's type has no concrete instance"
-          instanceInfo <- maybe (failAt sp "a finite quantifier requires an instance of its finite class") pure (Map.lookup (className, headName) (envInstances env))
+          instanceInfo <- maybe (failAt sp ("finite quantifier evidence requires an instance of " <> T.unpack (displayQualName className) <> " for " <> renderTy [] actual)) pure (Map.lookup (className, headName) (envInstances env))
           _ <- either (failAt sp) pure (instanceAssignment instanceInfo actual)
           forM_ (classMethods cls) \method ->
             case Map.lookup (methodQual method) (instFunctions instanceInfo) of
@@ -3487,9 +3489,8 @@ requireClassEvidence env givens sp seen className actual
             case Map.lookup (lawQual law) (instLaws instanceInfo) of
               Just theorem -> requireDependency sp (CertifiedDeclaration (thmCore theorem))
               Nothing -> failAt sp "a finite dictionary has no proof of one of its laws"
-          context <- either (failAt sp) pure (instanceContext env instanceInfo actual)
-          let constrained = nub [(methodClass method, target) | (slot, target) <- context, Just (GMethod method) <- [Map.lookup (slotMethod slot) (envGlobals env)]]
-          forM_ constrained \(class', target) -> requireClassEvidence env givens sp visited class' target
+          context <- either (failAt sp) pure (instanceClassContext instanceInfo actual)
+          forM_ context \(class', target) -> requireClassEvidence env givens sp visited class' target
 
 {- | A saved precondition's evidence is instantiated at the same actual types
 as its proposition. Retaining raw parameter positions at applications

@@ -15,6 +15,7 @@ import Language.Praxis.Surface.FiniteElaborationTest (finiteElaborationTests)
 import Language.Praxis.Surface.FiniteQuantifierTest (finiteQuantifierTests)
 import Language.Praxis.Surface.FiniteTacticTest (finiteTacticTests)
 import Language.Praxis.Surface.IndexedInstanceTest (indexedInstanceTests)
+import Language.Praxis.Surface.InstanceContextTest (instanceContextTests)
 import Language.Praxis.Surface.LogicalPreconditionTest (logicalPreconditionTests)
 import Language.Praxis.Surface.MethodContractTest (methodContractTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
@@ -47,6 +48,7 @@ main =
       , finiteTacticTests
       , finiteElaborationTests
       , evidenceTests
+      , instanceContextTests
       , logicalPreconditionTests
       , methodContractTests
       , builtinTests

@@ -579,7 +579,9 @@ data InstanceInfo = InstanceInfo
   , instScheme :: !Scheme
   -- ^ the complete instance head, including universally quantified value indices
   , instContext :: ![Slot]
-  -- ^ the original context, including premises needed only by laws
+  -- ^ the original dictionary slots, including places needed only by laws
+  , instClassContext :: ![(QualName, Int)]
+  -- ^ the declared class constraints, retained even for classes without methods
   , instFunctions :: !(Map QualName FunInfo)
   , instLaws :: !(Map QualName TheoremInfo)
   -- ^ the theorem proving each law of the class at the instance's type, by the law's qualified name
