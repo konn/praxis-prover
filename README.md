@@ -141,4 +141,4 @@ Praxis Surface -[elaborate]-> Praxis Core -[compile]-> CoPRA <- checked by the k
 
 [^1]: DISCLAIMER: The author himself believes that at least one supercompact cardinal should exist, though.
 
-[^2]: FAQ: "Then, why not System T, HA, or PA?" Well, I would like to explore by hand how weak the metatheory can be, so I chose one at the weak end of the spectrum ;-). FAQ 2: "Why not $I\Sigma_1$?" Well, it doesn't offer as many naming puns as PRA does :-). I love ZFC.
+[^2]: FAQ: "Then, why not System T, HA, or PA?" Well, I would like to explore by hand how weak the metatheory can be, so I chose one at the weak end of the spectrum ;-). FAQ 2: "Why not IΣ₁?" Well, it doesn't offer as many naming puns as PRA does :-). I love ZFC.
