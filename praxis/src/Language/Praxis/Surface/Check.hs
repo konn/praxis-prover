@@ -334,6 +334,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
                         core' =
                           core
                             { coreMembership = Map.insert self (dataIs info, encodedParams enc) (coreMembership core)
+                            , coreDisplay = Map.insert (dataIs info) (CorePretty.datatype info) (coreDisplay core)
                             , coreVariadic = (if encodedVariadic enc then Set.insert (dataIs info) else id) (coreVariadic core)
                             }
                         r5 =

@@ -637,10 +637,11 @@ for every constructor and for every function whose result is of a data type.
 - `praxis check [--dump-core] [--dump-pra] [--alone] [TARGET…]` checks a project, a
   package, a directory holding one, or `.px` files — each as a module of the
   package enclosing it, its imports first, or on its own — and prints every
-  report. `--dump-core` prints the elaborated function signatures and clauses
+  report. `--dump-core` prints datatype declarations with constructor signatures,
+  and elaborated function signatures and clauses
   in surface-like notation, with explicit type arguments (`@T`), named index
   instantiations (`{n = value}`), dictionaries (`[dict …]`) and certified proof
-  references (`[proof …]`). It includes imported bodies. This inspection
+  references (`[proof …]`). It includes imported declarations. This inspection
   notation is not yet accepted as source by the parser.
   `--dump-pra` prints the numerical definitions and every declaration handed
   to the PRA kernel. Both options can be used together.

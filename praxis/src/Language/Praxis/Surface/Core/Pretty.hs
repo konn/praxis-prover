@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Source-like declarations for the explicit core inspection view.
-module Language.Praxis.Surface.Core.Pretty (function) where
+module Language.Praxis.Surface.Core.Pretty (datatype, function) where
 
 import Bound (instantiate)
 import Data.IntMap.Strict qualified as IM
@@ -16,6 +16,32 @@ import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Pretty qualified as P
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Types
+
+{- | All data declarations use their elaborated constructor telescopes,
+including implicit indices recovered from fields and erased proof fields.
+-}
+datatype :: DataInfo -> Text
+datatype info = T.unlines (header : map constructor (dataCtors info))
+  where
+    params = dataParams info
+    names = map fst params
+    indices = take (length (dataIndices info)) [n | i <- [0 :: Int ..], let n = "index" <> T.pack (show i), n `notElem` names]
+    sc = P.Scope names indices []
+    binder n t = "(" <> n <> " : " <> t <> ")"
+    kinds = [binder n (T.pack (renderKind k)) | (n, k) <- params]
+    header = "data " <> displayQualName (dataQual info) <> " : " <> T.intercalate " -> " (kinds <> zipWith (\n t -> binder n (P.typeText sc 0 t)) indices (dataIndices info) <> ["Type"]) <> " where"
+    constructor c =
+      let sig = ctorSignature c
+          tele = constructorTele sig
+          scope = sc {P.indexNames = map teName tele}
+          ty = P.typeText scope 0
+          implicit = ["{" <> n <> " : " <> ty t <> "}" | TeleEntry n t role <- tele, not (explicit role)]
+          fields = [if "#" `T.isPrefixOf` n then P.typeText scope 1 t else binder n (ty t) | TeleEntry n t (Explicit _) <- tele]
+          proofs = [(pos, binder ("proof" <> T.pack (show (pos + 1))) (P.expression (P.nameAt "i" (P.indexNames scope)) (instantiate Var (fmap absurd prop)))) | (pos, prop) <- constructorProofs sig]
+          result = TData (renderQualName (dataQual info)) [TParam i [] | i <- [0 .. length params - 1]] (constructorResult sig)
+          types = ["@{" <> n <> " : " <> T.pack (renderKind k) <> "}" | (n, k) <- params]
+       in "  " <> displayQualName (ctorQual c) <> " : " <> T.intercalate " -> " (types <> implicit <> P.interleave proofs fields <> [ty result])
+    explicit = \case Explicit _ -> True; _ -> False
 
 {- | Called only after the body's evidence declarations have been certified.
 The output retains logical instantiations and dictionaries before erasure.

@@ -76,6 +76,34 @@ checkTests =
           assertBool (T.unpack fragment) (fragment `T.isInfixOf` output)
         forM_ ["TData", "TNat", "RefFunction", "u_Dump", "[proofs:"] $ \raw ->
           assertBool ("no raw AST syntax: " <> T.unpack raw) (not (raw `T.isInfixOf` output))
+    , testCase "core dumps include data declarations even without user functions" $ do
+        p <- either assertFailure pure prelude
+        let source =
+              T.unlines
+                [ "module DataDump where"
+                , "data PLt (n : Nat) (m : Nat) where"
+                , "  ZeroSucc : {m : Nat} -> PLt 0 (S m)"
+                , "  SuccSucc : {n m : Nat} -> PLt n m -> PLt (S n) (S m)"
+                , "data List a = Nil | Cons a (List a)"
+                , "data Witness where"
+                , "  Mk : (n : Nat) -> n = 0 -> Nat -> Witness"
+                , "data Void"
+                ]
+            c = checkSource p "data-dump.px" source
+        errors c @?= []
+        (_, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
+        let output = T.unlines (surfaceCore core)
+        forM_
+          [ "data DataDump.PLt : (index0 : Nat) -> (index1 : Nat) -> Type where"
+          , "  DataDump.PLt.ZeroSucc : {m : Nat} -> DataDump.PLt 0 (S m)"
+          , "  DataDump.PLt.SuccSucc : {n : Nat} -> {m : Nat} -> DataDump.PLt n m -> DataDump.PLt (S n) (S m)"
+          , "data DataDump.List : (a : Type) -> Type where"
+          , "  DataDump.List.Nil : @{a : Type} -> DataDump.List a"
+          , "  DataDump.List.Cons : @{a : Type} -> a -> DataDump.List a -> DataDump.List a"
+          , "  DataDump.Witness.Mk : (n : Nat) -> (proof2 : n = 0) -> Nat -> DataDump.Witness"
+          , "data DataDump.Void : Type where"
+          ]
+          $ \declaration -> assertBool (T.unpack declaration) (declaration `T.isInfixOf` output)
     , testCase "core dumps expose resolved dictionaries and impossible branches" $ do
         c <- checkFile "test/data/constrained.px"
         errors c @?= []
