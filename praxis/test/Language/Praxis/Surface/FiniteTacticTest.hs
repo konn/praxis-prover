@@ -2,11 +2,13 @@
 
 module Language.Praxis.Surface.FiniteTacticTest (finiteTacticTests) where
 
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.FiniteQuantifierTest (finitePrelude)
 import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -82,6 +84,93 @@ finiteTacticTests =
         [ "numeric : (m n : Nat) -> m < n -> ∃ (i : Nat) < n, i < n"
         , "numeric m n h = by exists m; assumption; assumption"
         ]
+    , succeeds
+        "reused theorem domains use the original explicit binder"
+        [ "all : (n : Nat) -> ∀ (i : Fin n), i = i"
+        , "all n = by intro element; rfl"
+        , "use : ∀ (m : Nat) < 3, ∀ (i : Fin m), i = i"
+        , "use = by intro bound; intro value; exact all bound value"
+        ]
+    , succeeds
+        "two applications of one source theorem keep independent domains"
+        [ "all : (n : Nat) -> ∀ (i : Fin n), i = i"
+        , "all n = by intro element; rfl"
+        , "use : (∀ (i : Fin 1), i = i) ∧ (∀ (i : Fin 2), i = i)"
+        , "use = by"
+        , "  have first := all 1"
+        , "  have second := all 2"
+        , "  constructor"
+        , "  · intro value; exact first value"
+        , "  · intro value; exact second value"
+        ]
+    , succeeds
+        "a generic quantified theorem specializes its source type and dictionary"
+        [ "all : Finite a => (x : a) -> ∀ (y : a), y = y"
+        , "all x = by intro value; rfl"
+        , "use : (x : Bool) -> x = x"
+        , "use x = by exact all x x"
+        ]
+    , succeeds
+        "identical applications at one source span retain equivalent views"
+        [ "all : (n : Nat) -> ∀ (i : Fin n), i = i"
+        , "all n = by intro element; rfl"
+        , "use : ∀ (i : Fin 1), i = i"
+        , "use = by"
+        , "  have first := all 1"
+        , "  have second := all 1"
+        , "  intro value"
+        , "  exact first value"
+        ]
+    , succeeds
+        "finite quantifiers remain usable below implication and negation"
+        [ "identity-negation : (¬ (∀ (x : Bool), x = x)) -> ¬ (∀ (x : Bool), x = x)"
+        , "identity-negation h = by exact h"
+        , "implication : (∀ (x : Bool), x = x) -> ∃ (y : Bool), y = True"
+        , "implication h = by exists True; exact h True"
+        ]
+    , succeeds
+        "explicit proof antecedents precede quantified element arguments"
+        [ "all : 0 = 0 -> ∀ (x : Bool), x = x"
+        , "all h = by intro value; rfl"
+        , "use : 0 = 0 -> True = True"
+        , "use h = by exact all h True"
+        ]
+    , testCase "identical spans in imported theorems keep their source scopes" $ do
+        library <- either assertFailure pure prelude
+        let check build imports file source = checkModule (\_ _ -> []) build imports Nothing file source
+            errors checked = [message | Report _ SevError message <- checkedReports checked]
+            (domain, firstBuild) = check (initialBuild library) Map.empty "Domain.px" ("module Domain where\n" <> finitePrelude)
+        errors domain @?= []
+        domainExports <- maybe (assertFailure "missing Domain exports") pure (Map.lookup [Ident "Domain"] (buildExports firstBuild))
+        let imports = Map.singleton (Nothing, [Ident "Domain"]) (Right domainExports)
+            declaration name = "module " <> name <> " where\nimport Domain\nall : (n : Nat) -> ∀ (i : Domain.Fin n), i = i\nall n = by intro element; rfl\n"
+            (first, secondBuild) = check firstBuild imports "A.px" (declaration "A")
+            (second, thirdBuild) = check secondBuild imports "B.px" (declaration "B")
+        errors first @?= []
+        errors second @?= []
+        aExports <- maybe (assertFailure "missing A exports") pure (Map.lookup [Ident "A"] (buildExports thirdBuild))
+        bExports <- maybe (assertFailure "missing B exports") pure (Map.lookup [Ident "B"] (buildExports thirdBuild))
+        let clientImports = imports <> Map.fromList [((Nothing, [Ident "A"]), Right aExports), ((Nothing, [Ident "B"]), Right bExports)]
+            (client, _) =
+              check
+                thirdBuild
+                clientImports
+                "Client.px"
+                ( T.unlines
+                    [ "module Client where"
+                    , "import Domain"
+                    , "import A"
+                    , "import B"
+                    , "use : (∀ (i : Domain.Fin 1), i = i) ∧ (∀ (i : Domain.Fin 2), i = i)"
+                    , "use = by"
+                    , "  have first := A.all 1"
+                    , "  have second := B.all 2"
+                    , "  constructor"
+                    , "  · intro value; exact first value"
+                    , "  · intro value; exact second value"
+                    ]
+                )
+        errors client @?= []
     ]
   where
     succeeds label declarations = testCase label $ do

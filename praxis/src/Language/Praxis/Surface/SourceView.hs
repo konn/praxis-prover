@@ -13,6 +13,7 @@ module Language.Praxis.Surface.SourceView (
   rhsQuantifierViews,
   quantifierViewCandidates,
   quantifierViewsList,
+  quantifierViewsFromList,
   tagQuantifierViews,
   withTypeBindings,
   withScope,
@@ -31,6 +32,8 @@ data QuantifierView = QuantifierView
   , qvBuiltins :: !(Map Text [Segment])
   , qvScope :: !TyScope
   , qvTypeBindings :: ![(Text, Ty)]
+  , qvParameters :: ![Text]
+  -- ^ Ordinary lexical value binders available before the quantifier.
   , qvSpan :: !Span
   , qvQuantifier :: !R.Quantifier
   , qvBinder :: !(Located Text)
@@ -53,17 +56,21 @@ newtype QuantifierViews = QuantifierViews (Map ([Segment], Span) QuantifierView)
 
 -- | All finite-style quantifier binders in a signature or proposition.
 quantifierViews :: [Segment] -> Map Text [Segment] -> TyScope -> Located R.Expr -> QuantifierViews
-quantifierViews owner builtins scope = expressionViews (Origin owner builtins scope [])
+quantifierViews owner builtins scope = expressionViews (Origin owner builtins scope [] [])
 
 -- | Views in local annotations, proof arguments, calculations and tactic blocks.
 rhsQuantifierViews :: [Segment] -> Map Text [Segment] -> TyScope -> Located R.Rhs -> QuantifierViews
-rhsQuantifierViews owner builtins scope = rhsViews (Origin owner builtins scope []) . unLocated
+rhsQuantifierViews owner builtins scope = rhsViews (Origin owner builtins scope [] []) . unLocated
 
 {- | Candidates retain their separate source identities. Matching a span alone
 never authorizes using a view from another declaration.
 -}
 quantifierViewCandidates :: Span -> QuantifierViews -> [QuantifierView]
 quantifierViewCandidates span' (QuantifierViews views) = [view | ((_, at), view) <- Map.toList views, at == span']
+
+-- | Rebuild a collection after a checked source-scope specialization.
+quantifierViewsFromList :: [QuantifierView] -> QuantifierViews
+quantifierViewsFromList views = QuantifierViews (Map.fromList [((qvOwner view, qvSpan view), view) | view <- views])
 
 -- | Inspect source scopes when specializing a reusable checked theorem.
 quantifierViewsList :: QuantifierViews -> [QuantifierView]
@@ -83,7 +90,7 @@ withTypeBindings bindings (QuantifierViews views) = QuantifierViews (fmap (\view
 withScope :: TyScope -> QuantifierViews -> QuantifierViews
 withScope scope (QuantifierViews views) = QuantifierViews (fmap (\view -> view {qvScope = scope}) views)
 
-data Origin = Origin ![Segment] !(Map Text [Segment]) !TyScope ![Located Text]
+data Origin = Origin ![Segment] !(Map Text [Segment]) !TyScope ![Text] ![Located Text]
 
 expressionViews :: Origin -> Located R.Expr -> QuantifierViews
 expressionViews origin written@(Located _ expression) = case expression of
@@ -102,7 +109,10 @@ expressionViews origin written@(Located _ expression) = case expression of
   R.ELam _ body -> rec body
   R.ECase value alternatives -> rec value <> foldMap (\(Located _ alternative) -> rec (R.altPattern alternative) <> rec (R.altBody alternative)) alternatives
   R.EIf condition yes no -> rec condition <> rec yes <> rec no
-  R.EPi binder body -> foldMap rec (R.binderType binder) <> rec body
+  R.EPi binder body ->
+    let Origin owner builtins scope parameters lexical = origin
+        inner = Origin owner builtins scope (parameters <> map unLocated (R.binderNames binder)) lexical
+     in foldMap rec (R.binderType binder) <> expressionViews inner body
   R.EArrow x y -> rec x <> rec y
   R.EQuant quantifier binders bound body ->
     binderViews origin quantifier binders bound body
@@ -120,14 +130,14 @@ expressionViews origin written@(Located _ expression) = case expression of
         names inside (name : more) =
           let remaining = [binder {R.binderNames = more} | not (null more)] <> rest
               inner = if null remaining then body else written {unLocated = R.EQuant quantifier remaining bound body}
-              Origin owner builtins scope lexical = inside
-              Origin _ _ _ domainLexical = current
+              Origin owner builtins scope parameters lexical = inside
+              Origin _ _ _ _ domainLexical = current
               domain = case R.binderType binder of
                 Just annotation -> annotation
                 Nothing -> Located (location name) (R.EName (R.QName [] (R.Ident "Nat")))
-              value = QuantifierView owner builtins scope [] (location name) quantifier name domain (maybe False (const True) bound) domainLexical lexical more inner
+              value = QuantifierView owner builtins scope [] parameters (location name) quantifier name domain (maybe False (const True) bound) domainLexical lexical more inner
               views = QuantifierViews (Map.singleton (owner, location name) value)
-              after = Origin owner builtins scope (lexical <> [name])
+              after = Origin owner builtins scope parameters (lexical <> [name])
            in views <> names after more
 
 rhsViews :: Origin -> R.Rhs -> QuantifierViews

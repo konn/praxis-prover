@@ -2204,11 +2204,7 @@ evidence k info g le = case spineOf le of
       , null args || maybe False boundedUniversal (hypothesis h) ->
           quantifiedEvidence k info g sp (named h) args
     _ -> case resolve (knowEnv k) q of
-      GTheorem t : _ -> do
-        initial <- theorem sp t (take (length (thmBinders t)) args)
-        if maybe False boundedUniversal (evConclusion initial)
-          then quantifiedEvidence k info g sp initial (drop (length (thmBinders t)) args)
-          else Right initial
+      GTheorem t : _ -> theorem sp t args
       GLaw l : _ -> do
         checked <- traverse (typedArg k info g) args
         let typed = map fst checked
@@ -2246,6 +2242,18 @@ evidence k info g le = case spineOf le of
     boundedUniversal proposition = case stripLocations proposition of
       Quant Forall _ (Just _) Nothing _ -> True
       _ -> False
+    proofArguments _ [] arguments = Right arguments
+    proofArguments _ _ [] = Right []
+    proofArguments sp (premise : premises) arguments@(argument : rest) =
+      case proofName argument >>= (`lookup` goalNames g) >>= hypothesis of
+        Nothing -> Right arguments
+        Just actual
+          | isJust (matchProposition [] (asEquation premise) (asEquation actual) Map.empty) -> proofArguments sp premises rest
+          | otherwise -> Left (EngineError (location argument) "the theorem's explicit proof argument does not establish its antecedent")
+      where
+        proofName (Located _ (R.EName (QName [] (Ident name)))) = Just name
+        proofName (Located _ (R.EParen inner)) = proofName inner
+        proofName _ = Nothing
     -- The indices a theorem's binders must have, at the arguments given: found, and stated where no hypothesis does; with the value parameters they give.
     indexPremises sp t typed
       | null (thmIndexHyps t) = Right (Map.empty, "")
@@ -2255,20 +2263,46 @@ evidence k info g le = case spineOf le of
               (defined, pre) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
           premisesAt k g (goalEquations g) pre [v | (i, v) <- zip [0 ..] values, i `notElem` map fst defined] (zip (thmBinders t) args)
     -- What a theorem with value parameters concludes at its arguments: each value parameter the index of an argument, or found from one.
-    conclusionAt t typed sigma = do
-      sc <-
-        thmProp t <|> do
-          guard (all isMembershipSlot (thmSlots t))
-          thmStatement t
+    statementAt sp t typed sigma = case (sourceStatement, theoremValuesAt t typed sigma) of
+      (Just sc, Just known) -> do
+        let nv = length (thmValues t)
+            instantiated = instantiate (\i -> if i < nv then fromCT (known !! i) else fst (typed !! (i - nv))) (fmap absurd sc)
+            assigned = assignment (thmMembered t) (map snd typed)
+            count = 1 + maximum (-1 : map slotParam (thmSlots t))
+            types = [Map.findWithDefault (TParam i []) i assigned | i <- [0 .. count - 1]]
+        if sourceViews
+          then Just <$> checkedElaboration k g (goalEnv k info g) (instantiateProofDictionary (goalEnv k info g) (goalDict g) (goalVars g) sp (thmSlots t) types instantiated)
+          else pure (Just instantiated)
+      _ -> pure Nothing
+      where
+        sourceViews = not (null (quantifierViewsList (thmQuantifierViews t)))
+        sourceStatement =
+          thmProp t <|> do
+            guard (sourceViews || all isMembershipSlot (thmSlots t))
+            thmStatement t
+    theoremValuesAt t typed sigma = do
       guard (length typed == length (thmBinders t))
       args <- either (const Nothing) Just (traverse (termCT CVar . fst) typed)
       let values = map mangleVariable (thmValues t)
           (defined, _) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
           byBinder = Map.fromList (zip (thmBinders t) args)
           valueTerm i = maybe (Map.lookup (values !! i) sigma) (Just . substCT byBinder) (lookup i defined)
-          nv = length values
-      known <- traverse valueTerm [0 .. nv - 1]
-      pure (snd (implications (instantiate (\i -> if i < nv then fromCT (known !! i) else fst (typed !! (i - nv))) (fmap absurd sc))))
+      traverse valueTerm [0 .. length values - 1]
+    theoremSource t typed sigma assign =
+      let tag = Ident ("#application:" <> T.pack (show (Map.size (sourceApplications (goalSourceBindings g)))))
+          views = tagQuantifierViews tag (thmQuantifierViews t)
+          scoped = foldMap specialize (quantifierViewsList views)
+          specialize view =
+            withTypeBindings [(name, Map.findWithDefault (TParam i []) i assign) | (i, name) <- zip [0 ..] (Types.tsTypes (qvScope view))] (quantifierViewsFromList [view {qvTypeBindings = [(name, specializeType view ty) | (name, ty) <- qvTypeBindings view]}])
+          knownValues = fromMaybe [] (theoremValuesAt t typed sigma)
+          typeAssignment = Types.Assignment (IM.fromList (Map.toList assign)) (IM.fromList [(i, index) | (i, value) <- zip [0 ..] knownValues, Right index <- [expressionIndex (fromCT value)]])
+          specializeType view = Types.substScheme (length (Types.tsTypes (qvScope view)), length (thmValues t)) typeAssignment
+          actual = Map.fromList (zip (thmBinders t) typed)
+          implicit view = [(name, (fromCT value, specializeType view (fromMaybe TNat (lookup name (Types.tsValueTys (qvScope view)))))) | (name, value) <- zip (thmValues t) knownValues]
+          lexical view = [(name, value) | name <- qvParameters view, Just value <- [Map.lookup (mangleVariable name) actual]] <> implicit view
+          bases = Map.fromList [(qvOwner view, lexical view) | view <- quantifierViewsList scoped]
+          bindings = goalSourceBindings g
+       in (scoped, bindings {sourceApplications = bases <> sourceApplications bindings})
     theorem sp t args
       | thmQual t == thmQual info = named <$> recursive sp (implicitsOf le) args
       | otherwise = do
@@ -2313,7 +2347,15 @@ evidence k info g le = case spineOf le of
           eq <- case thmStatement t of
             Just sc | any isMembershipSlot (thmSlots t) -> equationOf sp sc (placesAt t assign) typed (length (thmMembered t))
             _ -> Right Nothing
-          Right (Evidence (thmCore t) (mconcat (map outTactic checks) <> pre <> idx) (statics <> post) eq (concatMap outAux checks) (conclusionAt t typed sigma) Nothing (thmQuantifierViews t))
+          statement <- statementAt sp t typed sigma
+          let (views, bindings) = theoremSource t typed sigma assign
+              conclusion = snd . implications <$> statement
+              initial = Evidence (thmCore t) (mconcat (map outTactic checks) <> pre <> idx) (statics <> post) eq (concatMap outAux checks) conclusion (Just bindings) views
+          if maybe False boundedUniversal conclusion
+            then do
+              arguments <- proofArguments sp (maybe [] (fst . implications) statement) (drop (length (thmBinders t)) args)
+              quantifiedEvidence k info g sp initial arguments
+            else Right initial
     -- The place of the goal's dictionary for a method at one of its type parameters.
     goalPlace s = lookup s (zip (goalDict g) (placeRefs (goalDict g)))
     -- The places of a theorem's dictionary at the instances its arguments give: the goal's at its type parameters, the instances' functions at known types.
@@ -2385,7 +2427,7 @@ quantifiedEvidence :: Knowledge -> TheoremInfo -> Goal -> Span -> Evidence -> [L
 quantifiedEvidence _ _ _ _ ev [] = Right ev
 quantifiedEvidence k info g sp ev (argument : rest) = do
   prop <- maybe (Left (EngineError sp "the applied hypothesis has no proposition")) Right (evConclusion ev <|> case lookup (evName ev) (goalHyps g) of Just (HProp p) -> Just p; _ -> Nothing)
-  let withViews = g {goalQuantifierViews = goalQuantifierViews g <> evQuantifierViews ev}
+  let withViews = g {goalQuantifierViews = goalQuantifierViews g <> evQuantifierViews ev, goalSourceBindings = fromMaybe (goalSourceBindings g) (evSourceBindings ev)}
       local = withViews {goalConcl = prop}
   source <- finiteView k info local prop
   case stripLocations prop of
@@ -2496,11 +2538,12 @@ The raw views themselves contain no mutable proof context.
 -}
 data SourceBindings = SourceBindings
   { sourceBase :: ![(Text, (Expr Text, Ty))]
+  , sourceApplications :: !(Map [Segment] [(Text, (Expr Text, Ty))])
   , sourceQuantifiers :: !(Map ([Segment], Span) (Expr Text, Ty))
   }
 
 initialSourceBindings :: Ctx Text -> SourceBindings
-initialSourceBindings vars = SourceBindings [(name, (Var core, ty)) | (name, (core, ty)) <- vars] Map.empty
+initialSourceBindings vars = SourceBindings [(name, (Var core, ty)) | (name, (core, ty)) <- vars] Map.empty Map.empty
 
 {- | Matching includes the complete decoded body and bound. A span merely
 selects candidates; it never establishes that a transformed goal retains
@@ -2518,7 +2561,7 @@ finiteView k info g expression = case stripLocations expression of
     let candidates = nub (concatMap (`quantifierViewCandidates` goalQuantifierViews g) (locations expression))
         finiteCandidates = [view | view <- candidates, not (qvNumeric view)]
         tried = [(view, reconstruct quantifier bound body view) | view <- finiteCandidates]
-        matches = [found | (_, Right found) <- tried]
+        matches = nubBy sameView [found | (_, Right found) <- tried]
     case matches of
       [found] -> pure (Just found)
       [] | null finiteCandidates -> pure Nothing
@@ -2528,6 +2571,18 @@ finiteView k info g expression = case stripLocations expression of
       _ -> Left (EngineError (qvSpan (head finiteCandidates)) "the finite quantifier has ambiguous source provenance")
   _ -> pure Nothing
   where
+    sameView first second =
+      let a = viewDomain first
+          b = viewDomain second
+       in finiteElementType a == finiteElementType b
+            && finiteBound a == finiteBound b
+            && finiteDecode a == finiteDecode b
+            && finiteRank a == finiteRank b
+            && finiteOrdinal a == finiteOrdinal b
+            && finiteSelect a == finiteSelect b
+            && finiteCoverage a == finiteCoverage b
+            && finiteBuiltinBindings a == finiteBuiltinBindings b
+            && viewBody first == viewBody second
     locations (At (Irrelevant sp) inner) = sp : locations inner
     locations (Typed _ _ _ inner) = locations inner
     locations _ = []
@@ -2536,7 +2591,7 @@ finiteView k info g expression = case stripLocations expression of
       let base = goalEnv k info g
           env = base {envScope = qvScope source, envTypeBindings = qvTypeBindings source, envBuiltins = Required.builtinScope (qvBuiltins source) (envBuiltins (knowEnv k))}
           prefix = freshProofName g "quantifier_source_"
-          baseEntries = [(name, (prefix <> "base_" <> T.pack (show j), value, ty)) | (j, (name, (value, ty))) <- zip [0 :: Int ..] (sourceBase (goalSourceBindings g))]
+          baseEntries = [(name, (prefix <> "base_" <> T.pack (show j), value, ty)) | (j, (name, (value, ty))) <- zip [0 :: Int ..] (Map.findWithDefault (sourceBase (goalSourceBindings g)) (qvOwner source) (sourceApplications (goalSourceBindings g)))]
           entries binders = [(unLocated name, (prefix <> "bound_" <> T.pack (show j), value, ty)) | (j, name) <- zip [0 :: Int ..] binders, Just (value, ty) <- [Map.lookup (qvOwner source, location name) (sourceQuantifiers (goalSourceBindings g))]]
           context binders = reverse [(name, (core, ty)) | (name, (core, _, ty)) <- entries binders] <> [(name, (core, ty)) | (name, (core, _, ty)) <- baseEntries] <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
           substitutions binders = Map.fromList [(core, value) | (_, (core, value, _)) <- entries binders <> baseEntries]
@@ -2613,6 +2668,7 @@ mapSourceBindings :: (Expr Text -> Expr Text) -> SourceBindings -> SourceBinding
 mapSourceBindings replace bindings =
   bindings
     { sourceBase = [(name, (replace value, ty)) | (name, (value, ty)) <- sourceBase bindings]
+    , sourceApplications = fmap (map (\(name, (value, ty)) -> (name, (replace value, ty)))) (sourceApplications bindings)
     , sourceQuantifiers = fmap (\(value, ty) -> (replace value, ty)) (sourceQuantifiers bindings)
     }
 
