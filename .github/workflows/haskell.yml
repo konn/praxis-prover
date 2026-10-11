@@ -68,6 +68,8 @@ jobs:
     - name: Build All
       run: |
         ${{env.cabal}} build all
+    - name: Certify the Surface base library
+      run: ${{env.cabal}} run praxis -- check praxis/data/libraries/base
     - name: Save dist-newstyle Cache
       uses: actions/cache/save@v6
       with:

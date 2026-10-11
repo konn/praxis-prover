@@ -69,6 +69,12 @@ A range omitted accepts every version. The syntax is comparisons — `>=`,
 There is no repository of packages yet: a dependency must be a package of
 the same project, at a version its range accepts.
 
+The bundled Surface standard library is
+[`base`](../praxis/data/libraries/base/README.md). Add
+`praxis/data/libraries/base` to the project's package paths (relative to the
+project manifest), and `"base ^>= 0.1"` to a library's dependencies. It exposes
+natural arithmetic and order, finite ordinals, lists, and indexed vectors.
+
 ## Projects: `project.toml`
 
 A project is several packages, as a Cabal project is: the directories

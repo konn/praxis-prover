@@ -10,6 +10,12 @@ and this project adheres to the
 
 ### Added
 
+- A kernel-certified `base` Surface package with natural arithmetic and
+  ordering, inductive and bounded finite ordinals, lists and length-indexed
+  vectors. CI certifies the library and a separate importing package.
+- Checked local `have` facts, congruence using multiple equalities, and erased
+  GADT index transport justified by equality proofs. Vector append exposes
+  the conventional result length `n + m` using a commutativity proof.
 - A hierarchical module system in the Agda style: one top-level module per
   file named by its path, nested `module N where`, `import ["lib"] M [as N]`
   with `using`, `hiding` and `renaming`, `open N [public]`, `open import`,

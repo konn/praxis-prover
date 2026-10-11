@@ -1,0 +1,429 @@
+module Data.Nat where
+
+-- Natural arithmetic is total. Subtraction is truncated at zero; quotient
+-- and remainder use n / 0 = 0 and n % 0 = n.
+
+add-zero : {n : nat} -> n + 0 = n
+add-zero = rfl
+
+zero-add : {n : nat} -> 0 + n = n
+zero-add = by exact zeroAdd
+
+add-succ : {n m : nat} -> n + S m = S (n + m)
+add-succ = rfl
+
+succ-add : {n m : nat} -> S n + m = S (n + m)
+succ-add = by exact succAdd
+
+add-assoc : {n m k : nat} -> (n + m) + k = n + (m + k)
+add-assoc = by exact addAssoc
+
+add-comm : {n m : nat} -> n + m = m + n
+add-comm = by exact addComm
+
+add-cancel-left : {n m k : nat} -> n + m = n + k -> m = k
+add-cancel-left h = addCancelL h
+
+add-cancel-right : {n m k : nat} -> m + n = k + n -> m = k
+add-cancel-right h = addCancelR h
+
+mul-zero : {n : nat} -> n * 0 = 0
+mul-zero = rfl
+
+zero-mul : {n : nat} -> 0 * n = 0
+zero-mul = by exact zeroMul
+
+mul-one : {n : nat} -> n * 1 = n
+mul-one = by exact mulOne
+
+one-mul : {n : nat} -> 1 * n = n
+one-mul = by exact oneMul
+
+mul-succ : {n m : nat} -> n * S m = n + n * m
+mul-succ = rfl
+
+succ-mul : {n m : nat} -> S n * m = n * m + m
+succ-mul = by exact succMul
+
+mul-assoc : {n m k : nat} -> (n * m) * k = n * (m * k)
+mul-assoc = by exact mulAssoc
+
+mul-comm : {n m : nat} -> n * m = m * n
+mul-comm = by exact mulComm
+
+mul-add : {n m k : nat} -> n * (m + k) = n * m + n * k
+mul-add = by exact mulDistribL
+
+add-mul : {n m k : nat} -> (n + m) * k = n * k + m * k
+add-mul = by exact mulDistribR
+
+sub-zero : {n : nat} -> n - 0 = n
+sub-zero = rfl
+
+zero-sub : {n : nat} -> 0 - n = 0
+zero-sub = by exact zeroMinus
+
+sub-self : {n : nat} -> n - n = 0
+sub-self = by exact subSelf
+
+succ-sub-succ : {n m : nat} -> S n - S m = n - m
+succ-sub-succ = by exact succSubSucc
+
+add-sub-left : {n m : nat} -> (n + m) - n = m
+add-sub-left = by exact addSubCancel
+
+add-sub-right : {n m : nat} -> (n + m) - m = n
+add-sub-right = by exact subAddCancel
+
+sub-add : {n m : nat} -> n <= m -> n + (m - n) = m
+sub-add h = leAddSub h
+
+sub-add-self : {n m : nat} -> n - (n + m) = 0
+sub-add-self = by exact subAddZero
+
+add-sub-add : {n m k : nat} -> (n + k) - (n + m) = k - m
+add-sub-add = by exact addSubAdd
+
+sub-add-assoc : (n m k : nat) -> n - (m + k) = (n - m) - k
+sub-add-assoc n m 0 = rfl
+sub-add-assoc n m (S k) = calc
+  n - (m + S k)
+  = (n - (m + k)) - 1
+  = ((n - m) - k) - 1 := cong (sub-add-assoc n m k)
+  = (n - m) - S k
+
+sub-sub-comm : (n m k : nat) -> (n - m) - k = (n - k) - m
+sub-sub-comm n m k = calc
+  (n - m) - k
+  = n - (m + k) := cong (sub-add-assoc n m k)
+  = n - (k + m) := cong addComm
+  = (n - k) - m := sub-add-assoc n k m
+
+(^^) : Nat -> Nat -> Nat
+n ^^ m = n ^ m
+
+infixr 8 ^^
+
+pow-zero : {n : nat} -> n ^^ 0 = 1
+pow-zero = rfl
+
+pow-succ : {n m : nat} -> n ^^ S m = n * (n ^^ m)
+pow-succ = rfl
+
+pow-one : {n : nat} -> n ^^ 1 = n
+pow-one = rfl
+
+one-pow : (n : nat) -> 1 ^^ n = 1
+one-pow 0 = rfl
+one-pow (S n) = calc
+  1 ^^ S n
+  = 1 * (1 ^^ n)
+  = 1 ^^ n := by exact oneMul
+  = 1 := one-pow n
+
+zero-pow-succ : (n : nat) -> 0 ^^ S n = 0
+zero-pow-succ n = calc
+  0 ^^ S n
+  = 0 * (0 ^^ n)
+  = 0 := by exact zeroMul
+
+pow-add : (n m k : nat) -> n ^^ (m + k) = (n ^^ m) * (n ^^ k)
+pow-add n m 0 = rfl
+pow-add n m (S k) = calc
+  n ^^ (m + S k)
+  = n * (n ^^ (m + k))
+  = n * ((n ^^ m) * (n ^^ k)) := cong (pow-add n m k)
+  = (n * (n ^^ m)) * (n ^^ k) := cong mulAssoc
+  = ((n ^^ m) * n) * (n ^^ k) := cong mulComm
+  = (n ^^ m) * (n * (n ^^ k)) := by exact mulAssoc
+  = (n ^^ m) * (n ^^ S k)
+
+pow-mul : (n m k : nat) -> n ^^ (m * k) = (n ^^ m) ^^ k
+pow-mul n m 0 = rfl
+pow-mul n m (S k) = calc
+  n ^^ (m * S k)
+  = n ^^ (m + m * k)
+  = (n ^^ m) * (n ^^ (m * k)) := pow-add n m (m * k)
+  = (n ^^ m) * ((n ^^ m) ^^ k) := cong (pow-mul n m k)
+  = (n ^^ m) ^^ S k
+
+mul-interchange : (a b c d : nat) -> (a * b) * (c * d) = (a * c) * (b * d)
+mul-interchange a b c d = calc
+  (a * b) * (c * d)
+  = a * (b * (c * d)) := by exact mulAssoc
+  = a * ((b * c) * d) := cong mulAssoc
+  = a * ((c * b) * d) := cong mulComm
+  = a * (c * (b * d)) := cong mulAssoc
+  = (a * c) * (b * d) := cong mulAssoc
+
+mul-pow : (n m k : nat) -> (n * m) ^^ k = (n ^^ k) * (m ^^ k)
+mul-pow n m 0 = rfl
+mul-pow n m (S k) = calc
+  (n * m) ^^ S k
+  = (n * m) * ((n * m) ^^ k)
+  = (n * m) * ((n ^^ k) * (m ^^ k)) := cong (mul-pow n m k)
+  = (n * (n ^^ k)) * (m * (m ^^ k)) := mul-interchange n m (n ^^ k) (m ^^ k)
+  = (n ^^ S k) * (m ^^ S k)
+
+-- Division implementation helpers. For div-state n d, State q r c obeys
+-- r + c = d and (S d) * q + r = n. Hence r < S d. The countdown resets to
+-- d after each block of S d successors. Transitions are nonrecursive;
+-- div-state recurses on the dividend alone.
+private
+  data DivisionState = State Nat Nat Nat
+
+  quotient : DivisionState -> Nat
+  quotient (State q r c) = q
+
+  remainder : DivisionState -> Nat
+  remainder (State q r c) = r
+
+  countdown : DivisionState -> Nat
+  countdown (State q r c) = c
+
+  div-step-fields : Nat -> Nat -> Nat -> Nat -> DivisionState
+  div-step-fields d q r 0 = State (S q) 0 d
+  div-step-fields d q r (S c) = State q (S r) c
+
+  div-step : Nat -> DivisionState -> DivisionState
+  div-step d (State q r c) = div-step-fields d q r c
+
+  div-state : Nat -> Nat -> DivisionState
+  div-state 0 d = State 0 0 d
+  div-state (S n) d = div-step d (div-state n d)
+
+  step-countdown-fields : (d q r c : nat) -> r + c = d -> remainder (div-step-fields d q r c) + countdown (div-step-fields d q r c) = d
+  step-countdown-fields d q r 0 h = calc
+    remainder (div-step-fields d q r 0) + countdown (div-step-fields d q r 0)
+    = 0 + d
+    = d := by exact zeroAdd
+  step-countdown-fields d q r (S c) h = calc
+    remainder (div-step-fields d q r (S c)) + countdown (div-step-fields d q r (S c))
+    = S r + c
+    = S (r + c) := by exact succAdd
+    = r + S c
+    = d := h
+
+  step-countdown : (d : nat) -> (s : DivisionState) -> remainder s + countdown s = d -> remainder (div-step d s) + countdown (div-step d s) = d
+  step-countdown d (State q r c) h = by
+    have hc : r + c = d := h
+    calc
+      remainder (div-step d (State q r c)) + countdown (div-step d (State q r c))
+      = remainder (div-step-fields d q r c) + countdown (div-step-fields d q r c)
+      = d := step-countdown-fields d q r c hc
+
+  state-countdown : (n d : nat) -> remainder (div-state n d) + countdown (div-state n d) = d
+  state-countdown 0 d = calc
+    remainder (div-state 0 d) + countdown (div-state 0 d)
+    = 0 + d
+    = d := by exact zeroAdd
+  state-countdown (S n) d = calc
+    remainder (div-state (S n) d) + countdown (div-state (S n) d)
+    = remainder (div-step d (div-state n d)) + countdown (div-step d (div-state n d))
+    = d := step-countdown d (div-state n d) (state-countdown n d)
+
+  step-value-fields : (d q r c : nat) -> r + c = d -> (S d) * quotient (div-step-fields d q r c) + remainder (div-step-fields d q r c) = S ((S d) * q + r)
+  step-value-fields d q r 0 h = calc
+    (S d) * quotient (div-step-fields d q r 0) + remainder (div-step-fields d q r 0)
+    = (S d) * S q
+    = S d + (S d) * q
+    = S (d + (S d) * q) := by exact succAdd
+    = S ((S d) * q + d) := cong addComm
+    = S ((S d) * q + (r + 0)) := cong h
+    = S ((S d) * q + r)
+  step-value-fields d q r (S c) h = rfl
+
+  step-value : (d : nat) -> (s : DivisionState) -> remainder s + countdown s = d -> (S d) * quotient (div-step d s) + remainder (div-step d s) = S ((S d) * quotient s + remainder s)
+  step-value d (State q r c) h = by
+    have hc : r + c = d := h
+    calc
+      (S d) * quotient (div-step d (State q r c)) + remainder (div-step d (State q r c))
+      = (S d) * quotient (div-step-fields d q r c) + remainder (div-step-fields d q r c)
+      = S ((S d) * q + r) := step-value-fields d q r c hc
+      = S ((S d) * quotient (State q r c) + remainder (State q r c))
+
+  state-value : (n d : nat) -> (S d) * quotient (div-state n d) + remainder (div-state n d) = n
+  state-value 0 d = rfl
+  state-value (S n) d = by
+    have hc : remainder (div-state n d) + countdown (div-state n d) = d := state-countdown n d
+    calc
+      (S d) * quotient (div-state (S n) d) + remainder (div-state (S n) d)
+      = (S d) * quotient (div-step d (div-state n d)) + remainder (div-step d (div-state n d))
+      = S ((S d) * quotient (div-state n d) + remainder (div-state n d)) := step-value d (div-state n d) hc
+      = S n := cong (state-value n d)
+
+  state-bound : (n d : nat) -> remainder (div-state n d) < S d
+  state-bound n d = by
+    have hc : remainder (div-state n d) + countdown (div-state n d) = d := state-countdown n d
+    have le : remainder (div-state n d) <= d := leOfAdd hc
+    exact ltSuccOfLe le
+
+(/) : Nat -> Nat -> Nat
+n / 0 = 0
+n / (S d) = quotient (div-state n d)
+
+(%) : Nat -> Nat -> Nat
+n % 0 = n
+n % (S d) = remainder (div-state n d)
+
+infixl 7 / %
+
+div-zero : (n : nat) -> n / 0 = 0
+div-zero n = rfl
+
+mod-zero : (n : nat) -> n % 0 = n
+mod-zero n = rfl
+
+zero-div : (d : nat) -> 0 / d = 0
+zero-div 0 = rfl
+zero-div (S d) = rfl
+
+zero-mod : (d : nat) -> 0 % d = 0
+zero-mod 0 = rfl
+zero-mod (S d) = rfl
+
+div-mod : (n d : nat) -> d * (n / d) + n % d = n
+div-mod n 0 = calc
+  0 * (n / 0) + n % 0
+  = 0 + n
+  = n := by exact zeroAdd
+div-mod n (S d) = calc
+  (S d) * (n / S d) + n % S d
+  = (S d) * quotient (div-state n d) + remainder (div-state n d)
+  = n := state-value n d
+
+private
+  mod-bound-from-state : {n d : nat} -> remainder (div-state n d) < S d -> n % S d < S d
+  mod-bound-from-state h = h
+
+mod-bound : (n d : nat) -> 0 < d -> n % d < d
+mod-bound n (S d) h = by
+  have hb : remainder (div-state n d) < S d := state-bound n d
+  exact mod-bound-from-state hb
+
+-- Unit division follows directly from the reset transition.
+private
+  state-one : (n : nat) -> div-state n 0 = State n 0 0
+  state-one 0 = rfl
+  state-one (S n) = calc
+    div-state (S n) 0
+    = div-step 0 (div-state n 0)
+    = div-step 0 (State n 0 0) := cong (state-one n)
+    = State (S n) 0 0
+
+div-one : (n : nat) -> n / 1 = n
+div-one n = calc
+  n / 1
+  = quotient (div-state n 0)
+  = quotient (State n 0 0) := cong (state-one n)
+  = n
+
+mod-one : (n : nat) -> n % 1 = 0
+mod-one n = calc
+  n % 1
+  = remainder (div-state n 0)
+  = remainder (State n 0 0) := cong (state-one n)
+  = 0
+
+-- Multiplication and exponentiation preserve the natural order. Strict
+-- positivity of powers needs a positive base (and includes exponent zero).
+mul-le-both : {a b c d : nat} -> a <= b -> c <= d -> a * c <= b * d
+mul-le-both {a} {b} {c} {d} h j = by
+  have x : a * c <= b * c := mulLeMonoR h
+  have y : b * c <= b * d := mulLeMonoL j
+  exact leTrans x y
+
+pow-le-step : {n m k : nat} -> n * (n ^^ k) <= m * (m ^^ k) -> n ^^ S k <= m ^^ S k
+pow-le-step h = h
+
+pow-le-base : (n m k : nat) -> n <= m -> n ^^ k <= m ^^ k
+pow-le-base n m 0 h = rfl
+pow-le-base n m (S k) h = by
+  have ih : n ^^ k <= m ^^ k := pow-le-base n m k
+  have p : n * (n ^^ k) <= m * (m ^^ k) := mul-le-both h ih
+  exact pow-le-step p
+
+pow-positive-step : {n k : nat} -> 0 < n * (n ^^ k) -> 0 < n ^^ S k
+pow-positive-step h = h
+
+pow-positive : (n k : nat) -> 0 < n -> 0 < n ^^ k
+pow-positive n 0 h = rfl
+pow-positive n (S k) h = by
+  have ih : 0 < n ^^ k := pow-positive n k
+  have p : 0 < n * (n ^^ k) := mulPos h ih
+  exact pow-positive-step p
+
+div-mod-reconstruct : (n d : nat) -> n = (n / d) * d + n % d
+div-mod-reconstruct n d = calc
+  n
+  = d * (n / d) + n % d := cong (div-mod n d)
+  = (n / d) * d + n % d := cong mulComm
+
+pred-le-succ : {n : nat} -> (m : nat) -> S n <= m -> (S n) - 1 <= m - 1
+pred-le-succ {n} (S m) h = h
+
+pred-le : (n m : nat) -> n <= m -> n - 1 <= m - 1
+pred-le 0 m h = rfl
+pred-le (S n) m h = pred-le-succ m h
+
+sub-le-step : {n m k : nat} -> (n - k) - 1 <= (m - k) - 1 -> n - S k <= m - S k
+sub-le-step h = h
+
+-- Truncated subtraction preserves order in its first argument and reverses
+-- order in its second argument.
+sub-le-left : (n m k : nat) -> n <= m -> n - k <= m - k
+sub-le-left n m 0 h = h
+sub-le-left n m (S k) h = by
+  have ih : n - k <= m - k := sub-le-left n m k
+  have hp : (n - k) - 1 <= (m - k) - 1 := pred-le (n - k) (m - k) ih
+  exact sub-le-step hp
+
+sub-le-right : (n m k : nat) -> n <= m -> k - m <= k - n
+sub-le-right n m k h = by
+  have hm : n + (m - n) = m := leAddSub h
+  have he : (k - n) - (m - n) = k - m := calc
+    (k - n) - (m - n)
+    = k - (n + (m - n)) := cong (sub-add-assoc k n (m - n))
+    = k - m := cong hm
+  have hs : (k - n) - (m - n) <= k - n := by exact subLe
+  have ha : ((k - n) - (m - n)) + ((k - n) - ((k - n) - (m - n))) = k - n := leAddSub hs
+  have hw : (k - m) + ((k - n) - (k - m)) = k - n := calc
+    (k - m) + ((k - n) - (k - m))
+    = ((k - n) - (m - n)) + ((k - n) - ((k - n) - (m - n))) := cong he
+    = k - n := ha
+  exact leOfAdd hw
+
+positive-pred : (n : nat) -> 0 < n -> S (n - 1) = n
+positive-pred (S n) h = rfl
+
+lt-gap : {n m : nat} -> n < m -> n + S (m - S n) = m
+lt-gap {n} {m} h = calc
+  n + S (m - S n)
+  = S (n + (m - S n))
+  = S n + (m - S n) := cong succAdd
+  = m := ltAddSub h
+
+-- Strict multiplication monotonicity requires a positive multiplier.
+mul-lt-right : (n m k : nat) -> n < m -> 0 < k -> n * k < m * k
+mul-lt-right n m k h hk = by
+  have hg : n + S (m - S n) = m := lt-gap h
+  have hz : 0 < S (m - S n) := rfl
+  have hp : 0 < S (m - S n) * k := mulPos hz hk
+  have hs : S ((S (m - S n) * k) - 1) = S (m - S n) * k := positive-pred (S (m - S n) * k) hp
+  have hw : n * k + S ((S (m - S n) * k) - 1) = m * k := calc
+    n * k + S ((S (m - S n) * k) - 1)
+    = n * k + S (m - S n) * k := cong hs
+    = (n + S (m - S n)) * k := cong mulDistribR
+    = m * k := cong hg
+  exact ltOfAdd hw
+
+mul-lt-left : (n m k : nat) -> n < m -> 0 < k -> k * n < k * m
+mul-lt-left n m k h hk = by
+  have hr : n * k < m * k := mul-lt-right n m k h hk
+  have hw : n * k + S (m * k - S (n * k)) = m * k := lt-gap hr
+  have hl : k * n + S (m * k - S (n * k)) = k * m := calc
+    k * n + S (m * k - S (n * k))
+    = n * k + S (m * k - S (n * k)) := cong mulComm
+    = m * k := hw
+    = k * m := cong mulComm
+  exact ltOfAdd hl

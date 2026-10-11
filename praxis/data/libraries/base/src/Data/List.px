@@ -1,0 +1,273 @@
+module Data.List where
+
+-- Finite lists, with right-associative construction and concatenation.
+data List a = Nil | a :: List a
+
+infixr 5 ::
+open List public
+
+singleton : a -> List a
+singleton x = (x :: Nil)
+
+(<>) : List a -> List a -> List a
+(<>) Nil ys = ys
+(<>) (x :: xs) ys = x :: (xs <> ys)
+
+infixr 4 <>
+
+length : List a -> Nat
+length Nil = 0
+length (x :: xs) = S (length xs)
+
+replicate : Nat -> a -> List a
+replicate 0 x = Nil
+replicate (S n) x = (x :: (replicate n x))
+
+reverse : List a -> List a
+reverse Nil = Nil
+reverse (x :: xs) = ((reverse xs) <> (singleton x))
+
+take : Nat -> List a -> List a
+take 0 xs = Nil
+take (S n) Nil = Nil
+take (S n) (x :: xs) = (x :: (take n xs))
+
+drop : Nat -> List a -> List a
+drop 0 xs = xs
+drop (S n) Nil = Nil
+drop (S n) (x :: xs) = drop n xs
+
+concat : List (List a) -> List a
+concat Nil = Nil
+concat (xs :: xss) = (xs <> (concat xss))
+
+sum : List Nat -> Nat
+sum Nil = 0
+sum (x :: xs) = x + sum xs
+
+product : List Nat -> Nat
+product Nil = 1
+product (x :: xs) = x * product xs
+
+nil-append : (xs : List a) -> (Nil <> xs) = xs
+nil-append xs = rfl
+
+append-nil : (xs : List a) -> (xs <> Nil) = xs
+append-nil Nil = rfl
+append-nil (x :: xs) = cong (append-nil xs)
+
+append-assoc : (xs ys zs : List a) -> ((xs <> ys) <> zs) = (xs <> (ys <> zs))
+append-assoc Nil ys zs = rfl
+append-assoc (x :: xs) ys zs = calc
+  (((x :: xs) <> ys) <> zs)
+  = (x :: ((xs <> ys) <> zs))
+  = (x :: (xs <> (ys <> zs))) := cong (append-assoc xs ys zs)
+  = ((x :: xs) <> (ys <> zs))
+
+length-singleton : (x : a) -> length (singleton x) = 1
+length-singleton x = rfl
+
+length-append : (xs ys : List a) -> length (xs <> ys) = length xs + length ys
+length-append Nil ys = calc
+  length (Nil <> ys)
+  = length ys
+  = 0 + length ys := by cong zeroAdd
+  = length Nil + length ys
+length-append (x :: xs) ys = calc
+  length ((x :: xs) <> ys)
+  = S (length (xs <> ys))
+  = S (length xs + length ys) := cong (length-append xs ys)
+  = S (length xs) + length ys := by cong succAdd
+  = length (x :: xs) + length ys
+
+length-replicate : (n : Nat) -> (x : a) -> length (replicate n x) = n
+length-replicate 0 x = rfl
+length-replicate (S n) x = cong (length-replicate n x)
+
+replicate-add : (n m : Nat) -> (x : a) -> replicate (n + m) x = ((replicate n x) <> (replicate m x))
+replicate-add 0 m x = by cong zeroAdd
+replicate-add (S n) m x = calc
+  replicate (S n + m) x
+  = replicate (S (n + m)) x := by cong succAdd
+  = (x :: (replicate (n + m) x))
+  = (x :: ((replicate n x) <> (replicate m x))) := cong (replicate-add n m x)
+  = ((replicate (S n) x) <> (replicate m x))
+
+reverse-singleton : (x : a) -> reverse (singleton x) = singleton x
+reverse-singleton x = rfl
+
+reverse-append : (xs ys : List a) -> reverse (xs <> ys) = ((reverse ys) <> (reverse xs))
+reverse-append Nil ys = calc
+  reverse (Nil <> ys)
+  = reverse ys
+  = ((reverse ys) <> Nil) := by cong (append-nil (reverse ys))
+  = ((reverse ys) <> (reverse Nil))
+reverse-append (x :: xs) ys = calc
+  reverse ((x :: xs) <> ys)
+  = ((reverse (xs <> ys)) <> (singleton x))
+  = (((reverse ys) <> (reverse xs)) <> (singleton x)) := cong (reverse-append xs ys)
+  = ((reverse ys) <> ((reverse xs) <> (singleton x))) := append-assoc (reverse ys) (reverse xs) (singleton x)
+  = ((reverse ys) <> (reverse (x :: xs)))
+
+reverse-reverse : (xs : List a) -> reverse (reverse xs) = xs
+reverse-reverse Nil = rfl
+reverse-reverse (x :: xs) = calc
+  reverse (reverse (x :: xs))
+  = reverse ((reverse xs) <> (singleton x))
+  = ((reverse (singleton x)) <> (reverse (reverse xs))) := reverse-append (reverse xs) (singleton x)
+  = (x :: (reverse (reverse xs)))
+  = (x :: xs) := cong (reverse-reverse xs)
+
+length-reverse : (xs : List a) -> length (reverse xs) = length xs
+length-reverse Nil = rfl
+length-reverse (x :: xs) = calc
+  length (reverse (x :: xs))
+  = length ((reverse xs) <> (singleton x))
+  = length (reverse xs) + length (singleton x) := length-append (reverse xs) (singleton x)
+  = S (length (reverse xs))
+  = S (length xs) := cong (length-reverse xs)
+  = length (x :: xs)
+
+take-zero : (xs : List a) -> take 0 xs = Nil
+take-zero Nil = rfl
+take-zero (x :: xs) = rfl
+
+drop-zero : (xs : List a) -> drop 0 xs = xs
+drop-zero Nil = rfl
+drop-zero (x :: xs) = rfl
+
+take-nil : (n : Nat) -> take n Nil = Nil
+take-nil 0 = rfl
+take-nil (S n) = rfl
+
+drop-nil : (n : Nat) -> drop n Nil = Nil
+drop-nil 0 = rfl
+drop-nil (S n) = rfl
+
+take-length : (xs : List a) -> take (length xs) xs = xs
+take-length Nil = rfl
+take-length (x :: xs) = cong (take-length xs)
+
+drop-length : (xs : List a) -> drop (length xs) xs = Nil
+drop-length Nil = rfl
+drop-length (x :: xs) = drop-length xs
+
+take-append : (xs ys : List a) -> take (length xs) (xs <> ys) = xs
+take-append Nil ys = calc
+  take (length Nil) (Nil <> ys)
+  = take 0 ys
+  = Nil := take-zero ys
+take-append (x :: xs) ys = calc
+  take (length (x :: xs)) ((x :: xs) <> ys)
+  = (x :: (take (length xs) (xs <> ys)))
+  = (x :: xs) := cong (take-append xs ys)
+
+drop-append : (xs ys : List a) -> drop (length xs) (xs <> ys) = ys
+drop-append Nil ys = calc
+  drop (length Nil) (Nil <> ys)
+  = drop 0 ys
+  = ys := drop-zero ys
+drop-append (x :: xs) ys = calc
+  drop (length (x :: xs)) ((x :: xs) <> ys)
+  = drop (length xs) (xs <> ys)
+  = ys := drop-append xs ys
+
+concat-singleton : (xs : List a) -> concat (singleton xs) = xs
+concat-singleton xs = calc
+  concat (singleton xs)
+  = (xs <> Nil)
+  = xs := append-nil xs
+
+concat-append : (xss yss : List (List a)) -> concat (xss <> yss) = ((concat xss) <> (concat yss))
+concat-append Nil yss = rfl
+concat-append (xs :: xss) yss = calc
+  concat ((xs :: xss) <> yss)
+  = (xs <> (concat (xss <> yss)))
+  = (xs <> ((concat xss) <> (concat yss))) := cong (concat-append xss yss)
+  = ((xs <> (concat xss)) <> (concat yss)) := by cong (append-assoc xs (concat xss) (concat yss))
+  = ((concat (xs :: xss)) <> (concat yss))
+
+sum-append : (xs ys : List Nat) -> sum (xs <> ys) = sum xs + sum ys
+sum-append Nil ys = calc
+  sum (Nil <> ys)
+  = sum ys
+  = 0 + sum ys := by cong zeroAdd
+  = sum Nil + sum ys
+sum-append (x :: xs) ys = calc
+  sum ((x :: xs) <> ys)
+  = x + sum (xs <> ys)
+  = x + (sum xs + sum ys) := cong (sum-append xs ys)
+  = (x + sum xs) + sum ys := by cong addAssoc
+  = sum (x :: xs) + sum ys
+
+product-append : (xs ys : List Nat) -> product (xs <> ys) = product xs * product ys
+product-append Nil ys = calc
+  product (Nil <> ys)
+  = product ys
+  = 1 * product ys := by cong oneMul
+  = product Nil * product ys
+product-append (x :: xs) ys = calc
+  product ((x :: xs) <> ys)
+  = x * product (xs <> ys)
+  = x * (product xs * product ys) := cong (product-append xs ys)
+  = (x * product xs) * product ys := by cong mulAssoc
+  = product (x :: xs) * product ys
+
+-- Class methods are fixed function schemas, so folds can be polymorphic
+-- without quantifying over function values. Each instance certifies the
+-- identity and associativity laws used by fold-append below.
+class Folding a where
+  empty : a
+  combine : a -> a -> a
+
+class Folding a => Monoid a where
+  empty-combine : (x : a) -> combine empty x = x
+  combine-empty : (x : a) -> combine x empty = x
+  combine-assoc : (x y z : a) -> combine (combine x y) z = combine x (combine y z)
+
+fold : Folding a => List a -> a
+fold Nil = empty
+fold (x :: xs) = combine x (fold xs)
+
+fold-singleton : Monoid a => (x : a) -> fold (singleton x) = x
+fold-singleton x = calc
+  fold (singleton x)
+  = combine x empty
+  = x := combine-empty x
+
+fold-append : Monoid a => (xs ys : List a) -> fold (xs <> ys) = combine (fold xs) (fold ys)
+fold-append Nil ys = calc
+  fold (Nil <> ys)
+  = fold ys
+  = combine empty (fold ys) := by cong (empty-combine (fold ys))
+  = combine (fold Nil) (fold ys)
+fold-append (x :: xs) ys = calc
+  fold ((x :: xs) <> ys)
+  = combine x (fold (xs <> ys))
+  = combine x (combine (fold xs) (fold ys)) := cong (fold-append xs ys)
+  = combine (combine x (fold xs)) (fold ys) := by cong (combine-assoc x (fold xs) (fold ys))
+  = combine (fold (x :: xs)) (fold ys)
+
+instance Folding (List a) where
+  empty = Nil
+  combine xs ys = (xs <> ys)
+
+instance Monoid (List a) where
+  empty-combine xs = rfl
+  combine-empty xs = calc
+    combine xs empty
+    = (xs <> Nil)
+    = xs := append-nil xs
+  combine-assoc xs ys zs = calc
+    combine (combine xs ys) zs
+    = ((xs <> ys) <> zs)
+    = (xs <> (ys <> zs)) := append-assoc xs ys zs
+    = combine xs (combine ys zs)
+
+fold-concat : (xss : List (List a)) -> fold xss = concat xss
+fold-concat Nil = rfl
+fold-concat (xs :: xss) = calc
+  fold (xs :: xss)
+  = (xs <> (fold xss))
+  = (xs <> (concat xss)) := cong (fold-concat xss)
+  = concat (xs :: xss)

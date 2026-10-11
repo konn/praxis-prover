@@ -1,0 +1,7 @@
+[package]
+name = "base"
+version = "0.1.0.0"
+synopsis = "Natural arithmetic, finite ordinals, lists, and length-indexed vectors"
+
+[lib]
+source-dir = "src"

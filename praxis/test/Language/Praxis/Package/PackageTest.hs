@@ -7,7 +7,7 @@ one another, across libraries and packages.
 -}
 module Language.Praxis.Package.PackageTest (packageTests) where
 
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, sort)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -128,7 +128,19 @@ buildTests :: TestTree
 buildTests =
   testGroup
     "building"
-    [ testCase "a project: its libraries each after its dependencies, every module certified, imports across libraries and packages, two modules of one name told apart" $ do
+    [ testCase "base: all bundled modules certify and a dependent package can use their definitions and proofs" $ do
+        p <- either assertFailure pure prelude
+        results <- either assertFailure pure =<< checkProject p "test/data/base"
+        errorsOf results @?= []
+        let baseModules = [renderName (mrModule r) | r <- results, componentId (mrComponent r) == "base"]
+            clients = [mrChecked r | r <- results, componentId (mrComponent r) == "base-client"]
+        sort baseModules @?= ["Data.Fin", "Data.List", "Data.Nat", "Data.Nat.Order", "Data.Vec"]
+        case clients of
+          [client] -> do
+            let required = ["addition", "subtraction", "multiplication", "exponentiation", "power-precedence", "power-associativity", "quotient", "remainder", "zero-divisor", "zero-modulus", "division-algorithm", "order-witness", "lax-order-witness", "strict-peano-roundtrip", "strict-gap-roundtrip", "lax-peano-roundtrip", "lax-gap-roundtrip", "finite-bound", "list-monoid", "list-reversal", "list-split", "vector-length", "vector-append-length", "vector-reversal", "vector-list", "list-operators", "list-fold", "finite-roundtrip", "bounded-roundtrip", "vector-lookup", "remainder-bound", "power-monotone", "strict-product", "subtraction-monotone"]
+            mapM_ (\name -> assertBool (T.unpack name) (("Main." <> name) `elem` checkedTheorems client)) required
+          _ -> assertFailure "expected one base-client module"
+    , testCase "a project: its libraries each after its dependencies, every module certified, imports across libraries and packages, two modules of one name told apart" $ do
         p <- either assertFailure pure prelude
         results <- either assertFailure pure =<< checkProject p "test/data/project"
         map (\r -> (componentId (mrComponent r), renderName (mrModule r))) results @?= [("lists", "Data.List"), ("other", "Data.List"), ("lists:extra", "Data.List.Extra"), ("app", "Main")]

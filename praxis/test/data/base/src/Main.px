@@ -1,0 +1,116 @@
+module Main where
+
+import "base" Data.Nat as N
+import "base" Data.Nat.Order as O
+import "base" Data.Fin as F
+import "base" Data.List as L
+import "base" Data.Vec as V
+open N using ((/), (%), (^^))
+
+addition : (n : nat) -> 0 + n = n
+addition n = N.zero-add
+
+subtraction : (n m : nat) -> (n + m) - m = n
+subtraction n m = N.add-sub-right
+
+multiplication : (n m k : nat) -> n * (m + k) = n * m + n * k
+multiplication n m k = N.mul-add
+
+exponentiation : (n m k : nat) -> n ^^ (m + k) = (n ^^ m) * (n ^^ k)
+exponentiation n m k = N.pow-add n m k
+
+power-precedence : 2 + 2 ^^ 3 * 2 = 18
+power-precedence = rfl
+
+power-associativity : 2 ^^ 1 ^^ 2 = 2
+power-associativity = rfl
+
+quotient : 5 / 2 = 2
+quotient = rfl
+
+remainder : 5 % 2 = 1
+remainder = rfl
+
+zero-divisor : (n : nat) -> n / 0 = 0
+zero-divisor n = N.div-zero n
+
+zero-modulus : (n : nat) -> n % 0 = n
+zero-modulus n = N.mod-zero n
+
+division-algorithm : (n d : nat) -> d * (n / d) + n % d = n
+division-algorithm n d = N.div-mod n d
+
+order-witness : O.PLt n m -> n < m
+order-witness p = O.lt-of-plt p
+
+lax-order-witness : O.ELeq n m -> n <= m
+lax-order-witness p = O.le-of-eleq p
+
+strict-peano-roundtrip : (p : O.PLt n m) -> O.plt-of-elt (O.elt-of-plt p) = p
+strict-peano-roundtrip p = O.plt-elt-inverse p
+
+strict-gap-roundtrip : (p : O.ELt n m) -> O.elt-of-plt (O.plt-of-elt p) = p
+strict-gap-roundtrip p = O.elt-plt-inverse p
+
+lax-peano-roundtrip : (p : O.PLeq n m) -> O.pleq-of-eleq (O.eleq-of-pleq p) = p
+lax-peano-roundtrip p = O.pleq-eleq-inverse p
+
+lax-gap-roundtrip : (p : O.ELeq n m) -> O.eleq-of-pleq (O.pleq-of-eleq p) = p
+lax-gap-roundtrip p = O.eleq-pleq-inverse p
+
+finite-bound : (i : F.Fin n) -> F.to-nat i < n
+finite-bound i = F.to-nat-lt i
+
+list-monoid : (xs ys zs : L.List a) -> L.(<>) (L.(<>) xs ys) zs = L.(<>) xs (L.(<>) ys zs)
+list-monoid xs ys zs = L.append-assoc xs ys zs
+
+list-reversal : (xs : L.List a) -> L.reverse (L.reverse xs) = xs
+list-reversal xs = L.reverse-reverse xs
+
+list-split : (xs ys : L.List a) -> L.drop (L.length xs) (L.(<>) xs ys) = ys
+list-split xs ys = L.drop-append xs ys
+
+vector-length : (xs : V.Vec n a) -> V.length xs = n
+vector-length xs = V.length-index xs
+
+append-standard : V.Vec n a -> V.Vec m a -> V.Vec (n + m) a
+append-standard xs ys = V.append xs ys
+
+vector-append-length : (xs : V.Vec n a) -> (ys : V.Vec m a) -> V.length (append-standard xs ys) = n + m
+vector-append-length xs ys = V.length-index (append-standard xs ys)
+
+vector-reversal : (xs : V.Vec n a) -> V.reverse (V.reverse xs) = xs
+vector-reversal xs = V.reverse-reverse xs
+
+vector-list : (xs : L.List a) -> V.forget-length (V.from-list xs) = xs
+vector-list xs = V.to-list-from-list xs
+
+open L using ((<>))
+open L.List using ((::), Nil)
+
+list-operators : L.length (1 :: 2 :: Nil <> 3 :: Nil) = 3
+list-operators = rfl
+
+list-fold : (xss : L.List (L.List a)) -> L.fold xss = L.concat xss
+list-fold xss = L.fold-concat xss
+
+finite-roundtrip : (i : F.Fin n) -> F.from-efin (F.to-efin i) = i
+finite-roundtrip i = F.from-to-efin i
+
+bounded-roundtrip : (i : F.EFin n) -> F.to-efin (F.from-efin i) = i
+bounded-roundtrip i = F.to-from-efin i
+
+vector-lookup : V.lookup (F.Fin.FZero {0}) (V.Vec.Cons 7 V.Vec.Nil) = 7
+vector-lookup = rfl
+
+remainder-bound : (n d : nat) -> 0 < d -> n % d < d
+remainder-bound n d h = N.mod-bound n d h
+
+power-monotone : (n m k : nat) -> n <= m -> n ^^ k <= m ^^ k
+power-monotone n m k h = N.pow-le-base n m k h
+
+strict-product : (n m k : nat) -> n < m -> 0 < k -> k * n < k * m
+strict-product n m k h positive = N.mul-lt-left n m k h positive
+
+subtraction-monotone : (n m k : nat) -> n <= m -> n - k <= m - k
+subtraction-monotone n m k h = N.sub-le-left n m k h

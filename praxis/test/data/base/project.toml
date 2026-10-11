@@ -1,0 +1,2 @@
+[project]
+packages = ["../../../data/libraries/base", "."]

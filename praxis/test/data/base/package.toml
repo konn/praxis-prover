@@ -1,0 +1,7 @@
+[package]
+name = "base-client"
+version = "0.1.0.0"
+
+[lib]
+source-dir = "src"
+dependencies = ["base ^>= 0.1"]

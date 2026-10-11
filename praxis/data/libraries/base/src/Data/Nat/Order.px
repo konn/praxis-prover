@@ -1,0 +1,324 @@
+module Data.Nat.Order where
+
+-- Builtin comparisons are propositions about natural numbers.
+le-refl : {n : nat} -> n <= n
+le-refl = by exact leqRefl
+
+zero-le : {n : nat} -> 0 <= n
+zero-le = by exact zeroLe
+
+le-succ : {n : nat} -> n <= S n
+le-succ = by exact leSucc
+
+lt-succ : {n : nat} -> n < S n
+lt-succ = by exact ltSucc
+
+le-trans : {n m k : nat} -> n <= m -> m <= k -> n <= k
+le-trans h p = by exact leTrans
+
+lt-trans : {n m k : nat} -> n < m -> m < k -> n < k
+lt-trans h p = by exact ltTrans
+
+lt-le-trans : {n m k : nat} -> n < m -> m <= k -> n < k
+lt-le-trans h p = by exact ltLeTrans
+
+le-lt-trans : {n m k : nat} -> n <= m -> m < k -> n < k
+le-lt-trans h p = by exact leLtTrans
+
+le-antisym : {n m : nat} -> n <= m -> m <= n -> n = m
+le-antisym h p = by exact leAntisym
+
+le-total : {n m : nat} -> n <= m ∨ m <= n
+le-total = by exact leTotal
+
+lt-trichotomy : {n m : nat} -> n < m ∨ n = m ∨ m < n
+lt-trichotomy = by exact ltTrichotomy
+
+lt-irrefl : {n : nat} -> n < n -> ⊥
+lt-irrefl h = by exact ltIrrefl
+
+lt-ne : {n m : nat} -> n < m -> ¬ n = m
+lt-ne h = by exact ltNe
+
+le-cases : {n m : nat} -> n <= m -> n < m ∨ n = m
+le-cases h = by exact leCases
+
+lt-or-ge : {n m : nat} -> n < m ∨ m <= n
+lt-or-ge = by exact ltOrGe
+
+le-of-lt : {n m : nat} -> n < m -> n <= m
+le-of-lt h = by exact ltLe
+
+succ-le-of-lt : {n m : nat} -> n < m -> S n <= m
+succ-le-of-lt h = by exact ltSuccLe
+
+lt-of-succ-le : {n m : nat} -> S n <= m -> n < m
+lt-of-succ-le h = by exact succLeLt
+
+lt-succ-of-le : {n m : nat} -> n <= m -> n < S m
+lt-succ-of-le h = by exact ltSuccOfLe
+
+le-of-lt-succ : {n m : nat} -> n < S m -> n <= m
+le-of-lt-succ h = by exact leOfLtSucc
+
+succ-le-succ : {n m : nat} -> n <= m -> S n <= S m
+succ-le-succ h = by exact leSuccSucc
+
+le-of-succ-le-succ : {n m : nat} -> S n <= S m -> n <= m
+le-of-succ-le-succ h = by exact succLeSucc
+
+succ-lt-succ : {n m : nat} -> n < m -> S n < S m
+succ-lt-succ h = h
+
+lt-of-succ-lt-succ : {n m : nat} -> S n < S m -> n < m
+lt-of-succ-lt-succ h = h
+
+add-le-left : {n m k : nat} -> n <= m -> k + n <= k + m
+add-le-left h = by exact addLeMonoL
+
+add-le-right : {n m k : nat} -> n <= m -> n + k <= m + k
+add-le-right h = by exact addLeMonoR
+
+add-lt-left : {n m k : nat} -> n < m -> k + n < k + m
+add-lt-left h = by exact addLtMonoL
+
+add-lt-right : {n m k : nat} -> n < m -> n + k < m + k
+add-lt-right h = by exact addLtMonoR
+
+mul-le-left : {n m k : nat} -> n <= m -> k * n <= k * m
+mul-le-left h = by exact mulLeMonoL
+
+mul-le-right : {n m k : nat} -> n <= m -> n * k <= m * k
+mul-le-right h = by exact mulLeMonoR
+
+sub-le : {n m : nat} -> n - m <= n
+sub-le = by exact subLe
+
+-- Inductive (Peano) witnesses for strict and non-strict order.
+data PLt (n : nat) (m : nat) where
+  ZeroSucc : {m : nat} -> PLt 0 (S m)
+  SuccSucc : {n m : nat} -> PLt n m -> PLt (S n) (S m)
+
+data PLeq (n : nat) (m : nat) where
+  Zero : {m : nat} -> PLeq 0 m
+  Succ : {n m : nat} -> PLeq n m -> PLeq (S n) (S m)
+
+plt-of-lt : {n m : nat} -> n < m -> PLt n m
+plt-of-lt {0} {S m} h = ZeroSucc
+plt-of-lt {S n} {S m} h = SuccSucc (plt-of-lt h)
+plt-of-lt {n} {0} h = absurd h
+
+lt-of-plt : {n m : nat} -> PLt n m -> n < m
+lt-of-plt ZeroSucc = rfl
+lt-of-plt (SuccSucc p) = lt-of-plt p
+
+pleq-of-le : {n m : nat} -> n <= m -> PLeq n m
+pleq-of-le {0} {m} h = Zero
+pleq-of-le {S n} {0} h = absurd h
+pleq-of-le {S n} {S m} h = Succ (pleq-of-le h)
+
+le-of-pleq : {n m : nat} -> PLeq n m -> n <= m
+le-of-pleq Zero = by cong zeroLe
+le-of-pleq (Succ p) = le-of-pleq p
+
+-- Existential witnesses store the gap; the equality is a checked premise.
+data ELt (n : nat) (m : nat) where
+  Gap : (k : nat) -> n + S k = m -> ELt n m
+
+data ELeq (n : nat) (m : nat) where
+  Gap : (k : nat) -> n + k = m -> ELeq n m
+
+lt-of-elt : {n m : nat} -> ELt n m -> n < m
+lt-of-elt (Gap {n} {m} k h) = by
+  have bound : n < m := by exact ltOfAdd
+  bound
+
+le-of-eleq : {n m : nat} -> ELeq n m -> n <= m
+le-of-eleq (Gap {n} {m} k h) = by
+  have bound : n <= m := by exact leOfAdd
+  bound
+
+elt-of-lt : {n m : nat} -> n < m -> ELt n m
+elt-of-lt {n} {m} h = Gap (m - S n) (calc
+  n + S (m - S n)
+  = S (n + (m - S n))
+  = S n + (m - S n) := by cong succAdd
+  = m := by exact ltAddSub)
+
+eleq-of-le : {n m : nat} -> n <= m -> ELeq n m
+eleq-of-le {n} {m} h = Gap (m - n) (by exact leAddSub)
+
+elt-of-plt : {n m : nat} -> PLt n m -> ELt n m
+elt-of-plt p = elt-of-lt (lt-of-plt p)
+
+plt-of-elt : {n m : nat} -> ELt n m -> PLt n m
+plt-of-elt p = plt-of-lt (lt-of-elt p)
+
+eleq-of-pleq : {n m : nat} -> PLeq n m -> ELeq n m
+eleq-of-pleq p = eleq-of-le (le-of-pleq p)
+
+pleq-of-eleq : {n m : nat} -> ELeq n m -> PLeq n m
+pleq-of-eleq p = pleq-of-le (le-of-eleq p)
+
+pleq-refl : {n : nat} -> PLeq n n
+pleq-refl {n} = pleq-of-le le-refl
+
+eleq-refl : {n : nat} -> ELeq n n
+eleq-refl {n} = Gap 0 rfl
+
+plt-trans : {n m k : nat} -> PLt n m -> PLt m k -> PLt n k
+plt-trans {n} {m} {k} p q = plt-of-lt (by
+  have h := lt-of-plt p
+  have j := lt-of-plt q
+  exact ltTrans)
+
+pleq-trans : {n m k : nat} -> PLeq n m -> PLeq m k -> PLeq n k
+pleq-trans {n} {m} {k} p q = pleq-of-le (by
+  have h := le-of-pleq p
+  have j := le-of-pleq q
+  exact leTrans)
+
+elt-trans : {n m k : nat} -> ELt n m -> ELt m k -> ELt n k
+elt-trans {n} {m} {k} p q = elt-of-lt (by
+  have h := lt-of-elt p
+  have j := lt-of-elt q
+  exact ltTrans)
+
+eleq-trans : {n m k : nat} -> ELeq n m -> ELeq m k -> ELeq n k
+eleq-trans {n} {m} {k} p q = eleq-of-le (by
+  have h := le-of-eleq p
+  have j := le-of-eleq q
+  exact leTrans)
+
+pleq-antisym : {n m : nat} -> PLeq n m -> PLeq m n -> n = m
+pleq-antisym {n} {m} p q = by
+  have h := le-of-pleq p
+  have j := le-of-pleq q
+  exact leAntisym
+
+eleq-antisym : {n m : nat} -> ELeq n m -> ELeq m n -> n = m
+eleq-antisym {n} {m} p q = by
+  have h := le-of-eleq p
+  have j := le-of-eleq q
+  exact leAntisym
+
+pleq-of-plt : {n m : nat} -> PLt n m -> PLeq n m
+pleq-of-plt {n} {m} p = pleq-of-le (by
+  have h := lt-of-plt p
+  exact ltLe)
+
+eleq-of-elt : {n m : nat} -> ELt n m -> ELeq n m
+eleq-of-elt {n} {m} p = eleq-of-le (by
+  have h := lt-of-elt p
+  exact ltLe)
+
+plt-not-zero : {n : nat} -> PLt n 0 -> a
+plt-not-zero ()
+
+-- Monotonicity also produces witnesses at the new bounds.
+plt-add-left : {n m k : nat} -> PLt n m -> PLt (k + n) (k + m)
+plt-add-left {n} {m} {k} p = plt-of-lt (by
+  have h := lt-of-plt p
+  exact addLtMonoL)
+
+plt-add-right : {n m k : nat} -> PLt n m -> PLt (n + k) (m + k)
+plt-add-right {n} {m} {k} p = plt-of-lt (by
+  have h := lt-of-plt p
+  exact addLtMonoR)
+
+elt-add-left : {n m k : nat} -> ELt n m -> ELt (k + n) (k + m)
+elt-add-left {n} {m} {k} p = elt-of-lt (by
+  have h := lt-of-elt p
+  exact addLtMonoL)
+
+elt-add-right : {n m k : nat} -> ELt n m -> ELt (n + k) (m + k)
+elt-add-right {n} {m} {k} p = elt-of-lt (by
+  have h := lt-of-elt p
+  exact addLtMonoR)
+
+pleq-add-left : {n m k : nat} -> PLeq n m -> PLeq (k + n) (k + m)
+pleq-add-left {n} {m} {k} p = pleq-of-le (by
+  have h := le-of-pleq p
+  exact addLeMonoL)
+
+pleq-add-right : {n m k : nat} -> PLeq n m -> PLeq (n + k) (m + k)
+pleq-add-right {n} {m} {k} p = pleq-of-le (by
+  have h := le-of-pleq p
+  exact addLeMonoR)
+
+eleq-add-left : {n m k : nat} -> ELeq n m -> ELeq (k + n) (k + m)
+eleq-add-left {n} {m} {k} p = eleq-of-le (by
+  have h := le-of-eleq p
+  exact addLeMonoL)
+
+eleq-add-right : {n m k : nat} -> ELeq n m -> ELeq (n + k) (m + k)
+eleq-add-right {n} {m} {k} p = eleq-of-le (by
+  have h := le-of-eleq p
+  exact addLeMonoR)
+
+pleq-mul-left : {n m k : nat} -> PLeq n m -> PLeq (k * n) (k * m)
+pleq-mul-left {n} {m} {k} p = pleq-of-le (by
+  have h := le-of-pleq p
+  exact mulLeMonoL)
+
+pleq-mul-right : {n m k : nat} -> PLeq n m -> PLeq (n * k) (m * k)
+pleq-mul-right {n} {m} {k} p = pleq-of-le (by
+  have h := le-of-pleq p
+  exact mulLeMonoR)
+
+eleq-mul-left : {n m k : nat} -> ELeq n m -> ELeq (k * n) (k * m)
+eleq-mul-left {n} {m} {k} p = eleq-of-le (by
+  have h := le-of-eleq p
+  exact mulLeMonoL)
+
+eleq-mul-right : {n m k : nat} -> ELeq n m -> ELeq (n * k) (m * k)
+eleq-mul-right {n} {m} {k} p = eleq-of-le (by
+  have h := le-of-eleq p
+  exact mulLeMonoR)
+
+-- The inductive and gap presentations are isomorphic as values, not merely
+-- equivalent after forgetting their evidence to a builtin comparison.
+plt-elt-inverse : (p : PLt n m) -> plt-of-elt (elt-of-plt p) = p
+plt-elt-inverse ZeroSucc = rfl
+plt-elt-inverse (SuccSucc p) = calc
+  plt-of-elt (elt-of-plt (SuccSucc p))
+  = SuccSucc (plt-of-elt (elt-of-plt p))
+  = SuccSucc p := cong (plt-elt-inverse p)
+
+private
+  pleq-eleq-zero : (m : nat) -> pleq-of-eleq (eleq-of-pleq (PLeq.Zero {m})) = PLeq.Zero {m}
+  pleq-eleq-zero 0 = rfl
+  pleq-eleq-zero (S m) = rfl
+
+pleq-eleq-inverse : (p : PLeq n m) -> pleq-of-eleq (eleq-of-pleq p) = p
+pleq-eleq-inverse (Zero {m}) = pleq-eleq-zero m
+pleq-eleq-inverse (Succ p) = calc
+  pleq-of-eleq (eleq-of-pleq (Succ p))
+  = Succ (pleq-of-eleq (eleq-of-pleq p))
+  = Succ p := cong (pleq-eleq-inverse p)
+
+elt-plt-inverse : (p : ELt n m) -> elt-of-plt (plt-of-elt p) = p
+elt-plt-inverse (Gap {n} {m} k h) = by
+  have bound : n < m := by exact ltOfAdd
+  have gap : m - S n = k := calc
+    m - S n
+    = (n + S k) - S n := cong h
+    = S (n + k) - S n := cong addSucc
+    = (n + k) - n := by exact succSubSucc
+    = k := by exact addSubCancel
+  calc
+    elt-of-plt (plt-of-elt (ELt.Gap {n} {m} k h))
+    = elt-of-lt {n} {m} bound := by cong
+    = ELt.Gap {n} {m} k h := cong gap
+
+eleq-pleq-inverse : (p : ELeq n m) -> eleq-of-pleq (pleq-of-eleq p) = p
+eleq-pleq-inverse (Gap {n} {m} k h) = by
+  have bound : n <= m := by exact leOfAdd
+  have gap : m - n = k := calc
+    m - n
+    = (n + k) - n := cong h
+    = k := by exact addSubCancel
+  calc
+    eleq-of-pleq (pleq-of-eleq (ELeq.Gap {n} {m} k h))
+    = eleq-of-le {n} {m} bound := by cong
+    = ELeq.Gap {n} {m} k h := cong gap

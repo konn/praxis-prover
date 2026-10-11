@@ -1,0 +1,205 @@
+module Data.Vec where
+
+import Data.Fin as F
+import Data.List as L
+import Data.Nat as N
+
+-- The length precedes the element type, as in Vec n a.
+data Vec (n : Nat) (a : Type) where
+  Nil : Vec 0 a
+  Cons : {n : Nat} -> a -> Vec n a -> Vec (S n) a
+
+head : Vec (S n) a -> a
+head (Cons x xs) = x
+
+tail : Vec (S n) a -> Vec n a
+tail (Cons x xs) = xs
+
+length : Vec n a -> Nat
+length Nil = 0
+length (Cons x xs) = S (length xs)
+
+length-index : (xs : Vec n a) -> length xs ≡ n
+length-index Nil = rfl
+length-index (Cons x xs) = cong (length-index xs)
+
+head-tail : (xs : Vec (S n) a) -> Cons (head xs) (tail xs) ≡ xs
+head-tail (Cons x xs) = rfl
+
+singleton : a -> Vec 1 a
+singleton x = Cons x Nil
+
+replicate : {n : Nat} -> a -> Vec n a
+replicate {0} x = Nil
+replicate {S n} x = Cons x (replicate {n} x)
+
+snoc : Vec n a -> a -> Vec (S n) a
+snoc Nil x = Cons x Nil
+snoc (Cons y ys) x = Cons y (snoc ys x)
+
+reverse : Vec n a -> Vec n a
+reverse Nil = Nil
+reverse (Cons x xs) = snoc (reverse xs) x
+
+lookup : F.Fin n -> Vec n a -> a
+lookup (FZero {n}) (Cons x xs) = x
+lookup (FSucc i) (Cons x xs) = lookup i xs
+
+to-list : Vec n a -> L.List a
+to-list Nil = L.List.Nil
+to-list (Cons x xs) = L.List.(::) x (to-list xs)
+
+length-to-list : (xs : Vec n a) -> L.length (to-list xs) ≡ n
+length-to-list Nil = rfl
+length-to-list (Cons x xs) = cong (length-to-list xs)
+
+-- lookup is the evaluation map.  The core supports fixed function schemas,
+-- exposed in Surface by class methods.  Surface does not yet admit function
+-- values, so a literal bijection with Fin n -> a cannot be quantified here.
+
+-- Equality transport changes the length index without changing the entries.
+cast : {n m : Nat} -> n ≡ m -> Vec n a -> Vec m a
+cast {n} {m} h xs = xs
+
+private
+  -- Structural concatenation follows Nat's right-recursive addition.
+  append-left : Vec n a -> Vec m a -> Vec (m + n) a
+  append-left Nil ys = ys
+  append-left (Cons x xs) ys = Cons x (append-left xs ys)
+
+-- Commutativity identifies the implementation's length with the public n+m.
+append : {n m : Nat} -> Vec n a -> Vec m a -> Vec (n + m) a
+append {n} {m} xs ys = cast {m + n} {n + m} (N.add-comm {m} {n}) (append-left xs ys)
+
+reverse-snoc : (xs : Vec n a) -> (x : a) -> reverse (snoc xs x) ≡ Cons x (reverse xs)
+reverse-snoc Nil x = rfl
+reverse-snoc (Cons y ys) x = calc
+  reverse (snoc (Cons y ys) x)
+  = snoc (reverse (snoc ys x)) y
+  = snoc (Cons x (reverse ys)) y := cong (reverse-snoc ys x)
+  = Vec.Cons x (reverse (Vec.Cons y ys))
+
+reverse-reverse : (xs : Vec n a) -> reverse (reverse xs) ≡ xs
+reverse-reverse Nil = rfl
+reverse-reverse (Cons x xs) = calc
+  reverse (reverse (Cons x xs))
+  = reverse (snoc (reverse xs) x)
+  = Vec.Cons x (reverse (reverse xs)) := reverse-snoc (reverse xs) x
+  = Vec.Cons x xs := cong (reverse-reverse xs)
+
+private
+  append-left-nil : (xs : Vec n a) -> append-left xs Nil ≡ xs
+  append-left-nil Nil = rfl
+  append-left-nil (Cons x xs) = calc
+    append-left (Vec.Cons x xs) Nil
+    = Vec.Cons x (append-left xs Nil)
+    = Vec.Cons x xs := cong (append-left-nil xs)
+
+  nil-append-left : (xs : Vec n a) -> append-left Nil xs ≡ xs
+  nil-append-left xs = rfl
+
+  append-left-assoc : (xs : Vec n a) -> (ys : Vec m a) -> (zs : Vec k a) -> append-left (append-left xs ys) zs ≡ append-left xs (append-left ys zs)
+  append-left-assoc Nil ys zs = rfl
+  append-left-assoc (Cons x xs) ys zs = calc
+    append-left (append-left (Vec.Cons x xs) ys) zs
+    = Vec.Cons x (append-left (append-left xs ys) zs)
+    = Vec.Cons x (append-left xs (append-left ys zs)) := cong (append-left-assoc xs ys zs)
+    = append-left (Vec.Cons x xs) (append-left ys zs)
+
+  length-append-left : (xs : Vec n a) -> (ys : Vec m a) -> length (append-left xs ys) ≡ length xs + length ys
+  length-append-left Nil ys = calc
+    length (append-left Nil ys)
+    = length ys
+    = 0 + length ys := by cong zeroAdd
+    = length Nil + length ys
+  length-append-left (Cons x xs) ys = calc
+    length (append-left (Vec.Cons x xs) ys)
+    = S (length (append-left xs ys))
+    = S (length xs + length ys) := cong (length-append-left xs ys)
+    = S (length xs) + length ys := by cong succAdd
+    = length (Vec.Cons x xs) + length ys
+
+  to-list-append-left : (xs : Vec n a) -> (ys : Vec m a) -> to-list (append-left xs ys) ≡ L.(<>) (to-list xs) (to-list ys)
+  to-list-append-left Nil ys = rfl
+  to-list-append-left (Cons x xs) ys = calc
+    to-list (append-left (Vec.Cons x xs) ys)
+    = L.List.(::) x (to-list (append-left xs ys))
+    = L.List.(::) x (L.(<>) (to-list xs) (to-list ys)) := cong (to-list-append-left xs ys)
+    = L.(<>) (to-list (Vec.Cons x xs)) (to-list ys)
+
+append-nil : (xs : Vec n a) -> append xs Nil ≡ xs
+append-nil xs = calc
+  append xs Nil
+  = append-left xs Nil
+  = xs := append-left-nil xs
+
+nil-append : (xs : Vec n a) -> append Nil xs ≡ xs
+nil-append xs = rfl
+
+append-assoc : (xs : Vec n a) -> (ys : Vec m a) -> (zs : Vec k a) -> append (append xs ys) zs ≡ append xs (append ys zs)
+append-assoc xs ys zs = calc
+  append (append xs ys) zs
+  = append-left (append-left xs ys) zs
+  = append-left xs (append-left ys zs) := append-left-assoc xs ys zs
+  = append xs (append ys zs)
+
+length-append : (xs : Vec n a) -> (ys : Vec m a) -> length (append xs ys) ≡ length xs + length ys
+length-append xs ys = calc
+  length (append xs ys)
+  = length (append-left xs ys)
+  = length xs + length ys := length-append-left xs ys
+
+to-list-append : (xs : Vec n a) -> (ys : Vec m a) -> to-list (append xs ys) ≡ L.(<>) (to-list xs) (to-list ys)
+to-list-append xs ys = calc
+  to-list (append xs ys)
+  = to-list (append-left xs ys)
+  = L.(<>) (to-list xs) (to-list ys) := to-list-append-left xs ys
+
+-- A list whose length is only known at runtime carries its vector together
+-- with the (implicit) existential length witness.
+data SomeVec a where
+  Pack : {n : Nat} -> Vec n a -> SomeVec a
+
+private
+  cons-some : a -> SomeVec a -> SomeVec a
+  cons-some x (Pack xs) = Pack (Cons x xs)
+
+from-list : L.List a -> SomeVec a
+from-list L.List.Nil = Pack Nil
+from-list (L.List.(::) x xs) = cons-some x (from-list xs)
+
+forget-length : SomeVec a -> L.List a
+forget-length (Pack xs) = to-list xs
+
+private
+  forget-cons-some : (x : a) -> (xs : SomeVec a) -> forget-length (cons-some x xs) ≡ L.List.(::) x (forget-length xs)
+  forget-cons-some x (Pack xs) = rfl
+
+to-list-from-list : (xs : L.List a) -> forget-length (from-list xs) ≡ xs
+to-list-from-list L.List.Nil = rfl
+to-list-from-list (L.List.(::) x xs) = calc
+  forget-length (from-list (L.List.(::) x xs))
+  = forget-length (cons-some x (from-list xs))
+  = L.List.(::) x (forget-length (from-list xs)) := forget-cons-some x (from-list xs)
+  = L.List.(::) x xs := cong (to-list-from-list xs)
+
+from-list-to-list : (xs : Vec n a) -> from-list (to-list xs) ≡ Pack xs
+from-list-to-list Nil = rfl
+from-list-to-list (Cons x xs) = calc
+  from-list (to-list (Vec.Cons x xs))
+  = cons-some x (from-list (to-list xs))
+  = cons-some x (Pack xs) := cong (from-list-to-list xs)
+  = Pack (Vec.Cons x xs)
+
+lookup-succ : (i : F.Fin n) -> (x : a) -> (xs : Vec n a) -> lookup (FSucc i) (Cons x xs) ≡ lookup i xs
+lookup-succ i x xs = rfl
+
+lookup-replicate : (i : F.Fin n) -> (x : a) -> lookup i (replicate x) ≡ x
+lookup-replicate FZero x = rfl
+lookup-replicate (FSucc i) x = lookup-replicate i x
+
+from-forget-length : (xs : SomeVec a) -> from-list (forget-length xs) ≡ xs
+from-forget-length (Pack xs) = calc
+  from-list (forget-length (Pack xs))
+  = from-list (to-list xs)
+  = Pack xs := from-list-to-list xs

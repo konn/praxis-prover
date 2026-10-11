@@ -1,0 +1,157 @@
+module Data.Fin where
+
+import Data.Nat.Order as O
+
+-- Fin n has exactly the ordinals 0, ..., n - 1.  The bound is an index:
+-- there is no constructor at Fin 0.
+data Fin (n : Nat) where
+  FZero : {n : Nat} -> Fin (S n)
+  FSucc : {n : Nat} -> Fin n -> Fin (S n)
+
+absurd : Fin 0 -> a
+absurd ()
+
+empty : Fin 0 -> ⊥
+empty ()
+
+to-nat : Fin n -> Nat
+to-nat FZero = 0
+to-nat (FSucc i) = S (to-nat i)
+
+to-nat-lt : (i : Fin n) -> to-nat i < n
+to-nat-lt FZero = rfl
+to-nat-lt (FSucc i) = to-nat-lt i
+
+-- Include the same ordinal in the next larger finite set.
+weaken : Fin n -> Fin (S n)
+weaken (FZero {n}) = FZero {S n}
+weaken (FSucc i) = FSucc (weaken i)
+
+to-nat-weaken : (i : Fin n) -> to-nat (weaken i) ≡ to-nat i
+to-nat-weaken FZero = rfl
+to-nat-weaken (FSucc i) = calc
+  to-nat (weaken (FSucc i))
+  = S (to-nat (weaken i))
+  = S (to-nat i) := cong (to-nat-weaken i)
+  = to-nat (FSucc i)
+
+-- The greatest element of Fin (S n).
+last : {n : Nat} -> Fin (S n)
+last {0} = FZero
+last {S n} = FSucc (last {n})
+
+to-nat-last : {n : Nat} -> to-nat (last {n}) ≡ n
+to-nat-last {0} = rfl
+to-nat-last {S n} = cong (to-nat-last {n})
+
+-- Construct an ordinal from its builtin strict bound.
+from-nat : {k n : Nat} -> k < n -> Fin n
+from-nat {0} {S n} h = FZero
+from-nat {S k} {S n} h = FSucc (from-nat {k} {n} h)
+from-nat {k} {0} h = absurd h
+
+-- An alternative presentation retains the ordinal as a builtin natural and
+-- certifies its bound; the proof is erased, but checked by membership.
+data EFin (n : Nat) where
+  Mk : (k : Nat) -> k < n -> EFin n
+
+value : EFin n -> Nat
+value (Mk k h) = k
+
+value-lt : (i : EFin n) -> value i < n
+value-lt (Mk k h) = h
+
+succ-efin : {n : Nat} -> EFin n -> EFin (S n)
+succ-efin (Mk {n} k h) = Mk (S k) h
+
+to-efin : {n : Nat} -> Fin n -> EFin n
+to-efin (FZero {n}) = Mk 0 rfl
+to-efin (FSucc i) = succ-efin (to-efin i)
+
+from-plt : O.PLt k n -> Fin n
+from-plt (ZeroSucc {n}) = FZero {n}
+from-plt (SuccSucc p) = FSucc (from-plt p)
+
+to-nat-from-plt : (p : O.PLt k n) -> to-nat (from-plt p) ≡ k
+to-nat-from-plt ZeroSucc = rfl
+to-nat-from-plt (SuccSucc p) = cong (to-nat-from-plt p)
+
+from-efin : {n : Nat} -> EFin n -> Fin n
+from-efin (Mk {n} k h) = from-plt (O.plt-of-lt {k} {n} h)
+
+value-succ-efin : (i : EFin n) -> value (succ-efin i) ≡ S (value i)
+value-succ-efin (Mk k h) = rfl
+
+from-efin-succ : (i : EFin n) -> from-efin (succ-efin i) ≡ FSucc (from-efin i)
+from-efin-succ (Mk k h) = rfl
+
+value-to-efin : (i : Fin n) -> value (to-efin i) ≡ to-nat i
+value-to-efin FZero = rfl
+value-to-efin (FSucc i) = calc
+  value (to-efin (FSucc i))
+  = value (succ-efin (to-efin i))
+  = S (value (to-efin i)) := value-succ-efin (to-efin i)
+  = S (to-nat i) := cong (value-to-efin i)
+  = to-nat (FSucc i)
+
+from-to-efin : (i : Fin n) -> from-efin (to-efin i) ≡ i
+from-to-efin FZero = rfl
+from-to-efin (FSucc i) = calc
+  from-efin (to-efin (FSucc i))
+  = from-efin (succ-efin (to-efin i))
+  = FSucc (from-efin (to-efin i)) := from-efin-succ (to-efin i)
+  = FSucc i := cong (from-to-efin i)
+
+to-nat-from-efin : (i : EFin n) -> to-nat (from-efin i) ≡ value i
+to-nat-from-efin (Mk {n} k h) = calc
+  to-nat (from-efin (EFin.Mk {n} k h))
+  = to-nat (from-plt (O.plt-of-lt {k} {n} h))
+  = k := to-nat-from-plt (O.plt-of-lt {k} {n} h)
+  = value (EFin.Mk {n} k h)
+
+bound : EFin n -> Nat
+bound (Mk {n} k h) = n
+
+bound-index : (i : EFin n) -> bound i ≡ n
+bound-index (Mk k h) = rfl
+
+efin-ext : (i : EFin n) -> (j : EFin m) -> bound i ≡ bound j -> value i ≡ value j -> i ≡ j
+efin-ext (Mk {n} k h) j same-bound eq = by
+  induction j
+  { intros m l same-bound eq
+    have bounds := same-bound
+    have values := eq
+    cong }
+
+bound-roundtrip : (i : EFin n) -> bound (to-efin (from-efin i)) ≡ bound i
+bound-roundtrip i = by
+  have encoded := bound-index (to-efin (from-efin i))
+  have original := bound-index i
+  cong
+
+to-from-efin : (i : EFin n) -> to-efin (from-efin i) ≡ i
+to-from-efin i = by
+  have projected : value (to-efin (from-efin i)) ≡ value i := calc
+    value (to-efin (from-efin i))
+    = to-nat (from-efin i) := value-to-efin (from-efin i)
+    = value i := to-nat-from-efin i
+  have same-bounds := bound-roundtrip i
+  efin-ext (to-efin (from-efin i)) i same-bounds projected
+
+to-efin-bound : (i : Fin n) -> bound (to-efin i) ≡ n
+to-efin-bound i = bound-index (to-efin i)
+
+to-nat-injective : (i : Fin n) -> (j : Fin n) -> to-nat i ≡ to-nat j -> i ≡ j
+to-nat-injective i j eq = by
+  have bi := to-efin-bound i
+  have bj := to-efin-bound j
+  have bounds : bound (to-efin i) ≡ bound (to-efin j) := by cong
+  have vi := value-to-efin i
+  have vj := value-to-efin j
+  have values : value (to-efin i) ≡ value (to-efin j) := by cong
+  have encoded : to-efin i ≡ to-efin j := efin-ext (to-efin i) (to-efin j) bounds values
+  calc
+    i
+    = from-efin (to-efin i) := cong (from-to-efin i)
+    = from-efin (to-efin j) := cong encoded
+    = j := from-to-efin j

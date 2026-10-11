@@ -24,6 +24,11 @@ extra-source-files:
   test/data/**/*.toml
   test/data/*.px
 
+data-files:
+  data/libraries/base/README.md
+  data/libraries/base/package.toml
+  data/libraries/base/src/**/*.px
+
 source-repository head
   type: git
   location: https://github.com/konn/praxis
