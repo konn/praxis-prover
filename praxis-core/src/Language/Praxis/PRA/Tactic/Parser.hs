@@ -68,7 +68,8 @@ also be given, a term over the @var@ arguments, @exact cv m t (m < S m)@.
 A premise may quantify variables of its own, @(assoc ∀ x y z : |- f (f x y)
 z = f x (f y z))@ for an abstract function @f@: it then holds for every
 instance of them, and mentions no other object variable and no metavariable
-but @var@ and @term@ ones.  In the proof of the rule it is a lemma, appealed
+but @var@, @term@ and @ctx@ ones. A context stays fixed while the premise
+variables are instantiated. In the proof of the rule it is a lemma, appealed
 to at instances of its variables, by @exact@, @cong@, @rewrite@ or
 @symmetry@, as a theorem is, the metavariables of the rule standing for
 themselves; an appeal to the rule leaves it as a goal with its variables
@@ -358,8 +359,8 @@ declP lemmas mkScope = theoremP <|> ruleP
             fail ("the parameter " <> p <> " of " <> n <> " is not a var metavariable declared before it")
       pure (MetaBinder names s)
     -- A premise, over variables of its own when it quantifies some: it then
-    -- mentions no other object variable, and no metavariable but var and term
-    -- ones, abstract functions included.
+    -- mentions no other object variable, and no metavariable but var, term
+    -- and context ones, abstract functions included.
     premiseBinderP sc = do
       n <- identifierP sc
       xs <- option [] ((symbolP "∀" <|> keywordP "forall") *> some (localP sc))
@@ -381,8 +382,8 @@ declP lemmas mkScope = theoremP <|> ruleP
         fail ("the variables of the premise " <> n <> " are not distinct")
       unless (all (\v -> isJust (metaName v) || v `elem` xs) names) $
         fail ("the premise " <> n <> " is over variables of its own, and mentions no other object variable")
-      forM_ [m | v <- names, Just (sort, m) <- [metaName v], sort `notElem` [R.VarS, R.TermS]] \m ->
-        fail ("the premise " <> n <> " is over variables of its own, and mentions no metavariable but var and term ones, not " <> m)
+      forM_ [m | v <- names, Just (sort, m) <- [metaName v], sort `notElem` [R.VarS, R.TermS, R.CtxS]] \m ->
+        fail ("the premise " <> n <> " is over variables of its own, and mentions no metavariable but var, term and ctx ones, not " <> m)
     sortP =
       choice
         [ R.VarS <$ keywordP "var"

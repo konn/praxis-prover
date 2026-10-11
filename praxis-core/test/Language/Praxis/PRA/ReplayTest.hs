@@ -78,6 +78,23 @@ replayTests = withResource load (const (pure ())) $ \get ->
           (premises, _) <- right (instantiateLemma builtin (certificateLemma cert) call)
           ps <- traverse proveReflexive premises
           agrees known "replayLocalFresh" [ArgTerm t] ps (replayLocalFresh t reflex)
+    , testCase "quantified context premises replay and export with capture avoidance" $ do
+        known <- get
+        forM_ terms $ \t -> forM_ contexts $ \g -> do
+          let cert = known Map.! "replayLocalContext"
+              args = [ArgTerm t, ArgCtx g]
+              call = Appeal "replayLocalContext" (map mapArg args) [] MS.empty
+              premise x = Defeq x x (Id (x :=== x) g)
+          (premises, _) <- right (instantiateLemma builtin (certificateLemma cert) call)
+          ps <- traverse proveReflexive premises
+          agrees known "replayLocalContext" args ps (replayLocalContext t g premise)
+          case premises of
+            [_ :|- Atm (x :=== y)] | MS.population g > 0 -> do
+              let missingContext = Defeq x y (Id (x :=== y) MS.empty)
+              case replayCertificate environment cert call [missingContext] of
+                Left WrongPremise {} -> pure ()
+                other -> assertFailure ("a quantified premise dropped its context: " <> show other)
+            _ -> pure ()
     , testCase "quantified premise variables stay apart from captured arguments" $ do
         known <- get
         forM_ terms $ \t -> do

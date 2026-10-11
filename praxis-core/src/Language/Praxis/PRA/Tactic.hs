@@ -1747,8 +1747,9 @@ premiseRenamings lemma appeal = [zip xs (chosen xs) | (n, _) <- lemmaPremises le
 The bindings the statement of a lemma is matched from, and instantiated at.
 A metavariable it mentions without declaring it, one of the rule being
 proved when the lemma is a premise of that rule over variables of its own,
-stands for itself: a @var@ or @term@ metavariable is bound to itself, and an
-abstract function to the abstraction applying it to its parameters.
+stands for itself: a @var@ or @term@ metavariable is bound to itself, an
+abstract function to the abstraction applying it to its parameters, and an
+inherited context to its own opaque context marker.
 -}
 fixedBindings :: (Schematic a) => Lemma a -> Bindings a -> Bindings a
 fixedBindings lemma b =
@@ -1756,9 +1757,11 @@ fixedBindings lemma b =
     { bVars = Map.fromList [(n, v) | (n, R.VarS, v) <- fixed] <> bVars b
     , bTerms = Map.fromList [(n, Var v) | (n, R.TermS, v) <- fixed] <> bTerms b
     , bFuns = Map.fromList [(n, identityAbstraction n ps) | (n, ps) <- statementFunctions lemma, n `notElem` declared] <> bFuns b
+    , bCtxs = Map.fromList [(n, MS.insertOne formula MS.empty) | formula <- fixedContexts, Just n <- [contextMeta formula]] <> bCtxs b
     }
   where
     declared = map fst (lemmaMetas lemma)
+    fixedContexts = [formula | hyps :|- _ <- lemmaGoal lemma : map snd (lemmaPremises lemma), formula <- toList hyps, Just n <- [contextMeta formula], n `notElem` declared]
     fixed =
       [ (n, sort, v)
       | v <- HS.toList (HS.unions (map goalNames (lemmaGoal lemma : map snd (lemmaPremises lemma))))
@@ -1807,7 +1810,7 @@ useLemmaWith heads sig hints name lemma userArgs goal = do
     Left (Malformed (name <> " takes " <> show (length metas) <> " arguments"))
   unless (null metas && null premises || HS.null free) $
     Left (NotClosed name (HS.toList free))
-  let (ctxMetas, hyps) = partitionEithers [maybe (Right f) Left (contextMeta f) | f <- toList lemmaCtx]
+  let (ctxMetas, hyps) = partitionEithers [case contextMeta f of Just n | (n, R.CtxS) `elem` metas -> Left n; _ -> Right f | f <- toList lemmaCtx]
   when (length (hintOn hints) > length hyps) $
     Left (Malformed ("on: " <> name <> " has " <> show (length hyps) <> " hypotheses"))
   pins <- pinned goal (hintOn hints)
@@ -2144,7 +2147,15 @@ matchAtomL sig cons b pat@(ps :=== pt) q@(s :=== t) = case metaAtom pat of
 
 matchFormL :: (Schematic a) => Signature -> Constraints a -> Bindings a -> Formula a -> Formula a -> Match a
 matchFormL sig cons b pat f = case (pat, f) of
-  -- A context metavariable of the goal is opaque; it is never an instance of anything.
+  -- A context inherited by a premise-local lemma is fixed, and can only
+  -- match that same opaque context marker. It must never absorb or drop facts.
+  (Atm p, Atm q)
+    | Just (R.CtxS, n) <- metaAtom p
+    , p == q
+    , Just fixed <- Map.lookup n (bCtxs b)
+    , fixed == MS.insertOne pat MS.empty ->
+        Matched b
+  -- A context metavariable of the goal is otherwise opaque.
   (_, Atm q) | Just (R.CtxS, _) <- metaAtom q -> Mismatch
   (Atm p, _) | Just (R.FormS, n) <- metaAtom p -> case metaApplied p of
     [] -> bindForm cons b n f

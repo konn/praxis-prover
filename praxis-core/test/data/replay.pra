@@ -38,3 +38,9 @@ by exact replayShadowed
 
 rule replayFixed (t : term) : |- n = n /\ t = t
 by ConjR { refl } { Ind n (n = n) t { refl } { refl } }
+
+-- A quantified premise retains the caller's context, including names which
+-- collide with its own locally quantified variable.
+rule replayLocalContext (t : term) (Γ : ctx)
+  (D ∀ x : Γ |- x = x) : Γ |- t = t
+by exact D

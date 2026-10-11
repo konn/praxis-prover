@@ -128,12 +128,23 @@ schemaTests =
           , "rule congLocal (t : term) (h ∀ p : 0 < p |- p + t = t + p) : 0 < 1 |- S (1 + t) = S (t + 1) by cong h"
           ]
         refusedIn sig ["theorem addZeroUnder : 0 < n |- n + 0 = n by refl"] "theorem congBare : |- S (a + 0) = S a by cong addZeroUnder"
-    , testCase "a premise over variables of its own mentions no other object variable, and no metavariable but var and term ones" $ do
+    , testCase "a premise over variables of its own mentions no other object variable, and no metavariable but var, term and context ones" $ do
         sig <- environmentSignature <$> mixEnvironment
         unparsedIn sig "rule stray (h ∀ p : |- p = y) : |- 0 = 0 by refl" "mentions no other object variable"
         unparsedIn sig "rule twice (h ∀ p p : |- p = p) : |- 0 = 0 by refl" "are not distinct"
         unparsedIn sig "rule meta (a : var) (h ∀ a : |- a = a) : |- 0 = 0 by refl" "metavariable"
-        unparsedIn sig "rule context (Γ : ctx) (h ∀ p : Γ |- p = p) : |- 0 = 0 by refl" "not Γ"
+        unparsedIn sig "rule formulaPremise (P : formula) (h ∀ p : P |- p = p) : |- 0 = 0 by refl" "not P"
+    , testCase "quantified premises retain ambient contexts without capturing their variables" $ do
+        sig <- environmentSignature <$> mixEnvironment
+        let rule = "rule underContext (a : var) (f(a) : term) (t : term) (Γ : ctx) (h ∀ i : Γ |- f(i) = 0) : Γ |- f(t) = 0 by exact h"
+        certifiesIn
+          sig
+          [ rule
+          , "theorem useContext : x = 0 |- x = 0 by exact underContext k x 7 { assumption }"
+          , "theorem collidingContext : i = 0 |- i = 0 by exact underContext k i 7 { assumption }"
+          ]
+        refusedIn sig [rule] "theorem captureContext : i = 0 |- 1 = 0 by exact underContext k k 1 { assumption }"
+        refusedIn sig [] "rule dropContext (a : var) (f(a) : term) (t : term) (Γ : ctx) (h ∀ i : Γ |- f(i) = 0) : |- f(t) = 0 by exact h"
     ]
 
 -- | 'builtin' extended by 'mixSource'.
