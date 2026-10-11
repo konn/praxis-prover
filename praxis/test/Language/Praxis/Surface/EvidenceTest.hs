@@ -31,6 +31,8 @@ evidenceTests =
         let needed = requirement sp (DictionaryEntry methodName 0 1) <> requirement sp (MethodPremise methodName 0) <> requirement sp (MembershipEntry 0)
             available = empty {evidenceSlots = [Slot method 0 1, membershipSlot 0], evidencePremises = [PMethod method 0 (TArrow (TParam 0 []) TNat) (Ref RefStatic "w_1")]}
         validateRequirements available needed @?= Right ()
+        assertBool "membership-only evidence accepted for an indexed method" (isLeft (validateRequirements available {evidencePremises = [PClosure method 0]} needed))
+        validateRequirements available {evidencePremises = [PClosure method 0]} (requirement sp (ClosurePremise methodName 0)) @?= Right ()
         assertBool "another dictionary's contract accepted" (isLeft (validateRequirements available {evidencePremises = [PClosure method 1]} needed))
         assertBool "missing membership predicate accepted" (isLeft (validateRequirements available {evidenceSlots = [Slot method 0 1]} needed))
     , testCase "method closure evidence cannot substitute for coverage" $ do

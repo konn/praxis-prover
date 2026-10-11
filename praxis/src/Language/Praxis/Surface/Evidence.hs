@@ -64,7 +64,7 @@ validateRequirements evidence needed = forM_ (requirements needed) \(Requirement
             ("finite quantifier desugaring requires the closure premise " <> named name)
         MethodPremise name parameter ->
           demand
-            (method name parameter)
+            (any (\case PMethod q p _ _ -> q == qualified name && p == parameter; _ -> False) (evidencePremises evidence))
             ("finite quantifier desugaring requires the typed method contract " <> named name)
         DictionaryEntry name parameter arity ->
           demand

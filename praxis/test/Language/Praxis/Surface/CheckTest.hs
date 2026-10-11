@@ -560,7 +560,7 @@ checkTests =
         assertBool "the duplicate binder is diagnosed" (any ("the variable x is bound twice" `T.isInfixOf`) messages)
         assertBool "distinct binders do not prove the false equation" (any ("DuplicateBinders.distinct" `T.isInfixOf`) messages)
         assertBool "a rejected theorem is unavailable" (any ("not a hypothesis or a lemma: DuplicateBinders.bad" `T.isInfixOf`) messages)
-    , testCase "grouped and forall theorem binders must also be distinct" $ do
+    , testCase "grouped and consecutive theorem binders must also be distinct" $ do
         p <- either assertFailure pure prelude
         mapM_
           ( \signature -> do
@@ -570,7 +570,7 @@ checkTests =
               assertBool "the duplicate value binder is diagnosed" (any ("the variable x is bound twice" `T.isInfixOf`) (map reportMessage (checkedReports c)))
           )
           [ "bad : (x x : Nat) -> x ≡ x"
-          , "bad : (x : Nat) -> ∀ (x : Nat), x ≡ x"
+          , "bad : (x : Nat) -> (x : Nat) -> x ≡ x"
           ]
     , testCase "statement translation refuses colliding binders even in an already elaborated declaration" $ do
         src <- TIO.readFile "test/data/duplicate-binders.px"

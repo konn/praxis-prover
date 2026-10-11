@@ -143,6 +143,8 @@ test-suite praxis-test
     Language.Praxis.Surface.CoreTest
     Language.Praxis.Surface.DependentClassTest
     Language.Praxis.Surface.EvidenceTest
+    Language.Praxis.Surface.FiniteElaborationTest
+    Language.Praxis.Surface.FiniteFixtures
     Language.Praxis.Surface.IndexedInstanceTest
     Language.Praxis.Surface.MethodContractTest
     Language.Praxis.Surface.ParserTest
