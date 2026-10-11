@@ -515,7 +515,7 @@ lawArgumentFacts k info initial values = fst <$> foldM argument ("", initial) va
     argument state@(_, g) (value, ty) = do
       term <- termCT CVar value
       let env = goalEnv k info g
-          materialize ix = indexTermIn env (goalVars g) ix >>= either (const Nothing) Just . termCT CVar
+          materialize ix = checkedIndexTerm k env (goalVars g) ix >>= either (const Nothing) Just . termCT CVar
           variable name = fromMaybe (CVar name) (materialize (IxVar name))
           parameter i = fromMaybe (CVar "?") (materialize (IxParam i))
           ignored = head [name | name <- iterate (<> "'") "law_argument_environment", name `notElem` (schemaAvoid g <> varsCT term)]
@@ -540,7 +540,7 @@ methodEntryAt k g slot actual = do
   termCT CVar (join closed)
   where
     context = goalVars g <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
-    capture ix = maybe (Left "a selected method's dependent index is not available in this goal") Right (indexTermIn (knowEnv k) context ix)
+    capture ix = maybe (Left "a selected method's dependent index is not available in this goal") Right (checkedIndexTerm k (knowEnv k) context ix)
 
 {- | A method contract may come from the caller's matching premise or a
 certified implementation. Requiring both certificates for indexed results
@@ -2341,7 +2341,7 @@ evidence k info g le = case spineOf le of
                     [ (mangleVariable name, code)
                     | (position, ix) <- IM.toList (Types.asValues inferred)
                     , Just name <- [listToMaybe (drop position (thmValues t))]
-                    , Just value <- [indexTermIn (goalEnv k info g) (goalVars g) ix]
+                    , Just value <- [checkedIndexTerm k (goalEnv k info g) (goalVars g) ix]
                     , Right code <- [termCT CVar value]
                     ]
           post <- premiseBlocks k g sp t assign typed sigma
@@ -2536,6 +2536,16 @@ checkedElaboration k g env action = do
   either (\(sp, why) -> Left (EngineError sp why)) Right (Required.validateRequirements available required)
   pure value
 
+{- | Proof-time index recovery may use only projection equations whose
+providers have completed checking. Elaboration records the same prerequisites
+in its dependency writer before this later, already-admitted proof phase.
+-}
+checkedIndexTerm :: Knowledge -> Env -> Ctx a -> Ix -> Maybe (Expr a)
+checkedIndexTerm knowledge env context index = do
+  (value, needed) <- indexTermInWithDependencies env context index
+  guard (needed `Set.isSubsetOf` knowCheckedDeclarations knowledge)
+  pure value
+
 {- | A source binder's meaning, retained independently of user-facing renaming.
 The raw views themselves contain no mutable proof context.
 -}
@@ -2603,7 +2613,7 @@ finiteView k info g expression = case stripLocations expression of
           bodyContext = context (qvBodyBinders source)
       ty <- checkedElaboration k g env (quantifierType env domainContext (qvDomain source))
       original <- checkedElaboration k g env (finiteDomain env (goalDict g) domainContext (qvSpan source) ty)
-      let valueIndex ix = case indexTermIn env domainContext ix of
+      let valueIndex ix = case checkedIndexTerm k env domainContext ix of
             Just value -> either (const ix) id (expressionIndex (value >>= replace (qvDomainBinders source)))
             Nothing -> ix
           actualType = Types.mapIx valueIndex ty
@@ -2693,7 +2703,7 @@ valueContract :: Knowledge -> TheoremInfo -> Goal -> Expr Text -> Ty -> Either S
 valueContract k info g value ty = do
   term <- termCT CVar value
   let env = goalEnv k info g
-      materialize ix = indexTermIn env (goalVars g) ix >>= either (const Nothing) Just . termCT CVar
+      materialize ix = checkedIndexTerm k env (goalVars g) ix >>= either (const Nothing) Just . termCT CVar
       variable name = fromMaybe (CVar name) (materialize (IxVar name))
       parameter i = fromMaybe (CVar "?") (materialize (IxParam i))
       callback = CCallback (CClosure [freshProofName g "value_environment"] term []) (CNum 0)

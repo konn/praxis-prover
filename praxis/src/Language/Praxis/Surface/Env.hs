@@ -95,6 +95,9 @@ module Language.Praxis.Surface.Env (
   dataOfCtor,
   indexFunctionCores,
   indexTermIn,
+  indexTermInWithDependencies,
+  normalizeIndex,
+  normalizeTypeIndices,
   displayName,
 ) where
 
@@ -106,6 +109,8 @@ import Data.List (isPrefixOf, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -124,25 +129,79 @@ import Language.Praxis.Surface.Types (Assignment (..), Ix (..), Kind, Parameter 
 be recovered by the certified index projection of a value that carries it.
 -}
 indexTermIn :: Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a)
-indexTermIn env ctx = ixToExprWith variable parameter
+indexTermIn env ctx = fmap fst . scopedIndexTerm (\index -> (normIx index, Set.empty)) env ctx
+
+-- | Recover an index together with the declarations used to convert its type.
+indexTermInWithDependencies :: Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a, Set Text)
+indexTermInWithDependencies env = scopedIndexTerm (normalizeIndex env) env
+
+scopedIndexTerm :: (Ix -> (Ix, Set Text)) -> Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a, Set Text)
+scopedIndexTerm normalize env ctx index = do
+  scoped <- ixToExprWith (fmap Var . variable) (fmap Var . parameter) index
+  pure (scoped >>= fst, foldMap snd scoped)
   where
-    variable v = (Var . fst <$> lookup v ctx) <|> dictionaryValue v <|> recovered (IxVar v)
-    dictionaryValue v = do
-      position <- T.stripPrefix "#d" v
+    local name = (\(value, _) -> (Var value, Set.empty)) <$> lookup name ctx
+    variable name = local name <|> dictionaryValue name <|> recovered (IxVar name)
+    dictionaryValue name = do
+      position <- T.stripPrefix "#d" name
       if T.null position || not (T.all (`elem` ("0123456789" :: String)) position)
         then Nothing
-        else Just (Global (Ref RefValueParam position))
+        else Just (Global (Ref RefValueParam position), Set.empty)
     parameter i =
-      (listToMaybe [v | (v, IxParam j) <- tsValues (envScope env), i == j] >>= \v -> Var . fst <$> lookup v ctx)
+      (listToMaybe [name | (name, IxParam j) <- tsValues (envScope env), i == j] >>= local)
         <|> recovered (IxParam i)
     recovered wanted =
       listToMaybe
-        [ App (Global (Ref RefFunction fn)) (Var v)
-        | (_, (v, TData dn _ indices)) <- ctx
+        [ (App (Global (Ref RefFunction fn)) (Var value), fromActual <> fromWanted)
+        | (_, (value, TData dn _ indices)) <- ctx
         , Just fns <- [indexFunctionCores env dn]
         , (ix, fn) <- zip indices fns
-        , normIx ix == normIx wanted
+        , let (actual, fromActual) = normalize ix
+              (expected, fromWanted) = normalize wanted
+        , actual == expected
         ]
+
+{- | Reduce only direct argument projections discovered in typed definitions.
+The accompanying core names are proof prerequisites, including projections
+used beneath constructors and in discarded arguments. Each rewrite selects
+a strict subterm, so conversion neither evaluates recursion nor needs fuel.
+-}
+normalizeIndex :: Env -> Ix -> (Ix, Set Text)
+normalizeIndex env = go
+  where
+    go (IxSucc x) = let (y, used) = go x in (normIx (IxSucc y), used)
+    go (IxCon name xs) = let (ys, used) = children xs in (IxCon name ys, used)
+    go (IxFun name xs) =
+      let (ys, used) = children xs
+       in case [f | GFun f <- Map.elems (envGlobals env), funCore f == name] of
+            f : _
+              | Just position <- funProjection f
+              , null (funSlots f)
+              , null (funProofs f)
+              , length ys == length (funRuntime f) + funArity f
+              , position >= 0
+              , Just chosen <- listToMaybe (drop position ys) ->
+                  (chosen, Set.insert name used)
+            _ -> (normIx (IxFun name ys), used)
+    go (IxPartial name arity prefix xs) = let (ys, used) = children xs in (IxPartial name arity prefix ys, used)
+    go x = (normIx x, Set.empty)
+    children xs = let (ys, uses) = unzip (map go xs) in (ys, Set.unions uses)
+
+-- | Convert indices while preserving the type structure and collecting every prerequisite.
+normalizeTypeIndices :: Env -> Ty -> (Ty, Set Text)
+normalizeTypeIndices env = go
+  where
+    go (TParam i arguments) = let (as, used) = types arguments in (TParam i as, used)
+    go (TData name arguments indices) =
+      let (as, fromArguments) = types arguments
+          (is, fromIndices) = unzip (map (normalizeIndex env) indices)
+       in (TData name as is, fromArguments <> Set.unions fromIndices)
+    go (TArrow domain result) =
+      let (a, fromDomain) = go domain
+          (r, fromResult) = go result
+       in (TArrow a r, fromDomain <> fromResult)
+    go ty = (ty, Set.empty)
+    types arguments = let (as, uses) = unzip (map go arguments) in (as, Set.unions uses)
 
 {- |
 A qualified name as its segments: the library the module belongs to, when
@@ -306,6 +365,8 @@ data FunInfo = FunInfo
   arguments: the implicit values its clauses bind, which an application
   finds from the types and passes
   -}
+  , funProjection :: !(Maybe Int)
+  -- ^ a completed typed clause directly returns this operational argument
   }
   deriving stock (Show)
 
@@ -664,7 +725,7 @@ addFunction :: Env -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)
 addFunction env name sch arity slots = (env', info)
   where
     q = qualify env [name]
-    info = FunInfo q sch arity (coreOf q) slots [] [] mempty Map.empty mempty []
+    info = FunInfo q sch arity (coreOf q) slots [] [] mempty Map.empty mempty [] Nothing
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)
@@ -743,7 +804,7 @@ addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> [Slot] -> 
 addInstanceFunction env instance' method sch arity slots = (env', info)
   where
     q = instance' <> [method]
-    info = FunInfo q sch arity (coreOf q) slots [] [] mempty Map.empty mempty []
+    info = FunInfo q sch arity (coreOf q) slots [] [] mempty Map.empty mempty [] Nothing
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)

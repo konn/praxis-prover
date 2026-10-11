@@ -14,6 +14,7 @@ module Language.Praxis.Surface.Core (
   emptyBranch,
   computation,
   obligations,
+  indexDependencies,
   mapObligations,
   traverseObligations,
   mapComputation,
@@ -30,6 +31,8 @@ import Data.Functor.Identity (Identity (..))
 import Data.IntMap.Strict qualified as IM
 import Data.Map.Strict qualified as Map
 import Data.Maybe (listToMaybe)
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Type.Equality ((:~:) (..))
@@ -49,16 +52,16 @@ data Variable ctx t where
 
 -- A fully instantiated global signature, created only by this module from
 -- checked elaboration annotations. There is no instance search in the core.
-data Signature args result = Signature S.Ref [Ty.Ty] [(Int, Ty.Ix)] (List SType args) (SType result)
+data Signature args result = Signature S.Ref [Ty.Ty] [(Int, Ty.Ix)] (Set Text) (List SType args) (SType result)
 
 data Value o ctx t where
   Variable :: Variable ctx t -> Value o ctx t
   Literal :: Natural -> Value o ctx 'Natural
   Apply :: Signature args t -> List (Value o ctx) args -> [o] -> Value o ctx t
-  Dictionary :: SType t -> Tm.Term Int -> Value o ctx t
-  Callback :: SType t -> Tm.Term Int -> Value o ctx t
+  Dictionary :: SType t -> Tm.Term Int -> Set Text -> Value o ctx t
+  Callback :: SType t -> Tm.Term Int -> Set Text -> Value o ctx t
   Invoke :: SType t -> Value o ctx u -> List (Value o ctx) args -> Value o ctx t
-  Transport :: SType t -> Value o ctx u -> [o] -> Value o ctx t
+  Transport :: SType t -> Value o ctx u -> [o] -> Set Text -> Value o ctx t
   Absurd :: SType t -> o -> Value o ctx t
 
 data SomeVariable ctx where
@@ -120,10 +123,18 @@ elaborateNamed env slots variables expression = do
       SomeType ty <- reflectType (complete target)
       SomeValue actual value <- infer ctx child
       pairs <- maybe (Left "an index transport changes the type structure") Right (Ty.transportIndices (forgetType actual) (forgetType ty))
-      expected <- traverse (\(x, y) -> S.Rel S.RelEq <$> indexTerm x <*> indexTerm y) pairs
+      converted <-
+        traverse
+          ( \(x, y) -> do
+              (left, fromLeft) <- indexTerm x
+              (right, fromRight) <- indexTerm y
+              pure (S.Rel S.RelEq left right, fromLeft <> fromRight)
+          )
+          pairs
+      let (expected, dependencies) = unzip converted
       evidence <- traverse transportProof proofs
       unless (map fst evidence == expected) $ Left "index transport evidence does not match its index equalities"
-      pure (SomeValue ty (Transport ty value evidence))
+      pure (SomeValue ty (Transport ty value evidence (Set.unions dependencies)))
     infer ctx (S.SchemaParameter source ref child) = do
       SomeType ty <- reflectType (complete source)
       _ <- callbackSignature source
@@ -134,7 +145,7 @@ elaborateNamed env slots variables expression = do
       unless (forgetType ty == forgetType actual) $ Left "a callback environment has the wrong source signature"
       unless (any (\(name, known, signature) -> known == ref && name == fst (variables !! i) && complete signature == forgetType ty) (envSchemas env)) $
         Left "an unknown callback parameter at the explicit core boundary"
-      pure (SomeValue ty (Callback ty (Tm.Parameter ref (Tm.Variable i))))
+      pure (SomeValue ty (Callback ty (Tm.Parameter ref (Tm.Variable i)) Set.empty))
     infer _ S.SchemaPacked {} = Left "an internal packed callback cannot be supplied as a source term"
     infer _ (S.SchemaClosure source child) = do
       SomeType ty <- reflectType (complete source)
@@ -150,7 +161,7 @@ elaborateNamed env slots variables expression = do
       unless (null (obligations body)) $ Left "proof obligations inside a callback lambda are not supported"
       unless (bodyType body == complete result) $ Left "a callback lambda returns the wrong type"
       let closed = fmap (\i -> if i < count then B i else F (i - count)) (computation body)
-      pure (SomeValue ty (Callback ty (Tm.Closure count closed)))
+      pure (SomeValue ty (Callback ty (Tm.Closure count closed) (indexDependencies body)))
     infer _ (S.Nat n) = Right (SomeValue SNatural (Literal n))
     infer ctx (S.Var i) = do
       SomeVariable t v <- variable ctx i
@@ -160,8 +171,8 @@ elaborateNamed env slots variables expression = do
       SomeType ty <- first (\message -> message <> " in " <> show t) (reflectType (complete t))
       p <- Tm.prepareTerm e
       code <- Tm.withoutObligations p
-      validateDictionary env slots variables (forgetType ty) e
-      pure (SomeValue ty (Dictionary ty code))
+      dependencies <- validateDictionary env slots variables (forgetType ty) e
+      pure (SomeValue ty (Dictionary ty code dependencies))
     infer _ _ = Left "a value without a checked type at the explicit core boundary"
     callbackSignature source = case arrows source of
       ([], _) -> Left "a callback needs a function signature"
@@ -170,7 +181,7 @@ elaborateNamed env slots variables expression = do
         | otherwise -> Left "callbacks take and return first-order values"
     arrows (Ty.TArrow a b) = let (rest, result) = arrows b in (a : rest, result)
     arrows t = ([], t)
-    indexTerm ix = maybe (Left "an index transport has no scoped index term") Right (indexTermIn env [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] variables] ix)
+    indexTerm ix = maybe (Left "an index transport has no scoped index term") Right (indexTermInWithDependencies env [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] variables] ix)
     transportProof e = case S.stripLocations e of
       S.ProofArg prop (S.Irrelevant raw)
         | all (\i -> i >= 0 && i < length variables) (toList prop) -> Right (prop, raw)
@@ -192,8 +203,8 @@ elaborateNamed env slots variables expression = do
         (Arguments domains values, proofs) <- arguments ctx args
         -- Reflection checks that explicit instantiations contain no index holes.
         _ <- traverse (reflectType . Ty.TData "#index" [] . pure . snd) is
-        (types, indices) <- validateGlobal env slots ref (length proofs) is [sourceIndex argument | argument <- args, not (proofArgument argument)] (mapTypes forgetType domains) (forgetType ty)
-        pure (Apply (Signature ref types indices domains ty) values proofs)
+        (types, indices, dependencies) <- validateGlobal env slots ref (length proofs) is [sourceIndex argument | argument <- args, not (proofArgument argument)] (mapTypes forgetType domains) (forgetType ty)
+        pure (Apply (Signature ref types indices dependencies domains ty) values proofs)
       _ -> Left "a non-first-order value at the explicit core boundary"
     proofArgument argument = case S.stripLocations argument of
       S.ProofArg {} -> True
@@ -238,7 +249,7 @@ elaborateNamed env slots variables expression = do
 -- Check global applications against the declaration environment before making
 -- an intrinsically typed signature. In particular an annotation alone cannot
 -- turn a numeral operation or an arbitrary name into a value of any type.
-validateGlobal :: Env -> [Slot] -> S.Ref -> Int -> [(Int, Ty.Ix)] -> [Maybe Ty.Ix] -> [Ty.Ty] -> Ty.Ty -> Either String ([Ty.Ty], [(Int, Ty.Ix)])
+validateGlobal :: Env -> [Slot] -> S.Ref -> Int -> [(Int, Ty.Ix)] -> [Maybe Ty.Ix] -> [Ty.Ty] -> Ty.Ty -> Either String ([Ty.Ty], [(Int, Ty.Ix)], Set Text)
 validateGlobal env slots ref proofCount explicitIndices actualValues actual result = case S.refKind ref of
   S.RefBuiltin | S.refName ref == "S" -> check 0 (0, 0) [Ty.TNat] Ty.TNat
   S.RefBuiltin | S.refName ref `elem` ["add", "sub", "mul", "pow"] -> check 0 (0, 0) [Ty.TNat, Ty.TNat] Ty.TNat
@@ -277,8 +288,11 @@ validateGlobal env slots ref proofCount explicitIndices actualValues actual resu
     checkWith captured required n ds r = do
       unless (proofCount == required) $ Left ("core evidence arity mismatch for " <> show ref)
       unless (length ds == length actual) $ Left ("core application arity mismatch for " <> show ref)
-      let match a b s = maybe (Left ("core application type mismatch for " <> show ref <> ": " <> show a <> " against " <> show b)) Right (Ty.matchTy n a b s)
-      let stated = IM.fromList [(i, x) | (i, x) <- explicitIndices, i >= 0, i < snd n]
+      let normalizedType = fst . normalizeTypeIndices env
+          normalizedIndex = fst . normalizeIndex env
+          dependencies = Set.unions (map (snd . normalizeTypeIndices env) (r : result : ds <> actual) <> map (snd . normalizeIndex env . snd) (explicitIndices <> captured))
+          match a b s = maybe (Left ("core application type mismatch for " <> show ref <> ": " <> show a <> " against " <> show b)) Right (Ty.matchTy n (normalizedType a) (normalizedType b) s)
+      let stated = IM.fromList [(i, normalizedIndex x) | (i, x) <- explicitIndices, i >= 0, i < snd n]
       indices <-
         foldM
           ( \known (i, x) -> case IM.lookup i known of
@@ -286,13 +300,13 @@ validateGlobal env slots ref proofCount explicitIndices actualValues actual resu
               Just y -> maybe (Left "a runtime argument disagrees with its stated index") (\value -> Right (IM.insert i value known)) (Ty.mergeIx x y)
           )
           stated
-          captured
+          [(i, normalizedIndex x) | (i, x) <- captured]
       let seed = Ty.emptyAssignment {Ty.asValues = indices}
       initial <- match r result seed
       assignment <- foldM (\s (a, b) -> match a b s) initial (zip ds actual)
       unless (all Ty.firstOrder (IM.elems (Ty.asTypes assignment))) $ Left "type parameters cannot contain fixed callbacks"
       unless (Ty.firstOrder result) $ Left "a global value cannot return a fixed callback"
-      pure ([complete (Ty.substScheme n assignment (Ty.TParam i [])) | i <- [0 .. fst n - 1]], IM.toList (Ty.asValues assignment))
+      pure ([complete (Ty.substScheme n assignment (Ty.TParam i [])) | i <- [0 .. fst n - 1]], IM.toList (Ty.asValues assignment), dependencies)
     arrows (Ty.TArrow a b) = let (as, r) = arrows b in (a : as, r)
     arrows t = ([], t)
     places = place 1 0 slots
@@ -308,13 +322,14 @@ validateGlobal env slots ref proofCount explicitIndices actualValues actual resu
 -- Dictionary entries retain their runtime index captures in the current
 -- value context. Check every captured value and dependent result against
 -- the selected implementation before discarding its source annotations.
-validateDictionary :: Env -> [Slot] -> [(Text, Ty.Ty)] -> Ty.Ty -> S.Expr Int -> Either String ()
+validateDictionary :: Env -> [Slot] -> [(Text, Ty.Ty)] -> Ty.Ty -> S.Expr Int -> Either String (Set Text)
 validateDictionary env slots variables expected expression = case S.spine expression of
   (S.Global ref, captures)
     | Just _ <- lookup ref places -> do
         unless (null captures) $ Left "a dictionary place cannot capture arguments"
         let (ds, r) = arrows expected
-        () <$ validateGlobal env slots ref 0 [] (replicate (length ds) Nothing) ds r
+        (_, _, dependencies) <- validateGlobal env slots ref 0 [] (replicate (length ds) Nothing) ds r
+        pure dependencies
     | f : _ <- [f | GFun f <- Map.elems (envGlobals env), funCore f == S.refName ref] -> do
         let scheme = funScheme f
             arity = funArity f
@@ -333,18 +348,23 @@ validateDictionary env slots variables expected expression = case S.spine expres
         runtimeIndices <- traverse (maybe (Left "a dictionary runtime capture has no first-order index") Right . sourceIndex) runtime
         dictionary <- traverse (dictionaryMethodType env (funSlots f)) (funSlots f)
         instantiated <- instantiateDictionary (funSlots f) (map sourceIndex dictionaryCaptures) (Ty.schemeType scheme : dictionary)
-        let seed = Ty.emptyAssignment {Ty.asValues = IM.fromList (zip (funRuntime f) runtimeIndices)}
+        let normalizedType = fst . normalizeTypeIndices env
+            normalizedIndex = fst . normalizeIndex env
+            seed = Ty.emptyAssignment {Ty.asValues = IM.fromList (zip (funRuntime f) (map normalizedIndex runtimeIndices))}
         case instantiated of
           signature : entries -> do
-            assignment <- maybe (Left "a dictionary implementation has the wrong type") Right (Ty.matchTy n signature expected seed)
-            sequence_
-              [ do
-                  body <- elaborateNamed env slots variables value
-                  let required = complete (Ty.substScheme n assignment (snd (Ty.schemeValues scheme !! i)))
-                  unless (null (obligations body) && bodyType body == required) $ Left "a dictionary runtime capture has the wrong type"
-              | (i, value) <- zip (funRuntime f) runtime
-              ]
-            sequence_ [validateDictionary env slots variables (Ty.substScheme n assignment ty) entry | (ty, entry) <- zip entries dictionaryCaptures]
+            assignment <- maybe (Left "a dictionary implementation has the wrong type") Right (Ty.matchTy n (normalizedType signature) (normalizedType expected) seed)
+            runtimeDependencies <-
+              sequence
+                [ do
+                    body <- elaborateNamed env slots variables value
+                    let required = complete (Ty.substScheme n assignment (snd (Ty.schemeValues scheme !! i)))
+                    unless (null (obligations body) && normalizedType (bodyType body) == normalizedType required) $ Left "a dictionary runtime capture has the wrong type"
+                    pure (indexDependencies body <> snd (normalizeTypeIndices env (bodyType body)) <> snd (normalizeTypeIndices env required))
+                | (i, value) <- zip (funRuntime f) runtime
+                ]
+            dictionaryDependencies <- sequence [validateDictionary env slots variables (Ty.substScheme n assignment ty) entry | (ty, entry) <- zip entries dictionaryCaptures]
+            pure (Set.unions (runtimeDependencies <> dictionaryDependencies <> map (snd . normalizeIndex env) runtimeIndices <> map (snd . normalizeTypeIndices env) [signature, expected]))
           [] -> Left "a dictionary lost its implementation signature"
     | otherwise -> Left ("an unknown dictionary reference: " <> show ref)
   _ -> Left "a dictionary entry must be a resolved reference"
@@ -428,11 +448,11 @@ lower :: Value o ctx t -> Tm.Term Int
 lower = \case
   Variable v -> Tm.Variable (number v)
   Literal n -> Tm.Literal n
-  Apply (Signature r _ _ _ _) vs _ -> Tm.Call r (lowerArgs vs)
-  Dictionary _ code -> code
-  Callback _ code -> code
+  Apply (Signature r _ _ _ _ _) vs _ -> Tm.Call r (lowerArgs vs)
+  Dictionary _ code _ -> code
+  Callback _ code _ -> code
   Invoke _ callback arguments -> Tm.Invoke (lower callback) (lowerArgs arguments)
-  Transport _ child _ -> lower child
+  Transport _ child _ _ -> lower child
   Absurd _ _ -> Tm.Literal 0
   where
     lowerArgs :: List (Value o ctx) ts -> [Tm.Term Int]
@@ -454,12 +474,32 @@ obligations (Body _ _ v _) = evidence v
     evidence = \case
       Apply _ vs os -> children vs <> os
       Invoke _ callback args -> evidence callback <> children args
-      Transport _ child os -> evidence child <> os
+      Transport _ child os _ -> evidence child <> os
       Absurd _ o -> [o]
       _ -> []
     children :: List (Value o ctx) ts -> [o]
     children Nil = []
     children (Cons x xs) = evidence x <> children xs
+
+{- | Every provisional declaration used by index conversion at this explicit
+boundary. Callers retain these as declaration prerequisites before erasing
+source annotations, alongside the ordinary proof obligations.
+-}
+indexDependencies :: Body o -> Set Text
+indexDependencies (EmptyBranch _) = Set.empty
+indexDependencies (Body _ _ value _) = dependencies value
+  where
+    dependencies :: Value o ctx t -> Set Text
+    dependencies = \case
+      Apply (Signature _ _ _ used _ _) values _ -> used <> children values
+      Dictionary _ _ used -> used
+      Callback _ _ used -> used
+      Invoke _ callback arguments' -> dependencies callback <> children arguments'
+      Transport _ child _ used -> dependencies child <> used
+      _ -> Set.empty
+    children :: List (Value o ctx) ts -> Set Text
+    children Nil = Set.empty
+    children (Cons value' rest) = dependencies value' <> children rest
 
 mapObligations :: (o -> p) -> Body o -> Body p
 mapObligations f = runIdentity . traverseObligations (Identity . f)
@@ -477,10 +517,10 @@ traverseObligations f (Body ctx t value optimize) = (\v -> Body ctx t v optimize
       Variable x -> pure (Variable x)
       Literal n -> pure (Literal n)
       Apply s vs os -> Apply s <$> args vs <*> traverse f os
-      Dictionary ty code -> pure (Dictionary ty code)
-      Callback ty code -> pure (Callback ty code)
+      Dictionary ty code dependencies -> pure (Dictionary ty code dependencies)
+      Callback ty code dependencies -> pure (Callback ty code dependencies)
       Invoke ty callback values -> Invoke ty <$> go callback <*> args values
-      Transport ty child os -> Transport ty <$> go child <*> traverse f os
+      Transport ty child os dependencies -> (\value proofs -> Transport ty value proofs dependencies) <$> go child <*> traverse f os
       Absurd ty o -> Absurd ty <$> f o
     args :: List (Value o ctx) ts -> f (List (Value p ctx) ts)
     args Nil = pure Nil
@@ -516,7 +556,7 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
     term p = \case
       Variable v -> Pretty.nameAt "v" (Pretty.variableNames sc) (number v)
       Literal n -> T.pack (show n)
-      Apply (Signature ref ts is _ _) values proofs ->
+      Apply (Signature ref ts is _ _ _) values proofs ->
         let values' = arguments values
             (names, runtime, explicit, proofPositions) = layout ref
             -- A stored implicit value is printed once, in braces, using its
@@ -533,10 +573,10 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
          in if p == 0 && T.length flat > 88
               then T.intercalate "\n  " (Pretty.reference ref : args)
               else flat
-      Callback _ _ -> "[fixed callback]"
+      Callback _ _ _ -> "[fixed callback]"
       Invoke _ callback values -> Pretty.application p (term 11 callback) (arguments values)
-      Dictionary ty code -> "[dict (" <> dictionary code <> " : " <> Pretty.typeText env sc 0 (forgetType ty) <> ")]"
-      Transport ty child proofs -> Pretty.parens (p > 0) ("transport " <> term 11 child <> " [" <> T.intercalate ", " (map proofName proofs) <> "] : " <> Pretty.typeText env sc 0 (forgetType ty))
+      Dictionary ty code _ -> "[dict (" <> dictionary code <> " : " <> Pretty.typeText env sc 0 (forgetType ty) <> ")]"
+      Transport ty child proofs _ -> Pretty.parens (p > 0) ("transport " <> term 11 child <> " [" <> T.intercalate ", " (map proofName proofs) <> "] : " <> Pretty.typeText env sc 0 (forgetType ty))
       Absurd ty proof -> Pretty.parens (p > 0) ("absurd [proof " <> proofName proof <> "] : " <> Pretty.typeText env sc 0 (forgetType ty))
     arguments :: List (Value o ctx) ts -> [Text]
     arguments Nil = []

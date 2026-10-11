@@ -313,7 +313,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
     step r = \case
       IFailed (ElabError sp msg) -> report sp SevError msg r
       IData info sp fns needed _ ->
-        requireEvidence r [] [] needed $ completed (dataQual info) r (encode info sp fns r)
+        requireEvidence r [] [] (needed <> foldMap fdRequirements fns) $ completed (dataQual info) r (encode info sp fns r)
       IFun fd ->
         requireEvidence r (fdEvidenceSlots fd) (fdEvidencePremises fd) (fdRequirements fd) $
           completed (funQual (fdInfo fd)) r (either id (finishFunction fd) (defineFunction fd r))

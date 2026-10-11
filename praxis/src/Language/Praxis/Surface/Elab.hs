@@ -251,6 +251,12 @@ runTCWithRequirements = first failureError . runWriterT
 requireDependency :: Span -> Dependency -> TC ()
 requireDependency span' = tell . requirement span'
 
+requireIndexDependencies :: Span -> Set.Set Text -> TC ()
+requireIndexDependencies sp = mapM_ (requireDependency sp . CertifiedDeclaration) . Set.toList
+
+requireIndexResult :: Span -> String -> Maybe (a, Set.Set Text) -> TC a
+requireIndexResult sp why = maybe (failAt sp why) (\(value, used) -> requireIndexDependencies sp used *> pure value)
+
 throwTC :: Failure -> TC a
 throwTC = WriterT . Left
 
@@ -887,7 +893,9 @@ indexFunction env info fns p f sp = do
     prepared <- either (Left . ElabError sp) Right (Core.elaborate env [] fieldTypes body)
     withoutProofs <- Core.traverseObligations (const (Left (ElabError sp "internal: index expression has a proof argument"))) prepared
     pure (FunClause [PCon (Ref RefConstructor (ctorCore c)) (map (PVar . Hint) fields)] (zip fields fieldTypes) withoutProofs sp)
-  pure (FunDef f [TData self [TParam i [] | i <- [0 .. length (dataParams info) - 1]] []] (erase (dataIndices info !! p)) clauses sp mempty (envBuiltins env) [] [] [])
+  let needed = foldMap (requirement sp . CertifiedDeclaration) (Set.unions (map (Core.indexDependencies . fcTerm) clauses))
+      completed = f {funRequirements = normalizeRequirements (funRequirements f <> needed)}
+  pure (FunDef completed [TData self [TParam i [] | i <- [0 .. length (dataParams info) - 1]] []] (erase (dataIndices info !! p)) clauses sp needed (envBuiltins env) [] [] [])
   where
     self = renderQualName (dataQual info)
     indexFnOf ty j = case ty of
@@ -1049,34 +1057,50 @@ elabInstance fx env sp idl = do
   -- A dependency's dictionary appears in the indices of later methods.
   -- Re-elaborate after pruning it so provisional captures cannot survive
   -- as unused schema parameters in those later methods.
-  let inferSlots current = do
+  let inferSlots accumulated current = do
         let currentSlots m = fst (Map.findWithDefault ([], []) (methodQual m) current)
             currentRuntime m = snd (Map.findWithDefault ([], []) (methodQual m) current)
             (env1, funs1) = foldl (declare Map.empty currentSlots currentRuntime) (env, []) (classMethods cls)
             env2 = register env1 funs1 Map.empty
             siblings = Map.fromList [(funCore f, (methodQual m, length (funRuntime f) + funArity f)) | (m, f) <- funs1]
-        uses <- forM funs1 \(m, f) -> do
-          (bodies, _) <- methodClauses headScope headTy clauses env2 m f
-          let refs = placeRefs (funSlots f)
-              original r = do
-                slot <- lookup r (zip refs (funSlots f))
-                lookup slot (zip full (placeRefs full))
-              (own, called) = placesUsed siblings refs bodies
-              -- A type index alone is not an operational argument. Keep
-              -- only the head values used by code or retained obligations.
-              usedValue i fc = case elemIndex i (funRuntime f) >>= \position -> listToMaybe (drop position (fcPatterns fc)) of
-                Just (PVar (Hint name)) -> any (\position -> position `elem` toList (fcBody fc)) [position | (position, (bound, _)) <- zip [0 ..] (fcVars fc), name == bound]
-                Just PWild -> False
-                Just _ -> True
-                Nothing -> True
-              recoverable i = any (\case TData _ _ indices -> IxParam i `elem` indices; _ -> False) (fst (arrows (schemeType (funScheme f))))
-              proofOnly i = not (recoverable i) && any (not . null . Core.obligations . fcTerm) bodies
-              lastUsed = maximum (-1 : [i | i <- funRuntime f, any (usedValue i) bodies || proofOnly i])
-          pure (methodQual m, (mapMaybe original (own <> typeDictionaryRefs [schemeType (funScheme f)]), called), take (lastUsed + 1) runtime)
-        let reach = usedThrough (Map.fromList [(q, places) | (q, places, _) <- uses])
-            next = Map.fromList [(q, (retainDependencies env full [s | (s, r) <- zip full (placeRefs full), r `Set.member` Map.findWithDefault Set.empty q reach], indices)) | (q, _, indices) <- uses]
-        if next == current then pure next else inferSlots next
-  selected <- inferSlots (Map.fromList [(methodQual m, (full, runtime)) | m <- classMethods cls])
+        (_, uses) <-
+          foldM
+            ( \(earlier, accumulatedUses) (m, f) -> do
+                (bodies, _) <- methodClauses headScope headTy clauses earlier m f
+                let refs = placeRefs (funSlots f)
+                    original r = do
+                      slot <- lookup r (zip refs (funSlots f))
+                      lookup slot (zip full (placeRefs full))
+                    (own, called) = placesUsed siblings refs bodies
+                    -- A type index alone is not an operational argument. Keep
+                    -- only the head values used by code or retained obligations.
+                    usedValue i fc = case elemIndex i (funRuntime f) >>= \position -> listToMaybe (drop position (fcPatterns fc)) of
+                      Just (PVar (Hint name)) -> any (\position -> position `elem` toList (fcBody fc)) [position | (position, (bound, _)) <- zip [0 ..] (fcVars fc), name == bound]
+                      Just PWild -> False
+                      Just _ -> True
+                      Nothing -> True
+                    recovery i =
+                      listToMaybe
+                        [ dependencies
+                        | TData _ _ indices <- fst (arrows (schemeType (funScheme f)))
+                        , index <- indices
+                        , let (normalized, dependencies) = normalizeIndex earlier index
+                        , normalized == IxParam i
+                        ]
+                    recoverable i = isJust (recovery i)
+                    proofOnly i = not (recoverable i) && any (not . null . Core.obligations . fcTerm) bodies
+                    lastUsed = maximum (-1 : [i | i <- funRuntime f, any (usedValue i) bodies || proofOnly i])
+                    keptRuntime = take (lastUsed + 1) runtime
+                    conversionRequirements = foldMap (requirement sp . CertifiedDeclaration) (Set.unions [dependencies | i <- funRuntime f, i `notElem` keptRuntime, Just dependencies <- [recovery i]])
+                pure (registerUnfoldings f bodies earlier, accumulatedUses <> [(methodQual m, (mapMaybe original (own <> typeDictionaryRefs [schemeType (funScheme f)]), called), keptRuntime, conversionRequirements)])
+            )
+            (env2, [])
+            funs1
+        let reach = usedThrough (Map.fromList [(q, places) | (q, places, _, _) <- uses])
+            next = Map.fromList [(q, (retainDependencies env full [s | (s, r) <- zip full (placeRefs full), r `Set.member` Map.findWithDefault Set.empty q reach], indices)) | (q, _, indices, _) <- uses]
+            needed = Map.unionWith (<>) accumulated (Map.fromList [(q, dependencies) | (q, _, _, dependencies) <- uses])
+        if next == current then pure (next, needed) else inferSlots needed next
+  (selected, conversionRequirements) <- inferSlots Map.empty (Map.fromList [(methodQual m, (full, runtime)) | m <- classMethods cls])
   let slotsOf m = fst (Map.findWithDefault ([], []) (methodQual m) selected)
       runtimeOf m = snd (Map.findWithDefault ([], []) (methodQual m) selected)
   -- Propagate erased dependencies through sibling calls before publishing
@@ -1085,12 +1109,17 @@ elabInstance fx env sp idl = do
   let inferRequirements current = do
         let (declared, functions) = foldl (declare current slotsOf runtimeOf) (env, []) (classMethods cls)
             chosen = register declared functions Map.empty
-        discovered <- forM functions \(method, function) -> do
-          (_, needed) <- methodClauses headScope headTy clauses chosen method function
-          pure (methodQual method, normalizeRequirements (funRequirements function <> needed))
+        (_, discovered) <-
+          foldM
+            ( \(earlier, accumulated) (method, function) -> do
+                (bodies, needed) <- methodClauses headScope headTy clauses earlier method function
+                pure (registerUnfoldings function bodies earlier, accumulated <> [(methodQual method, normalizeRequirements (funRequirements function <> needed))])
+            )
+            (chosen, [])
+            functions
         let next = Map.fromList discovered
         if next == current then pure next else inferRequirements next
-  needed <- inferRequirements Map.empty
+  needed <- inferRequirements conversionRequirements
   let (env3, funs) = foldl (declare needed slotsOf runtimeOf) (env, []) (classMethods cls)
   (env4, items) <- foldM (define headScope headTy clauses) (register env3 funs Map.empty, []) funs
   -- Each law, a theorem at the instance's type, under its context.
@@ -1219,14 +1248,41 @@ arrows = \case
 
 -- | Register a function's unfolding lemmas, one per clause, as members of its namespace: @f.unfold-C@, and @f.eq_i@.
 registerUnfoldings :: FunInfo -> [FunClause] -> Env -> Env
-registerUnfoldings info fcs env = foldl register env (zip3 [1 :: Int ..] (unfoldingNames env (map fcPatterns fcs)) fcs)
+registerUnfoldings info fcs env = foldl register withProjection (zip3 [1 :: Int ..] (unfoldingNames env (map fcPatterns fcs)) fcs)
   where
+    withProjection = env {envGlobals = Map.insert (funQual info) (GFun info {funProjection = functionProjection info fcs}) (envGlobals env)}
     register e (i, n, fc) =
       let binders' = map (mangleVariable . fst) (fcVars fc)
           alias = Ident ("eq_" <> T.pack (show i))
           (e1, thm) = addTheorem e (funQual info <> [Ident n]) binders' [] [] [] Nothing
           (e2, eqI) = addTheorem e1 (funQual info <> [alias]) binders' [] [] [] Nothing
        in addNamespaceMember (funQual info) alias (thmQual eqI) (addNamespaceMember (funQual info) (Ident n) (thmQual thm) e2)
+
+{- | Recognize only the equation that is already explicit in a completed
+first-order typed clause. Pattern positions count wildcards; variable positions
+do not. No constructor cases, callbacks, dictionaries, recursion, proof
+parameters or retained obligations participate in this conversion rule.
+-}
+functionProjection :: FunInfo -> [FunClause] -> Maybe Int
+functionProjection info [clause]
+  | null (funSlots info)
+  , null (funProofs info)
+  , null (Core.obligations (fcTerm clause))
+  , Set.null (Core.indexDependencies (fcTerm clause))
+  , let (arguments, result) = arrows (schemeType (funScheme info))
+        runtime = [snd (schemeValues (funScheme info) !! i) | i <- funRuntime info]
+        patterns' = fcPatterns clause
+  , all firstOrder (result : runtime <> arguments)
+  , length arguments == funArity info
+  , length patterns' == length runtime + length arguments
+  , all variablePattern patterns'
+  , Term.Variable variable <- fcBody clause =
+      lookup variable [(binder, position) | (position, (pattern', binder)) <- zip [0 ..] (zip patterns' (scanl (+) 0 (map patternVariables patterns'))), PVar {} <- [pattern']]
+  where
+    variablePattern PVar {} = True
+    variablePattern PWild = True
+    variablePattern _ = False
+functionProjection _ _ = Nothing
 
 {- |
 Why a method is not resolved where it is used: the type its class is at is
@@ -2075,17 +2131,22 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       envBody = env {envScope = scope {tsValues = [(v, IxVar v) | v <- aliases] <> [(v, applyIx refined x) | (v, x) <- tsValues scope, v `notElem` aliases]}, envSchemas = schemas}
   let varIndex v = lookup v (zip (map fst vars) [0 ..])
       namedContext = [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] vars]
-      valueExpr i = indexTermIn envBody namedContext (applyIx refined (IxParam i))
-      ownProp prop
-        | all (isJust . valueExpr) [i | B i <- toList (fromScope prop)] = Just (instantiate (fromMaybe Hole . valueExpr) (fmap absurd prop))
-        | otherwise = Nothing
+      valueExpr i = indexTermInWithDependencies envBody namedContext (applyIx refined (IxParam i))
+      ownProp prop = do
+        values <- traverse (\i -> (i,) <$> valueExpr i) (nub [i | B i <- toList (fromScope prop)])
+        pure (instantiate (fromMaybe Hole . fmap fst . (`lookup` values)) (fmap absurd prop), foldMap (snd . snd) values)
       -- A precondition of a constructor matched, at the clause's variables: a value parameter by the clause's term for it.
-      boundProp q = join <$> traverse boundVar q
+      boundProp q = do
+        values <- traverse boundVar q
+        pure (values >>= fst, foldMap snd values)
       boundVar v
         | Just i <- T.stripPrefix "$" v >>= readMaybe . T.unpack = valueExpr i
         | v == "?" = Nothing
-        | otherwise = Var <$> varIndex v
-      own = [(h, p) | (Just h, (_, prop)) <- zip proofNames (funProofs info), Just p <- [ownProp prop]] <> [(h, p) | (Just h, q) <- boundProofs, Just p <- [boundProp q]]
+        | otherwise = (\i -> (Var i, Set.empty)) <$> varIndex v
+      ownRecorded = [(h, p, used) | (Just h, (_, prop)) <- zip proofNames (funProofs info), Just (p, used) <- [ownProp prop]] <> [(h, p, used) | (Just h, q) <- boundProofs, Just (p, used) <- [boundProp q]]
+      own = [(h, p) | (h, p, _) <- ownRecorded]
+      contextRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (foldMap (\(_, _, used) -> used) ownRecorded))
+  tell contextRequirements
   -- A clause with an absurd pattern has no right side, and is never reached: its code is 0.
   when (any nestedAbsurd pats) $ failAt (location lhs) "an absurd pattern, (), stands for a whole argument, for now"
   (body, bodyRequirements) <- listen $ case rhs of
@@ -2097,31 +2158,36 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       e' <- liftE (resolved fx e)
       fst <$> elabTerm (CollectProofArguments [(name, fmap (fst . (vars !!)) prop) | (name, prop) <- own]) envBody (logicalFunSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' (applyTy refined result)
     _ -> failAt rsp "a function's clause is a term, not a proof"
-  -- Each proof the body gives is an obligation: its proposition, under the clause's own
-  -- preconditions, named by its proof patterns, a theorem proved by what was written.
-  let obligation serial (prop, raw) =
-        let (l, col) = R.spanStart (location raw)
-            q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col) <> "-" <> T.pack (show serial))]
-            indices =
-              [ Rel RelEq projection term
-              | (i, (_, TData dn _ xs)) <- zip [0 ..] vars
-              , (fn, x) <- zip (indexFnsOf env dn) xs
-              , Just term <- [indexTermIn envBody namedContext x]
-              , let projection = App (Global (Ref RefFunction fn)) (Var i)
-              , term /= projection
-              ]
-            statement = foldr Arrow (foldr (Arrow . snd) prop own) indices
-            needed = funRequirements info <> bodyRequirements
-            (slots, _) = theoremPlacesRequiring env needed (logicalFunSlots info) statement (map snd vars)
-            premises = premisesFor env (classesOfSlots env slots) slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd vars)]
-            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots (map pdPremise premises) Nothing [] [] (funQuantifierViews info <> SourceView.quantifierViews q (envBuiltins env) (envScope envBody) raw) Nothing
-            pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] []
-         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) needed (envBuiltins env) []
   prepared <-
     either (failAt rsp) pure $
       if PAbsurd `elem` pats
         then Core.emptyBranch (applyTy refined result)
         else Core.elaborateNamed envBody (funSlots info) vars body
+  let coreRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (Core.indexDependencies prepared))
+      indexFacts =
+        [ (Rel RelEq projection term, used)
+        | (i, (_, TData dn _ xs)) <- zip [0 ..] vars
+        , (fn, x) <- zip (indexFnsOf env dn) xs
+        , Just (term, used) <- [indexTermInWithDependencies envBody namedContext x]
+        , let projection = App (Global (Ref RefFunction fn)) (Var i)
+        , term /= projection
+        ]
+      indexRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (foldMap snd indexFacts))
+  tell coreRequirements
+  unless (null (Core.obligations prepared)) (tell indexRequirements)
+  -- Each proof the body gives is an obligation: its proposition, under the clause's own
+  -- preconditions, named by its proof patterns, a theorem proved by what was written.
+  let obligation serial (prop, raw) =
+        let (l, col) = R.spanStart (location raw)
+            q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col) <> "-" <> T.pack (show serial))]
+            indices = map fst indexFacts
+            statement = foldr Arrow (foldr (Arrow . snd) prop own) indices
+            needed = funRequirements info <> bodyRequirements <> coreRequirements <> contextRequirements <> indexRequirements
+            (slots, _) = theoremPlacesRequiring env needed (logicalFunSlots info) statement (map snd vars)
+            premises = premisesFor env (classesOfSlots env slots) slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd vars)]
+            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots (map pdPremise premises) Nothing [] [] (funQuantifierViews info <> SourceView.quantifierViews q (envBuiltins env) (envScope envBody) raw) Nothing
+            pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] []
+         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) needed (envBuiltins env) []
   let numbered = State.evalState (Core.traverseObligations (\o -> State.state (\i -> (obligation i o, i + 1))) prepared) (0 :: Int)
   pure (FunClause pats vars numbered (R.spanning (location lhs) rsp))
 
@@ -2582,15 +2648,23 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
     Left original -> case proofArguments of
       CollectProofArguments hypotheses
         | expected /= THole
-        , Right ((_, inferred), _) <- runWriterT (elabTermDirect proofArguments env givens ctx le (erase expected))
+        , Right ((_, inferred), inferenceRequirements) <- runWriterT (elabTermDirect proofArguments env givens ctx le (erase expected))
         , Just hint <- fillTypes inferred expected
         , Right ((value, actual), needed) <- runWriterT (elabTermDirect proofArguments env givens ctx le hint)
         , Just target <- completeTypes actual expected
         , Just pairs@(_ : _) <- transportIndices actual target
         , not (null hypotheses) || all possible pairs
-        , Just propositions <- traverse (\(x, y) -> Rel RelEq <$> indexTermIn env ctx x <*> indexTermIn env ctx y) pairs ->
+        , Just converted <-
+            traverse
+              ( \(x, y) -> do
+                  (left, fromLeft) <- indexTermInWithDependencies env ctx x
+                  (right, fromRight) <- indexTermInWithDependencies env ctx y
+                  pure (Rel RelEq left right, fromLeft <> fromRight)
+              )
+              pairs ->
             let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
-             in Right ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | prop <- propositions]), target), needed)
+                prerequisites = foldMap (requirement sp . CertifiedDeclaration) (Set.toList (foldMap snd converted))
+             in Right ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | (prop, _) <- converted]), target), inferenceRequirements <> needed <> prerequisites)
       _ -> Left original
   where
     -- A proof can determine an index before an ordinary argument determines
@@ -2771,9 +2845,10 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         _ -> pure (plain (0, 0) [] t (Var v))
       R.EName (QName [] (Ident x))
         | Just ix <- lookup x (tsValues (envScope env))
-        , Just value <- valueIndex ix ->
+        , Just (value, used) <- runWriterT (valueIndex ix) -> do
+            requireIndexDependencies hsp used
             let ty = case value of Typed t _ _ _ -> t; _ -> ixType env (envScope env) ix
-             in pure (plain (0, 0) [] ty value)
+            pure (plain (0, 0) [] ty value)
       R.EName q -> resolveHead hsp q
       R.ENat k -> pure (plain (0, 0) [] TNat (Nat k))
       R.EParen x -> (\(e', t) -> plain (0, 0) [] t e') <$> elabTerm proofArguments env givens ctx x THole
@@ -2782,7 +2857,8 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     -- A value parameter of the enclosing signature, where the clause has it as a variable.
     valueParam i = listToMaybe [v | (v, IxParam j) <- tsValues (envScope env), j == i] >>= \v -> (\(a, ty) -> Typed ty [] [] (Var a)) <$> lookup v ctx
     -- The value found for a parameter of the head's type, as a term of what is in scope.
-    valueAt s i = IM.lookup i (asValues s) >>= valueIndex
+    valueAt s i = indexMaybe (IM.lookup i (asValues s)) >>= valueIndex
+    indexMaybe value = WriterT ((,mempty) <$> value)
     -- An index known from a typed value has a computational witness: its
     -- generated index projection. The membership/index contracts justify it.
     -- Materialized indices cross the same explicit typing boundary as source
@@ -2804,7 +2880,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
             values = [value | (slot, value) <- zip (funSlots f) entries, slotArity slot == 0]
             replace = mapIx (rewriteDictionaryIndices (\i -> listToMaybe (drop i values)))
             seed = emptyAssignment {asValues = IM.fromList (zip runtime xs)}
-        dictionary <- either (const Nothing) Just (traverse (dictionaryMethodType env (funSlots f)) (funSlots f))
+        dictionary <- indexMaybe (either (const Nothing) Just (traverse (dictionaryMethodType env (funSlots f)) (funSlots f)))
         indexApplication (Ref RefFunction name) n seed (map replace ([snd (schemeValues scheme !! i) | i <- runtime] <> domains <> dictionary)) (replace result) xs
       IxCon name xs
         | Just c <- ctorByCore env name
@@ -2829,20 +2905,33 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         pure (Typed actual [] [] value, actual)
       where
         indexApplication ref n seed domains result indices = do
-          unless (length domains == length indices) Nothing
-          start <- matchTy n result hint seed
+          unless (length domains == length indices) (indexMaybe Nothing)
+          start <- indexMatch n result hint seed
           (found, done) <- foldM (argumentIndex n) (start, []) (zip domains indices)
           let ty = substScheme n found result
           terms <- traverse (\(domain, original, checked, actual) -> if substScheme n found domain == actual then pure checked else valueIndexAs (substScheme n found domain) original) done
           pure (Typed ty [substScheme n found (TParam i []) | i <- [0 .. fst n - 1]] (IM.toList (asValues found)) (apps (Global ref) terms), ty)
         argumentIndex n (found, done) (domain, original) = do
           (value, actual) <- indexValue (substScheme n found domain) original
-          next <- matchTy n domain actual found
+          next <- indexMatch n domain actual found
           pure (next, done <> [(domain, original, value, actual)])
-    rawValueIndex =
-      ixToExprWith
-        (\v -> ((\(a, ty) -> Typed ty [] [] (Var a)) <$> lookup v ctx) <|> dictionaryValue v <|> recovered (IxVar v))
-        (\i -> valueParam i <|> recovered (IxParam i))
+        indexMatch n wanted actual assigned = do
+          let (wanted', fromWanted) = normalizeTypeIndices env wanted
+              (actual', fromActual) = normalizeTypeIndices env actual
+              assignedTypes = fmap (normalizeTypeIndices env) (asTypes assigned)
+              assignedValues = fmap (normalizeIndex env) (asValues assigned)
+              normalized = Assignment (fmap fst assignedTypes) (fmap fst assignedValues)
+          matched <- indexMaybe (matchTy n wanted' actual' normalized)
+          tell (fromWanted <> fromActual <> foldMap snd assignedTypes <> foldMap snd assignedValues)
+          pure matched
+    rawValueIndex index = do
+      values <- indexMaybe (ixToExprWith (fmap Var . variable) (fmap Var . parameter) index)
+      tell (foldMap snd values)
+      pure (values >>= fst)
+      where
+        withoutDependencies = fmap (,Set.empty)
+        variable v = withoutDependencies (((\(a, ty) -> Typed ty [] [] (Var a)) <$> lookup v ctx) <|> dictionaryValue v) <|> recovered (IxVar v)
+        parameter i = withoutDependencies (valueParam i) <|> recovered (IxParam i)
     dictionaryValue v = do
       name <- T.stripPrefix "#d" v
       slot <- lookup (Ref RefValueParam name) (zip (placeRefs givens) givens)
@@ -2850,15 +2939,19 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       pure (Typed ty [] [] (Global (Ref RefValueParam name)))
     recovered wanted =
       listToMaybe
-        [ Typed
-            (substParams ts (dataIndices dat !! j))
-            []
-            []
-            (App (Global (Ref RefFunction fn)) (Typed ty [] [] (Var v)))
+        [ ( Typed
+              (substParams ts (dataIndices dat !! j))
+              []
+              []
+              (App (Global (Ref RefFunction fn)) (Typed ty [] [] (Var v)))
+          , fromActual <> fromWanted
+          )
         | (_, (v, ty@(TData dn ts indices))) <- ctx
         , dat <- [d | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn]
         , (j, (index, fn)) <- zip [0 ..] (zip indices (indexFnsOf env dn))
-        , normIx index == normIx wanted
+        , let (actual, fromActual) = normalizeIndex env index
+              (target, fromWanted) = normalizeIndex env wanted
+        , actual == target
         ]
     resolveHead hsp q = case builtin q of
       Just b -> pure b
@@ -2897,19 +2990,19 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                 s
                 (zip [0 ..] values)
             -- The implicit values it takes at runtime, as found: terms of what is in scope.
-            passed s = forM (funRuntime f) \i -> case IM.lookup i (asValues s) >>= valueIndexAs (substScheme n s (snd (schemeValues (funScheme f) !! i))) of
-              Just x -> pure (Typed (substScheme n s (snd (schemeValues (funScheme f) !! i))) [] [] x)
+            passed s = forM (funRuntime f) \i -> case runWriterT (indexMaybe (IM.lookup i (asValues s)) >>= valueIndexAs (substScheme n s (snd (schemeValues (funScheme f) !! i)))) of
+              Just (x, used) -> requireIndexDependencies hsp used *> pure (Typed (substScheme n s (snd (schemeValues (funScheme f) !! i))) [] [] x)
               Nothing -> failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> " is not determined here, as a value")
             -- Its preconditions at the parameters found: the propositions its proofs are of.
             proofAt =
               [ ( pos
                 , \s -> do
-                    forM_ [i | B i <- toList (fromScope prop)] \i ->
-                      when (isNothing (valueAt s i)) $
-                        failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> ", which its precondition mentions, is not determined here")
+                    values <- forM (nub [i | B i <- toList (fromScope prop)]) \i -> do
+                      value <- requireIndexResult hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> ", which its precondition mentions, is not determined here") (runWriterT (valueAt s i))
+                      pure (i, value)
                     let actualTypes = [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]
                     replayRequirements env givens hsp actualTypes (funRequirements f)
-                    instantiateProofDictionary env givens ctx hsp (funProofSlots f) actualTypes (instantiate (fromMaybe Hole . valueAt s) (fmap absurd prop))
+                    instantiateProofDictionary env givens ctx hsp (funProofSlots f) actualTypes (instantiate (fromMaybe Hole . (`lookup` values)) (fmap absurd prop))
                 )
               | (pos, prop) <- funProofs f
               ]
@@ -2942,17 +3035,17 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
               proofAt =
                 [ ( a
                   , \s -> do
-                      forM_ [i | B i <- toList (fromScope prop)] \i ->
-                        when (isNothing (valueAt s i)) $
-                          failAt hsp ("the argument " <> T.unpack (teName (tele !! i)) <> " of " <> cname <> ", which its precondition mentions, is not determined here")
-                      pure (instantiate (fromMaybe Hole . valueAt s) (fmap absurd prop))
+                      values <- forM (nub [i | B i <- toList (fromScope prop)]) \i -> do
+                        value <- requireIndexResult hsp ("the argument " <> T.unpack (teName (tele !! i)) <> " of " <> cname <> ", which its precondition mentions, is not determined here") (runWriterT (valueAt s i))
+                        pure (i, value)
+                      pure (instantiate (fromMaybe Hole . (`lookup` values)) (fmap absurd prop))
                   )
                 | (a, prop) <- constructorProofs g
                 ]
           pure $ AppHead (n, length tele) [] True doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- constructorProofs g] pure \s -> do
             stored <- forM [(k, pos, en) | (pos, en@(TeleEntry _ _ (Stored k))) <- zip [0 ..] tele] \(k, pos, en) ->
-              case IM.lookup pos (asValues s) >>= valueIndex of
-                Just x -> pure (k, Typed (substScheme (n, length tele) s (teType en)) [] [] x)
+              case runWriterT (indexMaybe (IM.lookup pos (asValues s)) >>= valueIndex) of
+                Just (x, used) -> requireIndexDependencies hsp used *> pure (k, Typed (substScheme (n, length tele) s (teType en)) [] [] x)
                 Nothing -> failAt hsp ("the implicit argument " <> T.unpack (teName en) <> " of " <> cname <> " is not determined here, as a value")
             -- Its fields, the implicit arguments stored before them; its proofs after, kept for their obligations and erased from the code.
             pure \as ->
@@ -2996,7 +3089,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                   types = headArguments <> [substScheme n s (TParam i []) | i <- [1 .. fst n - 1]]
               replayRequirements env givens hsp types (funRequirements f)
               entries <- typedDictionary (funSlots f) types dict
-              runtime <- forM captures \(index, ty) -> maybe (failAt hsp "an instance index is not a scoped value") (pure . Typed ty [] []) (valueIndexAs ty index)
+              runtime <- forM captures \(index, ty) -> Typed ty [] [] <$> requireIndexResult hsp "an instance index is not a scoped value" (runWriterT (valueIndexAs ty index))
               pure \as -> apps (Global (Ref RefFunction (funCore f))) (runtime <> as <> entries)
       GTheorem t -> failAt sp (T.unpack (displayQualName (thmQual t)) <> " is a theorem, not a term")
       GLaw l -> failAt sp (T.unpack (displayQualName (lawQual l)) <> " is a law, not a term")
@@ -3011,7 +3104,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
           at i = listToMaybe (drop i values) >>= expressionIndex
           instantiated = substScheme (length types, 0) emptyAssignment {asTypes = IM.fromList (zip [0 ..] types)} template
           ty = mapIx (rewriteDictionaryIndices at) instantiated
-      scoped <- maybe (failAt sp "a dictionary captures an index with no scoped value") pure (join <$> traverse valueIndex entry)
+      scoped <- requireIndexResult sp "a dictionary captures an index with no scoped value" (runWriterT (join <$> traverse valueIndex entry))
       pure (Dictionary ty scoped)
     -- A method not resolved: undetermined while its type is not known, else refused.
     resolution :: Either Unresolved r -> TC r
@@ -3267,7 +3360,7 @@ finiteDomain env givens ctx sp ty = do
           decoded = select >>= \case B () -> ordinal; F value -> Var (F value)
       pure (FiniteDomain ty limit decoded (call toNat [fmap F limit] [encoded]) encoded select (Just coverage) (envBuiltins env))
   where
-    materialize index = maybe (failAt sp "the finite domain's index is not available as a value in this scope") pure (indexTermIn env ctx index)
+    materialize index = requireIndexResult sp "the finite domain's index is not available as a value in this scope" (indexTermInWithDependencies env ctx index)
     roleName role = do
       let name = builtinRoleName role
       target <- maybe (failAt sp ("a finite quantifier requires an earlier checked BUILTIN " <> T.unpack name <> " registration")) pure (Map.lookup name (envBuiltins env))
@@ -3518,7 +3611,7 @@ instantiateProofDictionary env givens ctx sp proofSlots types proposition = do
     pure (ref, replacement)
   walk replacements proposition
   where
-    materialize index = maybe (failAt sp "a proof precondition's dictionary index is not available as a value") pure (indexTermIn env ctx index)
+    materialize index = requireIndexResult sp "a proof precondition's dictionary index is not available as a value" (indexTermInWithDependencies env ctx index)
     walk :: Map.Map Ref (MethodReplacement b) -> Expr b -> TC (Expr b)
     walk table expression = case expression of
       At source child -> At source <$> walk table child
