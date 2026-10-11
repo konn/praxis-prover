@@ -714,6 +714,13 @@ have fixed its domain; a side of an equation is checked again once the other
 side has. A method at a type nothing determines, or at a type variable no
 constraint gives it for, is refused.
 
+A method can select its class type explicitly: `amount {a}` selects the
+dictionary for `a`, even when another type variable has the same class
+constraint. The selection is checked against the method's arguments and
+result; it cannot coerce a value into another instance's type. Within an
+instance, an otherwise undetermined class type defaults to that instance's
+complete head.
+
 An instance's methods are ordinary functions, compiled as any function is,
 with their unfolding lemmas. The instance comes into scope before its
 clauses, so a method may recur through itself, or use another method of the
@@ -770,6 +777,22 @@ The instance's laws are elaborated at its type under the context, as a
 theorem under constraints is. For adequacy, a function of an instance under
 a context at a known type denotes the function its clauses define with the
 context's instances' methods in place, as a function under constraints does.
+
+**Indexed instances.** An instance head may quantify over the indices of a
+datatype, as in `instance Indexed (Cell n)`. Each index must be a distinct
+variable, so the instance covers every index uniformly; `Cell 0` is not an
+admissible head. The instance records the complete head and the declared
+types of its indices. Its methods take the computationally needed index
+values before their ordinary arguments; unused runtime indices are pruned.
+Its laws quantify over the same indices. Dependent member types use the
+selected sibling methods with exactly those captures and their required
+context dictionaries. Dictionary pruning recomputes these types until the
+retained slots are stable.
+
+A method passed as a static dictionary may capture closed values, but cannot
+capture local runtime values: the PRA schema parameter must remain a closed
+function. This restriction is checked before compilation. A nullary member
+is passed as a value and can depend on local indices.
 
 **Resolution.** Instances and the obligations of proofs are found by one
 search (`Resolve.solve`). It takes a goal and a database of Horn clauses

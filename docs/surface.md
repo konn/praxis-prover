@@ -183,15 +183,24 @@ class Sized a where
 dictionary. Forward references in method signatures are rejected. A nullary
 member such as `card` need not mention `a` in its result type; its use must
 still select a unique dictionary. With two possible `Sized` dictionaries,
-an unqualified `card` is ambiguous. Dictionary pruning retains the values
+an unqualified `card` is ambiguous; `card {a}` explicitly selects the
+dictionary for `a`. Inside an instance, an otherwise undetermined class
+type defaults to that instance's head. Dictionary pruning retains the values
 needed by dependent signatures, and Praxis Core checks these indices against
 the actual dictionary arguments.
 
 Its superclasses constrain the same parameter. A method or a law is a
 top-level name, as in Haskell, and a member of its class's namespace.
 
-An instance is for a data type applied to distinct type variables, or for
-`Nat`. It is the only instance of its class for that type; it comes after an
+An instance is for a data type applied to distinct type and index variables,
+or for `Nat`. For example, `instance Sized (Fin n)` covers every `n`; a
+specialized head such as `Fin 0` is rejected. Index variables retain their
+declared types and are available in the method and law clauses, including
+through explicit implicit patterns such as `card {n} = n`.
+Unused runtime indices are pruned. Passing a method with arguments as a
+dictionary requires its runtime captures to be closed; passing a nullary
+member as a value has no such restriction.
+It is the only instance of its class for that type; it comes after an
 instance of each superclass for it; it defines every method by clauses, as a
 function is defined; and it proves every law by clauses, as a theorem is
 proved. Each method of an instance is a function of the instance,

@@ -9,6 +9,7 @@ import Language.Praxis.Surface.CheckTest (checkTests)
 import Language.Praxis.Surface.ComputationIndexTest (computationIndexTests)
 import Language.Praxis.Surface.CoreTest (coreTests)
 import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
+import Language.Praxis.Surface.IndexedInstanceTest (indexedInstanceTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
 import Language.Praxis.Surface.Prelude
 import Language.Praxis.Surface.ResolveTest (resolveTests)
@@ -30,6 +31,7 @@ main =
       , coreTests
       , dependentClassTests
       , computationIndexTests
+      , indexedInstanceTests
       , builtinTests
       , builtinCheckTests
       , checkTests

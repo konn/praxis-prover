@@ -488,6 +488,10 @@ data InstanceInfo = InstanceInfo
   { instQual :: !QualName
   , instClass :: !QualName
   , instHead :: !Text
+  , instScheme :: !Scheme
+  -- ^ the complete instance head, including universally quantified value indices
+  , instContext :: ![Slot]
+  -- ^ the original context, including premises needed only by laws
   , instFunctions :: !(Map QualName FunInfo)
   , instLaws :: !(Map QualName TheoremInfo)
   -- ^ the theorem proving each law of the class at the instance's type, by the law's qualified name

@@ -23,7 +23,7 @@ module Language.Praxis.Surface.Core (
 ) where
 
 import Bound (Var (..), fromScope)
-import Control.Monad (foldM, unless)
+import Control.Monad (foldM, unless, when)
 import Data.Bifunctor (first)
 import Data.Foldable (toList)
 import Data.Functor.Identity (Identity (..))
@@ -328,6 +328,8 @@ validateDictionary env slots variables expected expression = case S.spine expres
               S.RefFunction -> arity == 0
               _ -> False
         unless (correctRole && length captures == runtimeCount + length (funSlots f)) $ Left "a dictionary has the wrong static arity"
+        when (arity > 0 && any openCapture captures) $
+          Left "a static dictionary cannot capture scoped runtime values; pass a method whose runtime captures are closed"
         runtimeIndices <- traverse (maybe (Left "a dictionary runtime capture has no first-order index") Right . sourceIndex) runtime
         dictionary <- traverse (dictionaryMethodType env (funSlots f)) (funSlots f)
         instantiated <- instantiateDictionary (funSlots f) (map sourceIndex dictionaryCaptures) (Ty.schemeType scheme : dictionary)
@@ -347,6 +349,8 @@ validateDictionary env slots variables expected expression = case S.spine expres
     | otherwise -> Left ("an unknown dictionary reference: " <> show ref)
   _ -> Left "a dictionary entry must be a resolved reference"
   where
+    openCapture value =
+      not (null (toList value)) || any ((== S.RefValueParam) . S.refKind) (S.globalsOf value)
     sourceIndex = expressionIndex env variables
     arrows (Ty.TArrow a b) = let (as, r) = arrows b in (a : as, r)
     arrows t = ([], t)

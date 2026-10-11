@@ -44,11 +44,16 @@ computationIndexTests =
             entry index capture = Dictionary (TArrow TNat (box index)) (App (Global (Ref (RefIndexedPartial 1 1) (funCore function))) capture)
             captured = Typed TNat [] [] (Var 0)
             check = Core.elaborateNamed env [] [("n", TNat)]
-        body <- either assertFailure pure (check (entry (IxVar "n") captured))
-        Core.computation body @?= Term.Call (Ref (RefIndexedPartial 1 1) (funCore function)) [Term.Variable 0]
-        assertBool "a forged result index" (isLeft (check (entry (IxNat 7) captured)))
-        assertBool "an out-of-scope capture" (isLeft (check (entry (IxVar "n") (Typed TNat [] [] (Var 1)))))
-        assertBool "a capture with the wrong type" (isLeft (check (entry (IxVar "n") (Typed (box (IxVar "n")) [] [] (Var 0)))))
+        body <- either assertFailure pure (check (entry (IxNat 3) (Nat 3)))
+        Core.computation body @?= Term.Call (Ref (RefIndexedPartial 1 1) (funCore function)) [Term.Literal 3]
+        assertBool "an open static capture was accepted" (isLeft (check (entry (IxVar "n") captured)))
+        assertBool "a forged result index" (isLeft (check (entry (IxNat 7) (Nat 3))))
+        let (valueEnv, valueFunction) = setFunRuntime [0] (addFunction env (Ident "indexedValue") (Scheme [] [("n", TNat)] (box (IxParam 0))) 0 [])
+            valueEntry capture = Dictionary (box (IxVar "n")) (App (Global (Ref RefFunction (funCore valueFunction))) capture)
+            checkValue = Core.elaborateNamed valueEnv [] [("n", TNat)]
+        _ <- either assertFailure pure (checkValue (valueEntry captured))
+        assertBool "an out-of-scope capture" (isLeft (checkValue (valueEntry (Typed TNat [] [] (Var 1)))))
+        assertBool "a capture with the wrong type" (isLeft (checkValue (valueEntry (Typed (box (IxVar "n")) [] [] (Var 0)))))
     , testCase "registered projections recover only their context variable's index" $ do
         let (withBox, _) = addIndexedData emptyEnv (Ident "Box") [] [TNat] [DataBinder "n" False (IndexParameter 0)] [[Ident "project"]] []
             (withProjection, projection) = addFunction withBox (Ident "project") (Scheme [] [("n", TNat)] (TArrow (box (IxParam 0)) TNat)) 1 []
