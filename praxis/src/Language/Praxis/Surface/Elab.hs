@@ -883,27 +883,33 @@ elabClass fx env cd = do
       c : _ -> pure (classQual c)
       [] -> Left (ElabError qsp ("not a class: " <> T.unpack (displayQName q)))
   members <- forM (R.classMembers cd) \(Located msp m, ty0) -> (msp,m,) <$> resolved fx ty0
-  methods <- forM [x | x@(_, _, ty) <- members, not (isProp ty)] \(msp, m, ty) -> do
-    let params = a : filter (/= a) (nub (typeVariables env ty))
-    t <- elabType env params ty
-    let (args, result) = arrows t
-    unless (all firstOrder (result : args)) $ Left (ElabError msp "a method of functions: its arguments and its result are values, which are first-order")
-    unless (0 `elem` tyParams t) $ Left (ElabError msp ("the method does not mention the class's parameter " <> T.unpack a))
-    pure (m, Scheme [(p, KType) | p <- params] [] t, length args)
+  let className = qualify env [Ident (unLocated (R.className cd))]
+  methods <- foldM (member className a) [] [x | x@(_, _, ty) <- members, not (isProp ty)]
   let (env1, info) = addClass env (Ident (unLocated (R.className cd))) supers methods
       slots = [Slot (methodQual m) 0 (methodArity m) | c <- classClosure env1 info, m <- classMethods c]
+  classScope <- first (ElabError (location (R.className cd))) (dictionaryScope env1 slots (TyScope [a] [] []))
   -- A law: a statement over values of the parameter and of types over it, its methods the places of the class's dictionary.
   laws <- forM [x | x@(_, _, ty) <- members, isProp ty] \(msp, m, ty) -> do
     let (binders, body) = valueBinders ty
         names = map (unLocated . fst) binders
     unless (length names == length (nub names)) $ Left (ElabError msp "a law's values must have distinct names")
     binderTys <- forM binders \(Located nsp n, t) -> do
-      bty <- elabType env1 [a] t
+      bty <- elabTypeIn env1 classScope t
       unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a law quantifies over values, which are first-order"))
       pure (n, bty)
-    prop <- runTC (elabProp env1 slots [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body)
+    prop <- runTC (elabProp env1 {envScope = classScope} slots [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body)
     pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots body)
   pure (addLaws (classQual info) laws env1)
+  where
+    member className a preceding (msp, m, ty) = do
+      let params = a : filter (/= a) (nub (typeVariables env ty))
+          values = [(renderQualName (className <> [name]), methodIndex (className <> [name])) | (name, _, 0) <- preceding]
+          valueTypes = [(renderQualName (className <> [name]), schemeType sch) | (name, sch, 0) <- preceding]
+      t <- elabTypeIn env (TyScope params values valueTypes) ty
+      let (args, result) = arrows t
+      unless (all firstOrder (result : args)) $ Left (ElabError msp "a method of functions: its arguments and its result are values, which are first-order")
+      unless (null args || 0 `elem` tyParams t) $ Left (ElabError msp ("the method does not mention the class's parameter " <> T.unpack a))
+      pure (preceding <> [(m, Scheme [(p, KType) | p <- params] [] t, length args)])
 
 -- | A class after its superclasses, each once.
 classClosure :: Env -> ClassInfo -> [ClassInfo]
@@ -951,7 +957,7 @@ elabInstance fx env sp idl = do
     Just n | n `elem` map methodName (classMethods cls) <> map (last . lawQual) (classLaws cls) -> pure ()
     _ -> Left (ElabError (location (R.clauseLhs c)) ("a clause for no method or law of " <> T.unpack className'))
   let atType m = case methodScheme m of
-        Scheme mparams mvals mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) mvals (atInstance headTy (length vars) mty)
+        Scheme mparams mvals mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) mvals (atInstance headTy (length vars) (instanceDependencies cls iq mty))
       declare slotsOf (e, fs) m = let (e', f) = addInstanceFunction e iq (methodName m) (atType m) (methodArity m) (slotsOf m) in (e', fs <> [(m, f)])
       register e fs laws = addInstance e (InstanceInfo iq (classQual cls) headName (Map.fromList [(methodQual m, f) | (m, f) <- fs]) laws)
   -- Under a context, every method is elaborated over the whole dictionary
@@ -963,23 +969,23 @@ elabInstance fx env sp idl = do
         let (env1, funs1) = foldl (declare (const full)) (env, []) (classMethods cls)
             env2 = register env1 funs1 Map.empty
             siblings = Map.fromList [(funCore f, (methodQual m, funArity f)) | (m, f) <- funs1]
-        uses <- forM funs1 \(m, f) -> (methodQual m,) . placesUsed siblings (placeRefs full) <$> methodClauses clauses env2 m f
+        uses <- forM funs1 \(m, f) -> (methodQual m,) . placesUsed siblings (placeRefs full) <$> methodClauses headTy clauses env2 m f
         let reach = usedThrough (Map.fromList uses)
         pure \m -> [s | (s, r) <- zip full (placeRefs full), r `Set.member` Map.findWithDefault Set.empty (methodQual m) reach]
   let (env3, funs) = foldl (declare slotsOf) (env, []) (classMethods cls)
-  (env4, items) <- foldM (define clauses) (register env3 funs Map.empty, []) funs
+  (env4, items) <- foldM (define headTy clauses) (register env3 funs Map.empty, []) funs
   -- Each law, a theorem at the instance's type, under its context.
   (env5, lawItems, proved) <- foldM (prove headTy vars given full iq clauses) (env4, [], Map.empty) (classLaws cls)
   pure (register env5 funs proved, items <> lawItems)
   where
     clauseHead c = either (const Nothing) Just (resolveExpr fx (R.clauseLhs c)) >>= fmap fst . lhsParts
-    methodClauses clauses e m f = do
+    methodClauses headTy clauses e m f = do
       let mine = [c | c <- clauses, clauseHead c == Just (last (methodQual m))]
           (args, result) = arrows (schemeType (funScheme f))
       when (null mine) $ Left (ElabError sp ("no clauses for the method " <> T.unpack (segmentText (last (methodQual m)))))
-      forM mine \c -> runTC (elabFunClause fx e f [] args result c)
-    define clauses (e, items) (m, f) = do
-      fcs <- methodClauses clauses e m f
+      forM mine \c -> runTC (elabFunClause fx e {envClassDefaults = [(methodClass m, headTy)]} f [] args result c)
+    define headTy clauses (e, items) (m, f) = do
+      fcs <- methodClauses headTy clauses e m f
       let (args, result) = arrows (schemeType (funScheme f))
       pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f args result fcs sp [])])
     prove headTy vars given full iq clauses (e, items, proved) l = do
@@ -988,10 +994,10 @@ elabInstance fx env sp idl = do
           binderTys = [(n, atInstance headTy (length vars) t) | (n, t) <- lawBinders l]
           ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys]
       when (null mine) $ Left (ElabError sp ("no proof of the law " <> T.unpack (segmentText lawSeg)))
-      prop0 <- runTC (elabProp e full ctx0 (lawBody l))
+      prop0 <- runTC (elabProp e {envClassDefaults = [(lawClass l, headTy)]} full ctx0 (lawBody l))
       -- Under the context: the places its statement uses, the membership
       -- predicates of the type variables its values are of, and the premises they give.
-      let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
+      let (full', kept) = theoremPlaces e full prop0 (map snd binderTys)
           prop = keepPlaces full' kept prop0
           premises = premisesFor e given kept
           q = iq <> [lawSeg]
@@ -1026,6 +1032,19 @@ usedThrough uses = go (Map.map (Set.fromList . fst) uses)
     go current =
       let next = Map.map (\(own, calls) -> Set.unions (Set.fromList own : [Map.findWithDefault Set.empty c current | c <- calls])) uses
        in if next == current then current else go next
+
+-- | Dependent members refer to the corresponding method of this instance.
+instanceDependencies :: ClassInfo -> QualName -> Ty -> Ty
+instanceDependencies cls instanceName = mapIx go
+  where
+    table = [(methodIndex (methodQual method), IxFun (mangleGlobal (map segmentRaw (instanceName <> [last (methodQual method)]))) []) | method <- classMethods cls, methodArity method == 0]
+    go ix = case lookup ix table of
+      Just value -> value
+      Nothing -> case ix of
+        IxSucc x -> IxSucc (go x)
+        IxCon name xs -> IxCon name (map go xs)
+        IxFun name xs -> IxFun name (map go xs)
+        other -> other
 
 -- | A method's type at an instance: the class's parameter the instance's type, over its @n@ variables, and the method's own variables after them.
 atInstance :: Ty -> Int -> Ty -> Ty
@@ -1110,6 +1129,32 @@ dictionaryEntry s = \case
   AtInstance g gdict
     | slotArity s > 0 -> parameterOf g gdict
     | otherwise -> apps (Global (Ref RefFunction (funCore g))) gdict
+
+-- | A first-order resolved dictionary value, represented in type indices.
+expressionIndex :: Expr a -> Maybe Ix
+expressionIndex expression = case expression of
+  At _ value -> expressionIndex value
+  Typed _ _ _ value -> expressionIndex value
+  Dictionary _ value -> expressionIndex value
+  Nat n -> Just (IxNat n)
+  _ -> case spine expression of
+    (Global (Ref RefValueParam name), []) -> Just (IxVar ("#d" <> name))
+    (Global (Ref RefBuiltin "S"), [value]) -> IxSucc <$> expressionIndex value
+    (Global (Ref kind name), arguments)
+      | kind `elem` [RefBuiltin, RefFunction, RefConstructor] ->
+          (if kind == RefConstructor then IxCon else IxFun) name <$> traverse expressionIndex arguments
+    _ -> Nothing
+
+-- | Replace runtime dictionary indices while retaining all ordinary variables.
+rewriteDictionaryIndices :: (Int -> Maybe Ix) -> Ix -> Ix
+rewriteDictionaryIndices at = go
+  where
+    go original@(IxVar name)
+      | Just i <- T.stripPrefix "#d" name >>= readMaybe . T.unpack = fromMaybe original (at i)
+    go (IxSucc x) = IxSucc (go x)
+    go (IxCon name xs) = IxCon name (map go xs)
+    go (IxFun name xs) = IxFun name (map go xs)
+    go x = x
 
 -- | How deep instances under contexts may nest where a method is resolved.
 methodDepth :: Int
@@ -1244,11 +1289,13 @@ elabIx env vals le@(Located sp e) = case e of
     QName [] (Op o) | Just f <- lookup o arithmetic -> (\a b -> IxFun f [a, b]) <$> elabIx env vals l <*> elabIx env vals r
     q -> applied osp q [l, r]
   _ -> case rawSpine le of
-    (Located hsp (R.EName q), args) -> case q of
-      QName [] (Ident n)
-        | Just x <- lookup n vals, null args -> pure x
-        | n `elem` ["S", "suc"], [a] <- args -> IxSucc <$> elabIx env vals a
-      _ -> applied hsp q args
+    (Located hsp (R.EName q), args)
+      | null args, Just x <- lookup (case q of QName path name -> renderQualName (path <> [name])) vals -> pure x
+      | otherwise -> case q of
+          QName [] (Ident n)
+            | Just x <- lookup n vals, null args -> pure x
+            | n `elem` ["S", "suc"], [a] <- args -> IxSucc <$> elabIx env vals a
+          _ -> applied hsp q args
     _ -> Left (ElabError sp "an index: a value, a numeral, S, or a constructor or a function applied")
   where
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
@@ -1338,7 +1385,9 @@ elabDecl fx env sp name ty0 clauses = do
     unless (firstOrder vty) $ Left (ElabError (location t) ("the implicit value " <> T.unpack n <> " is of a first-order type"))
     pure (n, vty)
   let values = valueTys <> [(v, fromMaybe TNat (listToMaybe [t | (w, t) <- mentioned, w == v, t /= THole])) | v <- freeValues]
-      scope = TyScope paramNames [(v, IxParam i) | (i, (v, _)) <- zip [0 ..] values] values
+      basicScope = TyScope paramNames [(v, IxParam i) | (i, (v, _)) <- zip [0 ..] values] values
+  full <- dictionaryOf env paramNames constraints
+  scope <- first (ElabError sp) (dictionaryScope env full basicScope)
   if isProp body
     then do
       -- Statement lowering names each value by its binder. Distinct values
@@ -1348,13 +1397,12 @@ elabDecl fx env sp name ty0 clauses = do
         bty <- elabTypeIn env scope t
         unless (argumentType bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " must be a value or a fixed function schema over first-order values"))
         pure (n, bty)
-      full <- dictionaryOf env paramNames constraints
       given <- constraintClasses env paramNames constraints
       let ctx0 = [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] (values <> binderTys)]
       prop0 <- runTC (elabPropWithProofArguments env {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
-      let (full', kept) = theoremPlaces full prop0 (map snd binderTys)
+      let (full', kept) = theoremPlaces env full prop0 (map snd binderTys)
           prop = keepPlaces full' kept prop0
           premises = premisesFor env given kept <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd binderTys)]
           q = qualify env [name]
@@ -1382,7 +1430,6 @@ elabDecl fx env sp name ty0 clauses = do
       let (domains, resultE) = rawArrows body
           proofPositions = [i | (i, d) <- zip [0 ..] domains, isProp d]
           valueCtx = [(v, (i, t)) | (i, (v, t)) <- zip [0 :: Int ..] values]
-      full <- dictionaryOf env paramNames constraints
       domainTys <- forM [d | d <- domains, not (isProp d)] (elabTypeIn env scope)
       resultTy <- elabTypeIn env scope resultE
       props <- forM [d | d <- domains, isProp d] \d -> toScope . fmap B <$> runTC (elabProp env {envScope = scope} full valueCtx d)
@@ -1405,7 +1452,7 @@ elabDecl fx env sp name ty0 clauses = do
         when (t == THole) $ Left (ElabError sp ("the type of the implicit value " <> T.unpack (fst (values !! i)) <> " is not known; write it, {" <> T.unpack (fst (values !! i)) <> " : T}"))
       fcs1 <- forM clauses \c -> runTC (elabFunClause fx env1 {envScope = scope} info1 runtimeTys args result c)
       -- The function takes the places of its dictionary its clauses use; each proof its clauses give is an obligation.
-      let (used, fcs) = pruneDictionary info1 fcs1
+      let (used, fcs) = pruneDictionary env1 info1 fcs1
           (env2, info) = setFunProofs proofs (setFunRuntime runtime (addFunction env name scheme (length args) used))
       case [fcSpan fc | length fcs > 1, fc <- fcs, PAbsurd `elem` fcPatterns fc] of
         asp : _ -> Left (ElabError asp "an absurd clause is its function's only clause, for now")
@@ -1557,8 +1604,8 @@ the whole; the places kept renumbered, and the recursive calls passing on
 those alone.  The code of an instance of a schema is recognised by the calls
 of its parameters, so a schema must use each of them.
 -}
-pruneDictionary :: FunInfo -> [FunClause] -> ([Slot], [FunClause])
-pruneDictionary info fcs = (kept, map prune fcs)
+pruneDictionary :: Env -> FunInfo -> [FunClause] -> ([Slot], [FunClause])
+pruneDictionary env info fcs = (kept, map prune fcs)
   where
     full = funSlots info
     self = funCore info
@@ -1566,8 +1613,9 @@ pruneDictionary info fcs = (kept, map prune fcs)
     arity = length (funRuntime info) + funArity info
     refs = placeRefs full
     used = nub (concatMap (usedIn . fcBody) fcs)
-    keep = [r `elem` used | r <- refs]
-    kept = [s | (s, True) <- zip full keep]
+    initially = [s | (s, r) <- zip full refs, r `elem` used || r `elem` typeDictionaryRefs [schemeType (funScheme info)]]
+    kept = retainDependencies env full initially
+    keep = [s `elem` kept | s <- full]
     renumber = Map.fromList (zip [r | (r, True) <- zip refs keep] (placeRefs kept))
     prune fc = fc {fcTerm = Core.mapComputation rewrite (fcTerm fc)}
     usedIn :: Term.Term x -> [Ref]
@@ -1597,13 +1645,30 @@ its values mentions, added after the dictionary's when no constraint gave
 one; with the dictionary so extended.  Its values have their memberships by
 those predicates, the parameters' own, which an appeal instantiates.
 -}
-theoremPlaces :: [Slot] -> Expr a -> [Ty] -> ([Slot], [Slot])
-theoremPlaces full0 prop0 tys = (full, kept)
+theoremPlaces :: Env -> [Slot] -> Expr a -> [Ty] -> ([Slot], [Slot])
+theoremPlaces env full0 prop0 tys = (full, kept)
   where
     vars = nub (concatMap valueVariables tys)
     full = full0 <> [membershipSlot i | i <- vars, membershipSlot i `notElem` full0]
     used = globalsOf prop0
-    kept = [s | (s, r) <- zip full (placeRefs full), r `elem` used || (isMembershipSlot s && slotParam s `elem` vars)]
+    kept = retainDependencies env full [s | (s, r) <- zip full (placeRefs full), r `elem` used || r `elem` typeDictionaryRefs tys || (isMembershipSlot s && slotParam s `elem` vars)]
+
+{- | Dependencies in types retain the same dictionary values as their computations.
+Keeping preceding value places preserves the indices recorded in checked types.
+-}
+retainDependencies :: Env -> [Slot] -> [Slot] -> [Slot]
+retainDependencies env full initial =
+  let close current =
+        let more = nub (current <> [dependency | slot <- current, Just (GMethod method) <- [Map.lookup (slotMethod slot) (envGlobals env)], (name, _) <- methodDependencies method, dependency <- full, slotMethod dependency == name, slotParam dependency == slotParam slot])
+         in if more == current then current else close more
+      needed = close initial
+      lastValue = maximum (-1 : [i | (i, slot) <- zip [0 :: Int ..] (valueSlots full), slot `elem` needed])
+      prefix = take (lastValue + 1) (valueSlots full)
+   in [slot | slot <- full, slot `elem` needed || slot `elem` prefix]
+
+typeDictionaryRefs :: [Ty] -> [Ref]
+typeDictionaryRefs types =
+  [Ref RefValueParam number | name <- concatMap (concatMap ixVars . tyIndices) types, Just number <- [T.stripPrefix "#d" name]]
 
 -- | The type parameters a type mentions at kind @Type@, whose predicates the memberships of its values may take.
 valueVariables :: Ty -> [Int]
@@ -1786,7 +1851,7 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
               , term /= projection
               ]
             statement = foldr Arrow (foldr (Arrow . snd) prop own) indices
-            (slots, _) = theoremPlaces (funSlots info) statement (map snd vars)
+            (slots, _) = theoremPlaces env (funSlots info) statement (map snd vars)
             premises = closurePremises env slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd vars)]
             thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots (map pdPremise premises) Nothing [] [] Nothing
             pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] []
@@ -2176,13 +2241,24 @@ data AppHead a = AppHead
   -- ^ the positions of its arguments which are proofs, each with its proposition at the parameters found
   , ahProofShapes :: ![(Int, Expr Int)]
   -- ^ the same propositions over value parameters, for inference from named proofs
+  , ahRefine :: Assignment -> TC Assignment
+  -- ^ fill dependent dictionary indices after the class type is determined
   , ahApply :: Assignment -> TC ([Expr a] -> Expr a)
   }
 
 -- Proof erasure is permitted only when the caller retains and certifies
 -- the resulting obligations. Public term elaboration cannot silently discard them; callers
 -- collecting obligations must return them or emit their core derivations.
-data ProofArguments = NoProofArguments | CollectProofArguments [(Text, Expr Text)]
+data ProofArguments
+  = NoProofArguments
+  | CollectProofArguments [(Text, Expr Text)]
+  | CollectWithoutTransport [(Text, Expr Text)]
+
+proofHypotheses :: ProofArguments -> Maybe [(Text, Expr Text)]
+proofHypotheses = \case
+  NoProofArguments -> Nothing
+  CollectProofArguments hypotheses -> Just hypotheses
+  CollectWithoutTransport hypotheses -> Just hypotheses
 
 {- | Infer value parameters from the type of a named proof. This is only a
 bidirectional hint: the proof itself is retained and checked after inference.
@@ -2234,11 +2310,14 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected =
   case elabTermDirect proofArguments env givens ctx le expected of
     Right result -> Right result
     Left original -> case proofArguments of
-      CollectProofArguments (_ : _)
+      CollectProofArguments hypotheses
         | expected /= THole
-        , Right (value, actual) <- elabTermDirect proofArguments env givens ctx le THole
+        , Right (_, inferred) <- elabTermDirect proofArguments env givens ctx le (erase expected)
+        , Just hint <- fillTypes inferred expected
+        , Right (value, actual) <- elabTermDirect proofArguments env givens ctx le hint
         , Just target <- completeTypes actual expected
         , Just pairs@(_ : _) <- transportIndices actual target
+        , not (null hypotheses) || all possible pairs
         , Just propositions <- traverse (\(x, y) -> Rel RelEq <$> indexTermIn env ctx x <*> indexTermIn env ctx y) pairs ->
             let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
              in Right (At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | prop <- propositions]), target)
@@ -2247,6 +2326,12 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected =
     -- A proof can determine an index before an ordinary argument determines
     -- its element type. Fill those type holes before collecting the index
     -- equalities, preserving every index of a type inferred for a hole.
+    possible (IxNat x, IxNat y) = x == y
+    possible _ = True
+    fillTypes THole target = Just target
+    fillTypes (TData name ts indices) (TData other us _)
+      | name == other, length ts == length us = TData name <$> zipWithM fillTypes ts us <*> pure indices
+    fillTypes source _ = Just source
     completeTypes source THole = Just source
     completeTypes (TData name ts _) (TData other us indices)
       | name == other, length ts == length us = TData name <$> zipWithM completeTypes ts us <*> pure indices
@@ -2335,7 +2420,8 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       s0 <- maybe (failAt sp (mismatch env expected (substScheme n given (ahResult h)))) pure (matchTy n (ahResult h) expected given)
       let hinted = foldl (proofHint n args) s0 (ahProofShapes h)
       (s1, done, pending) <- foldM (argument (ahDependent h) n) (hinted, IM.empty, []) (zip3 [0 :: Int ..] (ahDomains h) termArgs)
-      (s2, done') <- settle (ahDependent h) n s1 done pending
+      (settled, done') <- settle (ahDependent h) n s1 done pending
+      s2 <- ahRefine h settled
       -- Each proof, against its proposition at what the application found: kept in the
       -- term, for the proof to be checked there, and erased from the code.
       proofs <- forM proofAt \(i, prop) -> (\p -> (i, ProofArg p (Irrelevant (args !! i)))) <$> prop s2
@@ -2345,15 +2431,19 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       apply <- ahApply h s2
       t <- agree env sp expected (substScheme n s2 (ahResult h))
       unless (firstOrder t) $ failAt sp "a function-valued result is not a first-order value"
-      let terms = [done' IM.! j | j <- [0 .. length (ahDomains h) - 1]]
-          inOrder i ts
+      terms <-
+        if asTypes s2 == asTypes settled && asValues s2 == asValues settled
+          then pure [done' IM.! j | j <- [0 .. length (ahDomains h) - 1]]
+          else forM (zip (ahDomains h) termArgs) \(domain, argument') ->
+            fst <$> elabTerm proofArguments env givens ctx argument' (substScheme n s2 domain)
+      let inOrder i ts
             | i >= arity = []
             | Just p <- lookup i proofs = p : inOrder (i + 1) ts
             | x : ts' <- ts = x : inOrder (i + 1) ts'
             | otherwise = []
       pure (At (Irrelevant sp) (Typed t [substScheme n s2 (TParam i []) | i <- [0 .. fst n - 1]] (IM.toList (asValues s2)) (apply (inOrder (0 :: Int) terms))), t)
     proofHint n args s (pos, shape)
-      | CollectProofArguments hypotheses <- proofArguments
+      | Just hypotheses <- proofHypotheses proofArguments
       , Located _ (R.EName (QName [] (Ident name))) <- stripParen (args !! pos)
       , Just actual <- lookup name hypotheses =
           fromMaybe s (matchProposition (snd n) shape actual s)
@@ -2416,7 +2506,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       R.ENat k -> pure (plain (0, 0) [] TNat (Nat k))
       R.EParen x -> (\(e', t) -> plain (0, 0) [] t e') <$> elabTerm proofArguments env givens ctx x THole
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
-    plain n doms res hd = AppHead n doms res [] [] [] [] (const (pure (apps hd)))
+    plain n doms res hd = AppHead n doms res [] [] [] [] pure (const (pure (apps hd)))
     -- A value parameter of the enclosing signature, where the clause has it as a variable.
     valueParam i = listToMaybe [v | (v, IxParam j) <- tsValues (envScope env), j == i] >>= \v -> Var . fst <$> lookup v ctx
     -- The value found for a parameter of the head's type, as a term of what is in scope.
@@ -2425,8 +2515,12 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     -- generated index projection. The membership/index contracts justify it.
     valueIndex =
       ixToExprWith
-        (\v -> (Var . fst <$> lookup v ctx) <|> recovered (IxVar v))
+        (\v -> (Var . fst <$> lookup v ctx) <|> dictionaryValue v <|> recovered (IxVar v))
         (\i -> valueParam i <|> recovered (IxParam i))
+    dictionaryValue v = do
+      name <- T.stripPrefix "#d" v
+      ref <- find (== Ref RefValueParam name) (placeRefs givens)
+      pure (Typed TNat [] [] (Global ref))
     recovered wanted =
       listToMaybe
         [ Typed
@@ -2458,9 +2552,23 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
             | otherwise -> typed hsp g
     typed hsp = \case
       GFun f -> do
-        let n = (length (schemeParams (funScheme f)), length (schemeValues (funScheme f)))
-            (doms, res) = splitArrows (funArity f) (schemeType (funScheme f))
+        let valueCount = length (schemeValues (funScheme f))
+            n = (length (schemeParams (funScheme f)), valueCount + length (valueSlots (funSlots f)))
+            abstractDictionary = rewriteDictionaryIndices (\i -> Just (IxParam (valueCount + i)))
+            (doms, res) = splitArrows (funArity f) (mapIx abstractDictionary (schemeType (funScheme f)))
             fn = Global (Ref RefFunction (funCore f))
+            refine s = do
+              dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]])
+              let values = [entry | (slot, entry) <- zip (funSlots f) dict, slotArity slot == 0]
+                  used = concatMap ixVars (tyIndices (schemeType (funScheme f)))
+              foldM
+                ( \assigned (i, entry) -> case expressionIndex entry of
+                    Just value -> pure assigned {asValues = IM.insert (valueCount + i) value (asValues assigned)}
+                    Nothing | ("#d" <> T.pack (show i)) `notElem` used -> pure assigned
+                    Nothing -> failAt hsp "a dependent dictionary value is not a first-order index"
+                )
+                s
+                (zip [0 ..] values)
             -- The implicit values it takes at runtime, as found: terms of what is in scope.
             passed s = forM (funRuntime f) \i -> case valueAt s i of
               Just x -> pure (Typed (substScheme n s (snd (schemeValues (funScheme f) !! i))) [] [] x)
@@ -2476,14 +2584,16 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                 )
               | (pos, prop) <- funProofs f
               ]
-        pure $ AppHead n doms res (zip [0 ..] (map snd (schemeValues (funScheme f)))) [] proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- funProofs f] \s -> do
+        pure $ AppHead n doms res (zip [0 ..] (map snd (schemeValues (funScheme f)))) [] proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- funProofs f] refine \s -> do
           pre <- passed s
           if null (funSlots f)
             then pure (\as -> apps fn (pre <> as))
             else do
               -- Its dictionary at the types its parameters are at, after its arguments.
-              dict <- resolution (dictionaryAt env givens f [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]])
-              pure \as -> apps fn (pre <> as <> zipWith (\slot entry -> Dictionary (dictionaryType slot [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]) (vacuous entry)) (funSlots f) dict)
+              let types = [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]
+              dict <- resolution (dictionaryAt env givens f types)
+              entries <- typedDictionary (funSlots f) types dict
+              pure \as -> apps fn (pre <> as <> entries)
       GCtor c -> case dataOfCtor env c of
         Just d -> do
           let n = length (dataParams d)
@@ -2508,7 +2618,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                   )
                 | (a, prop) <- constructorProofs g
                 ]
-          pure $ AppHead (n, length tele) doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- constructorProofs g] \s -> do
+          pure $ AppHead (n, length tele) doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- constructorProofs g] pure \s -> do
             stored <- forM [(k, pos, en) | (pos, en@(TeleEntry _ _ (Stored k))) <- zip [0 ..] tele] \(k, pos, en) ->
               case IM.lookup pos (asValues s) >>= valueIndex of
                 Just x -> pure (k, Typed (substScheme (n, length tele) s (teType en)) [] [] x)
@@ -2520,15 +2630,39 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         Nothing -> failAt sp "internal: a constructor of no data type"
       -- A method: the function of the instance for the type its class is at, or a place of the dictionary given.
       GMethod m -> do
-        let n = (length (schemeParams (methodScheme m)), 0)
-            (doms, res) = splitArrows (methodArity m) (schemeType (methodScheme m))
+        let dependencies = methodDependencies m
+            n = (length (schemeParams (methodScheme m)), length dependencies)
+        template <- either (failAt hsp) pure (methodTypeWith (\q -> IxParam <$> lookup q (zip (map fst dependencies) [0 ..])) m)
+        let (doms, res) = splitArrows (methodArity m) template
+            refine s = do
+              ty <- case substScheme n s (TParam 0 []) of
+                THole -> case nub ([TParam (slotParam slot) [] | slot <- givens, slotMethod slot == methodQual m] <> [t | (cls, t) <- envClassDefaults env, cls == methodClass m]) of
+                  [t] -> pure t
+                  _ -> undetermined hsp "the class type of a nullary method is ambiguous: provide a determining argument or dictionary"
+                t -> pure t
+              let assigned = s {asTypes = IM.insert 0 ty (asTypes s)}
+              foldM (dependency ty) assigned (zip [0 ..] dependencies)
+            dependency ty s (i, (q, _)) = do
+              method <- case Map.lookup q (envGlobals env) of
+                Just (GMethod member) -> pure member
+                _ -> failAt hsp "a dependent class member is not in scope"
+              selected <- resolution (methodAt env givens method ty)
+              ix <- case selected of
+                AtPlace (Ref RefValueParam name) -> pure (IxVar ("#d" <> name))
+                AtInstance function [] -> pure (IxFun (funCore function) [])
+                _ -> failAt hsp "a dependent class member needs a first-order dictionary value"
+              pure s {asValues = IM.insert i ix (asValues s)}
         when (fst n == 0) $ failAt hsp "internal: a method of no class"
-        pure $ AppHead n doms res [] [] [] [] \s ->
-          ( \case
-              AtPlace r -> apps (Global r)
-              AtInstance f dict -> \as -> apps (Global (Ref RefFunction (funCore f))) (as <> zipWith (\slot entry -> Dictionary (dictionaryType slot [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]) (vacuous entry)) (funSlots f) dict)
-          )
-            <$> resolution (methodAt env givens m (substScheme n s (TParam 0 [])))
+        pure $ AppHead n doms res [] [] [] [] refine \s -> do
+          selected <- resolution (methodAt env givens m (substScheme n s (TParam 0 [])))
+          case selected of
+            AtPlace r -> pure (apps (Global r))
+            AtInstance f dict -> do
+              let classType = substScheme n s (TParam 0 [])
+                  headArguments = case classType of TData _ ts _ -> ts; _ -> []
+                  types = headArguments <> [substScheme n s (TParam i []) | i <- [1 .. fst n - 1]]
+              entries <- typedDictionary (funSlots f) types dict
+              pure \as -> apps (Global (Ref RefFunction (funCore f))) (as <> entries)
       GTheorem t -> failAt sp (T.unpack (displayQualName (thmQual t)) <> " is a theorem, not a term")
       GLaw l -> failAt sp (T.unpack (displayQualName (lawQual l)) <> " is a law, not a term")
       GData d -> failAt sp (T.unpack (displayQualName (dataQual d)) <> " is a type, not a term")
@@ -2536,13 +2670,13 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       GClass c -> failAt sp (T.unpack (displayQualName (classQual c)) <> " is a class, not a term")
       GInstance i -> failAt sp (T.unpack (displayQualName (instQual i)) <> " is an instance, not a term")
       GModule m -> failAt sp (T.unpack (displayQualName (modQual m)) <> " is a module, not a term")
-    dictionaryType slot types
-      | isMembershipSlot slot = TArrow (at (slotParam slot)) TNat
-      | Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env) =
-          substScheme (length (schemeParams (methodScheme method)), 0) emptyAssignment {asTypes = IM.singleton 0 (at (slotParam slot))} (schemeType (methodScheme method))
-      | otherwise = foldr TArrow TNat (replicate (slotArity slot) TNat)
-      where
-        at i = fromMaybe TNat (listToMaybe (drop i types))
+    typedDictionary slots types entries = forM (zip slots entries) \(slot, entry) -> do
+      template <- either (failAt sp) pure (dictionaryMethodType env slots slot)
+      let values = [value | (place, value) <- zip slots entries, slotArity place == 0]
+          at i = listToMaybe (drop i values) >>= expressionIndex
+          instantiated = substScheme (length types, 0) emptyAssignment {asTypes = IM.fromList (zip [0 ..] types)} template
+          ty = mapIx (rewriteDictionaryIndices at) instantiated
+      pure (Dictionary ty (vacuous entry))
     -- A method not resolved: undetermined while its type is not known, else refused.
     resolution :: Either Unresolved r -> TC r
     resolution = either (\case Pending why -> undetermined sp why; Refusal why -> failAt sp why) pure
@@ -2558,7 +2692,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       QName [] (Ident x) | x `elem` ["S", "suc"] -> Just (plain (0, 0) [TNat] TNat (Global (Ref RefBuiltin "S")))
       QName [] (Op o) | Just core <- lookup o arithmetic -> Just (plain (0, 0) [TNat, TNat] TNat (Global (Ref RefBuiltin core)))
       -- absurd p, p a proof of what cannot be: a value of any type.
-      QName [] (Ident "absurd") -> Just (AppHead (1, 0) [] (TParam 0 []) [] [] [(0, const (pure Bottom))] [] (const (pure (\case [ProofArg _ raw] -> Absurd raw; _ -> Hole))))
+      QName [] (Ident "absurd") -> Just (AppHead (1, 0) [] (TParam 0 []) [] [] [(0, const (pure Bottom))] [] pure (const (pure (\case [ProofArg _ raw] -> Absurd raw; _ -> Hole))))
       _ -> Nothing
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
 
@@ -2619,9 +2753,17 @@ elabProposition proofArguments env givens ctx (Located sp e) =
     infer x = elabTerm proofArguments env givens ctx x THole
     check x ty = fst <$> elabTerm proofArguments env givens ctx x ty
     -- A side of an equation at the other's type, or else at it erased: codes are compared, whatever the indices of their types.
-    codeOf x t = case check x t of
-      Left (Refused _) -> check x (erase t)
+    codeOf x t = case direct t of
+      Left (Refused _) -> case direct (erase t) of
+        Left (Refused _) -> check x (erase t)
+        checked -> checked
       checked -> checked
+      where
+        -- Probing the other's result indices must not cast nested arguments
+        -- to satisfy those indices. If a nested conversion is necessary,
+        -- collect its evidence only after erasing the outer comparison type.
+        direct ty = fst <$> elabTermDirect withoutTransport env givens ctx x ty
+        withoutTransport = maybe NoProofArguments CollectWithoutTransport (proofHypotheses proofArguments)
     relation = \case
       o | o `elem` ["≡", "="] -> Just RelEq
       o | o `elem` ["≠", "/="] -> Just RelNe

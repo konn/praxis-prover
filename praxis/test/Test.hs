@@ -5,6 +5,7 @@ import Language.Praxis.Package.PackageTest (packageTests)
 import Language.Praxis.Surface.AdequacyTest (adequacyTests)
 import Language.Praxis.Surface.CheckTest (checkTests)
 import Language.Praxis.Surface.CoreTest (coreTests)
+import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
 import Language.Praxis.Surface.Prelude
 import Language.Praxis.Surface.ResolveTest (resolveTests)
@@ -24,6 +25,7 @@ main =
       , resolveTests
       , termTests
       , coreTests
+      , dependentClassTests
       , checkTests
       , adequacyTests
       , packageTests

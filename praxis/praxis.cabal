@@ -134,6 +134,7 @@ test-suite praxis-test
     Language.Praxis.Surface.AdequacyTest
     Language.Praxis.Surface.CheckTest
     Language.Praxis.Surface.CoreTest
+    Language.Praxis.Surface.DependentClassTest
     Language.Praxis.Surface.ParserTest
     Language.Praxis.Surface.ResolveTest
     Language.Praxis.Surface.TermTest

@@ -29,6 +29,7 @@ import Data.Foldable (toList)
 import Data.Functor.Identity (Identity (..))
 import Data.IntMap.Strict qualified as IM
 import Data.Map.Strict qualified as Map
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Type.Equality ((:~:) (..))
@@ -40,6 +41,7 @@ import Language.Praxis.Surface.Syntax qualified as S
 import Language.Praxis.Surface.Term qualified as Tm
 import Language.Praxis.Surface.Types qualified as Ty
 import Numeric.Natural (Natural)
+import Text.Read (readMaybe)
 
 -- Variables are membership proofs in a heterogeneous context.
 data Variable ctx t where
@@ -192,9 +194,13 @@ elaborateNamed env slots variables expression = do
         (Arguments domains values, proofs) <- arguments ctx args
         -- Reflection checks that explicit instantiations contain no index holes.
         _ <- traverse (reflectType . Ty.TData "#index" [] . pure . snd) is
-        (types, indices) <- validateGlobal env slots ref (length proofs) is (mapTypes forgetType domains) (forgetType ty)
+        (types, indices) <- validateGlobal env slots ref (length proofs) is [sourceIndex argument | argument <- args, not (proofArgument argument)] (mapTypes forgetType domains) (forgetType ty)
         pure (Apply (Signature ref types indices domains ty) values proofs)
       _ -> Left "a non-first-order value at the explicit core boundary"
+    proofArgument argument = case S.stripLocations argument of
+      S.ProofArg {} -> True
+      _ -> False
+    sourceIndex = expressionIndex (\i -> Ty.IxVar . fst <$> listToMaybe (drop i variables))
     invocation :: List SType ctx -> SType t -> S.Expr Int -> [S.Expr Int] -> Either String (Value (Tm.ProofArgument Int) ctx t)
     invocation ctx expected callback [] = do
       SomeValue actual value <- infer ctx callback
@@ -234,16 +240,22 @@ elaborateNamed env slots variables expression = do
 -- Check global applications against the declaration environment before making
 -- an intrinsically typed signature. In particular an annotation alone cannot
 -- turn a numeral operation or an arbitrary name into a value of any type.
-validateGlobal :: Env -> [Slot] -> S.Ref -> Int -> [(Int, Ty.Ix)] -> [Ty.Ty] -> Ty.Ty -> Either String ([Ty.Ty], [(Int, Ty.Ix)])
-validateGlobal env slots ref proofCount explicitIndices actual result = case S.refKind ref of
+validateGlobal :: Env -> [Slot] -> S.Ref -> Int -> [(Int, Ty.Ix)] -> [Maybe Ty.Ix] -> [Ty.Ty] -> Ty.Ty -> Either String ([Ty.Ty], [(Int, Ty.Ix)])
+validateGlobal env slots ref proofCount explicitIndices actualValues actual result = case S.refKind ref of
   S.RefBuiltin | S.refName ref == "S" -> check 0 (0, 0) [Ty.TNat] Ty.TNat
   S.RefBuiltin | S.refName ref `elem` ["add", "sub", "mul", "pow"] -> check 0 (0, 0) [Ty.TNat, Ty.TNat] Ty.TNat
   S.RefFunction -> case [f | GFun f <- globals, funCore f == S.refName ref] of
-    f : _ ->
+    f : _ -> do
       let scheme = funScheme f
-          (args, r) = arrows (Ty.schemeType scheme)
           runtime = [snd (Ty.schemeValues scheme !! i) | i <- funRuntime f]
-       in check (length (funProofs f)) (length (Ty.schemeParams scheme), length (Ty.schemeValues scheme)) (runtime <> args <> map dictionaryType (funSlots f)) r
+          offset = length runtime + funArity f
+      dictionary <- traverse (dictionaryMethodType env (funSlots f)) (funSlots f)
+      instantiated <- instantiateDictionary (funSlots f) (drop offset actualValues) (Ty.schemeType scheme : dictionary)
+      case instantiated of
+        signature : entries ->
+          let (args, r) = arrows signature
+           in check (length (funProofs f)) (length (Ty.schemeParams scheme), length (Ty.schemeValues scheme)) (runtime <> args <> entries) r
+        [] -> Left "a dictionary lost its function signature"
     [] -> missing
   S.RefConstructor -> case [c | GCtor c <- globals, ctorCore c == S.refName ref] of
     c : _
@@ -279,17 +291,10 @@ validateGlobal env slots ref proofCount explicitIndices actual result = case S.r
     place i j (s : ss)
       | slotArity s > 0 = (s, S.Ref S.RefStatic (staticName i)) : place (i + 1) j ss
       | otherwise = (s, S.Ref S.RefValueParam (T.pack (show j))) : place i (j + 1 :: Int) ss
-    dictionaryType slot
-      | isMembershipSlot slot = Ty.TArrow (Ty.TParam (slotParam slot) []) Ty.TNat
-      | Just (GMethod m) <- Map.lookup (slotMethod slot) (envGlobals env) =
-          Ty.substScheme (length (Ty.schemeParams (methodScheme m)), 0) Ty.emptyAssignment {Ty.asTypes = IM.singleton 0 (Ty.TParam (slotParam slot) [])} (Ty.schemeType (methodScheme m))
-      | otherwise = Ty.THole
-    checkSlot slot = case Map.lookup (slotMethod slot) (envGlobals env) of
-      Just (GMethod m) ->
-        let sch = methodScheme m
-            (ds, r) = arrows (Ty.substScheme (length (Ty.schemeParams sch), 0) Ty.emptyAssignment {Ty.asTypes = IM.singleton 0 (Ty.TParam (slotParam slot) [])} (Ty.schemeType sch))
-         in check 0 (0, 0) ds r
-      _ -> missing
+    checkSlot slot = do
+      ty <- dictionaryMethodType env slots slot
+      let (domains, r) = arrows ty
+      check 0 (0, 0) domains r
 
 -- Dictionary entries are closed static functions or closed nullary values.
 -- Their captured dictionaries are checked against the instantiated slots;
@@ -300,7 +305,7 @@ validateDictionary env slots expected = \case
     | Just _ <- lookup ref places -> do
         unless (null captures) $ Left "a dictionary place cannot capture arguments"
         let (ds, r) = arrows expected
-        () <$ validateGlobal env slots ref 0 [] ds r
+        () <$ validateGlobal env slots ref 0 [] (replicate (length ds) Nothing) ds r
     | f : _ <- [f | GFun f <- Map.elems (envGlobals env), funCore f == S.refName ref] -> do
         let scheme = funScheme f
             arity = funArity f
@@ -311,8 +316,13 @@ validateDictionary env slots expected = \case
               S.RefFunction -> arity == 0
               _ -> False
         unless (correctRole && length captures == length (funSlots f)) $ Left "a dictionary has the wrong static arity"
-        assignment <- maybe (Left "a dictionary implementation has the wrong type") Right (Ty.matchTy n (Ty.schemeType scheme) expected Ty.emptyAssignment)
-        sequence_ [validateDictionary env slots (Ty.substScheme n assignment (slotType slot)) entry | (slot, entry) <- zip (funSlots f) captures]
+        dictionary <- traverse (dictionaryMethodType env (funSlots f)) (funSlots f)
+        instantiated <- instantiateDictionary (funSlots f) (map (expressionIndex absurd . Tm.toExpr) captures) (Ty.schemeType scheme : dictionary)
+        case instantiated of
+          signature : entries -> do
+            assignment <- maybe (Left "a dictionary implementation has the wrong type") Right (Ty.matchTy n signature expected Ty.emptyAssignment)
+            sequence_ [validateDictionary env slots (Ty.substScheme n assignment ty) entry | (ty, entry) <- zip entries captures]
+          [] -> Left "a dictionary lost its implementation signature"
     | otherwise -> Left ("an unknown dictionary reference: " <> show ref)
   _ -> Left "a dictionary entry must be a resolved reference"
   where
@@ -323,12 +333,40 @@ validateDictionary env slots expected = \case
     place i j (slot : rest)
       | slotArity slot > 0 = (S.Ref S.RefStatic (staticName i), slot) : place (i + 1) j rest
       | otherwise = (S.Ref S.RefValueParam (T.pack (show j)), slot) : place i (j + 1 :: Int) rest
-    slotType slot
-      | isMembershipSlot slot = Ty.TArrow (Ty.TParam (slotParam slot) []) Ty.TNat
-      | Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env) =
-          let scheme = methodScheme method
-           in Ty.substScheme (length (Ty.schemeParams scheme), 0) Ty.emptyAssignment {Ty.asTypes = IM.singleton 0 (Ty.TParam (slotParam slot) [])} (Ty.schemeType scheme)
-      | otherwise = Ty.THole
+
+{- | Dictionary indices are tied to the actual value arguments. The typed
+annotation alone never chooses a different cardinality for a dictionary.
+-}
+instantiateDictionary :: [Slot] -> [Maybe Ty.Ix] -> [Ty.Ty] -> Either String [Ty.Ty]
+instantiateDictionary slots values types = do
+  let used = [i | name <- concatMap (concatMap Ty.ixVars . Ty.tyIndices) types, Just i <- [T.stripPrefix "#d" name >>= readMaybe . T.unpack]]
+      positions = [position | (position, slot) <- zip [0 ..] slots, slotArity slot == 0]
+      at i = listToMaybe (drop i positions) >>= (\position -> listToMaybe (drop position values)) >>= id
+  replacements <- traverse (\i -> maybe (Left "a dependent dictionary value has no checked index term") (Right . (i,)) (at i)) used
+  let rewrite original@(Ty.IxVar name)
+        | Just i <- T.stripPrefix "#d" name >>= readMaybe . T.unpack = maybe original id (lookup i replacements)
+      rewrite (Ty.IxSucc x) = Ty.IxSucc (rewrite x)
+      rewrite (Ty.IxCon name xs) = Ty.IxCon name (map rewrite xs)
+      rewrite (Ty.IxFun name xs) = Ty.IxFun name (map rewrite xs)
+      rewrite x = x
+  pure (map (Ty.mapIx rewrite) types)
+
+-- | The code denoted by a checked first-order source expression.
+expressionIndex :: (a -> Maybe Ty.Ix) -> S.Expr a -> Maybe Ty.Ix
+expressionIndex variable = go
+  where
+    go (S.At _ value) = go value
+    go (S.Typed _ _ _ value) = go value
+    go (S.Dictionary _ value) = go value
+    go (S.Var value) = variable value
+    go (S.Nat n) = Just (Ty.IxNat n)
+    go expression = case S.spine expression of
+      (S.Global (S.Ref S.RefValueParam name), []) -> Just (Ty.IxVar ("#d" <> name))
+      (S.Global (S.Ref S.RefBuiltin "S"), [value]) -> Ty.IxSucc <$> go value
+      (S.Global (S.Ref kind name), arguments)
+        | kind `elem` [S.RefBuiltin, S.RefFunction, S.RefConstructor] ->
+            (if kind == S.RefConstructor then Ty.IxCon else Ty.IxFun) name <$> traverse go arguments
+      _ -> Nothing
 
 complete :: Ty.Ty -> Ty.Ty
 complete = \case
@@ -465,6 +503,7 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
       Tm.Call r xs -> Pretty.application 0 (Pretty.reference r) ["[dict " <> dictionary x <> "]" | x <- xs]
       Tm.Parameter _ _ -> "[fixed callback]"
       Tm.Closure _ _ -> "[callback lambda]"
+      Tm.PackedClosure _ _ _ -> "[callback closure]"
       Tm.Invoke _ _ -> "[callback application]"
     layout ref = case [g | g <- Map.elems (envGlobals env), matches ref g] of
       GFun f : _ -> (map fst (Ty.schemeValues (funScheme f)), zip (funRuntime f) [0 ..], [], map fst (funProofs f))

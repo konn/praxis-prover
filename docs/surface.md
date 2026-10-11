@@ -159,8 +159,8 @@ instance Monoid (List a) where
   mempty = Nil
 ```
 
-A class has one parameter, methods and laws. Its methods are first-order
-signatures, each mentioning the parameter. Its laws are statements over
+A class has one parameter, methods and laws. Its methods have first-order
+signatures; methods taking arguments must mention the parameter. Its laws are statements over
 values of the parameter and of types over it:
 
 ```
@@ -169,6 +169,23 @@ class Pointed a where
   plus : a -> a -> a
   plus-zero : (x : a) -> plus x zero ≡ x
 ```
+
+Method signatures may depend on preceding nullary members of the same
+dictionary. For example, given an indexed vector type:
+
+```haskell
+class Sized a where
+  card : Nat
+  enumeration : Vec card a
+```
+
+`enumeration` carries the cardinality supplied by that same `Sized a`
+dictionary. Forward references in method signatures are rejected. A nullary
+member such as `card` need not mention `a` in its result type; its use must
+still select a unique dictionary. With two possible `Sized` dictionaries,
+an unqualified `card` is ambiguous. Dictionary pruning retains the values
+needed by dependent signatures, and Praxis Core checks these indices against
+the actual dictionary arguments.
 
 Its superclasses constrain the same parameter. A method or a law is a
 top-level name, as in Haskell, and a member of its class's namespace.
