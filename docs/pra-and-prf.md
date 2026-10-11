@@ -1,4 +1,4 @@
-# The core languages: `prf` definitions and `pra` proofs
+# The PRA kernel language: `prf` definitions and `pra` proofs
 
 praxis-core has two concrete languages over the kernel of
 [kernel.md](kernel.md): `prf`, in which primitive recursive functions are

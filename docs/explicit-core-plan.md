@@ -1,10 +1,10 @@
-# Explicit surface core migration
+# Praxis Core migration
 
 ## Objective
 
 Keep the PRA calculus unchanged. Elaborate the existing surface fragment into
-an explicit core with typed values, explicit dictionary arguments and evidence;
-lower that core to primitive-recursive definitions and checked PRA derivations.
+Praxis Core, an explicit typed intermediate language with dictionary arguments
+and evidence; lower it to primitive-recursive definitions and checked PRA derivations.
 Ordinary data declarations and indexed declarations use the same constructor
 signature. Recovering an erased proof field means applying a certified
 membership elimination lemma, never extracting a derivation from a number.
@@ -51,7 +51,7 @@ syntax remains usable.
 - Constructor normalization, the typed value boundary, certificate handoff,
   structured PRA admission, and end-to-end regressions are implemented.
 - All three package suites, the kernel doctests, formatting, package checks,
-  HLS checks and the surface-core CLI regression pass.
+  HLS checks and the Praxis Core CLI regression pass.
 
 ## Implemented architecture
 

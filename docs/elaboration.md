@@ -466,7 +466,7 @@ stands for a first-order type. `statementGoal` checks the distinction again.
 
 An explicit callback has two separate components: a fixed primitive
 recursive schema parameter and a numerical environment. A source binder
-`f : A -> B` retains that arrow type in the checked Surface core. Its
+`f : A -> B` retains that arrow type in checked Praxis Core. Its
 `SchemaParameter` node records the static reference as well as the
 environment variable; an arrow-typed variable cannot pass through ordinary
 value lowering on its own. Applying it calls the fixed parameter with the
