@@ -241,7 +241,8 @@ lemma: Data.List.bad`.
   enclosing it, its imports first, or, outside any package or with
   `--alone`, on its own; the current directory when no target is given.
   Every report is printed with its file, and the exit status is nonzero
-  when one is an error. `--dump-core` prints each module's core text.
+  when one is an error. `--dump-core` prints readable elaborated declarations;
+  `--dump-pra` prints each module's generated PRA text.
 - `praxis-lsp` checks a `.px` document as a module of the package
   enclosing its path, with what it imports, and reports the document's own
   findings.

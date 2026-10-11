@@ -72,6 +72,7 @@ import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, renderSchemaTacticError, schemaScope)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
 import Language.Praxis.Surface.Core qualified as SurfaceCore
+import Language.Praxis.Surface.Core.Pretty qualified as CorePretty
 import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
@@ -126,6 +127,8 @@ data Core = Core
   , coreCertificates :: !(Map String Certificate)
   , coreBodies :: !(Map Text [SurfaceCore.Body Certificate])
   -- ^ Explicit typed bodies whose evidence has been replaced by checked PRA certificates.
+  , coreDisplay :: !(Map Text Text)
+  -- ^ Inspection-only renderings retaining clause names and patterns; never used for checking or lowering.
   , coreMembership :: !(Map Text (Text, [Int]))
   -- ^ the membership predicate of each data type encoded, by its qualified name, with the parameters it takes the predicates of
   , coreVariadic :: !(Set Text)
@@ -136,14 +139,14 @@ data Core = Core
 coreLemmas :: Core -> Map String (PRA.Lemma SchemaName)
 coreLemmas = fmap certificateLemma . coreCertificates
 
-{- | Readable explicit bodies, with type and index arguments, dictionaries and
-the number of checked evidence objects retained by each clause.
+{- | Source-like explicit declarations with type and index arguments,
+dictionaries and references to certified evidence declarations.
 -}
 surfaceCore :: Core -> [Text]
-surfaceCore core = [name <> " = " <> SurfaceCore.dump body | (name, bodies) <- Map.toAscList (coreBodies core), body <- bodies]
+surfaceCore = Map.elems . coreDisplay
 
 initialCore :: Prelude -> Core
-initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeCertificates p) Map.empty Map.empty Set.empty
+initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeCertificates p) Map.empty Map.empty Map.empty Set.empty
 
 -- | Extend the core with definitions, as @prf@ equations.
 addDefinitions :: [Text] -> Core -> Either String Core
@@ -363,7 +366,15 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
                   certificate td = maybe (Left ()) Right (Map.lookup (T.unpack (thmCore (tdInfo td))) (coreCertificates core))
                in case traverse (SurfaceCore.traverseObligations certificate . fcTerm) (fdClauses fd) of
                     Left () -> Left r3
-                    Right bodies -> Right r3 {runCore = core {coreBodies = Map.insert (funCore (fdInfo fd)) bodies (coreBodies core)}}
+                    Right bodies ->
+                      Right
+                        r3
+                          { runCore =
+                              core
+                                { coreBodies = Map.insert (funCore (fdInfo fd)) bodies (coreBodies core)
+                                , coreDisplay = Map.insert (funCore (fdInfo fd)) (CorePretty.function env fd) (coreDisplay core)
+                                }
+                          }
 
     -- A function's lemmas about its results: its closure, their indices, and the specifications asked of it.
     finishFunction fd r = (specify fd (indexed fd (closure fd (r {runObligations = obligationFacts r fd})))) {runObligations = []}

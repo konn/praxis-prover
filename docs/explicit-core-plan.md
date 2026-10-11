@@ -115,8 +115,8 @@ from the checked bodies.
 Inspect both representations with:
 
 ```sh
-cabal run praxis -- check --alone --dump-surface-core praxis/test/data/proof-flow.px
 cabal run praxis -- check --alone --dump-core praxis/test/data/proof-flow.px
+cabal run praxis -- check --alone --dump-pra praxis/test/data/proof-flow.px
 ```
 
 The PRA inference rules and kernel are unchanged. `replayCertificate` expands
@@ -127,21 +127,21 @@ statements; they are not a formal adequacy proof of the whole source language.
 
 ## Verification
 
-- `cabal test praxis`: 96 tests passed, including constructor normalization,
+- `cabal test praxis`: 99 tests passed, including constructor normalization,
   typed scope/signature/dictionary rejection, proof forwarding through functions
   and containers, rebuilding from a theorem application, impossible branches,
   invalid evidence, mixed GADT recursion, implicit pattern and proof inference,
-  and independent replay of a GADT projection proof.
+  independent replay of a GADT projection proof, and readable core dumps.
 - `cabal test praxis-core`: 401 tests and 38 doctests passed.
 - `cabal test praxis-lsp`: 25 tests passed.
 - HLS: both the explicit core and downstream LSP module checked successfully.
 - Fourmolu checks pass; `cabal-gild` refreshed the module lists.
 - `cabal check` exits successfully for all three packages, with existing package
   metadata and dependency-bound warnings.
-- `cabal run praxis -- check --alone --dump-surface-core
+- `cabal run praxis -- check --alone --dump-core
   praxis/test/data/proof-flow.px` succeeds. The dump retains explicit index
-  arguments, proof counts, dictionary types and source result types of empty
-  branches.
+  arguments, named proof references, dictionary types and source result types of
+  empty branches.
 
 No kernel rules or axioms were added.
 

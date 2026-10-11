@@ -23,8 +23,8 @@ import System.IO (hPutStrLn, stderr)
 newtype Command = Check CheckOptions
 
 data CheckOptions = CheckOptions
-  { dumpSurfaceCore :: !Bool
-  , dumpCore :: !Bool
+  { dumpCore :: !Bool
+  , dumpPra :: !Bool
   , alone :: !Bool
   , targets :: ![FilePath]
   }
@@ -33,7 +33,7 @@ main :: IO ()
 main = do
   Check CheckOptions {..} <- execParser (info (commandP <**> versionP <**> helper) (fullDesc <> header "praxis - a finitistic prover over primitive recursive arithmetic"))
   p <- either (\e -> hPutStrLn stderr ("the prelude did not certify: " <> e) *> exitFailure) pure prelude
-  oks <- mapM (checkTarget p dumpSurfaceCore dumpCore alone) (if null targets then ["."] else targets)
+  oks <- mapM (checkTarget p dumpCore dumpPra alone) (if null targets then ["."] else targets)
   if and oks then exitSuccess else exitFailure
 
 commandP :: Parser Command
@@ -44,11 +44,11 @@ commandP =
 
 checkP :: Parser CheckOptions
 checkP = do
-  dumpSurfaceCore <- switch $ long "dump-surface-core" <> help "Print explicit typed bodies with their checked evidence, including imported bodies"
-  dumpCore <-
+  dumpCore <- switch $ long "dump-core" <> help "Print elaborated declarations in readable surface-like syntax, including imported bodies"
+  dumpPra <-
     switch $
-      long "dump-core"
-        <> help "Print the core text generated, prf definitions and pra declarations, before the reports"
+      long "dump-pra"
+        <> help "Print the PRA text generated, prf definitions and pra declarations, before the reports"
   alone <-
     switch $
       long "alone"

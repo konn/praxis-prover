@@ -65,6 +65,29 @@ checkTests =
         c <- checkFile "test/data/natural.px"
         errors c @?= []
         assertBool "the conversion's result indices are certified" ("Natural.elt-of-plt.#index" `elem` checkedTheorems c)
+    , testCase "core dumps preserve elaborated clauses and named evidence" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module Dump where", "data Witness where", "  Mk : (n : Nat) -> n = 0 -> Witness", "repack : Witness -> Witness", "repack (Mk n h) = Mk n h", "data Box a = box a", "pack : Witness -> Box Witness", "pack p = box p", "choose : {n : Nat} -> n = 0 -> Witness -> Witness", "choose {n} h p = p", "use : Witness -> Witness", "use p = choose {0} rfl p"]
+            c = checkSource p "dump.px" source
+        errors c @?= []
+        (_, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
+        let output = T.unlines (surfaceCore core)
+        forM_ ["Dump.repack : Dump.Witness -> Dump.Witness", "Dump.repack (Dump.Witness.Mk n) =", "Dump.Witness.Mk n [proof Dump.repack.#obligation-", "Dump.Box.box @Dump.Witness p", "Dump.choose {n = 0} [proof Dump.use.#obligation-", "n : Nat"] $ \fragment ->
+          assertBool (T.unpack fragment) (fragment `T.isInfixOf` output)
+        forM_ ["TData", "TNat", "RefFunction", "u_Dump", "[proofs:"] $ \raw ->
+          assertBool ("no raw AST syntax: " <> T.unpack raw) (not (raw `T.isInfixOf` output))
+    , testCase "core dumps expose resolved dictionaries and impossible branches" $ do
+        c <- checkFile "test/data/constrained.px"
+        errors c @?= []
+        (_, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
+        let output = T.unlines (surfaceCore core)
+        assertBool "dictionary parameters are explicit" ("[dict dict1 :" `T.isInfixOf` output)
+        assertBool "dictionary arguments are explicit" ("[dict (" `T.isInfixOf` output)
+        p <- either assertFailure pure prelude
+        let impossible = checkSource p "empty.px" "module Empty where\ndata Result = R\ndata OnlyOne n where\n  One : OnlyOne 1\nf : OnlyOne 0 -> Result\nf ()\n"
+        errors impossible @?= []
+        (_, empty) <- maybe (assertFailure "missing impossible body") pure (checkedFinal impossible)
+        assertBool "an impossible branch is not printed as zero" ("Empty.f () =\n  unreachable" `T.isInfixOf` T.unlines (surfaceCore empty))
     , testCase "implicit indices are recovered when converting by constructors alone" $ do
         p <- either assertFailure pure prelude
         source <- TIO.readFile "test/data/natural.px"

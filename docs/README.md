@@ -27,4 +27,4 @@ A reader new to the code base might read [kernel.md](kernel.md) for the
 calculus and its trust model, skim [pra-and-prf.md](pra-and-prf.md), and then
 read [surface.md](surface.md) and [elaboration.md](elaboration.md) together
 with `praxis/test/data/list.px` and its generated core text,
-`praxis check --dump-core praxis/test/data/list.px`.
+`praxis check --dump-pra praxis/test/data/list.px`.

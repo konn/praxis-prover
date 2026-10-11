@@ -18,6 +18,7 @@ module Language.Praxis.Surface.Core (
   mapComputation,
   bodyType,
   dump,
+  pretty,
 ) where
 
 import Control.Monad (foldM, unless)
@@ -32,6 +33,7 @@ import Data.Type.Equality ((:~:) (..))
 import Data.Void (Void, absurd)
 import Language.Praxis.Surface.Core.Types
 import Language.Praxis.Surface.Env
+import Language.Praxis.Surface.Pretty qualified as Pretty
 import Language.Praxis.Surface.Syntax qualified as S
 import Language.Praxis.Surface.Term qualified as Tm
 import Language.Praxis.Surface.Types qualified as Ty
@@ -326,20 +328,60 @@ bodyType :: Body o -> Ty.Ty
 bodyType (Body _ t _ _) = forgetType t
 bodyType (EmptyBranch t) = forgetType t
 
--- | A stable, readable view including the explicit context and result type.
+-- | A readable view of an anonymous body, with its explicit local context.
 dump :: Body o -> Text
-dump (EmptyBranch t) = "unreachable : " <> T.pack (show (forgetType t))
-dump b@(Body ctx t value _) =
-  T.pack (show (mapTypes forgetType ctx)) <> " |- " <> term value <> " : " <> T.pack (show (forgetType t)) <> " [evidence: " <> T.pack (show (length (obligations b))) <> "]"
+dump b = case b of
+  EmptyBranch _ -> rendered
+  Body ctx _ _ _ ->
+    let binders = ["(v" <> T.pack (show i) <> " : " <> Pretty.typeText Pretty.emptyScope 0 ty <> ")" | (i, ty) <- zip [0 :: Int ..] (mapTypes forgetType ctx)]
+     in if null binders then rendered else "\\" <> T.unwords binders <> " -> " <> rendered
   where
-    term :: Value o ctx t -> Text
-    term = \case
-      Variable v -> "v" <> T.pack (show (number v))
+    rendered = "(" <> pretty emptyEnv Pretty.emptyScope (const "<evidence>") b <> " : " <> Pretty.typeText Pretty.emptyScope 0 (bodyType b) <> ")"
+
+{- | Inspect the typed value before numerical lowering or dictionary pruning.
+Evidence is rendered by its caller-supplied, certified declaration name.
+-}
+pretty :: forall o. Env -> Pretty.Scope -> (o -> Text) -> Body o -> Text
+pretty _ _ _ (EmptyBranch _) = "unreachable"
+pretty env sc proofName (Body _ _ value _) = term 0 value
+  where
+    term :: Int -> Value o ctx t -> Text
+    term p = \case
+      Variable v -> Pretty.nameAt "v" (Pretty.variableNames sc) (number v)
       Literal n -> T.pack (show n)
       Apply (Signature ref ts is _ _) values proofs ->
-        S.refName ref <> " @" <> T.pack (show ts) <> " {" <> T.pack (show is) <> "}(" <> T.intercalate ", " (arguments values) <> ")" <> " [proofs: " <> T.pack (show (length proofs)) <> "]"
-      Dictionary ty code -> "dictionary(" <> T.pack (show code) <> " : " <> T.pack (show (forgetType ty)) <> ")"
-      Absurd ty _ -> "absurd : " <> T.pack (show (forgetType ty))
+        let values' = arguments values
+            (names, runtime, explicit, proofPositions) = layout ref
+            -- A stored implicit value is printed once, in braces, using its
+            -- actual computation (which may be a recovered index projection).
+            indices = IM.union (IM.fromList [(i, values' !! j) | (i, j) <- runtime]) (IM.fromList [(i, Pretty.indexText sc 0 x) | (i, x) <- is, i `notElem` explicit])
+            explicitValues = [x | (j, x) <- zip [0 ..] values', j `notElem` map snd runtime]
+            evidence = ["[proof " <> proofName proof <> "]" | proof <- proofs]
+            args =
+              map (("@" <>) . Pretty.typeText sc 11) ts
+                <> ["{" <> Pretty.nameAt "i" names i <> " = " <> x <> "}" | (i, x) <- IM.toAscList indices]
+                <> Pretty.interleave (zip proofPositions evidence) explicitValues
+                <> drop (length proofPositions) evidence
+            flat = Pretty.application p (Pretty.reference ref) args
+         in if p == 0 && T.length flat > 88
+              then T.intercalate "\n  " (Pretty.reference ref : args)
+              else flat
+      Dictionary ty code -> "[dict (" <> dictionary code <> " : " <> Pretty.typeText sc 0 (forgetType ty) <> ")]"
+      Absurd ty proof -> Pretty.parens (p > 0) ("absurd [proof " <> proofName proof <> "] : " <> Pretty.typeText sc 0 (forgetType ty))
     arguments :: List (Value o ctx) ts -> [Text]
     arguments Nil = []
-    arguments (Cons v vs) = term v : arguments vs
+    arguments (Cons v vs) = term 11 v : arguments vs
+    dictionary = \case
+      Tm.Variable v -> absurd v
+      Tm.Literal n -> T.pack (show n)
+      Tm.Call r xs -> Pretty.application 0 (Pretty.reference r) ["[dict " <> dictionary x <> "]" | x <- xs]
+    layout ref = case [g | g <- Map.elems (envGlobals env), matches ref g] of
+      GFun f : _ -> (map fst (Ty.schemeValues (funScheme f)), zip (funRuntime f) [0 ..], [], map fst (funProofs f))
+      GCtor c : _ ->
+        let tele = constructorTele (ctorSignature c)
+         in (map teName tele, [(i, j) | (i, TeleEntry _ _ (Stored j)) <- zip [0 ..] tele], [i | (i, TeleEntry _ _ (Explicit _)) <- zip [0 ..] tele], map fst (constructorProofs (ctorSignature c)))
+      _ -> ([], [], [], [])
+    matches ref = \case
+      GFun f -> funCore f == S.refName ref
+      GCtor c -> ctorCore c == S.refName ref
+      _ -> False

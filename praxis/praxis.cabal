@@ -62,6 +62,7 @@ library
     Language.Praxis.Surface.Check
     Language.Praxis.Surface.Compile
     Language.Praxis.Surface.Core
+    Language.Praxis.Surface.Core.Pretty
     Language.Praxis.Surface.Core.Types
     Language.Praxis.Surface.CoreText
     Language.Praxis.Surface.Elab
@@ -75,6 +76,7 @@ library
     Language.Praxis.Surface.Match
     Language.Praxis.Surface.Parser
     Language.Praxis.Surface.Prelude
+    Language.Praxis.Surface.Pretty
     Language.Praxis.Surface.Rename
     Language.Praxis.Surface.Resolve
     Language.Praxis.Surface.Shape

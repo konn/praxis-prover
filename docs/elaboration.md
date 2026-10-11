@@ -47,7 +47,7 @@ conditional). A theorem is not in scope in its own proof.
 What no machine checks is the reading of the source: that the parser, the
 fixities and the resolution of names give a statement the meaning its author
 intended. Every proof assistant shares this last step; `praxis check
---dump-core` prints each core statement that was certified, for inspection.
+--dump-pra` prints each core statement that was certified, for inspection.
 
 ## Names in the core
 
@@ -77,7 +77,7 @@ the values already in scope.
 
 `CoreText` builds that text from a small term type, parenthesising every
 application, so the text means exactly the term whatever the core's fixities.
-`praxis check --dump-core` prints it.
+`praxis check --dump-pra` prints it.
 
 ## The prelude
 
@@ -693,7 +693,7 @@ theorem under constraints holds at every instance of its classes.
 
 The translation of statements therefore never meets a method. A certified
 statement mentions the functions of the instances chosen, which
-`praxis check --dump-core` shows, and § Statements and their adequacy
+`praxis check --dump-pra` shows, and § Statements and their adequacy
 applies unchanged. That an instance is the only one of its class for its type
 is what makes the choice the one the reader of the source predicts; soundness
 does not depend on it.
