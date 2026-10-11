@@ -1053,7 +1053,7 @@ elabInstance fx env sp idl = do
       prop0 <- runTC (elabProp scoped full ctx0 (lawBody l))
       -- Keep the indexed head universally quantified, with the same index
       -- hypotheses as an ordinary theorem over its dependent binders.
-      let (full', kept) = theoremPlaces e full prop0 (map snd binderTys)
+      let (full', kept) = theoremPlaces e full prop0 (map snd binderTys <> lawPremiseTypes e given full)
           prop = keepPlaces full' kept prop0
           premises = premisesFor e given kept
           q = iq <> [lawSeg]
@@ -1521,7 +1521,7 @@ elabDecl fx env sp name ty0 clauses = do
       prop0 <- runTC (elabPropWithProofArguments env {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
-      let (full', kept) = theoremPlaces env full prop0 (map snd binderTys)
+      let (full', kept) = theoremPlaces env full prop0 (map snd binderTys <> lawPremiseTypes env given full)
           prop = keepPlaces full' kept prop0
           premises = premisesFor env given kept <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd binderTys)]
           q = qualify env [name]
@@ -1659,47 +1659,47 @@ premisesFor env given kept = laws <> closures
     -- The type parameters a class with laws constrains, whose predicate is kept: what laws and closures are about.
     lawful = [i | i <- nub [j | (cls, j) <- given, any (not . null . classLaws) (classClosure env cls)], membershipSlot i `elem` kept]
     laws =
-      [ PremiseDef (PLaw (lawQual l) i) (map (atParam i . snd) (lawBinders l)) (toScope (mapGlobals (\r -> Map.findWithDefault r r table) body))
+      [ PremiseDef (PLaw (lawQual l) i) (map (renameDictionaryType table . atParam i . snd) (lawBinders l)) (toScope (mapGlobals (\r -> Map.findWithDefault r r table) body))
       | i <- lawful
       , l <- nubBy (\x y -> lawQual x == lawQual y) [l | (cls, j) <- given, j == i, c <- classClosure env cls, l <- classLaws c]
       , let body = fromScope (lawProp l)
-            mine = [(s, r) | (s, r) <- zip (lawSlots l) (placeRefs (lawSlots l)), r `elem` globalsOf body]
+            mine = [(s, r) | (s, r) <- zip (lawSlots l) (placeRefs (lawSlots l)), r `elem` (globalsOf body <> typeDictionaryRefs (map snd (lawBinders l)))]
       , Just table <- [Map.fromList <$> traverse (\(s, r) -> (r,) <$> lookup s {slotParam = i} places) mine]
       ]
-    closures =
-      [ PremiseDef (PClosure (slotMethod s) i) (map (atParam i) args) (toScope (Rel RelLt (Nat 0) (App (Global isRef) (apps (Global r) [Var (B k) | k <- [0 .. length args - 1]]))))
-      | (s, r) <- places
-      , not (isMembershipSlot s)
-      , let i = slotParam s
-      , i `elem` lawful
-      , Just isRef <- [lookup (membershipSlot i) places]
-      , Just (GMethod m) <- [Map.lookup (slotMethod s) (envGlobals env)]
-      , let (args, result) = arrows (schemeType (methodScheme m))
-      , result == TParam 0 []
-      ]
+    closures = methodPremises env kept (`elem` lawful)
 
-{- |
-The closures of the methods of a dictionary, at the type parameters whose
-predicates it has: for each method returning its class's parameter, of a
-class which a class with laws extends, that its results are members.  What
-the closure lemma of a function under constraints takes as premises.
+{- | Full contracts of the dictionary methods available to generated function
+obligations. Indexed results retain both membership and their exact indices.
 -}
 closurePremises :: Env -> [Slot] -> [PremiseDef]
-closurePremises env slots =
-  [ PremiseDef (PClosure (slotMethod s) i) (map (atParam i) args) (toScope (Rel RelLt (Nat 0) (App (Global isRef) (apps (Global r) [Var (B k) | k <- [0 .. length args - 1]]))))
-  | (s, r) <- places
-  , not (isMembershipSlot s)
-  , let i = slotParam s
-  , Just isRef <- [lookup (membershipSlot i) places]
-  , Just (GMethod m) <- [Map.lookup (slotMethod s) (envGlobals env)]
-  , lawful (methodClass m)
-  , let (args, result) = arrows (schemeType (methodScheme m))
-  , result == TParam 0 []
-  ]
+closurePremises env slots = methodPremises env slots (const True)
+
+methodPremises :: Env -> [Slot] -> (Int -> Bool) -> [PremiseDef]
+methodPremises env slots allowed = concatMap contract places
   where
     places = zip slots (placeRefs slots)
     classes = [c | GClass c <- Map.elems (envGlobals env)]
     lawful q = or [q `elem` map classQual closure && any (not . null . classLaws) closure | c <- classes, let closure = classClosure env c]
+    contract (slot, ref)
+      | not (isMembershipSlot slot)
+      , let parameter = slotParam slot
+      , allowed parameter
+      , Just isRef <- lookup (membershipSlot parameter) places
+      , Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env)
+      , lawful (methodClass method)
+      , Right ty <- dictionaryMethodType env slots slot =
+          let (domains, result) = arrows ty
+           in case result of
+                TParam i []
+                  | i == parameter ->
+                      [ PremiseDef
+                          (PClosure (slotMethod slot) parameter)
+                          domains
+                          (toScope (Rel RelLt (Nat 0) (App (Global isRef) (apps (Global ref) [Var (B k) | k <- [0 .. length domains - 1]]))))
+                      ]
+                TData {} -> [PremiseDef (PMethod (slotMethod slot) parameter ty ref) [] (toScope Top)]
+                _ -> []
+      | otherwise = []
 
 -- | A type over a class's parameter at a type parameter of a theorem: the class's parameter that one, and a type variable of a method's own no data type.
 atParam :: Int -> Ty -> Ty
@@ -1799,6 +1799,27 @@ typeDictionaryRefs types = concatMap (concatMap indexRefs . tyIndices) types
       IxFun _ xs -> concatMap indexRefs xs
       IxPartial _ _ _ xs -> concatMap indexRefs xs
       _ -> []
+
+{- | Law binders can use earlier nullary methods as dependent indices.
+Their logical slots survive theorem pruning even when the law's equation
+alone does not mention those values. Computational function pruning stays
+independent of these proof-only dependencies.
+-}
+lawPremiseTypes :: Env -> [(ClassInfo, Int)] -> [Slot] -> [Ty]
+lawPremiseTypes env given slots =
+  [ renameDictionaryType table (atParam parameter ty)
+  | (cls, parameter) <- given
+  , parent <- classClosure env cls
+  , law <- classLaws parent
+  , (_, ty) <- lawBinders law
+  , let table = Map.fromList [(ref, actual) | (slot, ref) <- zip (lawSlots law) (placeRefs (lawSlots law)), Just actual <- [lookup slot {slotParam = parameter} (zip slots (placeRefs slots))]]
+  ]
+
+{- | The indices in a typed law and its proposition share the same dictionary
+renaming. Static schema captures are references too, not ordinary names.
+-}
+renameDictionaryType :: Map.Map Ref Ref -> Ty -> Ty
+renameDictionaryType table = mapTypeGlobals (\r -> Map.findWithDefault r r table)
 
 -- | The type parameters a type mentions at kind @Type@, whose predicates the memberships of its values may take.
 valueVariables :: Ty -> [Int]

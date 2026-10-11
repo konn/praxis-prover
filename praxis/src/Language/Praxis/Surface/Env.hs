@@ -350,6 +350,7 @@ results are members of the parameter's type.
 data Premise
   = PLaw !QualName !Int
   | PClosure !QualName !Int
+  | PMethod !QualName !Int !Ty !Ref
   | PSchema !Int !Ty
   deriving stock (Show, Eq)
 

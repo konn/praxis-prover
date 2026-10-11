@@ -68,7 +68,7 @@ module Language.Praxis.Surface.Engine (
 
 import Bound (abstract, instantiate, toScope)
 import Control.Applicative ((<|>))
-import Control.Monad (foldM, forM, forM_, guard, unless, zipWithM)
+import Control.Monad (foldM, forM, forM_, guard, join, unless, zipWithM)
 import Data.Char (isAlphaNum)
 import Data.IntMap.Strict qualified as IM
 import Data.List (elemIndex, find, nub, sort)
@@ -385,11 +385,27 @@ renderPremises includeResultMembership predicate binders valueTerm pds = travers
       c <- formula (scPost contract)
       let binder = "(" <> fromText name <> " ∀ " <> unwordsB (map fromText (scLocals contract)) <> " : " <> intercalateB ", " ("schema_context" : hs) <> " |- " <> c <> ")"
       pure (GoalPremise (pdPremise pd) name binder Nothing (Just contract))
+    premise (k, pd) | PMethod _ _ ty ref <- pdPremise pd = do
+      entry <- termCT CVar (Global ref :: Expr Text)
+      callback <- methodCallback (length (fst (schemaArrows ty))) entry
+      validateMethodPredicates predicate ty
+      contract <- schemaContractWith includeResultMembership predicate valueTerm callback ty
+      let name = "method_closed_" <> T.pack (show k)
+      hs <- traverse hypText (scHyps contract)
+      c <- formula (scPost contract)
+      let quantified = if null (scLocals contract) then "" else " ∀ " <> unwordsB (map fromText (scLocals contract))
+          binder = "(" <> fromText name <> quantified <> " : " <> intercalateB ", " ("schema_context" : hs) <> " |- " <> c <> ")"
+      pure (GoalPremise (pdPremise pd) name binder Nothing (Just contract))
     premise (k, pd) = do
+      let callback = CCallback (CClosure ("unused_law_environment" : ["unused_law_" <> T.pack (show j) | j <- [0 .. length (pdBinders pd) - 1]]) (CNum 0) []) (CNum 0)
+          -- A law's quantified arguments have exact indices as well as
+          -- memberships, just like the arguments of a callback contract.
+          lawType = foldr TArrow TNat (pdBinders pd)
+      domains <- schemaContractWith False predicate valueTerm callback lawType
       let name = (case pdPremise pd of PLaw {} -> "law_"; _ -> "closed_") <> T.pack (show k)
-          locals = ["l_" <> T.pack (show j) | j <- [0 .. length (pdBinders pd) - 1]]
+          locals = scLocals domains
           body = instantiate (Var . (locals !!)) (fmap absurd (pdProp pd))
-          hyps = [membershipText p (CVar l) | (l, t) <- zip locals (pdBinders pd), Just p <- [predicate t]]
+      hyps <- traverse hypText (scHyps domains)
       c <- formula body
       let binder = "(" <> fromText name <> (if null locals then "" else " ∀ " <> unwordsB (map fromText locals)) <> " : " <> intercalateB ", " hyps <> " |- " <> c <> ")"
           closure = case (pdPremise pd, stripLocations body) of
@@ -399,7 +415,15 @@ renderPremises includeResultMembership predicate binders valueTerm pds = travers
                   (Global (Ref RefValueParam v), []) -> Just (valueVar v, [], result)
                   _ -> Nothing
             _ -> Nothing
-      pure (GoalPremise (pdPremise pd) name binder closure Nothing)
+      contract <- case (pdPremise pd, stripLocations body) of
+        (PClosure _ parameter, Rel RelLt (Nat 0) (App _ result)) -> case spine result of
+          (Global ref, _) -> do
+            entry <- termCT CVar (Global ref :: Expr Text)
+            method <- methodCallback (length (pdBinders pd)) entry
+            pure (Just domains {scCallback = method, scType = foldr TArrow (TParam parameter []) (pdBinders pd), scPost = body})
+          _ -> pure Nothing
+        _ -> pure Nothing
+      pure (GoalPremise (pdPremise pd) name binder closure contract)
 
 schemaArgumentType :: Ty -> Bool
 schemaArgumentType ty = let (domains, result) = schemaArrows ty in all firstOrder domains && firstOrder result
@@ -441,6 +465,212 @@ schemaContractUsing includeResultMembership avoid variableTerm predicate valueTe
   where
     foldr1OrTop [] = Top
     foldr1OrTop xs = foldr1 (Conn And) xs
+
+{- | An ordinary dictionary entry, represented as a callback only while
+building its logical contract. The dummy environment is ignored; applying
+this wrapper returns exactly the original method application.
+-}
+methodCallback :: Int -> CT -> Either String CT
+methodCallback arity entry = do
+  let fresh prefix = head [name | name <- iterate (<> "'") prefix, name `notElem` varsCT entry]
+      ignored = fresh "method_environment"
+      names = [fresh ("method_argument_" <> T.pack (show i)) | i <- [0 .. arity - 1]]
+  body <- applyMethodEntry entry (map CVar names)
+  pure (CCallback (CClosure (ignored : names) body []) (CNum 0))
+
+applyMethodEntry :: CT -> [CT] -> Either String CT
+applyMethodEntry entry arguments = case (entry, arguments) of
+  (_, []) | not (isParameter entry) -> Right entry
+  (CStatic name, _) -> Right (CSym name arguments)
+  (CPartial name captures arity, _) | length arguments == arity -> Right (CSym name (arguments <> captures))
+  (CIndexedPartial name captures arity prefix, _) | length arguments == arity -> Right (CSym name (take prefix captures <> arguments <> drop prefix captures))
+  (CClosure names body [], _)
+    | length names == length arguments ->
+        Right (substCT (Map.fromList (zip names arguments)) body)
+  (CCallback {}, _) -> applyCallback entry arguments
+  _ -> Left "a dictionary method does not have its declared arity"
+
+{- | Select dictionary entries through the same coherent resolver as term
+elaboration. Captured type indices are recovered from the actual goal,
+never replaced by unconstrained variables.
+-}
+
+-- Class laws need the complete first-order type of each argument, including
+-- dictionary-dependent indices, before their premise can be applied.
+lawArgumentFacts :: Knowledge -> TheoremInfo -> Goal -> [(Expr Text, Ty)] -> Either String Builder
+lawArgumentFacts k info initial values = fst <$> foldM argument ("", initial) values
+  where
+    argument state@(_, g) (value, ty) = do
+      term <- termCT CVar value
+      let env = goalEnv k info g
+          materialize ix = indexTermIn env (goalVars g) ix >>= either (const Nothing) Just . termCT CVar
+          variable name = fromMaybe (CVar name) (materialize (IxVar name))
+          parameter i = fromMaybe (CVar "?") (materialize (IxParam i))
+          ignored = head [name | name <- iterate (<> "'") "law_argument_environment", name `notElem` (schemaAvoid g <> varsCT term)]
+          callback = CCallback (CClosure [ignored] term []) (CNum 0)
+      validateMethodPredicates (typePredicate k g) ty
+      contract <- schemaContractUsing True (schemaAvoid g <> varsCT term) variable (typePredicate k g) parameter callback ty
+      unless ("?" `notElem` foldr (:) [] (scPost contract)) $ Left "a class-law argument has an unresolved dependent index"
+      foldM (fact contract) state (parts (scPost contract))
+    fact contract (before, g) proposition = do
+      proof <- proveSchemaContract k g contract {scPost = proposition}
+      stated <- formula proposition
+      let name = head [candidate | candidate <- iterate (<> "'") "LawArgument", candidate `notElem` map fst (goalHyps g)]
+      pure (before <> "have " <> fromText name <> ": " <> stated <> " { " <> proof <> " }; ", g {goalHyps = goalHyps g <> [(name, HProp proposition)]})
+    parts Top = []
+    parts (Conn And left right) = parts left <> parts right
+    parts proposition = [proposition]
+
+methodEntryAt :: Knowledge -> Goal -> Slot -> Ty -> Either String CT
+methodEntryAt k g slot actual = do
+  entry <- resolvedDictionaryEntry (knowEnv k) (goalDict g) slot actual
+  closed <- traverse capture entry
+  termCT CVar (join closed)
+  where
+    context = goalVars g <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+    capture ix = maybe (Left "a selected method's dependent index is not available in this goal") Right (indexTermIn (knowEnv k) context ix)
+
+{- | A method contract may come from the caller's matching premise or a
+certified implementation. Requiring both certificates for indexed results
+prevents a membership proof from silently forgetting the result's index.
+-}
+certifiedMethodEntry :: Knowledge -> Goal -> Ty -> CT -> Either String ()
+certifiedMethodEntry k g ty callback = do
+  let arity = length (fst (schemaArrows ty))
+      arguments = [CVar ("checked_method_argument_" <> T.pack (show i)) | i <- [0 .. arity - 1]]
+  applied <- applyCallback callback arguments
+  if any (matches applied arguments) (goalPremises g)
+    then Right ()
+    else case applied of
+      CSym name _ -> do
+        unless (Map.member name (knowClosures k)) $
+          Left "a selected method has no certified result membership contract"
+        case snd (schemaArrows ty) of
+          TData _ _ (_ : _) ->
+            unless (Map.member name (knowIndexSpecs k)) $
+              Left "a selected method has no certified exact result indices"
+          _ -> Right ()
+      _ -> Left "the caller has no matching typed contract for this dictionary method"
+  where
+    matches applied arguments premise = case (gpPremise premise, gpSchema premise) of
+      (PMethod {}, Just contract) -> applyCallback (scCallback contract) arguments == Right applied
+      _ -> False
+
+methodContract :: Knowledge -> Goal -> (Text -> CT) -> (Ty -> Maybe Pred) -> (Int -> CT) -> CT -> Ty -> Either String SchemaContract
+methodContract k g variableTerm predicate valueTerm entry ty = do
+  callback <- methodCallback (length (fst (schemaArrows ty))) entry
+  validateMethodPredicates predicate ty
+  certifiedMethodEntry k g ty callback
+  contract <- schemaContractUsing True (schemaAvoid g <> varsCT entry) variableTerm predicate valueTerm callback ty
+  unless ("?" `notElem` concatMap hypVariables (scHyps contract) <> foldr (:) [] (scPost contract)) $
+    Left "a method contract has an unresolved dependent index"
+  pure contract
+  where
+    hypVariables (HMember _ name) = [name]
+    hypVariables (HProp prop) = foldr (:) [] prop
+
+validateMethodPredicates :: (Ty -> Maybe Pred) -> Ty -> Either String ()
+validateMethodPredicates predicate ty = do
+  let (domains, result) = schemaArrows ty
+  unless (all (\t -> t == TNat || isJust (predicate t)) (result : domains)) $
+    Left "a dictionary method's typed contract needs every domain and result membership predicate"
+
+methodPremiseObligation :: Knowledge -> Goal -> [Slot] -> Map Int Ty -> (Text -> CT) -> (Int -> CT) -> Premise -> Either String Obligation
+methodPremiseObligation k g slots assign variableTerm valueTerm premise = case premise of
+  PMethod method parameter ty _ -> do
+    slot <- maybe (Left "a method contract refers to no dictionary entry") Right (find (\s -> slotMethod s == method && slotParam s == parameter) slots)
+    actual <- at parameter
+    entry <- methodEntryAt k g slot actual
+    values <- forM [(i, s) | (i, s) <- zip [0 :: Int ..] (valueSlots slots), dictionaryName i `elem` dependencies ty] \(i, s) -> do
+      actualValue <- at (slotParam s)
+      value <- methodEntryAt k g s actualValue
+      pure (dictionaryName i, value)
+    let variable name = fromMaybe (variableTerm name) (lookup name values)
+        predicate = predicateOf (knowMembership k) (\i -> Map.lookup i assign >>= typePredicate k g)
+    OSchema <$> methodContract k g variable predicate valueTerm entry ty
+  _ -> Left "internal: a method contract was expected"
+  where
+    at i = maybe (Left "a method contract's class type is not determined by the arguments") Right (Map.lookup i assign)
+    dictionaryName i = "#d" <> T.pack (show i)
+    dependencies = concatMap Types.ixVars . Types.tyIndices
+
+{- | Logical contracts use the actual dictionary passed to a function.
+Static entries and runtime values keep the same positions as its code;
+extra membership predicates belong only to the generated lemma.
+-}
+functionDictionary :: FunInfo -> [Ty] -> [Slot]
+functionDictionary info argTypes = funSlots info <> [membershipSlot i | i <- variables, membershipSlot i `notElem` funSlots info]
+  where
+    result = snd (schemaArrows (schemeType (funScheme info)))
+    variables = nub (concatMap valueVariables (result : argTypes))
+
+functionEntry :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Slot -> Either String CT
+functionEntry k g info argTypes args given slot = case lookup slot (zip (funSlots info) (drop (length argTypes) args)) of
+  Just value -> Right value
+  Nothing -> do
+    predicate <- maybe (Left "a function contract's dictionary type is not known") Right (Map.lookup (slotParam slot) given)
+    actual <- typeFromPredicate predicate
+    methodEntryAt k g slot actual
+  where
+    typeFromPredicate predicate
+      | predicate == anyPred = Right TNat
+      | Just parameter <- ownParam g predicate = Right (TParam parameter [])
+      | Pred name parameters <- predicate
+      , (dn, used) : _ <- [(dn, used) | (dn, (core, used)) <- Map.toList (knowMembership k), core == name]
+      , [dat] <- [d | GData d <- Map.elems (envGlobals (knowEnv k)), renderQualName (dataQual d) == dn] = do
+          unless (null (dataIndices dat)) $ Left "an indexed class type cannot be recovered from its erased membership predicate"
+          types <- forM [0 .. length (dataParams dat) - 1] \i -> case lookup i (zip used parameters) of
+            Just value -> typeFromPredicate (parameterPredicate value)
+            Nothing -> Left "a class type parameter cannot be recovered from its erased membership predicate"
+          Right (TData dn types [])
+      | otherwise = Left "a class type cannot be recovered from its membership predicate"
+
+functionPremiseObligation :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Premise -> Either String Obligation
+functionPremiseObligation k g info argTypes args given = \case
+  PClosure method parameter -> maybe (Left "the predicate required by a method closure is not known") (Right . OClosure method . siteOfPred k g) (Map.lookup parameter given)
+  PMethod method parameter ty _ -> do
+    slot <- maybe (Left "a function contract refers to no dictionary method") Right (find (\s -> slotMethod s == method && slotParam s == parameter) dict)
+    entry <- functionEntry k g info argTypes args given slot
+    values <- forM [(i, s) | (i, s) <- zip [0 :: Int ..] (valueSlots dict), name i `elem` concatMap Types.ixVars (Types.tyIndices ty)] \(i, s) -> (name i,) <$> functionEntry k g info argTypes args given s
+    let variable source = fromMaybe (CVar (mangleVariable source)) (lookup source values)
+    OSchema <$> methodContract k g variable predicate valueTerm entry ty
+  PSchema position ty -> do
+    callback <- maybe (Left "the callback argument is not given") Right (listToMaybe (drop position args))
+    OSchema <$> schemaContract g predicate valueTerm callback ty
+  PLaw {} -> Left "internal: a class law among the premises of a function contract"
+  where
+    dict = functionDictionary info argTypes
+    predicate = predicateOf (knowMembership k) (`Map.lookup` given)
+    valueTerm i = if null args then CVar "?" else functionValueAt (knowEnv k) info argTypes args i
+    name i = "#d" <> T.pack (show i)
+
+{- | Parameters appearing only in method or callback premises cannot be
+inferred from the ordinary sequent. Instantiate them in the certified rule's
+binder order, including the selected nullary dictionary values.
+-}
+functionRuleArguments :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Text -> Either String Builder
+functionRuleArguments k g info argTypes args given lemma = do
+  methods <- forM [(slot, ref) | (slot, ref) <- zip dict (placeRefs dict), not (isMembershipSlot slot)] \(slot, Ref _ name) -> do
+    entry <- functionEntry k g info argTypes args given slot
+    value <- applyMethodEntry entry [CVar ("z_" <> T.pack (show i)) | i <- [1 .. slotArity slot]]
+    pure (if slotArity slot > 0 then name else valueVar name, parens (render value))
+  callbacks <- forM (zip [1 ..] (schemaArguments argTypes)) \(serial, (position, ty)) -> do
+    callback <- maybe (Left "a function contract needs its fixed callback") Right (listToMaybe (drop position args))
+    value <- case callback of
+      CCallback code@CStatic {} _ -> parens . render <$> applyCallback (CCallback code (CVar "z_1")) [CVar ("z_" <> T.pack (show i)) | i <- [2 .. 1 + length (fst (schemaArrows ty))]]
+      CCallback CClosure {} _ -> Right "_"
+      _ -> Left "a function contract argument has no fixed code"
+    pure (schemaName serial, value)
+  let predicates = [(name, parens (render (predicateAt predicate (CVar "z_1")))) | (slot, Ref _ name) <- zip dict (placeRefs dict), isMembershipSlot slot, Just predicate <- [Map.lookup (slotParam slot) given]]
+      ordinary = [(mangleVariable ("x" <> T.pack (show i)), parens (render (callbackEnvironment value))) | (i, value) <- zip [0 :: Int ..] (take (length argTypes) args)]
+      indices = [(mangleVariable ("#" <> name), parens (render (functionValueAt (knowEnv k) info argTypes args i))) | (i, (name, _)) <- zip [0 ..] (schemeValues (funScheme info)), not (null args)]
+      argument name
+        | "z_" `T.isPrefixOf` name = fromText name
+        | otherwise = fromMaybe "_" (lookup name (predicates <> methods <> callbacks <> ordinary <> indices))
+  pure (mconcat [" " <> argument name | name <- Map.findWithDefault [] lemma (knowRuleMetas k), name /= "schema_context"])
+  where
+    dict = functionDictionary info argTypes
+    parens body = "(" <> body <> ")"
 
 -- | The text of a theorem's core statement: 'statementGoal' as a sequent.
 theoremStatement :: Map Text (Text, [Int]) -> TheoremDef -> Either String Text
@@ -927,7 +1157,7 @@ instantiate the certified rule, including its typed closure obligations.
 -}
 obligationAppeal :: Knowledge -> Goal -> TheoremInfo -> Map Text CT -> Either String Builder
 obligationAppeal k g info known
-  | null callbacks = Right ("exact " <> fromText (thmCore info))
+  | null (thmPremises info) = Right ("exact " <> fromText (thmCore info))
   | otherwise = do
       actualCallbacks <- forM (zip [1 ..] callbacks) \(serial, (position, _)) -> do
         value <-
@@ -1235,28 +1465,15 @@ indexOf k g eqs t0 = case t0 of
               Nothing -> Right ""
               Just info -> do
                 let argTypes = [snd (schemeValues (funScheme info) !! i) | i <- funRuntime info] <> take (funArity info) (fst (schemaArrows (schemeType (funScheme info))))
-                    result = snd (schemaArrows (schemeType (funScheme info)))
-                    variables = nub (concatMap valueVariables (result : argTypes))
-                    dict = funSlots info <> [membershipSlot i | i <- variables, membershipSlot i `notElem` funSlots info]
-                    given = knownPredicates k g argTypes args
-                    predicate = predicateOf (knowMembership k) (Just . (\i -> Map.findWithDefault anyPred i given))
-                proofs <- forM (schemaArguments argTypes) \(position, ty) -> do
-                  contract <- schemaContract g predicate (functionValueAt (knowEnv k) info argTypes args) (args !! position) ty
-                  proveSchemaContract k g contract
-                statics <- forM (zip [1 ..] (schemaArguments argTypes)) \(serial, (position, ty)) -> do
-                  argument <- case args !! position of
-                    CCallback code@CStatic {} _ -> (\body -> "(" <> render body <> ")") <$> applyCallback (CCallback code (CVar "z_1")) [CVar ("z_" <> T.pack (show j)) | j <- [2 .. 1 + length (fst (schemaArrows ty))]]
-                    CCallback CClosure {} _ -> Right "_"
-                    _ -> Left "an indexed function needs its fixed callback"
-                  pure (schemaName serial, argument)
-                let predicates = [(name, "(" <> render (predicateAt (Map.findWithDefault anyPred (slotParam slot) given) (CVar "z_1")) <> ")") | (slot, Ref _ name) <- zip dict (placeRefs dict), isMembershipSlot slot]
-                    runtime (CCallback _ environment) = environment
-                    runtime value = value
-                    values = [(name, "(" <> render (runtime value) <> ")") | (name, value) <- Map.toList (Map.fromList byArg <> sigma)]
-                    argument name
-                      | "z_" `T.isPrefixOf` name = fromText name
-                      | otherwise = fromMaybe "_" (lookup name (predicates <> statics <> values))
-                    explicit = if null statics then "" else mconcat [" " <> argument name | name <- Map.findWithDefault [] (ixsLemma s) (knowRuleMetas k), name /= "schema_context"]
+                    dict = functionDictionary info argTypes
+                    given0 = knownPredicates k g argTypes args <> dictionaryPredicates k g info argTypes args
+                    given = given0 <> Map.fromList [(slotParam slot, anyPred) | slot <- dict, isMembershipSlot slot]
+                    premises = map pdPremise (closurePremises (knowEnv k) dict) <> [PSchema position ty | (position, ty) <- schemaArguments argTypes]
+                forM_ [parameter | PMethod _ parameter _ _ <- premises] \parameter ->
+                  unless (Map.member parameter given0) $ Left "an indexed function's method contract needs its actual class predicate"
+                required <- traverse (functionPremiseObligation k g info argTypes args given) premises
+                proofs <- traverse (discharge k g) required
+                explicit <- if null premises then Right "" else functionRuleArguments k g info argTypes args given (ixsLemma s)
                 pure (explicit <> mconcat [" { " <> proof <> " }" | proof <- proofs])
             let at = substCT (Map.fromList byArg <> sigma)
                 appeal = mems <> haves <> props <> "exact " <> fromText (ixsLemma s) <> callbacks
@@ -1331,6 +1548,29 @@ knownPredicates k g tys args = Map.unions (zipWith fromArgument tys args)
           Map.unions [fromPredicate ty (parameterPredicate p) | (i, p) <- zip used parameters, Just ty <- [listToMaybe (drop i ts)]]
     fromPredicate _ _ = Map.empty
 
+{- | A class parameter can occur only in its dictionary, as with a nullary
+enumerator. Recover its actual predicate from the selected method's result
+contract before instantiating an index-only lemma.
+-}
+dictionaryPredicates :: Knowledge -> Goal -> FunInfo -> [Ty] -> [CT] -> Map Int Pred
+dictionaryPredicates k g info argTypes args =
+  Map.unions
+    [ fromPredicate result predicate
+    | (slot, entry) <- zip (funSlots info) (drop (length argTypes) args)
+    , not (isMembershipSlot slot)
+    , Right ty <- [dictionaryMethodType (knowEnv k) (funSlots info) slot]
+    , let (domains, result) = schemaArrows ty
+    , Right applied <- [applyMethodEntry entry [CVar ("dictionary_argument_" <> T.pack (show i)) | i <- [0 .. length domains - 1]]]
+    , Just predicate <- [termPred k g applied]
+    ]
+  where
+    fromPredicate (TParam i []) predicate = Map.singleton i predicate
+    fromPredicate (TData dn ts _) (Pred name parameters)
+      | Just (actual, used) <- Map.lookup dn (knowMembership k)
+      , name == actual =
+          Map.unions [fromPredicate ty (parameterPredicate p) | (i, p) <- zip used parameters, Just ty <- [listToMaybe (drop i ts)]]
+    fromPredicate _ _ = Map.empty
+
 -- | The membership predicate of a term, in a goal: a variable's, by its hypothesis; a function's result's, by its closure lemma at the predicates of its arguments.
 termPred :: Knowledge -> Goal -> CT -> Maybe Pred
 termPred k g term
@@ -1344,19 +1584,19 @@ termPred k g term
       , let captures = init args
       ] =
       Just p
+  | p : _ <-
+      [ parameterPredicate (substCT sigma (predicateParam p))
+      | gp <- goalPremises g
+      , Just contract <- [gpSchema gp]
+      , Rel RelLt (Nat 0) member <- parts (scPost contract)
+      , Right code <- [termCT CVar member]
+      , Just (p, patternTerm) <- [splitMembership code]
+      , Just sigma <- [matchCT (scLocals contract) patternTerm term Map.empty]
+      ] =
+      Just p
   | otherwise = case term of
       CVar v -> listToMaybe [p | (_, HMember p x) <- goalHyps g, x == v]
       CSym f args
-        | p : _ <-
-            [ p
-            | gp <- goalPremises g
-            , Just contract <- [gpSchema gp]
-            , Rel RelLt (Nat 0) member <- parts (scPost contract)
-            , Right code <- [termCT CVar member]
-            , Just (p, patternTerm) <- [splitMembership code]
-            , Just _ <- [matchCT (scLocals contract) patternTerm term Map.empty]
-            ] ->
-            Just p
         | Just cl <- Map.lookup f (knowClosures k) -> do
             let given = knownPredicates k g (closureArgTys cl) args
             predicateOf (knowMembership k) (`Map.lookup` given) (closureResultTy cl)
@@ -1760,7 +2000,7 @@ evidence k info g le = case spineOf le of
         case Map.lookup 0 (assignment (map snd (lawBinders l)) (map snd typed)) of
           Just (TParam j []) -> do
             name <- own sp (PLaw (lawQual l) j)
-            pre <- memberships k g [(arg, e, typePredicate k g ty) | ((arg, (e, ty)), (_, TParam 0 [])) <- zip (zip args typed) (lawBinders l)]
+            pre <- either (Left . EngineError sp) Right (lawArgumentFacts k info g typed)
             -- The law's methods, the goal's places for them at j.
             let table = Map.fromList <$> traverse (\(s, r) -> (r,) <$> goalPlace s {slotParam = j}) (zip (lawSlots l) (placeRefs (lawSlots l)))
             eq <- equationOf sp (lawProp l) table typed (length (lawBinders l))
@@ -2040,7 +2280,6 @@ theorem, the goal's own premise.
 -}
 premiseBlocks :: Knowledge -> Goal -> Span -> TheoremInfo -> Map Int Ty -> [(Expr Text, Ty)] -> Map Text CT -> Either EngineError Builder
 premiseBlocks k g sp t assign typed sigma = either (Left . EngineError sp) Right do
-  obs <- premiseObligations k g assign t
   args <- traverse (termCT CVar . fst) typed
   let values = map mangleVariable (thmValues t)
       (defined, _) = indexHypotheses (thmBinders t) values (thmIndexHyps t)
@@ -2048,6 +2287,9 @@ premiseBlocks k g sp t assign typed sigma = either (Left . EngineError sp) Right
       valueTerm i = substCT (byBinder <> sigma) (fromMaybe (CVar (values !! i)) (lookup i defined))
       variableTerm name = Map.findWithDefault (CVar (mangleVariable name)) (mangleVariable name) (byBinder <> sigma)
       predicate = predicateOf (knowMembership k) (\i -> Map.lookup i assign >>= typePredicate k g)
+  obs <- forM [p | p <- thmPremises t, case p of { PSchema {} -> False; _ -> True }] \case
+    premise@PMethod {} -> methodPremiseObligation k g (thmSlots t) assign variableTerm valueTerm premise
+    premise -> premiseObligation k g assign t premise
   schemaObs <- forM [(position, ty) | PSchema position ty <- thmPremises t] \(position, ty) -> do
     callback <- maybe (Left "a schema theorem needs its callback argument") Right (listToMaybe (drop position args))
     OSchema <$> schemaContractUsing True (schemaAvoid g) variableTerm predicate valueTerm callback ty
@@ -2059,7 +2301,7 @@ comes from the certified rule, so erased phantom predicates need no guesses.
 -}
 schemaTheoremArguments :: Knowledge -> Goal -> TheoremInfo -> Map Int Ty -> [(Expr Text, Ty)] -> Map Text CT -> Either String Builder
 schemaTheoremArguments k g t assign typed sigma
-  | null schemas = Right ""
+  | null schemas && not (any methodPremise (thmPremises t)) = Right ""
   | otherwise = do
       args <- traverse (termCT CVar . fst) typed
       callbacks <- forM (zip [1 ..] schemas) \(serial, (position, ty)) -> do
@@ -2069,6 +2311,12 @@ schemaTheoremArguments k g t assign typed sigma
           CCallback CClosure {} _ -> Right "_"
           _ -> Left "a schema theorem argument has no fixed code"
         pure (schemaName serial, argument)
+      methods <- forM [(slot, name) | (slot, Ref _ name) <- zip (thmSlots t) (placeRefs (thmSlots t)), not (isMembershipSlot slot)] \(slot, name) -> do
+        actual <- maybe (Left "a method contract's class type is not determined by the arguments") Right (Map.lookup (slotParam slot) assign)
+        entry <- methodEntryAt k g slot actual
+        let values = [CVar ("z_" <> T.pack (show i)) | i <- [1 .. slotArity slot]]
+        applied <- applyMethodEntry entry values
+        pure (if slotArity slot > 0 then name else valueVar name, parensB (render applied))
       let predicates =
             [ (name, parensB (render (predicateAt predicate (CVar "z_1"))))
             | (slot, Ref _ name) <- zip (thmSlots t) (placeRefs (thmSlots t))
@@ -2086,17 +2334,23 @@ schemaTheoremArguments k g t assign typed sigma
           runtime value = value
           argument name
             | "z_" `T.isPrefixOf` name = fromText name
-            | otherwise = fromMaybe "_" (lookup name (predicates <> callbacks <> termArgs))
+            | otherwise = fromMaybe "_" (lookup name (predicates <> callbacks <> methods <> termArgs))
       pure (mconcat [" " <> argument name | name <- parameters])
   where
     schemas = [(position, ty) | PSchema position ty <- thmPremises t]
     parensB body = "(" <> body <> ")"
+    methodPremise PMethod {} = True
+    methodPremise _ = False
 
 -- | The obligations the premises of a theorem under constraints leave where it is appealed to, its type parameters at the types given.
 premiseObligations :: Knowledge -> Goal -> Map Int Ty -> TheoremInfo -> Either String [Obligation]
-premiseObligations k g assign t = forM [p | p <- thmPremises t, case p of { PSchema {} -> False; _ -> True }] \case
+premiseObligations k g assign t = traverse (premiseObligation k g assign t) [p | p <- thmPremises t, case p of PSchema {} -> False; _ -> True]
+
+premiseObligation :: Knowledge -> Goal -> Map Int Ty -> TheoremInfo -> Premise -> Either String Obligation
+premiseObligation k g assign t = \case
   PLaw lq i -> OLaw lq <$> at i
   PClosure mq i -> OClosure mq . siteOfType k g <$> at i
+  premise@PMethod {} -> methodPremiseObligation k g (thmSlots t) assign (CVar . mangleVariable) (const (CVar "?")) premise
   PSchema {} -> Left "internal: a schema contract needs its callback argument"
   where
     at i = maybe (Left (T.unpack (displayQualName (thmQual t)) <> " is under a class with laws: apply it to its arguments, whose types give the instances")) Right (Map.lookup i assign)
@@ -2277,7 +2531,7 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
     -- A method of the goal's dictionary applied: the goal's premise stating its closure.
     premised f = \case
       OMember p t
-        | (name, argPs) : _ <- [(gpName gp, ps) | gp <- goalPremises g, Just (place, ps, result) <- [gpClosure gp], place == f, result == p] ->
+        | (name, argPs) : _ <- [(gpName gp, ps) | gp <- goalPremises g, Just (place, ps, result) <- [gpClosure gp], not (isJust (gpSchema gp)), place == f, result == p] ->
             Just (afterMemberships [(a, q) | (a, Just q) <- zip (operands t) argPs] [] (const ("exact " <> fromText name)))
       _ -> Nothing
     -- A constructor applied: its introduction, after the memberships of the fields its type checks, and the equations of indices of its entries.
@@ -2338,14 +2592,12 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, schemaPrem
       _ -> Nothing
     -- The appeal to a closure lemma: its premises, the closures of its dictionary's methods, at the predicates its type parameters are at.
     closureAppeal cl given args = do
-      subs <- forM (closurePremisesOf cl) \case
-        PClosure mq i -> maybe (Left ("the predicate of the type parameter " <> show i <> " of a closure is not known")) (Right . OClosure mq . siteOfPred k g) (Map.lookup i given)
-        PLaw {} -> Left "internal: a law among the premises of a closure"
-        PSchema position ty -> do
-          callback <- maybe (Left "the callback argument is not given") Right (listToMaybe (drop position args))
-          info <- maybe (Left "the callback's enclosing function is not known") Right (find (\f -> functionLemma f "#closed" == closureLemma cl) [f | GFun f <- Map.elems (envGlobals env)])
-          OSchema <$> schemaContract g (predicateOf (knowMembership k) (`Map.lookup` given)) (functionValueAt env info (closureArgTys cl) args) callback ty
-      Right (subs, \rs -> "exact " <> fromText (closureLemma cl) <> blocks rs)
+      info <- maybe (Left "the closure's enclosing function is not known") Right (find (\f -> functionLemma f "#closed" == closureLemma cl) [f | GFun f <- Map.elems (envGlobals env)])
+      subs <- traverse (functionPremiseObligation k g info (closureArgTys cl) args given) (closurePremisesOf cl)
+      explicit <- if any typedPremise (closurePremisesOf cl) then functionRuleArguments k g info (closureArgTys cl) args given (closureLemma cl) else Right ""
+      Right (subs, \rs -> "exact " <> fromText (closureLemma cl) <> explicit <> blocks rs)
+    typedPremise PMethod {} = True
+    typedPremise _ = False
     -- The predicates a function's closure lemma needs of its arguments, at the
     -- predicates of the type parameters the result's gives: none when it does
     -- not give them all.
