@@ -58,6 +58,8 @@ module Language.Praxis.Surface.Elab (
   TC,
   Failure,
   runTC,
+  runTCWithRequirements,
+  requireDependency,
   inferTerm,
   inferTermWithObligations,
   inferTermWithHypotheses,
@@ -76,6 +78,7 @@ import Bound (Scope, Var (..), fromScope, instantiate, toScope)
 import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM, forM_, join, unless, when, zipWithM)
 import Control.Monad.State.Strict qualified as State
+import Control.Monad.Writer.Strict (WriterT (..), tell)
 import Data.Bifunctor (first)
 import Data.Foldable (toList)
 import Data.Graph (SCC (..), stronglyConnComp)
@@ -88,6 +91,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void, absurd)
 import Language.Praxis.Surface.Core qualified as Core
+import Language.Praxis.Surface.Desugar (Dependency, Requirement (..), Requirements, requirement, requirements)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Index
@@ -107,9 +111,10 @@ import Text.Read (readMaybe)
 -- | A declaration, elaborated: what the driver encodes, compiles or proves, in order.
 data Item
   = -- | a data type, with its index functions when it is in the GADT style
-    IData !DataInfo !Span ![FunDef]
+    IData !DataInfo !Span ![FunDef] !Requirements !(Map.Map Text QualName)
   | IFun !FunDef
   | ITheorem !TheoremDef
+  | IClass !ClassInfo !Span ![Slot] ![PremiseDef] !Requirements !(Map.Map Text QualName)
   | -- | A requested builtin registration, admitted by the checker in source order.
     IBuiltin !(Located Text) !(Located QualName)
   | -- | a declaration which did not elaborate; the rest go on without it
@@ -121,6 +126,10 @@ data FunDef = FunDef
   , fdResult :: !Ty
   , fdClauses :: ![FunClause]
   , fdSpan :: !Span
+  , fdRequirements :: !Requirements
+  , fdBuiltinScope :: !(Map.Map Text QualName)
+  , fdEvidenceSlots :: ![Slot]
+  , fdEvidencePremises :: ![PremiseDef]
   , fdImpossible :: ![Text]
   -- ^ the constructors its clauses omit, by their core names, impossible at the indices of its signature
   }
@@ -161,6 +170,8 @@ data TheoremDef = TheoremDef
   -- ^ its value parameters, the values its binders' indices mention, in the scope of its proposition before its binders
   , tdHypNames :: ![Text]
   -- ^ the names of the leading antecedents of its proposition, hypotheses a proof may name: the proofs a clause of a function binds
+  , tdRequirements :: !Requirements
+  , tdBuiltinScope :: !(Map.Map Text QualName)
   , tdIndexHyps :: ![(Int, Text, Ix)]
   -- ^ the indices of its binders' types: a binder's position, an index function by its core name, and the index over its value parameters
   }
@@ -210,29 +221,46 @@ data Failure
   | Undetermined !ElabError
 
 -- | Type checking: without unification variables, it has no state.
-type TC = Either Failure
+type TC = WriterT Requirements (Either Failure)
 
+-- | Run a caller which cannot retain or validate elaboration dependencies.
 runTC :: TC a -> Either ElabError a
-runTC = first \case
-  Refused err -> err
-  Undetermined err -> err
+runTC action = do
+  (value, needed) <- runTCWithRequirements action
+  case requirements needed of
+    [] -> pure value
+    firstRequirement : _ -> Left (ElabError (requirementSpan firstRequirement) "elaboration dependencies must be retained and checked before using the desugared syntax")
+
+-- | Run a caller responsible for retaining or validating every dependency.
+runTCWithRequirements :: TC a -> Either ElabError (a, Requirements)
+runTCWithRequirements = first failureError . runWriterT
+  where
+    failureError = \case
+      Refused err -> err
+      Undetermined err -> err
+
+requireDependency :: Span -> Dependency -> TC ()
+requireDependency span' = tell . requirement span'
+
+throwTC :: Failure -> TC a
+throwTC = WriterT . Left
 
 failAt :: Span -> String -> TC a
-failAt sp msg = Left (Refused (ElabError sp msg))
+failAt sp msg = throwTC (Refused (ElabError sp msg))
 
 -- | A term whose type is not determined where it stands, and what that leaves unresolved.
 undetermined :: Span -> String -> TC a
-undetermined sp msg = Left (Undetermined (ElabError sp msg))
+undetermined sp msg = throwTC (Undetermined (ElabError sp msg))
 
--- | The result, or, when the term is undetermined, why.
+-- | The result, or, when the term is undetermined, why. Refusals still fail.
 attempt :: TC a -> TC (Either ElabError a)
-attempt = \case
-  Left (Undetermined err) -> Right (Left err)
+attempt action = WriterT case runWriterT action of
+  Left (Undetermined err) -> Right (Left err, mempty)
   Left refused -> Left refused
-  Right x -> Right (Right x)
+  Right (value, needed) -> Right (Right value, needed)
 
 liftE :: Either ElabError a -> TC a
-liftE = first Refused
+liftE action = WriterT ((,mempty) <$> first Refused action)
 
 -- * Modules
 
@@ -333,7 +361,9 @@ elabModule fx env0 rn = withModules (walk envData decls [])
               _ -> walk env rest (IFailed (ElabError sp "a clause with no signature for its name") : acc)
             R.DClass cd -> case elabClass fx env cd of
               Left err -> walk env rest (IFailed err : acc)
-              Right env' -> walk env' rest acc
+              Right env' -> case Map.lookup (qualify env [Ident (unLocated (R.className cd))]) (envGlobals env') of
+                Just (GClass cls) -> walk env' rest (IClass cls sp [] [] mempty (envBuiltins env') : acc)
+                _ -> walk env rest (IFailed (ElabError sp "internal: the elaborated class is unavailable") : acc)
             R.DInstance idl -> case elabInstance fx env sp idl of
               Left err -> walk env rest (IFailed err : acc)
               Right (env', items) -> walk env' rest (reverse items <> acc)
@@ -423,11 +453,11 @@ elabDataDecl fx env sig sp d
           declare (e, fs) (p, n) = let (e', f) = addInstanceFunction e q (Ident n) (Scheme params [] (TArrow self (erase (indices !! p)))) 1 [] in (e', fs <> [f])
           (env2, fns) = foldl declare (env1, []) (zip [0 ..] fnNames)
       defs <- forM (zip [0 ..] fns) \(p, f) -> indexFunction env2 info fns p f sp
-      pure (foldl (\e fd -> registerUnfoldings (fdInfo fd) (fdClauses fd) e) env2 defs, [IData info sp defs])
+      pure (foldl (\e fd -> registerUnfoldings (fdInfo fd) (fdClauses fd) e) env2 defs, [IData info sp defs mempty Map.empty])
   | otherwise = do
       (params, ctors) <- elabData fx env d
       let (env', info) = addData env (Ident (unLocated (R.dataName d))) params ctors
-      pure (env', [IData info sp []])
+      pure (env', [IData info sp [] mempty Map.empty])
   where
     gadtStyle =
       not (null (R.dataSignatures d))
@@ -838,7 +868,7 @@ indexFunction env info fns p f sp = do
     prepared <- either (Left . ElabError sp) Right (Core.elaborate env [] fieldTypes body)
     withoutProofs <- Core.traverseObligations (const (Left (ElabError sp "internal: index expression has a proof argument"))) prepared
     pure (FunClause [PCon (Ref RefConstructor (ctorCore c)) (map (PVar . Hint) fields)] (zip fields fieldTypes) withoutProofs sp)
-  pure (FunDef f [TData self [TParam i [] | i <- [0 .. length (dataParams info) - 1]] []] (erase (dataIndices info !! p)) clauses sp [])
+  pure (FunDef f [TData self [TParam i [] | i <- [0 .. length (dataParams info) - 1]] []] (erase (dataIndices info !! p)) clauses sp mempty Map.empty [] [] [])
   where
     self = renderQualName (dataQual info)
     indexFnOf ty j = case ty of
@@ -910,7 +940,7 @@ elabClass fx env cd = do
       unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a law quantifies over values, which are first-order"))
       pure (n, bty)
     prop <- runTC (elabProp env1 {envScope = classScope} slots [(n, (i, t)) | (i, (n, t)) <- zip [0 :: Int ..] binderTys] body)
-    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots body)
+    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots a mempty Map.empty mempty body)
   pure (addLaws (classQual info) laws env1)
   where
     member className a preceding (msp, m, ty) = do
@@ -1037,7 +1067,7 @@ elabInstance fx env sp idl = do
       fcs <- methodClauses headScope headTy clauses e m f
       let (args, result) = arrows (schemeType (funScheme f))
           runtimeTypes = [snd (schemeValues (funScheme f) !! i) | i <- funRuntime f]
-      pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f (runtimeTypes <> args) result fcs sp [])])
+      pure (registerUnfoldings f fcs e, items <> [IFun (FunDef f (runtimeTypes <> args) result fcs sp mempty Map.empty [] [] [])])
     prove headScope headTy vars values given full iq clauses (e, items, proved) l = do
       let lawSeg = last (lawQual l)
           mine = [c | c <- clauses, clauseHead c == Just lawSeg]
@@ -1064,7 +1094,7 @@ elabInstance fx env sp idl = do
           e2 = addNamespaceMember iq lawSeg q indexed
           valueSlots' = map (Just . (\(i, (_, ty)) -> (i, ty))) (zip [0 ..] values)
       pcs <- forM mine \c -> runTC (elabProofClause fx e2 {envScope = headScope, envClassDefaults = [(lawClass l, headTy)]} (Just valueSlots') (map snd binderTys) (antecedentCount prop) c)
-      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys statement pcs sp kept premises values [] indexHyps)], Map.insert (lawQual l) info proved)
+      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys statement pcs sp kept premises values [] mempty Map.empty indexHyps)], Map.insert (lawQual l) info proved)
 
 {- |
 The places of a dictionary the clauses of a method refer to themselves, and
@@ -1542,7 +1572,7 @@ elabDecl fx env sp name ty0 clauses = do
       case [pcSpan pc | length pcs > 1, pc <- pcs, PAbsurd `elem` (pcValuePats pc <> pcPatterns pc)] of
         asp : _ -> Left (ElabError asp "an absurd clause is its theorem's only clause, for now")
         [] -> pure ()
-      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises values [] indexHyps))
+      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises values [] mempty Map.empty indexHyps))
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       -- Its domains, as written: types, and propositions, the preconditions its proofs are of.
@@ -1580,7 +1610,7 @@ elabDecl fx env sp name ty0 clauses = do
         asp : _ -> Left (ElabError asp "an absurd clause is its function's only clause, for now")
         [] -> pure ()
       impossible <- coverage (runtimeTys <> args) fcs
-      pure (registerUnfoldings info fcs env2, IFun (FunDef info (map (mapTypeGlobals renamed) (runtimeTys <> args)) (mapTypeGlobals renamed result) fcs sp impossible))
+      pure (registerUnfoldings info fcs env2, IFun (FunDef info (map (mapTypeGlobals renamed) (runtimeTys <> args)) (mapTypeGlobals renamed result) fcs sp mempty Map.empty [] [] impossible))
   where
     checkBinder seen (Located nsp n)
       | n `elem` seen = Left (ElabError nsp ("the variable " <> T.unpack n <> " is bound twice"))
@@ -2010,9 +2040,9 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
             statement = foldr Arrow (foldr (Arrow . snd) prop own) indices
             (slots, _) = theoremPlaces env (funSlots info) statement (map snd vars)
             premises = closurePremises env slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments (map snd vars)]
-            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots (map pdPremise premises) Nothing [] [] Nothing
+            thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map (mangleVariable . fst) vars) (map snd vars) slots (map pdPremise premises) Nothing [] [] mempty Nothing
             pc = ProofClause [PVar (Hint n) | (n, _) <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] []
-         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) []
+         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) mempty Map.empty []
   prepared <-
     either (failAt rsp) pure $
       if PAbsurd `elem` pats
@@ -2472,21 +2502,21 @@ determined more of its domain, and the application is undetermined itself
 when none do.
 -}
 elabTerm :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
-elabTerm proofArguments env givens ctx le@(Located sp _) expected =
-  case elabTermDirect proofArguments env givens ctx le expected of
+elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
+  case runWriterT (elabTermDirect proofArguments env givens ctx le expected) of
     Right result -> Right result
     Left original -> case proofArguments of
       CollectProofArguments hypotheses
         | expected /= THole
-        , Right (_, inferred) <- elabTermDirect proofArguments env givens ctx le (erase expected)
+        , Right ((_, inferred), _) <- runWriterT (elabTermDirect proofArguments env givens ctx le (erase expected))
         , Just hint <- fillTypes inferred expected
-        , Right (value, actual) <- elabTermDirect proofArguments env givens ctx le hint
+        , Right ((value, actual), needed) <- runWriterT (elabTermDirect proofArguments env givens ctx le hint)
         , Just target <- completeTypes actual expected
         , Just pairs@(_ : _) <- transportIndices actual target
         , not (null hypotheses) || all possible pairs
         , Just propositions <- traverse (\(x, y) -> Rel RelEq <$> indexTermIn env ctx x <*> indexTermIn env ctx y) pairs ->
             let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
-             in Right (At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | prop <- propositions]), target)
+             in Right ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | prop <- propositions]), target), needed)
       _ -> Left original
   where
     -- A proof can determine an index before an ordinary argument determines
@@ -2645,7 +2675,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         [] -> pure (s', done')
         (_, _, _, _, why) : _
           | progress -> settle deps n s' done' left
-          | otherwise -> Left (Undetermined why)
+          | otherwise -> throwTC (Undetermined why)
     again deps n (s, done, left, progress) entry@(i, d, a, tried, _)
       | dom == tried = pure (s, done, left <> [entry], progress)
       | otherwise =
@@ -2979,9 +3009,9 @@ elabProposition proofArguments env givens ctx (Located sp e) =
     infer x = elabTerm proofArguments env givens ctx x THole
     check x ty = fst <$> elabTerm proofArguments env givens ctx x ty
     -- A side of an equation at the other's type, or else at it erased: codes are compared, whatever the indices of their types.
-    codeOf x t = case direct t of
-      Left (Refused _) -> case direct (erase t) of
-        Left (Refused _) -> check x (erase t)
+    codeOf x t = WriterT case runWriterT (direct t) of
+      Left (Refused _) -> case runWriterT (direct (erase t)) of
+        Left (Refused _) -> runWriterT (check x (erase t))
         checked -> checked
       checked -> checked
       where

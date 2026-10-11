@@ -34,6 +34,7 @@ module Language.Praxis.Surface.Env (
   TeleEntry (..),
   Role (..),
   FunInfo (..),
+  logicalFunSlots,
   TheoremInfo (..),
   ClassInfo (..),
   MethodInfo (..),
@@ -100,15 +101,17 @@ import Bound (Scope)
 import Control.Applicative ((<|>))
 import Control.Monad (forM)
 import Data.IntMap.Strict qualified as IM
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
+import Language.Praxis.Surface.Desugar (Requirements)
 import Language.Praxis.Surface.Index (ixToExprWith)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
+import Language.Praxis.Surface.SourceView (QuantifierViews)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..))
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
@@ -290,6 +293,13 @@ data FunInfo = FunInfo
   the proposition it is of, over its value parameters — a precondition,
   which an application gives a proof of, and its code does not take
   -}
+  , funProofSlots :: ![Slot]
+  -- ^ logical dictionary of proof preconditions, separate from runtime slots
+  , funRequirements :: !Requirements
+  -- ^ dependencies of reusable proof preconditions, captured before erasure
+  , funBuiltinScope :: !(Map Text QualName)
+  -- ^ the source registry used by the preconditions and their proof views
+  , funQuantifierViews :: !QuantifierViews
   , funRuntime :: ![Int]
   {- ^ the value parameters it takes at runtime, by position, before its
   arguments: the implicit values its clauses bind, which an application
@@ -297,6 +307,10 @@ data FunInfo = FunInfo
   -}
   }
   deriving stock (Show)
+
+-- | Runtime entries retain their numbering; logical evidence follows them.
+logicalFunSlots :: FunInfo -> [Slot]
+logicalFunSlots info = nub (funSlots info <> funProofSlots info)
 
 {- |
 A place of a function's dictionary: a method of a class at one of the
@@ -379,6 +393,8 @@ data TheoremInfo = TheoremInfo
   -- ^ the indices of its binders' types: a binder's position, an index function by its core name, and the index over its value parameters
   , thmValues :: ![Text]
   -- ^ its value parameters, by name, which its binders' indices mention
+  , thmQuantifierViews :: !QuantifierViews
+  -- ^ source provenance for explicit finite quantifiers, separate from Core
   , thmProp :: !(Maybe (Scope Int Expr Void))
   -- ^ its proposition, over its value parameters then its binders, when it has value parameters
   }
@@ -407,6 +423,11 @@ data LawInfo = LawInfo
   -- ^ its proposition, over the binders, its methods the places of 'lawSlots'
   , lawSlots :: ![Slot]
   -- ^ the dictionary of the class at its parameter: each method of it and of its superclasses
+  , lawTypeParameter :: !Text
+  -- ^ original class parameter name, specialized lexically at an instance
+  , lawRequirements :: !Requirements
+  , lawBuiltinScope :: !(Map Text QualName)
+  , lawQuantifierViews :: !QuantifierViews
   , lawBody :: !(Located R.Expr)
   -- ^ its proposition as written, which an instance elaborates at its type
   }
@@ -566,6 +587,8 @@ data Env = Env
   -- ^ each instance, by its class and the head of its type: one for each
   , envBuiltins :: !(Map Text QualName)
   -- ^ checked builtin roles and the globals registered for them
+  , envTypeBindings :: ![(Text, Ty)]
+  -- ^ lexical specialization of a class law's original type parameter
   , envClassDefaults :: ![(QualName, Ty)]
   -- ^ the instance currently elaborated supplies a class type for ambiguous nullary methods
   , envSchemas :: ![(Text, Ref, Ty)]
@@ -576,7 +599,7 @@ data Env = Env
 
 -- | No module, and nothing known: what a build starts from.
 emptyEnv :: Env
-emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty Map.empty [] [] emptyScope
+emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty Map.empty [] [] [] emptyScope
 
 {- |
 The environment a module of the name given is elaborated in, with the
@@ -585,7 +608,7 @@ environment given — the globals, namespaces, instances and display names of
 the modules before it.
 -}
 moduleEnv :: QualName -> [QualName] -> Env -> Env
-moduleEnv q visible env = env {envModule = q, envVisible = visible, envClassDefaults = [], envSchemas = [], envScope = emptyScope}
+moduleEnv q visible env = env {envModule = q, envVisible = visible, envTypeBindings = [], envClassDefaults = [], envSchemas = [], envScope = emptyScope}
 
 -- | A name of the module, qualified.
 qualify :: Env -> [Segment] -> QualName
@@ -636,7 +659,7 @@ addFunction :: Env -> Segment -> Scheme -> Int -> [Slot] -> (Env, FunInfo)
 addFunction env name sch arity slots = (env', info)
   where
     q = qualify env [name]
-    info = FunInfo q sch arity (coreOf q) slots [] []
+    info = FunInfo q sch arity (coreOf q) slots [] [] mempty Map.empty mempty []
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)
@@ -669,7 +692,7 @@ it, with the types of its values when its statement gives them memberships.
 addTheorem :: Env -> QualName -> [Text] -> [Ty] -> [Slot] -> [Premise] -> Maybe (Scope Int Expr Void) -> (Env, TheoremInfo)
 addTheorem env q binders membered slots premises statement = (env', info)
   where
-    info = TheoremInfo q (coreOf q) binders membered slots premises statement [] [] Nothing
+    info = TheoremInfo q (coreOf q) binders membered slots premises statement [] [] mempty Nothing
     env' =
       env
         { envGlobals = Map.insert q (GTheorem info) (envGlobals env)
@@ -715,7 +738,7 @@ addInstanceFunction :: Env -> QualName -> Segment -> Scheme -> Int -> [Slot] -> 
 addInstanceFunction env instance' method sch arity slots = (env', info)
   where
     q = instance' <> [method]
-    info = FunInfo q sch arity (coreOf q) slots [] []
+    info = FunInfo q sch arity (coreOf q) slots [] [] mempty Map.empty mempty []
     env' =
       env
         { envGlobals = Map.insert q (GFun info) (envGlobals env)

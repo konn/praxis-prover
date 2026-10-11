@@ -78,7 +78,8 @@ import Language.Praxis.Surface.CoreText (CT (..), termCT)
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
 import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), Hyp (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), asEquation, indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
-import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), QualName, TheoremInfo (..), displayQualName, emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), displayQualName, emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Evidence qualified as Evidence
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
@@ -311,10 +312,37 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
 
     step r = \case
       IFailed (ElabError sp msg) -> report sp SevError msg r
-      IData info sp fns -> completed (dataQual info) r (encode info sp fns r)
-      IFun fd -> completed (funQual (fdInfo fd)) r (either id (finishFunction fd) (defineFunction fd r))
-      ITheorem td -> completed (thmQual (tdInfo td)) r (proveAndCertify r td)
+      IData info sp fns needed _ ->
+        requireEvidence r [] [] needed $ completed (dataQual info) r (encode info sp fns r)
+      IFun fd ->
+        requireEvidence r (fdEvidenceSlots fd) (fdEvidencePremises fd) (fdRequirements fd) $
+          completed (funQual (fdInfo fd)) r (either id (finishFunction fd) (defineFunction fd r))
+      ITheorem td ->
+        requireEvidence r (tdSlots td) (tdPremises td) (tdRequirements td) $
+          completed (thmQual (tdInfo td)) r (proveAndCertify r td)
+      IClass info _ slots premises requirements _ ->
+        requireEvidence r slots premises requirements $
+          r {runCheckedDeclarations = Set.union (runCheckedDeclarations r) (Set.fromList (classQual info : map methodQual (classMethods info) <> map lawQual (classLaws info)))}
       IBuiltin role target -> register role target r
+
+    -- Run this gate before code generation or proof erasure: dependencies of
+    -- even an unused local fact must already have succeeded, never its owner.
+    requireEvidence r slots premises requirements success =
+      case Evidence.validateRequirements (Evidence.Evidence (runBuiltins r) (knownDeclarations r) slots (map pdPremise premises)) requirements of
+        Left (sp, why) -> report sp SevError why r
+        Right () -> success
+
+    knownDeclarations r =
+      Set.fromList (map T.pack (Map.keys (coreCertificates (runCore r))))
+        <> Set.fromList
+          [ coreName
+          | name <- Set.toList (runCheckedDeclarations r)
+          , Just global <- [Map.lookup name (envGlobals env)]
+          , coreName <- case global of
+              GFun function -> [funCore function]
+              GData datatype -> [dataIs datatype]
+              _ -> []
+          ]
 
     -- Only successful registrations are visible to proofs or subsequent modules.
     activeEnv r = env {envBuiltins = runBuiltins r}
@@ -338,9 +366,9 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
       Just (GData info) -> checked (Map.member (renderQualName (dataQual info)) (coreMembership core))
       Just (GFun info) -> checked (Map.member (funCore info) (coreBodies core))
       Just (GTheorem info) -> checked (Map.member (T.unpack (thmCore info)) (coreCertificates core))
-      Just (GClass _) -> Right ()
-      Just (GMethod _) -> Right ()
-      Just (GLaw _) -> Right ()
+      Just (GClass _) -> checked True
+      Just (GMethod _) -> checked True
+      Just (GLaw _) -> checked True
       _ -> Left "a BUILTIN target must be a checked declaration"
       where
         core = runCore r
@@ -443,7 +471,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
     -- The lemmas of the library a proof may cite by name: those certified, but the modules' own, which are mangled.
-    knowledge r = Knowledge (activeEnv r) fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"])
+    knowledge r = Knowledge (activeEnv r) fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"]) (knownDeclarations r)
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of

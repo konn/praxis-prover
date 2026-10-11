@@ -150,7 +150,7 @@ fixture = withCoverage
         , (Ident "code", Scheme [("a", KType)] [] (TArrow parameter (fin cardIndex)), 1)
         , (Ident "decode", Scheme [("a", KType)] [] (TArrow (fin cardIndex) parameter), 1)
         ]
-    law = LawInfo (target BuiltinFiniteDecodeCode) (target BuiltinFinite) [("x", parameter)] (scoped coverageProp) slots (Located (Span (1, 1) (1, 1)) R.EWildcard)
+    law = LawInfo (target BuiltinFiniteDecodeCode) (target BuiltinFinite) [("x", parameter)] (scoped coverageProp) slots "a" mempty Map.empty mempty (Located (Span (1, 1) (1, 1)) R.EWildcard)
     withCoverage = addLaws (target BuiltinFinite) [law] withClass
     slots = [Slot (target BuiltinFiniteCard) 0 0, Slot (target BuiltinFiniteCode) 0 1, Slot (target BuiltinFiniteDecode) 0 1]
 

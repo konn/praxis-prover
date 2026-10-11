@@ -288,6 +288,8 @@ data Knowledge = Knowledge
   -- ^ Certified rule binder order, used when a premise alone mentions a type predicate.
   , knowLibrary :: !(Set Text)
   -- ^ the lemmas of the library and the prelude, certified, which a proof may cite by their names
+  , knowCheckedDeclarations :: !(Set Text)
+  -- ^ Completely checked declarations and certificates available to surface elaboration.
   }
 
 data EngineError = EngineError !Span !String
@@ -855,7 +857,7 @@ proveSpec k fd spec = do
     dict = lemmaDictionary fd
     predicate = lemmaPredicate k dict
     argIs = map predicate (fdArgs fd)
-    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] [] Nothing
+    thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] [] mempty Nothing
     columns = nub [i | fc <- fdClauses fd, (i, p) <- zip [0 ..] (fcPatterns fc), matchedOn p]
     -- An absurd pattern is matched on too: every case there is refuted.
     matchedOn = \case

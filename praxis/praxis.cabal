@@ -71,10 +71,12 @@ library
     Language.Praxis.Surface.Core.Pretty
     Language.Praxis.Surface.Core.Types
     Language.Praxis.Surface.CoreText
+    Language.Praxis.Surface.Desugar
     Language.Praxis.Surface.Elab
     Language.Praxis.Surface.Encode
     Language.Praxis.Surface.Engine
     Language.Praxis.Surface.Env
+    Language.Praxis.Surface.Evidence
     Language.Praxis.Surface.Fixity
     Language.Praxis.Surface.Index
     Language.Praxis.Surface.Lexer
@@ -86,6 +88,7 @@ library
     Language.Praxis.Surface.Rename
     Language.Praxis.Surface.Resolve
     Language.Praxis.Surface.Shape
+    Language.Praxis.Surface.SourceView
     Language.Praxis.Surface.Syntax
     Language.Praxis.Surface.Syntax.Raw
     Language.Praxis.Surface.Term
@@ -139,6 +142,7 @@ test-suite praxis-test
     Language.Praxis.Surface.ComputationIndexTest
     Language.Praxis.Surface.CoreTest
     Language.Praxis.Surface.DependentClassTest
+    Language.Praxis.Surface.EvidenceTest
     Language.Praxis.Surface.IndexedInstanceTest
     Language.Praxis.Surface.MethodContractTest
     Language.Praxis.Surface.ParserTest

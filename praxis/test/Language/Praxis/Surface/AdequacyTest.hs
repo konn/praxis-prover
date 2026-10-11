@@ -152,9 +152,9 @@ load path = do
   fx <- either (assertFailure . snd . renderFixityError) pure (moduleFixities m)
   let (renamed, _) = renameModule fx emptyEnv Map.empty (headerName m) m
       (env, items) = elabModule fx emptyEnv renamed
-      datas = [d | IData d _ _ <- items]
+      datas = [d | IData d _ _ _ _ <- items]
       -- A data type's index functions come with it.
-      funs = concat [fds | IData _ _ fds <- items] <> [fd | IFun fd <- items]
+      funs = concat [fds | IData _ _ fds _ _ <- items] <> [fd | IFun fd <- items]
       -- Each data type encoded after those before it, as the checker encodes them: with the index functions of those, and its own.
       encodeIn (known, done) d =
         let self = renderQualName (dataQual d)
