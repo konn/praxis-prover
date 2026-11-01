@@ -64,11 +64,53 @@ checkTests =
     , testCase "nested vector updates preserve both dimensions through polymorphic callbacks" $ do
         c <- checkFile "test/data/nested-update.px"
         errors c @?= []
-        forM_ ["write.#index", "rectangular.#index", "row-length", "read-write", "concrete"] $ \name ->
+        forM_ ["write.#index", "rectangular.#index", "row-length", "read-write", "concrete", "rows-length-cons", "rows-length-concrete"] $ \name ->
           assertBool (T.unpack name <> " was not certified") (("NestedUpdate." <> name) `elem` checkedTheorems c)
         (k, _) <- maybe (assertFailure "no checked nested updates") pure (checkedFinal c)
         forM_ ["u_NestedUpdate_swrite", "u_NestedUpdate_srectangular"] $ \name ->
           assertBool (T.unpack name <> " has no certified membership contract") (Map.member name (knowClosures k))
+    , testCase "closed computations share checked reductions and preserve captured callbacks" $ do
+        c <- checkFile "test/data/closed-computation.px"
+        errors c @?= []
+        forM_ ["callback", "comparison", "same", "captures", "arithmetic"] $ \name ->
+          assertBool (T.unpack name <> " was not certified") (("ClosedComputation." <> name) `elem` checkedTheorems c)
+        (k, core) <- maybe (assertFailure "no checked computation") pure (checkedFinal c)
+        assertBool "closed reductions were not retained for checked reuse" (not (Map.null (coreReductions core)))
+        certificate <- maybe (assertFailure "missing checked computation certificate") pure (Map.lookup "u_ClosedComputation_sarithmetic" (coreCertificates core))
+        either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) certificate (Appeal "u_ClosedComputation_sarithmetic" [] [] MS.empty) [])
+        assertBool "constructor proof arguments have no checked membership contract" (Map.member "u_ClosedComputation_sverified" (knowClosures k))
+    , testCase "cached computation hints cannot certify an incorrect equation" $ do
+        p <- either assertFailure pure prelude
+        let initial = initialBuild p
+            poisoned = initial {buildCore = (buildCore initial) {coreReductions = Map.singleton (CNum 1) (CNum 2, "oneNonzero")}}
+            (checked, _) = checkModule (\_ _ -> []) poisoned Map.empty Nothing "poisoned-computation.px" "module PoisonedComputation where\nbad : 1 = 2\nbad = by decide\n"
+        assertBool "a false cached result was certified" (not (null (errors checked)))
+        assertBool "the rejected theorem was admitted" ("PoisonedComputation.bad" `notElem` checkedTheorems checked)
+    , testCase "omitting generated text retains certificates, replay and rejection" $ do
+        p <- either assertFailure pure prelude
+        let source = "module OutputRetention where\ngood : 2 + 3 = 5\ngood = by decide\nbad : 2 + 3 = 6\nbad = by decide\n"
+            run keep = checkModule (\_ _ -> []) (initialBuild p) {buildRetainGeneratedText = keep} Map.empty Nothing "output-retention.px" source
+            (kept, _) = run True
+            (omitted, final) = run False
+        assertBool "expected the false equation to fail" (not (null (errors omitted)))
+        errors omitted @?= errors kept
+        checkedTheorems omitted @?= checkedTheorems kept
+        checkedCore omitted @?= []
+        assertBool "inspection mode lost its output" (not (null (checkedCore kept)))
+        assertBool "retention setting was not propagated" (not (buildRetainGeneratedText final))
+        (_, keptCore) <- maybe (assertFailure "missing retained core") pure (checkedFinal kept)
+        (_, omittedCore) <- maybe (assertFailure "missing omitted core") pure (checkedFinal omitted)
+        coreLemmas omittedCore @?= coreLemmas keptCore
+        let name = "u_OutputRetention_sgood"
+        cert <- maybe (assertFailure "certificate was discarded with its text") pure (Map.lookup name (coreCertificates omittedCore))
+        either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv omittedCore) cert (Appeal name [] [] MS.empty) [])
+    , testCase "closed computation rejects a wrong answer and an open goal" $ do
+        p <- either assertFailure pure prelude
+        source <- TIO.readFile "test/data/closed-computation.px"
+        let wrong = checkSource p "wrong-computation.px" (source <> "\nwrong : sum (add-all 3 xs) = 10\nwrong = by decide\n")
+            open = checkSource p "open-computation.px" "module OpenComputation where\nopen-goal : (n : Nat) -> n = n\nopen-goal n = by decide\n"
+        assertBool "a wrong result was certified" (not (null (errors wrong)))
+        assertBool "an open goal was accepted" (any (T.isInfixOf "only closed equations and comparisons" . reportMessage) (checkedReports open))
     , testCase "nested vector updates reject changes to the row length" $ do
         p <- either assertFailure pure prelude
         source <- TIO.readFile "test/data/nested-update.px"

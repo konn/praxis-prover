@@ -684,8 +684,10 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
     membership
       | null ctors = []
       | otherwise =
+          -- Reuse the checked schema: normalizing the whole instantiated
+          -- predicate can exhaust conversion fuel for large GADTs.
           [ (dataLemma d "is-def", lemma (dataLemma d "is-def") [n] [] (eqn (isAt n) (cvrecAt n)) "refl")
-          , (dataLemma d "is-beta", lemma (dataLemma d "is-beta") [n] [] (eqn (cvrecAt n) (membershipBody known eqsOf d n (histAt' n))) "refl")
+          , (dataLemma d "is-beta", lemma (dataLemma d "is-beta") [n] [] (eqn (cvrecAt n) (membershipBody known eqsOf d n (histAt' n))) "exact cvrecUnfold")
           ]
 
     -- 0 < T.is t |- the disjunction of the shapes t may have, with the memberships of their fields and the equations of their indices.

@@ -2450,7 +2450,11 @@ elabPattern env bound s expected le@(Located sp e) = case e of
           (sMatched, bound)
           (zip implicitEntries implicit)
       let explicits = [(k, t) | TeleEntry _ t (Explicit k) <- tele]
-          fields = [applyTy s1 (mapIx inst (substParams typeArgs t)) | (_, t) <- explicits]
+          -- Constructor indices belong to its telescope; indices inside a
+          -- supplied type argument belong to the surrounding clause. Rename
+          -- the former before substituting the latter to avoid capturing a
+          -- nested vector's length with the outer constructor's length.
+          fields = [applyTy s1 (substParams typeArgs (mapIx inst t)) | (_, t) <- explicits]
           entries = [pos | (pos, TeleEntry _ _ (Explicit _)) <- zip [0 ..] tele]
           -- Its explicit arguments: its fields, and its proofs at their positions among them, each named by a variable or _.
           proofPositions = map fst (constructorProofs g)
@@ -2462,7 +2466,7 @@ elabPattern env bound s expected le@(Located sp e) = case e of
         Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
         Located _ R.EWildcard -> pure Nothing
         Located psp _ -> failAt psp "a proof of a constructor is named by a variable or _: a proposition has no constructors"
-      let stored = [(pos, k, applyTy s1 (mapIx inst (substParams typeArgs (teType entry))), pat) | ((pos, entry), pat) <- zip implicitEntries implicit, Stored k <- [teRole entry]]
+      let stored = [(pos, k, applyTy s1 (substParams typeArgs (mapIx inst (teType entry))), pat) | ((pos, entry), pat) <- zip implicitEntries implicit, Stored k <- [teRole entry]]
           matchedFields = [(pos, k, ty, pat) | (pos, k, ty, pat) <- stored] <> [(pos, k, ty, pat) | (pos, (k, _), ty, pat) <- zip4 entries explicits fields valueArgs]
       -- Each field's pattern, and what it says the field is, which holds of its entry: the types of the fields
       -- after it and the indices of the result may mention it, as a named field, @(m : nat) ->@, is in scope there.

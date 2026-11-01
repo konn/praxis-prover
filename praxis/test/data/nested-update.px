@@ -50,3 +50,14 @@ read-write r c x b = by
 
 concrete : rectangular (FZero {1}) (FSucc (FZero {1})) 9 (Cons (Cons 1 (Cons 2 (Cons 3 Nil))) (Cons (Cons 4 (Cons 5 (Cons 6 Nil))) Nil)) = Cons (Cons 1 (Cons 9 (Cons 3 Nil))) (Cons (Cons 4 (Cons 5 (Cons 6 Nil))) Nil)
 concrete = rfl
+
+-- Deconstructing the outer vector must not capture the inner vector's index.
+rows-length : {m : Nat} -> Vec n (Vec m a) -> Nat
+rows-length {m} Nil = 0
+rows-length {m} (Cons row rows) = length row + rows-length {m} rows
+
+rows-length-cons : {m : Nat} -> (row : Vec m a) -> (rows : Vec n (Vec m a)) -> rows-length {m} (Cons row rows) = m + rows-length {m} rows
+rows-length-cons {m} row rows = cong (length-index row)
+
+rows-length-concrete : rows-length {3} (Cons (Cons 1 (Cons 2 (Cons 3 Nil))) (Cons (Cons 4 (Cons 5 (Cons 6 Nil))) Nil)) = 6
+rows-length-concrete = rfl

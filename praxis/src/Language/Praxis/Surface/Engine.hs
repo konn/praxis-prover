@@ -72,6 +72,7 @@ import Bound (Var (..), abstract, instantiate, toScope)
 import Bound qualified
 import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM, forM_, guard, join, unless, zipWithM)
+import Control.Monad.State.Strict (State, get, modify', runState)
 import Data.Char (isAlphaNum)
 import Data.IntMap.Strict qualified as IM
 import Data.List (elemIndex, find, nub, nubBy, partition, sort)
@@ -300,6 +301,8 @@ data Knowledge = Knowledge
   -- ^ the lemmas of the library and the prelude, certified, which a proof may cite by their names
   , knowCheckedDeclarations :: !(Set Text)
   -- ^ Completely checked declarations and certificates available to surface elaboration.
+  , knowReductions :: !(Map CT (CT, Text))
+  -- ^ Closed reduction equations available for checked reuse across declarations.
   }
 
 data EngineError = EngineError !Span !String
@@ -3528,9 +3531,12 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, exactMembe
     -- index functions, a precondition as a function's, by a hypothesis once unfolded or by an obligation.
     indexPremise l r
       | hasEquation g l r = Right ""
-      | otherwise = case indexEquation k g (goalEquations g) l r of
-          Right proof -> Right ("have " <> equationText l r <> " { " <> proof <> " }; ")
-          Left why -> either (const (Left why)) Right (preconditionsAt k g Map.empty [(l, r)])
+      -- Proof arguments have already been certified. Reuse that evidence
+      -- before trying to recompute a closed constructor precondition.
+      | Right proof <- preconditionsAt k g Map.empty [(l, r)] = Right proof
+      | otherwise = do
+          proof <- indexEquation k g (goalEquations g) l r
+          Right ("have " <> equationText l r <> " { " <> proof <> " }; ")
     -- A function applied: its closure lemma, after the memberships of its arguments.
     closedBy f = \case
       OMember p (CSym _ args)
@@ -3719,6 +3725,7 @@ runTactics k info n g0 sp tacs0 = do
         R.TExists witnesses -> existsGoal tsp witnesses g more
         R.TObtain names expression -> obtainGoal tsp (map unLocated names) expression g more
         R.TRefl -> (\x -> (closed x, more)) <$> rflTactic k g tsp
+        R.TDecide -> (,more) <$> decideTactic k info g tsp
         R.TAssumption -> Right (closed "assumption", more)
         R.TContradiction -> (,more) . closed <$> either (Left . EngineError tsp) Right (refute k g)
         R.TSorry -> Left (EngineError tsp ("sorry: the goal is\n" <> T.unpack (renderGoal (knowEnv k) g)))
@@ -4288,6 +4295,87 @@ rflWith bridge k g sp = case asEquation (goalConcl g) of
     reductions t = case unfoldStep k t of
       Nothing -> []
       Just (lemma, t') -> (lemma, t') : reductions t'
+
+{- | Prove a closed equation or comparison with shared reduction evidence.
+Open goals keep using the ordinary rewriting and induction tactics.
+-}
+decideTactic :: Knowledge -> TheoremInfo -> Goal -> Span -> Either EngineError Out
+decideTactic k info g sp = case asEquation (goalConcl g) of
+  Rel RelEq a b -> do
+    left <- either (Left . EngineError sp) Right (termCT CVar a)
+    right <- either (Left . EngineError sp) Right (termCT CVar b)
+    unless (null (varsCT left <> varsCT right)) $
+      Left (EngineError sp "decide: only closed equations and comparisons are supported")
+    unless (null (goalDict g) && null (goalPremises g)) $
+      Left (EngineError sp "decide: abstract dictionaries and reusable premises are not supported")
+    let R.Span (line, column) _ = sp
+        prefix = thmCore info <> "_decide_" <> T.pack (show line) <> "_" <> T.pack (show column)
+    pure (closedReduction k prefix left right)
+  At _ e -> decideTactic k info g {goalConcl = e} sp
+  _ -> Left (EngineError sp "decide: only closed equations and comparisons are supported")
+
+{- | Share closed subcomputations as auxiliary checked theorems. In particular,
+do not repeat an entire board expression at every reduction inside a ray.
+The evaluator supplies only a proof script; every step is checked as before.
+-}
+closedReduction :: Knowledge -> Text -> CT -> CT -> Out
+closedReduction _ _ left right | left == right = closed "refl"
+closedReduction k prefix left right =
+  let ((l, lp, r, rp), (_, _, proofs)) = runState calculation (Map.empty, 0, [])
+      before = maybe "" (\name -> " = " <> render l <> " by exact " <> fromText name) lp
+      middle = if l == r then "" else " = " <> render r <> " by refl"
+      after = maybe "" (\name -> " = " <> render right <> " by cong " <> fromText name) rp
+      final = if left == right then "refl" else "calc " <> render left <> before <> middle <> after
+   in Out final (reverse proofs)
+  where
+    calculation = do
+      (l, lp) <- normal left
+      (r, rp) <- normal right
+      pure (l, lp, r, rp)
+    normal :: CT -> State (Map CT (CT, Maybe Text), Int, [(Text, Text)]) (CT, Maybe Text)
+    normal term = do
+      (memo, _, _) <- get
+      case Map.lookup term memo <|> (\(value, name) -> (value, Just name)) <$> Map.lookup term (knowReductions k) of
+        Just answer -> pure answer
+        Nothing -> case next term of
+          Nothing -> do
+            modify' (\(memo', count, proofs) -> (Map.insert term (term, Nothing) memo', count, proofs))
+            pure (term, Nothing)
+          Just (redex, step, reduced) -> do
+            (changed, first) <-
+              if redex == term
+                then pure (reduced, direct step)
+                else do
+                  (value, proof) <- normal redex
+                  pure (replaceCT (\x -> if x == redex then Just value else Nothing) term, maybe "refl" (\name -> "cong " <> fromText name) proof)
+            (value, rest) <- normal changed
+            (_, count, _) <- get
+            let name = prefix <> "_" <> T.pack (show count)
+                proof =
+                  "theorem "
+                    <> fromText name
+                    <> ": |- ("
+                    <> render term
+                    <> " = "
+                    <> render value
+                    <> ")\nby calc "
+                    <> render term
+                    <> " = "
+                    <> render changed
+                    <> " by "
+                    <> first
+                    <> maybe "" (\child -> " = " <> render value <> " by exact " <> fromText child) rest
+            modify' (\(memo', _, proofs) -> (Map.insert term (value, Just name) memo', count + 1, (name, runBuilder proof) : proofs))
+            pure (value, Just name)
+    -- At the root of an equation the reduction theorem proves precisely
+    -- the goal. Avoid a cut and congruence derivation for that direct use.
+    direct step = maybe step (\name -> "exact " <> fromText name) (T.stripPrefix "cong " (runBuilder step))
+    -- A projection can expose the tail of a packed environment. Preserve
+    -- its cons until the surrounding hd/tl uses the checked projection law.
+    next (CSym "cons" _) = Nothing
+    next term
+      | normalized <- canonical term, normalized /= term = Just (term, "refl", normalized)
+      | otherwise = unfoldRedex k term
 
 -- | The term rewritten by an unfolding lemma at its first application, outermost, which one rewrites, with the tactic doing it.
 unfoldStep :: Knowledge -> CT -> Maybe (Builder, CT)

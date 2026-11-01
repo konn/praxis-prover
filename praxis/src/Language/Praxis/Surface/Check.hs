@@ -44,6 +44,7 @@ module Language.Praxis.Surface.Check (
 
   -- * The core state
   Core (..),
+  coreCertificates,
   coreLemmas,
   surfaceCore,
   initialCore,
@@ -56,6 +57,7 @@ module Language.Praxis.Surface.Check (
 import Control.Exception (displayException)
 import Control.Monad (foldM)
 import Data.Bifunctor (first)
+import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
@@ -64,9 +66,12 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.PRA.Certificate
+import Language.Praxis.PRA.PrimitiveRecursion.Code qualified as PR
 import Language.Praxis.PRA.PrimitiveRecursion.Elaboration (Equation, parseEquations)
 import Language.Praxis.PRA.PrimitiveRecursion.Environment (CompiledEnv, compileDefinitions, environmentSignature, extendEnvironment)
-import Language.Praxis.PRA.Signature (Signature)
+import Language.Praxis.PRA.PrimitiveRecursion.Function qualified as Function
+import Language.Praxis.PRA.Signature (Signature, symbolName, symbolOfFunction)
+import Language.Praxis.PRA.Syntax qualified as Syntax
 import Language.Praxis.PRA.Tactic qualified as PRA
 import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, renderSchemaTacticError, schemaScope)
@@ -125,7 +130,9 @@ data Core = Core
   { coreCompiled :: !CompiledEnv
   , coreSignature :: !Signature
   , coreEnv :: !PRA.Env
-  , coreCertificates :: !(Map String Certificate)
+  , coreCertificateStore :: !CertificateStore
+  , coreReductions :: !(Map CT (CT, Text))
+  -- ^ Elaboration hints from closed checked equations; every reuse is checked again.
   , coreBodies :: !(Map Text [SurfaceCore.Body Certificate])
   -- ^ Explicit typed bodies whose evidence has been replaced by checked PRA certificates.
   , coreDisplay :: !(Map Text Text)
@@ -138,7 +145,11 @@ data Core = Core
 
 -- | The statement view is derived from retained, checked certificates.
 coreLemmas :: Core -> Map String (PRA.Lemma SchemaName)
-coreLemmas = fmap certificateLemma . coreCertificates
+coreLemmas = storedLemmas . coreCertificateStore
+
+-- | Certificates retained by the incremental checked store.
+coreCertificates :: Core -> Map String Certificate
+coreCertificates = storedCertificates . coreCertificateStore
 
 {- | Source-like explicit declarations with type and index arguments,
 dictionaries and references to certified evidence declarations.
@@ -147,7 +158,7 @@ surfaceCore :: Core -> [Text]
 surfaceCore = Map.elems . coreDisplay
 
 initialCore :: Prelude -> Core
-initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (preludeCertificates p) Map.empty Map.empty Map.empty Set.empty
+initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (certificateStore (preludeCertificates p)) Map.empty Map.empty Map.empty Map.empty Set.empty
 
 -- | Extend the core with definitions, as @prf@ equations.
 addDefinitions :: [Text] -> Core -> Either String Core
@@ -167,16 +178,44 @@ addEquations eqs core = do
 -- | Certify a declaration, given as text, and add it as a lemma; the core's verdict, demangled, when it fails.
 certifyDecl :: Text -> Core -> Either String Core
 certifyDecl text core = do
-  decls <- first displayException (parseDeclsIn (fmap (map snd . PRA.lemmaMetas) (coreLemmas core)) (schemaScope (coreSignature core)) (T.unpack text))
+  decls <- first displayException (parseDeclsIn (storedMetas (coreCertificateStore core)) (schemaScope (coreSignature core)) (T.unpack text))
   foldM (flip certifyDeclaration) core decls
 
 {- | Admit an elaborated sequent derivation, retaining its lexical dependencies
 for independent expansion to primitive PRA rules.
 -}
 certifyDeclaration :: Decl SchemaName -> Core -> Either String Core
-certifyDeclaration declaration core = case checkCertificate (coreEnv core) (coreCertificates core) declaration of
-  Right certificate -> Right core {coreCertificates = Map.insert (declName declaration) certificate (coreCertificates core)}
+certifyDeclaration declaration core = case checkAndInsertCertificate (coreEnv core) (coreCertificateStore core) declaration of
+  Right (certificate, store) ->
+    Right
+      core
+        { coreCertificateStore = store
+        , coreReductions = rememberReduction (coreSignature core) (T.pack (declName declaration)) certificate (coreReductions core)
+        }
   Left err -> Left (renderSchemaTacticError (coreSignature core) err)
+
+-- Only closed helper equations enter this cache. A cache hit emits an appeal
+-- to its certificate, not a trusted evaluation result. Schema applications
+-- without a named first-order symbol are deliberately left out.
+rememberReduction :: Signature -> Text -> Certificate -> Map CT (CT, Text) -> Map CT (CT, Text)
+rememberReduction signature name certificate known
+  | "_decide_" `T.isInfixOf` name
+  , let lemma = certificateLemma certificate
+  , null (PRA.lemmaMetas lemma)
+  , null (PRA.lemmaPremises lemma)
+  , context Syntax.:|- Syntax.Atm (left Syntax.:=== right) <- PRA.lemmaGoal lemma
+  , null context
+  , Just l <- term (Syntax.canonicalise left)
+  , Just r <- term (Syntax.canonicalise right)
+  , l /= r =
+      Map.insert l (r, name) known
+  | otherwise = known
+  where
+    term (Syntax.Lit n) = Just (CNum n)
+    term (Syntax.App (Function.Primitive PR.Succ) arguments) = CSym "S" <$> traverse term (toList arguments)
+    term (Syntax.App function arguments)
+      | Just symbol <- symbolOfFunction function signature = CSym (T.pack (symbolName symbol)) <$> traverse term (toList arguments)
+    term _ = Nothing
 
 -- * The build
 
@@ -189,6 +228,8 @@ own starts from 'initialBuild'.
 -}
 data Build = Build
   { buildCore :: !Core
+  , buildRetainGeneratedText :: !Bool
+  -- ^ Keep PRA text for inspection. Disabling this never discards certificates.
   , buildEnv :: !Env
   , buildCheckedDeclarations :: !(Set QualName)
   -- ^ declarations whose entire checking step, including generated contracts, succeeded
@@ -206,7 +247,7 @@ data Build = Build
 
 -- | A build before any module: the prelude, whose definitions and the core's builtins unfold as a module's own functions do.
 initialBuild :: Prelude -> Build
-initialBuild p = Build (initialCore p) emptyEnv Set.empty Map.empty Map.empty Map.empty [Unfolding n l r | (n, l, r) <- preludeUnfoldings p] Map.empty Map.empty Map.empty
+initialBuild p = Build (initialCore p) True emptyEnv Set.empty Map.empty Map.empty Map.empty [Unfolding n l r | (n, l, r) <- preludeUnfoldings p] Map.empty Map.empty Map.empty
 
 -- * Checking
 
@@ -295,6 +336,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
       ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r)) Nothing
       , Build
           { buildCore = runCore r
+          , buildRetainGeneratedText = buildRetainGeneratedText build0
           , buildEnv = activeEnv r
           , buildCheckedDeclarations = runCheckedDeclarations r
           , buildMembers = runMembers r
@@ -307,7 +349,9 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
           }
       )
     report sp sev msg r = r {runReports = Report sp sev (demangle (T.pack msg)) : runReports r}
-    emit t r = r {runText = t : runText r}
+    emit t r
+      | buildRetainGeneratedText build0 = r {runText = t : runText r}
+      | otherwise = r
 
     step r = \case
       IFailed (ElabError sp msg) -> report sp SevError msg r
@@ -468,7 +512,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
     -- The lemmas of the library a proof may cite by name: those certified, but the modules' own, which are mangled.
-    knowledge r = Knowledge (activeEnv r) fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"]) (knownDeclarations r)
+    knowledge r = Knowledge (activeEnv r) fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"]) (knownDeclarations r) (coreReductions (runCore r))
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
     closure fd r = case proveClosure (knowledge r) fd of

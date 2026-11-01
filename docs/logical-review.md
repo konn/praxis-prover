@@ -176,6 +176,18 @@ projections for parsing and tactic search. A failed declaration cannot be
 inserted through this API. Dependencies are retained by identity, so later
 shadowing does not rewrite an earlier proof.
 
+The opaque `CertificateStore` updates the certificate-derived lookup tables
+incrementally and hash-conses retained terms across entries. Interning uses full
+structural equality, including variable names; hash collisions do not identify
+unequal terms. It retains every inference step and dependency and does not
+perform evaluation or logical rewriting. Reconstructed proof steps are forced
+before insertion so their thunks cannot retain old unshared terms; repeated
+appeal names also share their storage. Ordinary CLI checking omits generated
+PRA text kept solely for inspection, while `--dump-pra` retains it. Both modes
+retain the same certificates, and a regression independently replays a
+certificate checked without the text while also testing rejection of a false
+equation.
+
 `replayCertificate` instantiates the retained derivation, substitutes actual
 premise proofs, expands appeals recursively, and checks the resulting
 primitive proof and its conclusion with `inferConclusionIn`. It uses the

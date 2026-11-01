@@ -1,0 +1,42 @@
+module ClosedComputation where
+
+data List = Nil | Cons Nat List
+open List
+
+map : (Nat -> Nat) -> List -> List
+map f Nil = Nil
+map f (Cons x xs) = Cons (f x) (map f xs)
+
+sum : List -> Nat
+sum Nil = 0
+sum (Cons x xs) = x + sum xs
+
+add-all : Nat -> List -> List
+add-all n xs = map (\x -> x + n) xs
+
+xs : List
+xs = Cons 1 (Cons 2 Nil)
+
+callback : sum (add-all 3 xs) = 9
+callback = by decide
+
+comparison : 8 <= sum (add-all 3 xs)
+comparison = by decide
+
+same : add-all 3 xs = add-all 3 xs
+same = by decide
+
+add-two : Nat -> Nat -> List -> List
+add-two n m values = map (\x -> x + n + m) values
+
+captures : sum (add-two 3 4 xs) = 17
+captures = by decide
+
+data Verified (answer : Nat) where
+  Result : {answer : Nat} -> sum (add-two 3 4 xs) = answer -> Verified answer
+
+verified : Verified 17
+verified = Verified.Result (by decide)
+
+arithmetic : 2 + 3 = 5
+arithmetic = by decide

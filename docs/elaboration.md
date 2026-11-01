@@ -692,6 +692,11 @@ not an exact recognizer of source values and cannot serve by itself as an
 existential guard. Finite quantifiers instead use the checked bounded
 decoder and roundtrip law above.
 
+Constructor-pattern elaboration renames the constructor's telescope indices
+before substituting the caller's type arguments. Indices already inside a
+type argument belong to the caller: matching the outer constructor of
+`Vec r (Vec c a)` must not replace `c` with the outer tail's length.
+
 Nested datatype arguments retain their value indices in the parameter
 predicate. For example, the membership hypothesis for `Vec n (Vec m a)`
 uses the row predicate `idx row = m` conjoined with membership in `Vec a`;
@@ -781,6 +786,21 @@ names of hypotheses. User hypothesis names never reach the core.
 **`rfl`** rewrites the sides by the unfolding lemmas, outermost first,
 wherever a function meets a constructor, and closes with the core's
 definitional equality only on what remains (functions applied to variables).
+**`decide`** handles closed equations and comparisons with memoized reduction
+proofs. Each reused subcomputation is an auxiliary theorem proved by checked
+unfolding and congruence; the host evaluator contributes no trusted result.
+Closed first-order helper equations are cached across declarations. A cache hit
+still emits a theorem appeal checked against its retained certificate; a
+falsified cache entry cannot establish a false equation. The core's opaque
+`CertificateStore` maintains certificate-derived statement and parser tables
+incrementally, so checking one helper does not rebuild the entire theorem table.
+Its constructor is private and insertion still checks the declaration. It also
+hash-conses structurally equal terms in retained certificates, preserving every
+inference step, variable name, and dependency.
+Packed callback environments retain their `cons` structure until a checked
+projection exposes the captured value. This path is opt-in: eager sharing can
+be more expensive than ordinary `rfl` for some terms.
+Abstract dictionaries and reusable premises are not supported by this tactic.
 **`calc`** is the core's `calc`, each step's justification translated in the
 step's goal. A recursive call in a proof term names the induction hypothesis
 at its argument; a lemma name is `exact`, `cong e` is `cong`.

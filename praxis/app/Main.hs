@@ -69,18 +69,19 @@ checkTarget p surface dump alone target = do
   isDir <- doesDirectoryExist target
   if
     | isDir || takeFileName target `elem` ["project.toml", "package.toml"] ->
-        checkProject p target >>= \case
+        checkProjectFrom initial target >>= \case
           Left err -> failWith err
           Right results -> and <$> mapM (\r -> printChecked surface dump (mrPath r) (mrChecked r)) results
     | takeExtension target == ".px" -> do
         src <- readFileUtf8 target
-        located <- if alone then pure Nothing else checkFile p target src
+        located <- if alone then pure Nothing else checkFileFrom initial target src
         case located of
-          Nothing -> printChecked surface dump target (checkSource p target src)
+          Nothing -> printChecked surface dump target (fst (checkModule (\_ _ -> []) initial mempty Nothing target src))
           Just (Left err) -> failWith err
           Just (Right results) -> and <$> mapM (\r -> printChecked surface dump (mrPath r) (mrChecked r)) results
     | otherwise -> failWith (target <> ": not a .px file, a manifest, or a directory holding one")
   where
+    initial = (initialBuild p) {buildRetainGeneratedText = dump}
     failWith err = hPutStrLn stderr err *> pure False
 
 -- | The core text of a module when asked, then its reports; whether it has no error.

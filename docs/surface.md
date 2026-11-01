@@ -832,7 +832,7 @@ is `rfl`.
 **By tactics** (Lean 4 style, with Rocq's spellings accepted). A tactic acts
 on the first goal; newlines and `;` sequence; `{ … }` and `· …` focus the first
 goal and must close it, so `induction xs { … } { … }` solves the cases in
-turn. The engine translates, so far: `rfl` (`refl`, `reflexivity`), `exact`,
+turn. The engine translates, so far: `rfl` (`refl`, `reflexivity`), `decide`, `exact`,
 `cong` (`congr`), `calc`, `induction x`, `intro`/`intros` (naming what a case
 introduces: the constructor's fields, then the induction hypotheses, `IH` by
 default, `IH1 …` when there are several, then any implications reverted into
@@ -859,6 +859,13 @@ tactics. Its annotation can be omitted when a theorem application or named
 hypothesis determines the proposition: `have bound := lt-of-plt p`. This is
 particularly useful for facts about GADT indices. The proof remains checked
 even when the following tactics do not use the local fact.
+
+`by decide` supports closed equations and comparisons. It shares checked
+equations for repeated subcomputations, including calls with captured
+callbacks. It rejects open goals, abstract dictionaries, and reusable premises;
+it does not currently decide arbitrary logical formulas. The generated evidence
+is checked by the same kernel as ordinary proofs; this is not an unchecked
+evaluation escape hatch.
 
 `rfl` is *surface* definitional equality: the sides are rewritten by the
 unfolding lemmas wherever a function meets a constructor — a module's

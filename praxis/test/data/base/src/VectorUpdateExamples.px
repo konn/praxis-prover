@@ -2,7 +2,17 @@ module VectorUpdateExamples where
 
 import "base" Data.Bool as B
 import "base" Data.Fin as F
+import "base" Data.Maybe as M
 import "base" Data.Vec as V
+
+checked-index : F.from-nat-maybe {3} 2 = M.Just (F.last {2})
+checked-index = rfl
+
+rejected-index : F.from-nat-maybe {3} 3 = M.Nothing
+rejected-index = F.from-nat-maybe-bound {3}
+
+index-roundtrip : (i : F.Fin n) -> F.from-nat-maybe {n} (F.to-nat i) = M.Just i
+index-roundtrip i = F.from-nat-maybe-to-nat i
 
 -- Updating the final entry exercises the whole recursive path.
 last-entry : V.update (F.last {2}) 9 (V.Vec.Cons 1 (V.Vec.Cons 2 (V.Vec.Cons 3 V.Vec.Nil))) = V.Vec.Cons 1 (V.Vec.Cons 2 (V.Vec.Cons 9 V.Vec.Nil))

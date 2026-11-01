@@ -1,6 +1,7 @@
 module Data.Fin where
 
 import Data.Nat.Order as O
+import Data.Maybe as M
 
 -- Fin n has exactly the ordinals 0, ..., n - 1.  The bound is an index:
 -- there is no constructor at Fin 0.
@@ -17,6 +18,28 @@ empty ()
 to-nat : Fin n -> Nat
 to-nat FZero = 0
 to-nat (FSucc i) = S (to-nat i)
+
+-- Check a runtime index without requiring a separate bound proof.
+from-nat-maybe : {n : Nat} -> Nat -> M.Maybe (Fin n)
+from-nat-maybe {0} k = M.Nothing
+from-nat-maybe {S n} 0 = M.Just (FZero {n})
+from-nat-maybe {S n} (S k) = M.map (FSucc {n}) (from-nat-maybe {n} k)
+
+from-nat-maybe-to-nat : {n : Nat} -> (i : Fin n) -> from-nat-maybe {n} (to-nat i) = M.Just i
+from-nat-maybe-to-nat (FZero {n}) = rfl
+from-nat-maybe-to-nat (FSucc {n} i) = calc
+  from-nat-maybe {S n} (to-nat (FSucc i))
+  = M.map (FSucc {n}) (from-nat-maybe {n} (to-nat i))
+  = M.map (FSucc {n}) (M.Just i) := cong (from-nat-maybe-to-nat i)
+  = M.Just (FSucc i)
+
+from-nat-maybe-bound : {n : Nat} -> from-nat-maybe {n} n = M.Nothing
+from-nat-maybe-bound {0} = rfl
+from-nat-maybe-bound {S n} = calc
+  from-nat-maybe {S n} (S n)
+  = M.map (FSucc {n}) (from-nat-maybe {n} n)
+  = M.map (FSucc {n}) (M.Nothing : M.Maybe (Fin n)) := cong (from-nat-maybe-bound {n})
+  = M.Nothing
 
 to-nat-lt : (i : Fin n) -> to-nat i < n
 to-nat-lt FZero = rfl

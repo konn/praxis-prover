@@ -94,7 +94,7 @@ data CT
     schema's application takes after its arguments
     -}
     CClosure ![Text] !CT ![CT]
-  deriving stock (Show, Eq)
+  deriving stock (Show, Eq, Ord)
 
 {- |
 The text of a term, every application parenthesised; the parameters of a

@@ -38,8 +38,11 @@ module Language.Praxis.Package.Build (
   Reader,
   readFileUtf8,
   checkComponents,
+  checkComponentsFrom,
   checkProject,
+  checkProjectFrom,
   checkFile,
+  checkFileFrom,
 ) where
 
 import Control.Monad (filterM, foldM, forM, unless)
@@ -304,7 +307,11 @@ target, a library and a module of it, restricts the last library to that
 module and what it imports, directly or through others.
 -}
 checkComponents :: Prelude -> Reader -> Loaded -> [Component] -> Maybe QualName -> IO ([ModuleResult], Build)
-checkComponents p reader loaded comps target = go (initialBuild p) Map.empty [] (zip [1 :: Int ..] comps)
+checkComponents p = checkComponentsFrom (initialBuild p)
+
+-- | Check components from a supplied build, including its output-retention setting.
+checkComponentsFrom :: Build -> Reader -> Loaded -> [Component] -> Maybe QualName -> IO ([ModuleResult], Build)
+checkComponentsFrom initial reader loaded comps target = go initial Map.empty [] (zip [1 :: Int ..] comps)
   where
     go build _ results [] = pure (reverse results, build)
     go build known results ((i, c) : rest) = do
@@ -393,11 +400,15 @@ checkComponents p reader loaded comps target = go (initialBuild p) Map.empty [] 
 
 -- | Check every library of the project at a path, in order: the results, or why the project could not be loaded.
 checkProject :: Prelude -> FilePath -> IO (Either String [ModuleResult])
-checkProject p path = do
+checkProject p = checkProjectFrom (initialBuild p)
+
+-- | Check a project from a supplied build and its output-retention setting.
+checkProjectFrom :: Build -> FilePath -> IO (Either String [ModuleResult])
+checkProjectFrom initial path = do
   loaded <- loadProject path
   case loaded >>= \l -> (l,) <$> componentsInOrder l of
     Left err -> pure (Left err)
-    Right (l, comps) -> Right . fst <$> checkComponents p readFileUtf8 l comps Nothing
+    Right (l, comps) -> Right . fst <$> checkComponentsFrom initial readFileUtf8 l comps Nothing
 
 {- |
 Check a file as a module of the library enclosing it, with the libraries
@@ -406,7 +417,11 @@ last; or nothing, when no package encloses the file, which is then checked
 on its own by the caller.  The text given stands for the file's.
 -}
 checkFile :: Prelude -> FilePath -> Text -> IO (Maybe (Either String [ModuleResult]))
-checkFile p path text = do
+checkFile p = checkFileFrom (initialBuild p)
+
+-- | Check a package file from a supplied build and its output-retention setting.
+checkFileFrom :: Build -> FilePath -> Text -> IO (Maybe (Either String [ModuleResult]))
+checkFileFrom initial path text = do
   located <- locate path
   case located of
     Nothing -> pure Nothing
@@ -418,4 +433,4 @@ checkFile p path text = do
             reader f = do
               f' <- canonicalizePath f
               if f' == canonical then pure text else readFileUtf8 f
-        Just . Right . fst <$> checkComponents p reader loaded upTo (Just name)
+        Just . Right . fst <$> checkComponentsFrom initial reader loaded upTo (Just name)
