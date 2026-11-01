@@ -61,6 +61,21 @@ checkTests =
         case Map.lookup "u_TypeAliases_sunwrap" (coreBodies core) of
           Just [body] -> SurfaceCore.bodyType body @?= TData "TypeAliases.Vec" [TData "TypeAliases.Vec" [TParam 0 []] [IxParam 0]] [IxParam 0]
           _ -> assertFailure "missing synonym identity"
+    , testCase "nested vector updates preserve both dimensions through polymorphic callbacks" $ do
+        c <- checkFile "test/data/nested-update.px"
+        errors c @?= []
+        forM_ ["write.#index", "rectangular.#index", "row-length", "read-write", "concrete"] $ \name ->
+          assertBool (T.unpack name <> " was not certified") (("NestedUpdate." <> name) `elem` checkedTheorems c)
+        (k, _) <- maybe (assertFailure "no checked nested updates") pure (checkedFinal c)
+        forM_ ["u_NestedUpdate_swrite", "u_NestedUpdate_srectangular"] $ \name ->
+          assertBool (T.unpack name <> " has no certified membership contract") (Map.member name (knowClosures k))
+    , testCase "nested vector updates reject changes to the row length" $ do
+        p <- either assertFailure pure prelude
+        source <- TIO.readFile "test/data/nested-update.px"
+        let bad = source <> "\nbad : Fin n -> Vec n (Vec m Nat) -> Vec n (Vec m Nat)\nbad r b = modify (\\row -> Cons 0 row) r b\n"
+            c = checkSource p "bad-nested-update.px" bad
+        assertBool "a callback changed the matrix width" (not (null (errors c)))
+        assertBool "the invalid update was certified" ("NestedUpdate.bad.#closed" `notElem` checkedTheorems c)
     , testCase "type synonyms reject cycles, invalid arguments and forward binder dependencies" $ do
         p <- either assertFailure pure prelude
         let prefix = "module BadAlias where\ndata Vec n a where\n  Nil : Vec 0 a\n"

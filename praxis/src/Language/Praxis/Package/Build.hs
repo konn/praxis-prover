@@ -131,7 +131,7 @@ loadProject path0 = do
       case parseProject src of
         Left err -> pure (Left (dir </> "project.toml" <> ": " <> err))
         Right proj -> do
-          dirs <- concat <$> mapM (expand dir) (projectPackages proj)
+          dirs <- mapM canonicalizePath =<< (concat <$> mapM (expand dir) (projectPackages proj))
           pkgs <- mapM (\d -> fmap (d,) <$> loadPackage d) dirs
           pure (sequence pkgs >>= \ps -> validate (Loaded dir ps (projectConstraints proj)))
     -- A directory, or, ending in *, every subdirectory holding a package.toml.

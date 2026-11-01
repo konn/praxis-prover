@@ -1,0 +1,46 @@
+module Game.Othello.Initial where
+
+import "base" Data.Bool as B
+import Game.Othello.Board as C
+import Game.Othello.Rules as R
+
+-- half = 2 gives 4x4; half = 3 gives 6x6. Black occupies the
+-- north-east/south-west diagonal of the central 2x2 square and moves first.
+initial : Nat -> C.Board
+initial half = C.write (C.At (half - 1) (half - 1)) (C.Disc C.White) (C.write (C.At (half - 1) half) (C.Disc C.Black) (C.write (C.At half (half - 1)) (C.Disc C.Black) (C.write (C.At half half) (C.Disc C.White) (C.empty (half + half)))))
+
+four : C.Board
+four = initial 2
+
+six : C.Board
+six = initial 3
+
+four-opening : R.Position
+four-opening = R.Turn C.Black four
+
+six-opening : R.Position
+six-opening = R.Turn C.Black six
+
+four-size : C.size four = 4
+four-size = rfl
+
+six-size : C.size six = 6
+six-size = rfl
+
+four-well-formed : C.well-formed four = B.True
+four-well-formed = rfl
+
+six-well-formed : C.well-formed six = B.True
+six-well-formed = rfl
+
+four-black : C.count C.Black four = 2
+four-black = rfl
+
+four-white : C.count C.White four = 2
+four-white = rfl
+
+six-black : C.count C.Black six = 2
+six-black = rfl
+
+six-white : C.count C.White six = 2
+six-white = rfl

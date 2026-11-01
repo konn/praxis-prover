@@ -56,8 +56,10 @@ reverse-twice xs = L.reverse-reverse xs
 | `Data.Nat.Order` | Builtin linear ordering laws; addition and multiplication monotonicity; inductive `PLt`/`PLeq` and gap-based `ELt`/`ELeq`, with both round-trip laws and conversions to and from builtin comparisons |
 | `Data.Fin` | Inductive `Fin n` and bounded-natural `EFin n`, conversions and both inverse laws, bounds, weakening and ordinal reversal; checked finite-quantifier bridge registrations |
 | `Data.Finite` | The `Finite a` retraction class, its surface builtin registrations, and the instance for `Fin n` |
-| `Data.List` | `Nil`, `(::)`, `(<>)`, map, length, replication, reversal, take/drop, concatenation, sum/product, class-schema fold and algebraic proofs |
-| `Data.Vec` | Length-indexed `Vec n a`, head/tail, map, bounded take, replication, lookup/tabulate with inverse laws, reversal, append and list conversions |
+| `Data.Bool` | Booleans, choice, logical operations and natural-number comparison tests |
+| `Data.Maybe` | Optional values, mapping, defaults and map laws |
+| `Data.List` | `Nil`, `(::)`, `(<>)`, map, length, lookup, length-preserving update, replication, reversal, take/drop, concatenation, sum/product, class-schema fold and algebraic proofs |
+| `Data.Vec` | Length-indexed `Vec n a`, head/tail, map, bounded take, replication, lookup/update/modify, tabulation with inverse laws, reversal, append and list conversions |
 
 Natural subtraction is truncated: `n - m = 0` when `m` exceeds `n`.
 Division is total, with `n / 0 = 0` and `n % 0 = n`. For every divisor,
@@ -86,6 +88,26 @@ checked commutativity proof to transport its length index; transport preserves
 the entries and is erased at runtime. `length-append` proves the corresponding
 length equation. `SomeVec a` packs a vector with its length, and the list
 conversions have inverse laws.
+
+`update i x xs` replaces the entry at `i : Fin n` in `xs : Vec n a`;
+`modify f i xs` applies `f : a -> a` to that entry. Both preserve the length
+and need no default value or out-of-bounds case. Their lookup laws describe
+the changed entry and preservation of other entries. `update-lookup` and
+`modify-id` describe identity updates; `update-update` and `modify-compose`
+describe consecutive updates at one index.
+The other-entry laws take a proof that `Data.Bool.equal-nat` returns `False`
+for `Data.Fin.to-nat i` and `Data.Fin.to-nat j`.
+
+A matrix can be a nested vector. Updating a cell then composes the two
+operations:
+
+```text
+write : Fin n -> Fin m -> a -> Vec n (Vec m a) -> Vec n (Vec m a)
+write r c x board = modify (\row -> update c x row) r board
+```
+
+Here `lookup`, `update`, `modify`, and `Vec` are from `Data.Vec`, and `Fin`
+is from `Data.Fin`. The callback's row retains its length `m`.
 
 `Data.List.fold` uses the fixed methods of `Folding a`; the `Monoid a`
 subclass supplies checked identity and associativity laws. Lists have an

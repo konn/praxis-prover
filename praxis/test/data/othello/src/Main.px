@@ -1,0 +1,35 @@
+module Main where
+
+import "base" Data.Bool as B
+import "base" Data.List as L
+import "base" Data.Maybe as M
+import "othello" Game.Othello.Board as C
+import "othello" Game.Othello.Initial as I
+import "othello" Game.Othello.Rules as R
+
+north-edge : C.step 4 C.Back C.Stay (C.At 0 2) = M.Nothing
+north-edge = rfl
+
+east-edge : C.step 4 C.Stay C.Forward (C.At 2 3) = M.Nothing
+east-edge = rfl
+
+diagonal : C.step 6 C.Back C.Forward (C.At 3 3) = M.Just (C.At 2 4)
+diagonal = rfl
+
+four-first-legal : R.legal-placement C.Black I.four (C.At 0 1) = B.True
+four-first-legal = rfl
+
+four-first-flips : R.captures C.Black I.four (C.At 0 1) = L.singleton (C.At 1 1)
+four-first-flips = rfl
+
+four-occupied : R.legal-placement C.Black I.four (C.At 1 1) = B.False
+four-occupied = rfl
+
+four-outside : R.play C.Black I.four (R.Place (C.At 0 4)) = M.Nothing
+four-outside = rfl
+
+six-first-legal : R.legal-placement C.Black I.six (C.At 1 2) = B.True
+six-first-legal = rfl
+
+six-first-flips : R.captures C.Black I.six (C.At 1 2) = L.singleton (C.At 2 2)
+six-first-flips = rfl

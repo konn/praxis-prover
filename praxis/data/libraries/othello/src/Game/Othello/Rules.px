@@ -1,0 +1,192 @@
+module Game.Othello.Rules where
+
+import "base" Data.Bool as B
+import "base" Data.List as L
+import "base" Data.Maybe as M
+import Game.Othello.Board as C
+open C using (Board, Square, Player, Cell, Offset)
+open L using (List, Nil, (::), (<>))
+
+data Direction = North | NorthEast | East | SouthEast | South | SouthWest | West | NorthWest
+open Direction public
+
+row-offset : Direction -> Offset
+row-offset North = C.Back
+row-offset NorthEast = C.Back
+row-offset East = C.Stay
+row-offset SouthEast = C.Forward
+row-offset South = C.Forward
+row-offset SouthWest = C.Forward
+row-offset West = C.Stay
+row-offset NorthWest = C.Back
+
+column-offset : Direction -> Offset
+column-offset North = C.Stay
+column-offset NorthEast = C.Forward
+column-offset East = C.Forward
+column-offset SouthEast = C.Forward
+column-offset South = C.Stay
+column-offset SouthWest = C.Back
+column-offset West = C.Back
+column-offset NorthWest = C.Back
+
+directions : List Direction
+directions = North :: NorthEast :: East :: SouthEast :: South :: SouthWest :: West :: NorthWest :: Nil
+
+private
+  data Ray where
+    Path : M.Maybe (Square) -> List (Square) -> Ray
+
+  extend-ray : M.Maybe (Square) -> List (Square) -> Ray
+  extend-ray M.Nothing xs = Path M.Nothing xs
+  extend-ray (M.Just s) xs = Path (M.Just s) (s :: xs)
+
+  advance-ray : Nat -> Direction -> M.Maybe (Square) -> List (Square) -> Ray
+  advance-ray n d M.Nothing xs = Path M.Nothing xs
+  advance-ray n d (M.Just s) xs = extend-ray (C.step n (row-offset d) (column-offset d) s) xs
+
+  ray-step : Nat -> Direction -> Ray -> Ray
+  ray-step n d (Path current xs) = advance-ray n d current xs
+
+  ray-state : Nat -> Nat -> Direction -> Square -> Ray
+  ray-state 0 n d s = Path (M.Just s) Nil
+  ray-state (S k) n d s = ray-step n d (ray-state k n d s)
+
+  ray-list : Ray -> List (Square)
+  ray-list (Path current xs) = L.reverse xs
+
+-- At most n steps reach every square on a ray. Stepping off the board
+-- is absorbing, so truncated natural subtraction can never wrap an edge.
+ray : Nat -> Direction -> Square -> List (Square)
+ray n d s = ray-list (ray-state n n d s)
+
+private
+  data Capture where
+    Unbracketed : Capture
+    Bracketed : List (Square) -> Capture
+
+  prepend-opponent : Square -> Capture -> Capture
+  prepend-opponent s Unbracketed = Unbracketed
+  prepend-opponent s (Bracketed xs) = Bracketed (s :: xs)
+
+  scan-cell : Player -> Square -> Cell -> Capture -> Capture
+  scan-cell p s C.Empty suffix = Unbracketed
+  scan-cell p s (C.Disc q) suffix = B.choose (C.same-player p q) (Bracketed Nil) (prepend-opponent s suffix)
+
+  scan-read : Player -> Square -> M.Maybe Cell -> Capture -> Capture
+  scan-read p s M.Nothing suffix = Unbracketed
+  scan-read p s (M.Just x) suffix = scan-cell p s x suffix
+
+  scan : Player -> Board -> List (Square) -> Capture
+  scan p b Nil = Unbracketed
+  scan p b (s :: ss) = scan-read p s (C.read s b) (scan p b ss)
+
+  captured : Capture -> List (Square)
+  captured Unbracketed = Nil
+  captured (Bracketed xs) = xs
+
+-- Only a nonempty consecutive run of opponent discs followed by a
+-- friendly disc is returned. An empty square or board edge cancels it.
+captures-on : Player -> Board -> Square -> Direction -> List (Square)
+captures-on p b s d = captured (scan p b (ray (C.size b) d s))
+
+captures : Player -> Board -> Square -> List (Square)
+captures p b s = L.concat (L.map (\d -> captures-on p b s d) directions)
+
+nonempty : List a -> B.Bool
+nonempty Nil = B.False
+nonempty (x :: xs) = B.True
+
+legal-placement : Player -> Board -> Square -> B.Bool
+legal-placement p b s = B.and (C.well-formed b) (B.and (C.empty-cell (C.read s b)) (nonempty (captures p b s)))
+
+placements : Player -> Board -> List (Square)
+placements p b = L.concat (L.map (\s -> B.choose (legal-placement p b s) (L.singleton s) Nil) (C.squares (C.size b)))
+
+has-placement : Player -> Board -> B.Bool
+has-placement p b = nonempty (placements p b)
+
+terminal : Board -> B.Bool
+terminal b = B.and (C.well-formed b) (B.not (B.or (has-placement C.Black b) (has-placement C.White b)))
+
+pass-allowed : Player -> Board -> B.Bool
+pass-allowed p b = B.and (B.not (has-placement p b)) (has-placement (C.other p) b)
+
+paint : Player -> List (Square) -> Board -> Board
+paint p Nil b = b
+paint p (s :: ss) b = C.write s (C.Disc p) (paint p ss b)
+
+paint-size : (p : Player) -> (ss : List Square) -> (b : Board) -> C.size (paint p ss b) = C.size b
+paint-size p Nil b = rfl
+paint-size p (s :: ss) b = calc
+  C.size (paint p (s :: ss) b)
+  = C.size (C.write s (C.Disc p) (paint p ss b))
+  = C.size (paint p ss b) := C.write-size s (C.Disc p) (paint p ss b)
+  = C.size b := paint-size p ss b
+
+paint-length : (p : Player) -> (ss : List Square) -> (b : Board) -> L.length (C.cells (paint p ss b)) = L.length (C.cells b)
+paint-length p Nil b = rfl
+paint-length p (s :: ss) b = calc
+  L.length (C.cells (paint p (s :: ss) b))
+  = L.length (C.cells (C.write s (C.Disc p) (paint p ss b)))
+  = L.length (C.cells (paint p ss b)) := C.write-length s (C.Disc p) (paint p ss b)
+  = L.length (C.cells b) := paint-length p ss b
+
+-- Every capture is determined on the original board, before any discs
+-- are flipped. This prevents a flip in one direction enabling another.
+place : Player -> Board -> Square -> Board
+place p b s = C.write s (C.Disc p) (paint p (captures p b s) b)
+
+place-size : (p : Player) -> (b : Board) -> (s : Square) -> C.size (place p b s) = C.size b
+place-size p b s = calc
+  C.size (place p b s)
+  = C.size (paint p (captures p b s) b) := C.write-size s (C.Disc p) (paint p (captures p b s) b)
+  = C.size b := paint-size p (captures p b s) b
+
+place-length : (p : Player) -> (b : Board) -> (s : Square) -> L.length (C.cells (place p b s)) = L.length (C.cells b)
+place-length p b s = calc
+  L.length (C.cells (place p b s))
+  = L.length (C.cells (paint p (captures p b s) b)) := C.write-length s (C.Disc p) (paint p (captures p b s) b)
+  = L.length (C.cells b) := paint-length p (captures p b s) b
+
+data Move where
+  Place : Square -> Move
+  Pass : Move
+open Move public
+
+legal : Player -> Board -> Move -> B.Bool
+legal p b (Place s) = legal-placement p b s
+legal p b Pass = pass-allowed p b
+
+-- A rejected move has no successor. Passing is disallowed when a
+-- placement exists, and also when neither player can move (game over).
+play : Player -> Board -> Move -> M.Maybe (Board)
+play p b (Place s) = B.choose (legal-placement p b s) (M.Just (place p b s)) M.Nothing
+play p b Pass = B.choose (pass-allowed p b) (M.Just b) M.Nothing
+
+moves : Player -> Board -> List (Move)
+moves p b = L.map (\s -> Place s) (placements p b) <> B.choose (pass-allowed p b) (L.singleton Pass) Nil
+
+data Position where
+  Turn : Player -> Board -> Position
+open Position public
+
+to-move : Position -> Player
+to-move (Turn p b) = p
+
+board : Position -> Board
+board (Turn p b) = b
+
+successor : Position -> Move -> M.Maybe (Position)
+successor (Turn p b) m = M.map (\next -> Turn (C.other p) next) (play p b m)
+
+data Outcome = BlackWins | Draw | WhiteWins
+open Outcome public
+
+-- Scores count discs actually present on the terminal board. Empty
+-- squares are not silently credited to either player.
+outcome : Board -> Outcome
+outcome b = B.choose (B.less-nat (C.count C.Black b) (C.count C.White b)) WhiteWins (B.choose (B.less-nat (C.count C.White b) (C.count C.Black b)) BlackWins Draw)
+
+result : Board -> M.Maybe Outcome
+result b = B.choose (terminal b) (M.Just (outcome b)) M.Nothing

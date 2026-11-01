@@ -1,5 +1,7 @@
 module Data.List where
 
+import Data.Maybe as M
+
 -- Finite lists, with right-associative construction and concatenation.
 data List a = Nil | a :: List a
 
@@ -52,6 +54,34 @@ sum (x :: xs) = x + sum xs
 product : List Nat -> Nat
 product Nil = 1
 product (x :: xs) = x * product xs
+
+-- Total positional access. An out-of-range replacement leaves the list
+-- unchanged, and lookup distinguishes that case from any element value.
+lookup : Nat -> List a -> M.Maybe a
+lookup 0 Nil = M.Nothing
+lookup 0 (x :: xs) = M.Just x
+lookup (S n) Nil = M.Nothing
+lookup (S n) (x :: xs) = lookup n xs
+
+update : Nat -> a -> List a -> List a
+update 0 x Nil = Nil
+update 0 x (y :: ys) = x :: ys
+update (S n) x Nil = Nil
+update (S n) x (y :: ys) = y :: update n x ys
+
+length-update : (n : Nat) -> (x : a) -> (xs : List a) -> length (update n x xs) = length xs
+length-update 0 x Nil = rfl
+length-update 0 x (y :: ys) = rfl
+length-update (S n) x Nil = rfl
+length-update (S n) x (y :: ys) = calc
+  length (update (S n) x (y :: ys))
+  = S (length (update n x ys))
+  = S (length ys) := cong (length-update n x ys)
+  = length (y :: ys)
+
+range : Nat -> List Nat
+range 0 = Nil
+range (S n) = range n <> singleton n
 
 map-id : (xs : List a) -> map (\x -> x) xs = xs
 map-id Nil = rfl

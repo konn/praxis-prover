@@ -1,0 +1,139 @@
+module Game.Othello.Board where
+
+import "base" Data.Bool as B
+import "base" Data.List as L
+import "base" Data.Maybe as M
+open L using (List, Nil, (::), (<>))
+
+data Player = Black | White
+open Player public
+
+other : Player -> Player
+other Black = White
+other White = Black
+
+other-other : (p : Player) -> other (other p) = p
+other-other Black = rfl
+other-other White = rfl
+
+same-player : Player -> Player -> B.Bool
+same-player Black Black = B.True
+same-player Black White = B.False
+same-player White Black = B.False
+same-player White White = B.True
+
+data Cell = Empty | Disc Player
+open Cell public
+
+-- Row-major storage. All game entry points check well-formedness;
+-- raw storage remains available for independent fixtures and certificates.
+data Board = Grid Nat (List Cell)
+open Board public
+
+size : Board -> Nat
+size (Grid n xs) = n
+
+cells : Board -> List Cell
+cells (Grid n xs) = xs
+
+well-formed : Board -> B.Bool
+well-formed (Grid n xs) = B.equal-nat (L.length xs) (n * n)
+
+data Square = At Nat Nat
+open Square public
+
+inside : Nat -> Square -> B.Bool
+inside n (At r c) = B.and (B.less-nat r n) (B.less-nat c n)
+
+index : Nat -> Square -> Nat
+index n (At r c) = n * r + c
+
+read : Square -> Board -> M.Maybe Cell
+read s (Grid n xs) = B.choose (inside n s) (L.lookup (index n s) xs) M.Nothing
+
+-- Out-of-board writes are ignored. In particular, an excessive column
+-- cannot alias a square in the following row.
+private
+  write-cells : B.Bool -> Nat -> Cell -> List Cell -> List Cell
+  write-cells B.False i x xs = xs
+  write-cells B.True i x xs = L.update i x xs
+
+  write-cells-length : (ok : B.Bool) -> (i : Nat) -> (x : Cell) -> (xs : List Cell) -> L.length (write-cells ok i x xs) = L.length xs
+  write-cells-length B.False i x xs = rfl
+  write-cells-length B.True i x xs = L.length-update i x xs
+
+write : Square -> Cell -> Board -> Board
+write s x (Grid n xs) = Grid n (write-cells (inside n s) (index n s) x xs)
+
+write-size : (s : Square) -> (x : Cell) -> (b : Board) -> size (write s x b) = size b
+write-size s x (Grid n xs) = rfl
+
+write-length : (s : Square) -> (x : Cell) -> (b : Board) -> L.length (cells (write s x b)) = L.length (cells b)
+write-length s x (Grid n xs) = write-cells-length (inside n s) (index n s) x xs
+
+write-well-formed : (s : Square) -> (x : Cell) -> (b : Board) -> well-formed (write s x b) = well-formed b
+write-well-formed s x (Grid n xs) = calc
+  well-formed (write s x (Grid n xs))
+  = B.equal-nat (L.length (write-cells (inside n s) (index n s) x xs)) (n * n)
+  = B.equal-nat (L.length xs) (n * n) := cong (write-cells-length (inside n s) (index n s) x xs)
+  = well-formed (Grid n xs)
+
+empty : Nat -> Board
+empty n = Grid n (L.replicate (n * n) Empty)
+
+squares : Nat -> List Square
+squares n = L.concat (L.map (\r -> L.map (\c -> At r c) (L.range n)) (L.range n))
+
+is-empty : Cell -> B.Bool
+is-empty Empty = B.True
+is-empty (Disc p) = B.False
+
+empty-cell : M.Maybe Cell -> B.Bool
+empty-cell M.Nothing = B.False
+empty-cell (M.Just x) = is-empty x
+
+owned-cell : Player -> Cell -> Nat
+owned-cell p Empty = 0
+owned-cell p (Disc q) = B.choose (same-player p q) 1 0
+
+count : Player -> Board -> Nat
+count p (Grid n xs) = L.sum (L.map (\x -> owned-cell p x) xs)
+
+empty-weight : Cell -> Nat
+empty-weight Empty = 1
+empty-weight (Disc p) = 0
+
+empty-count : Board -> Nat
+empty-count (Grid n xs) = L.sum (L.map empty-weight xs)
+
+same-square : Square -> Square -> B.Bool
+same-square (At r c) (At s d) = B.and (B.equal-nat r s) (B.equal-nat c d)
+
+data Offset = Back | Stay | Forward
+open Offset public
+
+private
+  previous : Nat -> M.Maybe Nat
+  previous 0 = M.Nothing
+  previous (S n) = M.Just n
+
+shift : Offset -> Nat -> M.Maybe Nat
+shift Back i = previous i
+shift Stay i = M.Just i
+shift Forward i = M.Just (S i)
+
+private
+  with-row : Nat -> M.Maybe Nat -> M.Maybe Square
+  with-row r M.Nothing = M.Nothing
+  with-row r (M.Just c) = M.Just (At r c)
+
+  combine : M.Maybe Nat -> M.Maybe Nat -> M.Maybe Square
+  combine M.Nothing c = M.Nothing
+  combine (M.Just r) c = with-row r c
+
+  bounded : Nat -> M.Maybe Square -> M.Maybe Square
+  bounded n M.Nothing = M.Nothing
+  bounded n (M.Just s) = B.choose (inside n s) (M.Just s) M.Nothing
+
+step : Nat -> Offset -> Offset -> Square -> M.Maybe Square
+step n dr dc (At r c) = bounded n (combine (shift dr r) (shift dc c))

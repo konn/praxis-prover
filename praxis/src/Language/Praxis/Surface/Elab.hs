@@ -1197,6 +1197,7 @@ placesUsed siblings refs = foldMap (go . fcBody)
       Term.Parameter r environment -> ([r | r `elem` refs], []) <> go environment
       Term.Closure _ body -> go body
       Term.PackedClosure _ body environment -> go body <> go environment
+      Term.PackedPredicate _ body captures -> go body <> foldMap go captures
       Term.Invoke f as -> go f <> foldMap go as
       _ -> ([], [])
 
@@ -1916,6 +1917,7 @@ pruneDictionary env info fcs = (kept, map prune fcs)
       Term.Parameter r environment -> [r | r `elem` refs] <> usedIn environment
       Term.Closure _ body -> usedIn body
       Term.PackedClosure _ body environment -> usedIn body <> usedIn environment
+      Term.PackedPredicate _ body captures -> usedIn body <> concatMap usedIn captures
       Term.Invoke f as -> usedIn f <> concatMap usedIn as
       _ -> []
     rewrite :: Term.Term x -> Term.Term x
@@ -1925,6 +1927,7 @@ pruneDictionary env info fcs = (kept, map prune fcs)
       Term.Parameter r environment -> Term.Parameter (renamed r) (rewrite environment)
       Term.Closure n body -> Term.Closure n (rewrite body)
       Term.PackedClosure hints body environment -> Term.PackedClosure hints (rewrite body) (rewrite environment)
+      Term.PackedPredicate hints body captures -> Term.PackedPredicate hints (rewrite body) (map rewrite captures)
       Term.Invoke f as -> Term.Invoke (rewrite f) (map rewrite as)
       other -> other
     renamed r = Map.findWithDefault r r renumber
@@ -3639,6 +3642,10 @@ instantiateProofDictionary env givens ctx sp proofSlots types proposition = do
         when (any (`Map.member` table) (globalsOf (fromScope body))) $
           failAt sp "a reusable proof precondition cannot capture its dictionary inside closed callback code"
         SchemaPacked hints body <$> walk table environment
+      PredicatePacked hints body captures -> do
+        when (any (`Map.member` table) (globalsOf (fromScope body))) $
+          failAt sp "a reusable proof precondition cannot capture its dictionary inside closed predicate code"
+        PredicatePacked hints body <$> traverse (walk table) captures
       Lam hints body -> Lam hints <$> scoped table body
       Case scrutinee alternatives -> Case <$> walk table scrutinee <*> traverse (\(pattern', body) -> (pattern',) <$> scoped table body) alternatives
       If condition yes no -> If <$> walk table condition <*> walk table yes <*> walk table no

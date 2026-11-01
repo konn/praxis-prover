@@ -74,7 +74,7 @@ import Control.Applicative ((<|>))
 import Control.Monad (foldM, forM, forM_, guard, join, unless, zipWithM)
 import Data.Char (isAlphaNum)
 import Data.IntMap.Strict qualified as IM
-import Data.List (elemIndex, find, nub, nubBy, sort)
+import Data.List (elemIndex, find, nub, nubBy, partition, sort)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
@@ -342,7 +342,7 @@ statementGoal membership td = do
     -- the dictionary; none for Nat, every code.
     predicate = \case
       TNat -> Nothing
-      t -> predicateOf membership (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip (tdSlots td) [n | Ref _ n <- placeRefs (tdSlots td)])) t
+      t -> nestedPredicateOf membership (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip (tdSlots td) [n | Ref _ n <- placeRefs (tdSlots td)])) (Just . ixCT (either (const (CVar "?")) id . termCT CVar . valueTerm)) t
     members =
       [HMember p core | ((_, t), core) <- zip (tdBinders td) binderCores, Just p <- [predicate t]]
         <> [HMember p core | (i, ((_, t), core)) <- zip [0 :: Int ..] (zip (tdValues td) valueCores), i `notElem` map fst defined, Just p <- [predicate t]]
@@ -732,7 +732,7 @@ functionPremiseObligation k g info argTypes args given = \case
   PLaw law parameter -> (\ty -> OLaw law ty True) <$> functionClassType k g info argTypes args given parameter
   where
     dict = functionDictionary info argTypes
-    predicate = predicateOf (knowMembership k) (`Map.lookup` given)
+    predicate = functionPredicate k info argTypes args given
     valueTerm i = if null args then CVar "?" else functionValueAt (knowEnv k) info argTypes args i
     name i = "#d" <> T.pack (show i)
 
@@ -811,7 +811,7 @@ of neither, or when the membership of a body cannot be established, as for a
 field whose type's membership does not constrain it.
 -}
 proveClosure :: Knowledge -> FunDef -> Either EngineError (Maybe (Closure, [(Text, Text)]))
-proveClosure k fd = case (fdResult fd, lemmaPredicate k (lemmaDictionary fd) (fdResult fd)) of
+proveClosure k fd = case (fdResult fd, lemmaPredicate k fd (fdResult fd)) of
   (result, Just (Pred resultIs ps))
     | closes result ->
         do
@@ -865,7 +865,7 @@ closureSpec resultIs ps =
   Spec
     { specName = "#closed"
     , specPre = const []
-    , specPost = \_ applied -> Rel RelLt (Nat 0) (apps (Global (Ref RefBuiltin resultIs)) (map fromCT ps <> [applied]))
+    , specPost = \_ applied -> Rel RelLt (Nat 0) (apps (Global (Ref RefBuiltin resultIs)) (map fromCT ps <> [applied] <> [fromCT capture | CClosure _ _ captures <- ps, capture <- captures]))
     , specPremises = closurePremises
     , specCase = membershipCase
     }
@@ -906,7 +906,7 @@ specGoal k fd spec = do
   let names = ["x" <> T.pack (show i) | i <- [0 .. length (fdArgs fd) - 1]]
       cores = map mangleVariable names
       dict = lemmaDictionary fd
-      predicate = lemmaPredicate k dict
+      predicate = lemmaPredicate k fd
       applied = functionApplication fd
       hyps = [HMember p v | (v, Just p) <- zip cores (map predicate (fdArgs fd))] <> map HProp (specPre spec cores)
   premises <- either (Left . EngineError (fdSpan fd)) Right (renderPremises True predicate cores (functionValueTerm k fd) (functionPremises k fd spec))
@@ -945,7 +945,7 @@ proveSpec k fd spec = do
     names = ["x" <> T.pack (show i) | i <- [0 .. length (fdArgs fd) - 1]]
     cores = map mangleVariable names
     dict = lemmaDictionary fd
-    predicate = lemmaPredicate k dict
+    predicate = lemmaPredicate k fd
     argIs = map predicate (fdArgs fd)
     thm = TheoremInfo (funQual info <> [Ident (specName spec)]) (functionLemma info (specName spec)) cores (fdArgs fd) [] [] Nothing [] [] mempty Nothing
     columns = nub [i | fc <- fdClauses fd, (i, p) <- zip [0 ..] (fcPatterns fc), matchedOn p]
@@ -1014,6 +1014,11 @@ functionApplication fd = apps (Global (Ref RefFunction (funCore info))) (argumen
 functionValueTerm :: Knowledge -> FunDef -> Int -> CT
 functionValueTerm k fd = functionValueAt (knowEnv k) (fdInfo fd) (fdArgs fd) [CVar (mangleVariable ("x" <> T.pack (show position))) | position <- [0 .. length (fdArgs fd) - 1]]
 
+-- | Instantiate nested index predicates at a function's actual arguments.
+functionPredicate :: Knowledge -> FunInfo -> [Ty] -> [CT] -> Map Int Pred -> Ty -> Maybe Pred
+functionPredicate k info types arguments predicates =
+  nestedPredicateOf (knowMembership k) (`Map.lookup` predicates) (Just . ixCT (functionValueAt (knowEnv k) info types arguments))
+
 functionValueAt :: Env -> FunInfo -> [Ty] -> [CT] -> Int -> CT
 functionValueAt env info argTypes args i = case lookup i runtime of
   Just value -> value
@@ -1032,10 +1037,12 @@ functionValueAt env info argTypes args i = case lookup i runtime of
       ]
 
 -- | The predicate of a type in a function's lemma: a type parameter's own, a place of the lemma's dictionary; none for @Nat@.
-lemmaPredicate :: Knowledge -> [Slot] -> Ty -> Maybe Pred
-lemmaPredicate k dict = \case
+lemmaPredicate :: Knowledge -> FunDef -> Ty -> Maybe Pred
+lemmaPredicate k fd = \case
   TNat -> Nothing
-  t -> predicateOf (knowMembership k) (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip dict [n | Ref _ n <- placeRefs dict])) t
+  t -> nestedPredicateOf (knowMembership k) (\i -> (\n -> Pred n []) <$> lookup (membershipSlot i) (zip dict [n | Ref _ n <- placeRefs dict])) (Just . ixCT (functionValueTerm k fd)) t
+  where
+    dict = lemmaDictionary fd
 
 -- | The implications of a goal's conclusion introduced as hypotheses, named after the others: the tactic doing it, and the goal after.
 introduceImplications :: Goal -> (Builder, Goal)
@@ -1659,10 +1666,22 @@ indexOf k g eqs t0 = case t0 of
   CSym fn [t]
     | (n, e) : _ <- [(h, b) | (h, a, b) <- eqs, a == t0] -> Right (e, "exact " <> fromText n)
     | Right result <- specification fn t -> Right result
+    | Right result <- exactIndex t -> Right result
     | Just (tac, t') <- unfoldStep k t0 -> Right (t', "calc " <> render t0 <> " = " <> render t' <> " by " <> tac)
   _ -> missing
   where
+    missing :: Either String a
     missing = Left ("no index is known of " <> T.unpack (runBuilder (render t0)))
+    exactIndex value = do
+      predicate <- maybe missing Right (termPred k g value)
+      case predicateAt predicate value of
+        CSym "conj" _ -> do
+          let name = freshProofName g "ExactValue"
+              (exposed, expanded) = exposeExactMemberships g {goalHyps = goalHyps g <> [(name, HProp (Rel RelLt (Nat 0) (fromCT (predicateAt predicate value))))]}
+          (indexName, bound) <- maybe missing Right (listToMaybe [(h, rhs) | (h, lhs, rhs) <- goalEquations expanded, lhs == t0])
+          proof <- membershipProof k g predicate value
+          pure (bound, "have " <> fromText name <> ": " <> membershipText predicate value <> " { " <> proof <> " }; " <> exposed <> "exact " <> fromText indexName)
+        _ -> missing
     specification fn t = case t of
       CSym h args
         | Just s <- Map.lookup h (knowIndexSpecs k)
@@ -1739,19 +1758,27 @@ premisesAt k g eqs pre values byArg = foldM one (Map.empty, "") pre
 argMemberships :: Knowledge -> Goal -> Text -> [CT] -> Either String Builder
 argMemberships k g h args = do
   cl <- maybe (Left ("the results of " <> T.unpack h <> " are not known to be members")) Right (Map.lookup h (knowClosures k))
+  let types = closureArgTys cl
+      given = knownPredicates k g types args
+      expected ty = do
+        info <- find ((== h) . funCore) [fn | GFun fn <- Map.elems (envGlobals (knowEnv k))]
+        functionPredicate k info types args given ty
   fmap mconcat . forM (zip (closureArgTys cl) args) $ \(ty, a) -> case ty of
     TNat -> Right ""
     TArrow {} -> Right ""
     _ -> do
-      p <- maybe (Left ("the membership of " <> T.unpack (runBuilder (render a)) <> " is not known")) Right (termPred k g a <|> if null (valueVariables ty) then typePredicate k g ty else Nothing)
+      p <- maybe (Left ("the membership of " <> T.unpack (runBuilder (render a)) <> " is not known")) Right (expected ty <|> termPred k g a <|> if null (valueVariables ty) then typePredicate k g ty else Nothing)
       if hasMembership g p a then Right "" else (\proof -> "have (" <> membershipText p a <> ") { " <> proof <> " }; ") <$> membershipProof k g p a
 
 {- | Recover type-parameter predicates from ordinary arguments and from a
 fixed callback's result contract. Unknown predicates remain absent.
 -}
 knownPredicates :: Knowledge -> Goal -> [Ty] -> [CT] -> Map Int Pred
-knownPredicates k g tys args = Map.unions (zipWith fromArgument tys args)
+knownPredicates k g tys args = Map.unions (map (uncurry fromArgument) (ordinary <> callbacks))
   where
+    -- A callback may expose only the unindexed part of its result predicate.
+    -- Prefer the complete element predicate supplied by ordinary containers.
+    (ordinary, callbacks) = partition (null . fst . schemaArrows . fst) (zip tys args)
     fromArgument ty value = case schemaArrows ty of
       ([], _) -> maybe Map.empty (fromPredicate ty) (termPred k g value)
       (domains, result) -> case applyCallback value [CVar ("predicate_arg_" <> T.pack (show i)) | i <- [0 .. length domains - 1]] of
@@ -1791,13 +1818,12 @@ dictionaryPredicates k g info argTypes args =
 termPred :: Knowledge -> Goal -> CT -> Maybe Pred
 termPred k g term
   | p : _ <-
-      [ Pred name captures
+      [ predicate
       | (_, HProp prop) <- goalHyps g
       , Rel RelLt (Nat 0) member <- [stripLocations prop]
-      , Right (CSym name args) <- [termCT CVar member]
-      , not (null args)
-      , last args == term
-      , let captures = init args
+      , Right code <- [termCT CVar member]
+      , Just (predicate, value) <- [splitMembership code]
+      , value == term
       ] =
       Just p
   | p : _ <-
@@ -1810,14 +1836,24 @@ termPred k g term
       , Just sigma <- [matchCT (scLocals contract) patternTerm term Map.empty]
       ] =
       Just p
-  | otherwise = case term of
+  | otherwise = direct <|> reduced
+  where
+    direct = case term of
       CVar v -> listToMaybe [p | (_, HMember p x) <- goalHyps g, x == v]
       CSym f args
         | Just cl <- Map.lookup f (knowClosures k) -> do
             let given = knownPredicates k g (closureArgTys cl) args
-            predicateOf (knowMembership k) (`Map.lookup` given) (closureResultTy cl)
+            info <- find ((== f) . funCore) [fn | GFun fn <- Map.elems (envGlobals (knowEnv k))]
+            functionPredicate k info (closureArgTys cl) args given (closureResultTy cl)
       _ -> Nothing
-  where
+    reduced = do
+      -- Packed callback environments use these projections. Do not unfold
+      -- arbitrary constructor values merely to infer a predicate.
+      CSym projection _ <- pure term
+      guard (projection `elem` ["hd", "tl"])
+      let value = lastTerm term (reductionsOf k term)
+      guard (value /= term)
+      termPred k g value
     parts (Conn And a b) = parts a <> parts b
     parts p = [stripLocations p]
 
@@ -2401,9 +2437,11 @@ evidence k info g le = case spineOf le of
                 TData _ _ _ -> True
                 TParam i [] -> membershipSlot i `elem` thmSlots t
                 _ -> False
-          let appliedPredicate = instantiatedPredicate k g assign
-          required <- forM [((arg, e), bty) | ((arg, (e, _)), bty) <- zip (zip args typed) (thmMembered t), membered bty] \((arg, value), ty) -> do
-            predicate <- maybe (Left (EngineError (location arg) "a theorem argument's exact indexed type predicate is unavailable")) Right (appliedPredicate ty)
+          required <- forM [((arg, e, actual), bty) | ((arg, (e, actual)), bty) <- zip (zip args typed) (thmMembered t), membered bty] \((arg, value, actual), ty) -> do
+            let appliedPredicate = case ty of
+                  TParam {} -> exactTypePredicate k g
+                  _ -> typePredicate k g
+            predicate <- maybe (Left (EngineError (location arg) "a theorem argument's exact indexed type predicate is unavailable")) Right (appliedPredicate actual)
             pure (arg, value, Just predicate)
           pre <- memberships k g required
           (indices, idx) <- indexPremises sp t typed
@@ -2988,7 +3026,10 @@ at the predicates of its arguments; @anyIs@ for @Nat@; and a type parameter
 of the goal's theorem's own, a place of the goal's dictionary.
 -}
 typePredicate :: Knowledge -> Goal -> Ty -> Maybe Pred
-typePredicate k g = predicateOf (knowMembership k) (\j -> (\n -> Pred n []) <$> lookup (membershipSlot j) (zip (goalDict g) [n | Ref _ n <- placeRefs (goalDict g)]))
+typePredicate k g = nestedPredicateOf (knowMembership k) (\j -> (\n -> Pred n []) <$> lookup (membershipSlot j) (zip (goalDict g) [n | Ref _ n <- placeRefs (goalDict g)])) index
+  where
+    context = goalVars g <> [(core, (core, ty)) | (_, (core, ty)) <- goalVars g]
+    index value = checkedIndexTerm k (knowEnv k) context value >>= either (const Nothing) Just . termCT CVar
 
 {- | Instantiate a type parameter by its complete indexed type. Direct
 datatype contexts retain their separate membership and index hypotheses.
@@ -3096,6 +3137,29 @@ predicateOf membership param = go
       TNat -> Just anyPred
       TParam j [] -> param j
       _ -> Nothing
+
+{- | Keep indices on nested datatype arguments in their element predicates.
+The outer datatype's indices still have separate hypotheses. In particular,
+membership of @Vec n (Vec m a)@ constrains every row to length @m@, so a
+polymorphic callback receives that constraint when instantiated at a row.
+-}
+nestedPredicateOf :: Map Text (Text, [Int]) -> (Int -> Maybe Pred) -> (Ix -> Maybe CT) -> Ty -> Maybe Pred
+nestedPredicateOf membership parameter index = outer
+  where
+    outer (TData name arguments _) = do
+      (symbol, used) <- Map.lookup name membership
+      parameters <- traverse (\position -> exact =<< lookup position (zip [0 ..] arguments)) used
+      pure (Pred symbol (map predicateParam parameters))
+    outer ty = predicateOf membership parameter ty
+    exact ty@(TData name _ indices) = do
+      base <- outer ty
+      values <- traverse index indices
+      let variable = head [candidate | candidate <- iterate (<> "'") "exact_member", candidate `notElem` concatMap varsCT (predicateParam base : values)]
+          value = CVar variable
+          functions = [mangleGlobal (T.split (\c -> c == '.' || c == '/') name <> [if length indices == 1 then "#idx" else "#idx-" <> T.pack (show j)]) | j <- [0 .. length indices - 1]]
+          restrictions = [CSym "eq" [CSym function [value], bound] | (function, bound) <- zip functions values]
+      pure (if null indices then base else predicateOver variable (foldr (\restriction rest -> CSym "conj" [restriction, rest]) (predicateAt base value) restrictions))
+    exact ty = outer ty
 
 -- | The predicate every code satisfies: the membership of @Nat@.
 anyPred :: Pred
@@ -3374,7 +3438,7 @@ parameter, and at a data type the closure lemma of the instance's function,
 its premises in turn.
 -}
 obligations :: Knowledge -> Goal -> Database ObligationHead Obligation Builder String
-obligations k g = Database obligationHead byHead [assumed, anyMember, exactMember, schemaPremised g] none deep
+obligations k g = Database obligationHead byHead [assumed, anyMember, exactMember, schemaPremised g, projectedMember] none deep
   where
     env = knowEnv k
     obligationHead = \case
@@ -3386,10 +3450,10 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, exactMembe
       OSchema {} -> OnNothing
       OEquation {} -> OnNothing
     byHead = \case
-      OnTerm f -> [premised f, introduced f, closedBy f]
+      OnTerm f -> [premised f, introduced f, closedBy f, reducedMember]
       OnLaw _ -> [lawPremise, lawInstance]
       OnClosure _ -> [closureAny, closurePremise, closureInstance]
-      OnNothing -> [schemaClosed, equationKnown]
+      OnNothing -> [schemaClosed, equationKnown, reducedMember]
     schemaClosed = \case
       OSchema contract -> Just (either Refuse (Reduce [] . const) (proveSchemaContract k g contract))
       _ -> Nothing
@@ -3398,6 +3462,8 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, exactMembe
       OEquation l r -> Just (either Refuse (Reduce [] . const) (indexEquation k g (goalEquations g) l r))
       _ -> Nothing
     exactMember = \case
+      obligation@(OMember predicate value@(CSym function _))
+        | code@(CSym "conj" _) <- predicateAt predicate value -> closedBy function obligation <|> positive code
       OMember predicate value | code@(CSym "conj" _) <- predicateAt predicate value -> positive code
       _ -> Nothing
     positive = \case
@@ -3419,6 +3485,23 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, exactMembe
     statement code = "((lt 0 " <> render code <> ") = 1)"
     assumed = \case
       OMember p t | hasMembership g p t -> Just (Reduce [] (const "assumption"))
+      _ -> Nothing
+    reducedMember = \case
+      OMember predicate value
+        | let reductions = reductionsOf k value
+        , let reduced = lastTerm value reductions
+        , value /= reduced ->
+            Just (Reduce [OMember predicate reduced] (\proofs -> "calc " <> render (CSym "lt" [CNum 0, predicateAt predicate value]) <> forth [(tactic, CSym "lt" [CNum 0, predicateAt predicate next]) | (tactic, next) <- reductions] <> " = 1 by (" <> head proofs <> ")"))
+      _ -> Nothing
+    projectedMember = \case
+      OMember wanted value
+        | Just actual <- termPred k g value
+        , actual /= wanted
+        , CSym "conj" _ <- predicateAt actual value
+        , let name = freshProofName g "ExactValue"
+        , let (exposed, expanded) = exposeExactMemberships g {goalHyps = goalHyps g <> [(name, HProp (Rel RelLt (Nat 0) (fromCT (predicateAt actual value))))]}
+        , hasMembership expanded wanted value ->
+            Just (Reduce [OMember actual value] (\proofs -> "have " <> fromText name <> ": " <> membershipText actual value <> " { " <> head proofs <> " }; " <> exposed <> "assumption"))
       _ -> Nothing
     anyMember = \case
       OMember p _ | p == anyPred -> Just (Reduce [] (const "exact anyIsMember"))
@@ -3514,7 +3597,8 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, exactMembe
       let argumentGiven = Map.unions [predicatesGiven ty actual | (ty, value) <- zip (closureArgTys cl) args, Just actual <- [termPred k g value]]
           given = resultGiven <> argumentGiven
       guard (all (`Map.member` given) (concatMap valueVariables (closureArgTys cl)))
-      Just (given, [if ty == TNat then Nothing else predicateOf (knowMembership k) (`Map.lookup` given) ty | ty <- closureArgTys cl])
+      info <- find (\fn -> functionLemma fn "#closed" == closureLemma cl) [fn | GFun fn <- Map.elems (envGlobals env)]
+      Just (given, [if ty == TNat then Nothing else functionPredicate k info (closureArgTys cl) args given ty | ty <- closureArgTys cl])
     predicatesGiven ty p = case (ty, p) of
       (TParam j [], _) -> Map.singleton j p
       (TData dn ts _, Pred name ps)
@@ -3935,6 +4019,7 @@ runTactics k info n g0 sp tacs0 = do
                 (decoderFacts, _) <- liftAt tsp (stateFacts (eigen <> "Typed") bounded decoderProofs)
                 arguments <- liftAt tsp (auxiliaryArguments extended [(source, decoded)])
                 limitCode <- liftAt tsp (termCT CVar limit)
+                boundText <- liftAt tsp (formula boundProp)
                 bodyText <- liftAt tsp ((\text -> "(" <> text <> ")") <$> formula (instantiate (const (Var eigen)) body))
                 let wrapper out = do
                       decl <- liftAt tsp (auxiliaryDeclaration helper extended (outTactic out))
@@ -3947,6 +4032,11 @@ runTactics k info n g0 sp tacs0 = do
                               <> " "
                               <> render limitCode
                               <> " { "
+                              <> "have "
+                              <> fromText (eigen <> "Bound")
+                              <> ": "
+                              <> boundText
+                              <> " { assumption }; "
                               <> decoderFacts
                               <> "have "
                               <> fromText bodyName
@@ -4942,8 +5032,10 @@ fromCT = \case
       Just closedCode -> SchemaPacked (map Hint binders) closedCode (fromCT environment)
       Nothing -> Hole
   CCallback {} -> Hole
-  -- A closure is no surface term; the predicates of types, which alone reach here, are none.
-  CClosure {} -> Hole
+  CClosure binders body captures ->
+    case traverse (const Nothing) (abstract (`elemIndex` binders) (fromCT body)) of
+      Just closedCode -> PredicatePacked (map Hint binders) closedCode (map fromCT captures)
+      Nothing -> Hole
 
 -- * By clauses
 

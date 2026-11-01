@@ -692,6 +692,16 @@ not an exact recognizer of source values and cannot serve by itself as an
 existential guard. Finite quantifiers instead use the checked bounded
 decoder and roundtrip law above.
 
+Nested datatype arguments retain their value indices in the parameter
+predicate. For example, the membership hypothesis for `Vec n (Vec m a)`
+uses the row predicate `idx row = m` conjoined with membership in `Vec a`;
+the outer length `n` is still a separate index hypothesis. Instantiating a
+polymorphic update at a row carries that predicate into the callback's domain
+and result contract. The engine derives its membership and index components
+with ordinary conjunction and equality lemmas. Ordinary container arguments
+take precedence over a callback's potentially less precise result predicate
+when inferring these parameter predicates.
+
 ### Testing the translation
 
 The implementation is tested against the informal argument above.

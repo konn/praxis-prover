@@ -32,6 +32,7 @@ data Term a
   | Parameter !Ref !(Term a)
   | Closure !Int !(Term (Var Int a))
   | PackedClosure ![Hint] !(Term Int) !(Term a)
+  | PackedPredicate ![Hint] !(Term Int) ![Term a]
   | Invoke !(Term a) ![Term a]
   deriving stock (Eq, Show, Functor, Foldable, Traversable)
 
@@ -73,6 +74,7 @@ prepareProposition = go
       SchemaParameter _ _ p -> hasEvidence p
       SchemaClosure _ p -> hasEvidence p
       SchemaPacked _ body env -> hasEvidence (fromScope body) || hasEvidence env
+      PredicatePacked _ body captures -> hasEvidence (fromScope body) || any hasEvidence captures
       Transport _ p proofs -> hasEvidence p || not (null proofs)
       Lam _ body -> hasEvidence (fromScope body)
       Case value alternatives -> hasEvidence value || any (hasEvidence . fromScope . snd) alternatives
@@ -148,6 +150,11 @@ prepareTerm = go
         PendingTerm packed envProofs <- go environment
         unlessEmpty envProofs
         applied (PackedClosure hs code packed) args
+      (PredicatePacked hs body captures, []) -> do
+        PendingTerm code codeProofs <- go (instantiate Var (fmap absurd body))
+        unlessEmpty codeProofs
+        captured <- traverse go captures
+        pure (PendingTerm (PackedPredicate hs code (map computation captured)) (concatMap obligations captured))
       (Transport _ child proofs, []) -> do
         PendingTerm t os <- go child
         evidence <- traverse transportProof proofs
@@ -180,4 +187,5 @@ toExpr = \case
   Parameter ref env -> SchemaParameter THole ref (toExpr env)
   Closure n body -> SchemaClosure THole (Lam (replicate n (Hint "x")) (toScope (toExpr body)))
   PackedClosure hs body env -> SchemaPacked hs (toScope (fmap B (toExpr body))) (toExpr env)
+  PackedPredicate hs body captures -> PredicatePacked hs (toScope (fmap B (toExpr body))) (map toExpr captures)
   Invoke f args -> apps (toExpr f) (map toExpr args)

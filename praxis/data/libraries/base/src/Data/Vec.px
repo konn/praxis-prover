@@ -1,5 +1,6 @@
 module Data.Vec where
 
+import Data.Bool as B
 import Data.Fin as F
 import Data.List as L
 import Data.Nat as N
@@ -45,6 +46,84 @@ reverse (Cons x xs) = snoc (reverse xs) x
 lookup : F.Fin n -> Vec n a -> a
 lookup (FZero {n}) (Cons x xs) = x
 lookup (FSucc i) (Cons x xs) = lookup i xs
+
+-- Change exactly one entry. The callback is fixed throughout recursion.
+modify : (a -> a) -> F.Fin n -> Vec n a -> Vec n a
+modify f FZero (Cons x xs) = Cons (f x) xs
+modify f (FSucc i) (Cons x xs) = Cons x (modify f i xs)
+
+update : F.Fin n -> a -> Vec n a -> Vec n a
+update FZero x (Cons y ys) = Cons x ys
+update (FSucc i) x (Cons y ys) = Cons y (update i x ys)
+
+lookup-modify : (f : a -> a) -> (i : F.Fin n) -> (xs : Vec n a) -> lookup i (modify f i xs) = f (lookup i xs)
+lookup-modify f FZero (Cons x xs) = rfl
+lookup-modify f (FSucc i) (Cons x xs) = lookup-modify f i xs
+
+lookup-update : (i : F.Fin n) -> (x : a) -> (xs : Vec n a) -> lookup i (update i x xs) = x
+lookup-update FZero x (Cons y ys) = rfl
+lookup-update (FSucc i) x (Cons y ys) = lookup-update i x ys
+
+modify-id : (i : F.Fin n) -> (xs : Vec n a) -> modify (\x -> x) i xs = xs
+modify-id FZero (Cons x xs) = rfl
+modify-id (FSucc i) (Cons x xs) = cong (modify-id i xs)
+
+update-lookup : (i : F.Fin n) -> (xs : Vec n a) -> update i (lookup i xs) xs = xs
+update-lookup FZero (Cons x xs) = rfl
+update-lookup (FSucc i) (Cons x xs) = calc
+  update (FSucc i) (lookup (FSucc i) (Cons x xs)) (Cons x xs)
+  = Cons x (update i (lookup i xs) xs)
+  = Cons x xs := cong (update-lookup i xs)
+
+-- Reading another entry is unaffected by a replacement.
+lookup-update-other : (i j : F.Fin n) -> (x : a) -> (xs : Vec n a) -> B.equal-nat (F.to-nat i) (F.to-nat j) = B.False -> lookup i (update j x xs) = lookup i xs
+lookup-update-other FZero FZero x (Cons y ys) h = by
+  have impossible-test : B.equal-nat 0 0 = B.False := h
+  have impossible : 1 = 0 := calc
+    1
+    = B.choose (B.equal-nat 0 0) 1 0
+    = B.choose B.False 1 0 := cong impossible-test
+    = 0
+  contradiction
+lookup-update-other FZero (FSucc j) x (Cons y ys) h = rfl
+lookup-update-other (FSucc i) FZero x (Cons y ys) h = rfl
+lookup-update-other (FSucc i) (FSucc j) x (Cons y ys) h = lookup-update-other i j x ys
+
+lookup-modify-other : (f : a -> a) -> (i j : F.Fin n) -> (xs : Vec n a) -> B.equal-nat (F.to-nat i) (F.to-nat j) = B.False -> lookup i (modify f j xs) = lookup i xs
+lookup-modify-other f FZero FZero (Cons x xs) h = by
+  have impossible-test : B.equal-nat 0 0 = B.False := h
+  have impossible : 1 = 0 := calc
+    1
+    = B.choose (B.equal-nat 0 0) 1 0
+    = B.choose B.False 1 0 := cong impossible-test
+    = 0
+  contradiction
+lookup-modify-other f FZero (FSucc j) (Cons x xs) h = rfl
+lookup-modify-other f (FSucc i) FZero (Cons x xs) h = rfl
+lookup-modify-other f (FSucc i) (FSucc j) (Cons x xs) h = lookup-modify-other f i j xs
+
+update-update : (i : F.Fin n) -> (x y : a) -> (xs : Vec n a) -> update i x (update i y xs) = update i x xs
+update-update FZero x y (Cons z zs) = rfl
+update-update (FSucc i) x y (Cons z zs) = calc
+  update (FSucc i) x (update (FSucc i) y (Cons z zs))
+  = Cons z (update i x (update i y zs))
+  = Cons z (update i x zs) := cong (update-update i x y zs)
+  = update (FSucc i) x (Cons z zs)
+
+modify-compose : (f g : a -> a) -> (i : F.Fin n) -> (xs : Vec n a) -> modify g i (modify f i xs) = modify (\x -> g (f x)) i xs
+modify-compose f g FZero (Cons x xs) = rfl
+modify-compose f g (FSucc i) (Cons x xs) = calc
+  modify g (FSucc i) (modify f (FSucc i) (Cons x xs))
+  = Cons x (modify g i (modify f i xs))
+  = Cons x (modify (\y -> g (f y)) i xs) := cong (modify-compose f g i xs)
+  = modify (\y -> g (f y)) (FSucc i) (Cons x xs)
+
+-- Recover a statically sized vector from a list with a checked length.
+from-list-exact : {n : Nat} -> {xs : L.List a} -> L.length xs = n -> Vec n a
+from-list-exact {0} {L.Nil} h = Nil
+from-list-exact {S n} {L.Nil} h = absurd h
+from-list-exact {0} {L.(::) x xs} h = absurd h
+from-list-exact {S n} {L.(::) x xs} h = Cons x (from-list-exact {n} {xs} (by cong))
 
 -- Keep a prefix whose requested length is bounded by the input's length.
 take : {m n : Nat} -> m <= n -> Vec n a -> Vec m a

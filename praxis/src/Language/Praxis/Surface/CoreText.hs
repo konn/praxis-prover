@@ -258,6 +258,13 @@ lowerTermWith lowering = go
           Left "an invalid closed callback binder"
         code <- lowerTermWith (standardLowering (CVar . (parameters !!))) body
         CCallback (CClosure parameters code []) <$> go environment
+      Term.PackedPredicate hints body captures -> do
+        let parameters = map hintText hints
+            arity = length parameters
+        unless (arity == 1 + length captures && length (nub parameters) == arity && all (\i -> i >= 0 && i < arity) body) $
+          Left "an invalid closed predicate binder"
+        code <- lowerTermWith (standardLowering (CVar . (parameters !!))) body
+        CClosure parameters code <$> traverse go captures
       Term.Invoke callback arguments -> do
         code <- go callback
         values <- traverse go arguments
@@ -286,6 +293,7 @@ lowerTermWith lowering = go
       Term.Parameter _ environment -> dictionaryValues environment
       Term.Closure _ body -> dictionaryValues body
       Term.PackedClosure _ body environment -> dictionaryValues body <> dictionaryValues environment
+      Term.PackedPredicate _ body captures -> dictionaryValues body <> concatMap dictionaryValues captures
       Term.Invoke callback arguments -> dictionaryValues callback <> concatMap dictionaryValues arguments
       _ -> []
 

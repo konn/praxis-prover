@@ -1,0 +1,52 @@
+module NestedUpdate where
+
+data Fin (n : Nat) where
+  FZero : {n : Nat} -> Fin (S n)
+  FSucc : Fin n -> Fin (S n)
+data Vec (n : Nat) a where
+  Nil : Vec 0 a
+  Cons : a -> Vec n a -> Vec (S n) a
+lookup : Fin n -> Vec n a -> a
+lookup FZero (Cons x xs) = x
+lookup (FSucc i) (Cons x xs) = lookup i xs
+update : Fin n -> a -> Vec n a -> Vec n a
+update FZero x (Cons y ys) = Cons x ys
+update (FSucc i) x (Cons y ys) = Cons y (update i x ys)
+modify : (a -> a) -> Fin n -> Vec n a -> Vec n a
+modify f FZero (Cons x xs) = Cons (f x) xs
+modify f (FSucc i) (Cons x xs) = Cons x (modify f i xs)
+type Board n = Vec n (Vec n Nat)
+write : {n : Nat} -> Fin n -> Fin n -> Nat -> Board n -> Board n
+write {n} r c x b = modify (\row -> update c x row) r b
+
+length : Vec n a -> Nat
+length Nil = 0
+length (Cons x xs) = S (length xs)
+length-index : (xs : Vec n a) -> length xs = n
+length-index Nil = rfl
+length-index (Cons x xs) = cong (length-index xs)
+
+rectangular : Fin n -> Fin m -> a -> Vec n (Vec m a) -> Vec n (Vec m a)
+rectangular r c x b = modify (\row -> update c x row) r b
+
+lookup-modify : (f : a -> a) -> (i : Fin n) -> (xs : Vec n a) -> lookup i (modify f i xs) = f (lookup i xs)
+lookup-modify f FZero (Cons x xs) = rfl
+lookup-modify f (FSucc i) (Cons x xs) = lookup-modify f i xs
+lookup-update : (i : Fin n) -> (x : a) -> (xs : Vec n a) -> lookup i (update i x xs) = x
+lookup-update FZero x (Cons y ys) = rfl
+lookup-update (FSucc i) x (Cons y ys) = lookup-update i x ys
+
+row-length : (r : Fin n) -> (b : Vec n (Vec m a)) -> length (lookup r b) = m
+row-length r b = length-index (lookup r b)
+
+read-write : (r : Fin n) -> (c : Fin m) -> (x : a) -> (b : Vec n (Vec m a)) -> lookup c (lookup r (rectangular r c x b)) = x
+read-write r c x b = by
+  have row : lookup r (modify (\row -> update c x row) r b) = update c x (lookup r b) := lookup-modify (\row -> update c x row) r b
+  calc
+    lookup c (lookup r (rectangular r c x b))
+    = lookup c (lookup r (modify (\row -> update c x row) r b))
+    = lookup c (update c x (lookup r b)) := cong row
+    = x := lookup-update c x (lookup r b)
+
+concrete : rectangular (FZero {1}) (FSucc (FZero {1})) 9 (Cons (Cons 1 (Cons 2 (Cons 3 Nil))) (Cons (Cons 4 (Cons 5 (Cons 6 Nil))) Nil)) = Cons (Cons 1 (Cons 9 (Cons 3 Nil))) (Cons (Cons 4 (Cons 5 (Cons 6 Nil))) Nil)
+concrete = rfl

@@ -147,6 +147,7 @@ elaborateNamed env slots variables expression = do
         Left "an unknown callback parameter at the explicit core boundary"
       pure (SomeValue ty (Callback ty (Tm.Parameter ref (Tm.Variable i)) Set.empty))
     infer _ S.SchemaPacked {} = Left "an internal packed callback cannot be supplied as a source term"
+    infer _ S.PredicatePacked {} = Left "an internal predicate cannot be supplied as a source term"
     infer _ (S.SchemaClosure source child) = do
       SomeType ty <- reflectType (complete source)
       (domains, result) <- callbackSignature source
@@ -588,6 +589,7 @@ pretty env sc proofName (Body _ _ value _) = term 0 value
       Tm.Parameter _ _ -> "[fixed callback]"
       Tm.Closure _ _ -> "[callback lambda]"
       Tm.PackedClosure _ _ _ -> "[callback closure]"
+      Tm.PackedPredicate _ _ _ -> "[membership predicate]"
       Tm.Invoke _ _ -> "[callback application]"
     layout ref = case [g | g <- Map.elems (envGlobals env), matches ref g] of
       GFun f : _ -> (map fst (Ty.schemeValues (funScheme f)), zip (funRuntime f) [0 ..], [], map fst (funProofs f))

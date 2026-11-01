@@ -1,0 +1,20 @@
+module Data.Maybe where
+
+data Maybe a = Nothing | Just a
+open Maybe public
+
+map : (a -> b) -> Maybe a -> Maybe b
+map f Nothing = Nothing
+map f (Just x) = Just (f x)
+
+with-default : a -> Maybe a -> a
+with-default x Nothing = x
+with-default x (Just y) = y
+
+map-id : (x : Maybe a) -> map (\y -> y) x = x
+map-id Nothing = rfl
+map-id (Just x) = rfl
+
+map-compose : (f : a -> b) -> (g : b -> c) -> (x : Maybe a) -> map g (map f x) = map (\y -> g (f y)) x
+map-compose f g Nothing = rfl
+map-compose f g (Just x) = rfl

@@ -1,0 +1,8 @@
+[package]
+name = "othello"
+version = "0.1.0.0"
+synopsis = "Finite Othello rules and checked small-board analysis"
+
+[lib]
+source-dir = "src"
+dependencies = ["base ^>= 0.1"]

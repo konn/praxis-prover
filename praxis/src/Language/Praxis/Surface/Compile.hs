@@ -282,6 +282,7 @@ compileFunction env fd = do
     nestedRecursion = \case
       Term.Closure _ body' -> callsSelf core body'
       Term.PackedClosure _ body' environment -> callsSelf core body' || nestedRecursion environment
+      Term.PackedPredicate _ body' captures -> callsSelf core body' || any nestedRecursion captures
       Term.Call _ xs -> any nestedRecursion xs
       Term.Parameter _ x -> nestedRecursion x
       Term.Invoke f xs -> nestedRecursion f || any nestedRecursion xs
@@ -707,6 +708,7 @@ callsSelf core = \case
   Term.Parameter _ environment -> callsSelf core environment
   Term.Closure _ body -> callsSelf core body
   Term.PackedClosure _ body environment -> callsSelf core body || callsSelf core environment
+  Term.PackedPredicate _ body captures -> callsSelf core body || any (callsSelf core) captures
   Term.Invoke callback arguments -> callsSelf core callback || any (callsSelf core) arguments
   _ -> False
 

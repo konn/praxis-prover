@@ -54,6 +54,22 @@ termTests =
           SchemaPacked _ _ environment -> foldr (:) [] environment @?= ["schema_x0"]
           _ -> assertFailure "reconstruction lost the callback's closed code"
         termCT CVar restored @?= Right callback
+    , testCase "indexed predicates roundtrip with captures outside the closed code" $ do
+        let predicate = CClosure ["row", "bound"] (CSym "conj" [CSym "eq" [CSym "length" [CVar "row"], CVar "bound"], CSym "rows" [CVar "row"]]) [CVar "row"]
+            restored = fromCT predicate
+        foldr (:) [] restored @?= ["row"]
+        termCT CVar restored @?= Right predicate
+        termCT CVar (restored >>= \v -> if v == "row" then Nat 4 else Var v)
+          @?= Right (CClosure ["row", "bound"] (CSym "conj" [CSym "eq" [CSym "length" [CVar "row"], CVar "bound"], CSym "rows" [CVar "row"]]) [CNum 4])
+    , testCase "internal predicates reject malformed code and retain captured evidence" $ do
+        let packed body captures = PredicatePacked [Hint "value", Hint "bound"] (toScope body) captures :: Expr Text
+        assertBool "an out-of-scope predicate binder was lowered" (isLeft (termCT CVar (packed (Var (B 2)) [Nat 0])))
+        assertBool "a predicate with missing captures was lowered" (isLeft (termCT CVar (packed (Var (B 0)) [])))
+        assertBool "a predicate erased an unproved code argument" (isLeft (termCT CVar (packed (Absurd (Irrelevant (raw 1))) [Nat 0])))
+        let input = packed (Var (B 0)) [Absurd (Irrelevant (raw 2))]
+        prepared <- either assertFailure pure (Term.prepareTerm input)
+        Term.obligations prepared @?= [(Bottom, raw 2)]
+        assertBool "a predicate erased an unproved capture" (isLeft (termCT CVar input))
     , testCase "reconstructed nested callbacks retain their fixed code" $ do
         let inner = CCallback (CClosure ["schema_env", "schema_x0"] (CSym "pair" [fieldT 0 (CVar "schema_env"), CVar "schema_x0"]) []) (consSeq 0 [CVar "outer"])
             applied = CSym "map" [inner, CVar "items"]

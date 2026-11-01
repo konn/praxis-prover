@@ -1,0 +1,22 @@
+module Game.Othello.Sized where
+
+import "base" Data.Fin as F
+import "base" Data.Vec as V
+import Game.Othello.Board as C
+
+type Board n = V.Vec n (V.Vec n C.Cell)
+
+read : F.Fin n -> F.Fin n -> Board n -> C.Cell
+read r c b = V.lookup c (V.lookup r b)
+
+write : {n : Nat} -> F.Fin n -> F.Fin n -> C.Cell -> Board n -> Board n
+write {n} r c x b = V.modify (\row -> V.update c x row) r b
+
+read-write : (r c : F.Fin n) -> (x : C.Cell) -> (b : Board n) -> read r c (write r c x b) = x
+read-write r c x b = by
+  have row : V.lookup r (V.modify (\row -> V.update c x row) r b) = V.update c x (V.lookup r b) := V.lookup-modify (\row -> V.update c x row) r b
+  calc
+    read r c (write r c x b)
+    = V.lookup c (V.lookup r (V.modify (\row -> V.update c x row) r b))
+    = V.lookup c (V.update c x (V.lookup r b)) := cong row
+    = x := V.lookup-update c x (V.lookup r b)

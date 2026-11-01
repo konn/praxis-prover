@@ -1,0 +1,44 @@
+module Data.Bool where
+
+data Bool = False | True
+open Bool public
+
+choose : Bool -> a -> a -> a
+choose False x y = y
+choose True x y = x
+
+not : Bool -> Bool
+not False = True
+not True = False
+
+and : Bool -> Bool -> Bool
+and False y = False
+and True y = y
+
+or : Bool -> Bool -> Bool
+or False y = y
+or True y = True
+
+not-not : (b : Bool) -> not (not b) = b
+not-not False = rfl
+not-not True = rfl
+
+equal-nat : Nat -> Nat -> Bool
+equal-nat 0 0 = True
+equal-nat 0 (S n) = False
+equal-nat (S m) 0 = False
+equal-nat (S m) (S n) = equal-nat m n
+
+less-nat : Nat -> Nat -> Bool
+less-nat 0 0 = False
+less-nat 0 (S n) = True
+less-nat (S m) 0 = False
+less-nat (S m) (S n) = less-nat m n
+
+equal-nat-self : (n : Nat) -> equal-nat n n = True
+equal-nat-self 0 = rfl
+equal-nat-self (S n) = equal-nat-self n
+
+less-nat-self : (n : Nat) -> less-nat n n = False
+less-nat-self 0 = rfl
+less-nat-self (S n) = less-nat-self n

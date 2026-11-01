@@ -1,0 +1,44 @@
+-- Draft, outside the package's source directory. The generated membership
+-- beta lemma for Derivation currently fails kernel checking. This module
+-- and candidates generated against it are not certified proofs.
+module Game.Othello.Certificate where
+
+import "base" Data.Bool as B
+import "base" Data.List as L
+import "base" Data.Maybe as M
+import "base" Data.Nat as N
+import Game.Othello.Board as C
+import Game.Othello.Rules as R
+
+-- The tournament score credits unused squares to the winner, following
+-- Feinstein's 1993 6x6 analysis. Drawn empty squares are shared equally.
+-- The raw disc counts remain separately available in Board.count.
+white-score : C.Board -> Nat
+white-score b = B.choose (B.less-nat (C.count C.Black b) (C.count C.White b)) (C.size b * C.size b - C.count C.Black b) (B.choose (B.less-nat (C.count C.White b) (C.count C.Black b)) (C.count C.White b) (N.(/) (C.size b * C.size b) 2))
+
+data Bound = Lower | Upper
+open Bound public
+
+-- A lower bound is witnessed by White's choice, an upper bound by
+-- Black's choice. At the other player's turn every legal reply is needed.
+choosing : Bound -> C.Player -> B.Bool
+choosing Lower C.Black = B.False
+choosing Lower C.White = B.True
+choosing Upper C.Black = B.True
+choosing Upper C.White = B.False
+
+data Judgement = AtBound Bound R.Position Nat | AllMoves Bound R.Position Nat (L.List R.Move)
+open Judgement public
+
+-- Intended proof objects: admission must check every equation and comparison,
+-- including pass legality and coverage of the complete legal move list.
+data Derivation (j : Judgement) where
+  LeafLower : {p : C.Player} -> {b : C.Board} -> {v : Nat} -> R.terminal b = B.True -> v <= white-score b -> Derivation (AtBound Lower (R.Turn p b) v)
+  LeafUpper : {p : C.Player} -> {b : C.Board} -> {v : Nat} -> R.terminal b = B.True -> white-score b <= v -> Derivation (AtBound Upper (R.Turn p b) v)
+  Choice : {k : Bound} -> {p : C.Player} -> {b : C.Board} -> {v : Nat} -> {m : R.Move} -> {next : R.Position} -> C.well-formed b = B.True -> choosing k p = B.True -> R.successor (R.Turn p b) m = M.Just next -> Derivation (AtBound k next v) -> Derivation (AtBound k (R.Turn p b) v)
+  Replies : {k : Bound} -> {p : C.Player} -> {b : C.Board} -> {v : Nat} -> C.well-formed b = B.True -> R.terminal b = B.False -> choosing k p = B.False -> Derivation (AllMoves k (R.Turn p b) v (R.moves p b)) -> Derivation (AtBound k (R.Turn p b) v)
+  NoMoves : {k : Bound} -> {pos : R.Position} -> {v : Nat} -> {ms : L.List R.Move} -> ms = L.Nil -> Derivation (AllMoves k pos v ms)
+  Reply : {k : Bound} -> {pos : R.Position} -> {v : Nat} -> {m : R.Move} -> {ms : L.List R.Move} -> {next : R.Position} -> R.successor pos m = M.Just next -> Derivation (AtBound k next v) -> Derivation (AllMoves k pos v ms) -> Derivation (AllMoves k pos v (L.(::) m ms))
+
+data ExactScore (pos : R.Position) (score : Nat) where
+  Exact : Derivation (AtBound Lower pos score) -> Derivation (AtBound Upper pos score) -> ExactScore pos score

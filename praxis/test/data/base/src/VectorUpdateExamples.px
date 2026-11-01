@@ -1,0 +1,33 @@
+module VectorUpdateExamples where
+
+import "base" Data.Bool as B
+import "base" Data.Fin as F
+import "base" Data.Vec as V
+
+-- Updating the final entry exercises the whole recursive path.
+last-entry : V.update (F.last {2}) 9 (V.Vec.Cons 1 (V.Vec.Cons 2 (V.Vec.Cons 3 V.Vec.Nil))) = V.Vec.Cons 1 (V.Vec.Cons 2 (V.Vec.Cons 9 V.Vec.Nil))
+last-entry = rfl
+
+-- The public lookup law applies to a callback at the concrete type Nat.
+modified-entry : (i : F.Fin n) -> (xs : V.Vec n Nat) -> V.lookup i (V.modify (\x -> S x) i xs) = S (V.lookup i xs)
+modified-entry i xs = V.lookup-modify (\x -> S x) i xs
+
+unchanged-entry : (xs : V.Vec 2 Nat) -> V.lookup (F.Fin.FZero {1}) (V.update (F.last {1}) 7 xs) = V.lookup (F.Fin.FZero {1}) xs
+unchanged-entry xs = by
+  have distinct : B.equal-nat (F.to-nat (F.Fin.FZero {1})) (F.to-nat (F.last {1})) = B.False := rfl
+  V.lookup-update-other (F.Fin.FZero {1}) (F.last {1}) 7 xs
+
+write-cell : F.Fin n -> F.Fin m -> a -> V.Vec n (V.Vec m a) -> V.Vec n (V.Vec m a)
+write-cell r c x board = V.modify (\row -> V.update c x row) r board
+
+read-cell : F.Fin n -> F.Fin m -> V.Vec n (V.Vec m a) -> a
+read-cell r c board = V.lookup c (V.lookup r board)
+
+read-write : (r : F.Fin n) -> (c : F.Fin m) -> (x : a) -> (board : V.Vec n (V.Vec m a)) -> read-cell r c (write-cell r c x board) = x
+read-write r c x board = by
+  have row : V.lookup r (V.modify (\xs -> V.update c x xs) r board) = V.update c x (V.lookup r board) := V.lookup-modify (\xs -> V.update c x xs) r board
+  calc
+    read-cell r c (write-cell r c x board)
+    = V.lookup c (V.lookup r (V.modify (\xs -> V.update c x xs) r board))
+    = V.lookup c (V.update c x (V.lookup r board)) := cong row
+    = x := V.lookup-update c x (V.lookup r board)

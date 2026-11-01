@@ -129,6 +129,7 @@ numericCount = \case
   SchemaParameter _ _ value -> numericCount value
   SchemaClosure _ value -> numericCount value
   SchemaPacked _ body value -> (+) <$> numericCount (fromScope body) <*> numericCount value
+  PredicatePacked _ body captures -> (+) <$> numericCount (fromScope body) <*> (sum <$> traverse numericCount captures)
   Lam _ body -> numericCount (fromScope body)
   Case value alternatives -> (+) <$> numericCount value <*> (sum <$> traverse (numericCount . fromScope . snd) alternatives)
   If condition yes no -> sum <$> traverse numericCount [condition, yes, no]
