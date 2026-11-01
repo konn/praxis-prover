@@ -5,6 +5,12 @@ module Language.Praxis.PRA.Certificate (
   Certificate,
   certificateLemma,
   checkCertificate,
+  CertificateStore,
+  certificateStore,
+  storedCertificates,
+  storedLemmas,
+  storedMetas,
+  checkAndInsertCertificate,
   derivationAppeals,
   primitiveCertificate,
   unfoldingCertificates,
@@ -14,9 +20,11 @@ module Language.Praxis.PRA.Certificate (
 import Control.Exception (displayException)
 import Control.Monad (unless)
 import Control.Monad.Free (Free (..))
+import Control.Monad.Trans.State.Strict (State, gets, modify', runState)
 import Data.Bifunctor (first)
 import Data.Foldable (toList)
 import Data.Functor.Foldable (cata, embed)
+import Data.HashMap.Strict qualified as HM
 import Data.HashSet qualified as HS
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -53,11 +61,150 @@ accessor, not an exported record selector that permits record updates.
 certificateLemma :: Certificate -> Lemma SchemaName
 certificateLemma = storedLemma
 
+{- | An immutable collection of certificates and their derived lookup tables.
+The constructor is private: statements cannot be added without certificates.
+-}
+data CertificateStore
+  = CertificateStore
+      !(Map String Certificate)
+      !(Map String (Lemma SchemaName))
+      !(Map String [R.Sort])
+      !TermPool
+
+-- | Build the lookup tables once from already checked certificates.
+certificateStore :: Map String Certificate -> CertificateStore
+certificateStore known =
+  let lemmas = fmap certificateLemma known
+   in CertificateStore known lemmas (fmap (map snd . lemmaMetas) lemmas) (TermPool HM.empty HM.empty)
+
+storedCertificates :: CertificateStore -> Map String Certificate
+storedCertificates (CertificateStore known _ _ _) = known
+
+storedLemmas :: CertificateStore -> Map String (Lemma SchemaName)
+storedLemmas (CertificateStore _ lemmas _ _) = lemmas
+
+storedMetas :: CertificateStore -> Map String [R.Sort]
+storedMetas (CertificateStore _ _ metas _) = metas
+
+{- | Check and insert one declaration, updating the derived tables incrementally.
+Lexical dependencies still refer to the certificates present before insertion.
+-}
+checkAndInsertCertificate :: Env -> CertificateStore -> Decl SchemaName -> Either (TacticError SchemaName) (Certificate, CertificateStore)
+checkAndInsertCertificate env (CertificateStore known lemmas metas pool) decl = do
+  checked <- checkWith env known lemmas decl
+  let ((certificate, name), pool') = runState ((,) <$> shareCertificate checked <*> shareName (declName decl)) pool
+      lemma = certificateLemma certificate
+  pure (certificate, CertificateStore (Map.insert name certificate known) (Map.insert name lemma lemmas) (Map.insert name (map snd (lemmaMetas lemma)) metas) pool')
+
+{- | Check against a certificate map. Incremental clients should use
+'checkAndInsertCertificate' to avoid rebuilding lookup tables at each step.
+-}
 checkCertificate :: Env -> Map String Certificate -> Decl SchemaName -> Either (TacticError SchemaName) Certificate
-checkCertificate env known decl = do
-  (proof, lemma) <- checkDecl env (fmap certificateLemma known) decl
+checkCertificate env known = checkWith env known (fmap certificateLemma known)
+
+checkWith :: Env -> Map String Certificate -> Map String (Lemma SchemaName) -> Decl SchemaName -> Either (TacticError SchemaName) Certificate
+checkWith env known lemmas decl = do
+  (proof, lemma) <- checkDecl env lemmas decl
   let dependencies = derivationAppeals proof `Set.difference` Set.fromList (map fst (lemmaPremises lemma))
   pure (Certificate lemma proof (Map.restrictKeys known dependencies))
+
+-- Interning is structural only: the pool compares complete terms, including
+-- variable names, and never evaluates or rewrites an expression. Keep the
+-- entire derivation; share identical subterms across its fields and certificates.
+data TermPool = TermPool
+  { sharedTerms :: !(HM.HashMap (Term SchemaName) (Term SchemaName))
+  , sharedNames :: !(HM.HashMap String String)
+  }
+
+shareName :: String -> State TermPool String
+shareName name = do
+  names <- gets sharedNames
+  case HM.lookup name names of
+    Just shared -> pure shared
+    Nothing -> do
+      modify' (\pool -> pool {sharedNames = HM.insert name name names})
+      pure name
+
+shareTerm :: Term SchemaName -> State TermPool (Term SchemaName)
+shareTerm original = do
+  pool <- gets sharedTerms
+  case HM.lookup original pool of
+    Just shared -> pure shared
+    Nothing -> do
+      shared <- case original of
+        App function arguments -> App function <$> traverse shareTerm arguments
+        _ -> pure original
+      modify' (\pool' -> pool' {sharedTerms = HM.insert shared shared (sharedTerms pool')})
+      pure shared
+
+shareAtomic :: Atomic SchemaName -> State TermPool (Atomic SchemaName)
+shareAtomic (left :=== right) = (:===) <$> shareTerm left <*> shareTerm right
+
+shareFormula :: Formula SchemaName -> State TermPool (Formula SchemaName)
+shareFormula = \case
+  Atm atom -> Atm <$> shareAtomic atom
+  left :/\ right -> (:/\) <$> shareFormula left <*> shareFormula right
+  left :\/ right -> (:\/) <$> shareFormula left <*> shareFormula right
+  left :==> right -> (:==>) <$> shareFormula left <*> shareFormula right
+  Bot -> pure Bot
+
+shareContext :: MS.Multiset (Formula SchemaName) -> State TermPool (MS.Multiset (Formula SchemaName))
+shareContext context = foldr MS.insertOne MS.empty <$> traverse shareFormula (toList context)
+
+shareSequent :: Sequent SchemaName -> State TermPool (Sequent SchemaName)
+shareSequent (context :|- conclusion) = (:|-) <$> shareContext context <*> shareFormula conclusion
+
+shareArgument :: Arg SchemaName -> State TermPool (Arg SchemaName)
+shareArgument = \case
+  argument@ArgVar {} -> pure argument
+  ArgTerm value -> ArgTerm <$> shareTerm value
+  ArgAtom value -> ArgAtom <$> shareAtomic value
+  ArgForm value -> ArgForm <$> shareFormula value
+  ArgCtx value -> ArgCtx <$> shareContext value
+  ArgFun value -> do
+    body <- shareTerm (abstractionBody value)
+    captured <- traverse shareTerm (abstractionCaptured value)
+    pure (ArgFun value {abstractionBody = body, abstractionCaptured = captured})
+
+shareDerivation :: Free (Step SchemaName) String -> State TermPool (Free (Step SchemaName) String)
+shareDerivation source = do
+  shared <- shareStep source
+  -- Free's field is lazy. Force the rebuilt step now: otherwise the mkStep
+  -- fallback below can retain the entire original, unshared rule until replay.
+  case shared of
+    Pure _ -> pure shared
+    Free step -> step `seq` pure shared
+
+shareStep :: Free (Step SchemaName) String -> State TermPool (Free (Step SchemaName) String)
+shareStep = \case
+  Pure name -> Pure <$> shareName name
+  Free (WeakenStep extra child) -> Free <$> (WeakenStep <$> shareContext extra <*> shareDerivation child)
+  Free (LemmaStep appeal children) -> do
+    name <- shareName (appealName appeal)
+    args <- traverse shareArgument (appealArgs appeal)
+    bindings <- traverse (\(variable, value) -> (variable,) <$> shareTerm value) (appealSubst appeal)
+    extra <- shareContext (appealWeakening appeal)
+    children' <- traverse shareDerivation children
+    pure (Free (LemmaStep appeal {appealName = name, appealArgs = args, appealSubst = bindings, appealWeakening = extra} children'))
+  Free (RuleStep original) -> do
+    step <- traverse shareDerivation original
+    let (args, children) = stepFields step
+    args' <- traverse shareArgument args
+    -- Sharing preserves every field's sort and all children. Retaining the
+    -- original checked fields is a conservative fallback if reconstruction fails.
+    pure (Free (RuleStep (fromMaybe step (mkStep (ruleName step) args' children))))
+
+shareCertificate :: Certificate -> State TermPool Certificate
+shareCertificate certificate = do
+  let lemma = certificateLemma certificate
+  conclusion <- shareSequent (lemmaGoal lemma)
+  premises <- traverse (\(name, statement) -> (name,) <$> shareSequent statement) (lemmaPremises lemma)
+  proof <- shareDerivation (certificateDerivation certificate)
+  pure
+    certificate
+      { storedLemma = lemma {lemmaGoal = conclusion, lemmaPremises = premises}
+      , certificateDerivation = proof
+      }
 
 {- | The lemma names actually used by a derivation, after tactic alternatives
 have been resolved. Declaration premises must be removed by the caller.

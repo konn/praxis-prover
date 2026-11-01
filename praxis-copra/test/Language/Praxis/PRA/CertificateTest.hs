@@ -45,6 +45,28 @@ certificateTests =
         case replayCertificate environment cert call [Id (Lit 0 :=== Lit 0) MS.empty] of
           Left WrongPremise {} -> pure ()
           other -> assertFailure ("expected a wrong-premise error, got " <> show other)
+    , testCase "incremental stores preserve schematic calls and lexical dependencies" $ do
+        initial <- checked "rule at (t : term) : |- t = t by refl"
+        ds <- right (parseDeclsIn (storedMetas (certificateStore initial)) (schemaScope builtin) "theorem use : |- S x = S x by exact at (S x)\nrule at (t : term) : |- 0 = 0 by refl")
+        store <- foldM (\known d -> snd <$> right (checkAndInsertCertificate environment known d)) (certificateStore initial) ds
+        replayed (storedCertificates store) "use" [] []
+        storedLemmas store @?= fmap certificateLemma (storedCertificates store)
+        storedMetas store @?= fmap (map snd . lemmaMetas) (storedLemmas store)
+    , testCase "term sharing preserves distinct variable names and hypotheses" $ do
+        ds <- right (parseDecls (schemaScope builtin) "theorem first : |- S x = S x by refl\ntheorem second : S y = S z |- S y = S z by assumption")
+        store <- foldM (\known d -> snd <$> right (checkAndInsertCertificate environment known d)) (certificateStore Map.empty) ds
+        replayed (storedCertificates store) "first" [] []
+        replayed (storedCertificates store) "second" [] []
+        let statement = lemmaGoal (certificateLemma (storedCertificates store Map.! "second"))
+            equation = suc (Var (Obj "y")) :=== suc (Var (Obj "z"))
+        statement @?= (MS.insertOne (Atm equation) MS.empty :|- Atm equation)
+    , testCase "incremental stores reject unchecked declarations" $ do
+        ds <- right (parseDecls (schemaScope builtin) "theorem unproved : |- 0 = S 0 by refl")
+        case ds of
+          [d] -> case checkAndInsertCertificate environment (certificateStore Map.empty) d of
+            Left _ -> pure ()
+            Right _ -> assertFailure "an invalid declaration entered the certificate store"
+          _ -> assertFailure "expected one declaration"
     , testCase "captured dependencies survive later name shadowing" $ do
         known <- checked "theorem original : |- x = x by refl\ntheorem use : |- x = x by exact original\ntheorem original : |- 0 = 0 by refl"
         replayed known "use" [] []
