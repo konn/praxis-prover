@@ -22,25 +22,25 @@ six-opening : R.Position
 six-opening = R.Turn C.Black six
 
 four-size : C.size four = 4
-four-size = rfl
+four-size = by decide
 
 six-size : C.size six = 6
-six-size = rfl
+six-size = by decide
 
 four-well-formed : C.well-formed four = B.True
-four-well-formed = rfl
+four-well-formed = by decide
 
 six-well-formed : C.well-formed six = B.True
-six-well-formed = rfl
+six-well-formed = by decide
 
 four-black : C.count C.Black four = 2
-four-black = rfl
+four-black = by decide
 
 four-white : C.count C.White four = 2
-four-white = rfl
+four-white = by decide
 
 six-black : C.count C.Black six = 2
-six-black = rfl
+six-black = by decide
 
 six-white : C.count C.White six = 2
-six-white = rfl
+six-white = by decide

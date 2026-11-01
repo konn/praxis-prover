@@ -2,9 +2,50 @@ module Game.Othello.Sized where
 
 import "base" Data.Fin as F
 import "base" Data.Vec as V
+import "base" Data.Bool as B
+import "base" Data.List as L
+import "base" Data.Nat as N
 import Game.Othello.Board as C
 
 type Board n = V.Vec n (V.Vec n C.Cell)
+
+data Square (n : Nat) where
+  At : F.Fin n -> F.Fin n -> Square n
+
+reference-square : Square n -> C.Square
+reference-square (At r c) = C.At (F.to-nat r) (F.to-nat c)
+
+flatten : {c : Nat} -> V.Vec r (V.Vec c C.Cell) -> L.List C.Cell
+flatten {c} V.Vec.Nil = L.Nil
+flatten {c} (V.Vec.Cons row rows) = L.(<>) (V.to-list row) (flatten {c} rows)
+
+flatten-length : {c : Nat} -> (rows : V.Vec r (V.Vec c C.Cell)) -> L.length (flatten {c} rows) = V.length rows * c
+flatten-length {c} V.Vec.Nil = calc
+  L.length (flatten {c} (V.Vec.Nil : V.Vec 0 (V.Vec c C.Cell)))
+  = 0
+  = 0 * c := by cong zeroMul
+  = V.length (V.Vec.Nil : V.Vec 0 (V.Vec c C.Cell)) * c
+flatten-length {c} (V.Vec.Cons row rows) = by
+  have width : L.length (V.to-list row) = c := V.length-to-list row
+  calc
+    L.length (flatten {c} (V.Vec.Cons row rows))
+    = L.length (V.to-list row) + L.length (flatten {c} rows) := L.length-append (V.to-list row) (flatten {c} rows)
+    = c + L.length (flatten {c} rows) := cong width
+    = c + V.length rows * c := cong (flatten-length {c} rows)
+    = V.length rows * c + c := N.add-comm {c} {V.length rows * c}
+    = S (V.length rows) * c := by cong succMul
+    = V.length (V.Vec.Cons row rows) * c
+
+to-reference : {n : Nat} -> Board n -> C.Board
+to-reference {n} b = C.Grid n (flatten {n} b)
+
+to-reference-well-formed : {n : Nat} -> (b : Board n) -> C.well-formed (to-reference {n} b) = B.True
+to-reference-well-formed {n} b = calc
+  C.well-formed (to-reference {n} b)
+  = B.equal-nat (L.length (flatten {n} b)) (n * n)
+  = B.equal-nat (V.length b * n) (n * n) := cong (flatten-length {n} b)
+  = B.equal-nat (n * n) (n * n) := cong (V.length-index b)
+  = B.True := B.equal-nat-self (n * n)
 
 read : F.Fin n -> F.Fin n -> Board n -> C.Cell
 read r c b = V.lookup c (V.lookup r b)

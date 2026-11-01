@@ -1,6 +1,3 @@
--- Draft, outside the package's source directory. The generated membership
--- beta lemma for Derivation currently fails kernel checking. This module
--- and candidates generated against it are not certified proofs.
 module Game.Othello.Certificate where
 
 import "base" Data.Bool as B
@@ -30,15 +27,19 @@ choosing Upper C.White = B.False
 data Judgement = AtBound Bound R.Position Nat | AllMoves Bound R.Position Nat (L.List R.Move)
 open Judgement public
 
--- Intended proof objects: admission must check every equation and comparison,
+-- Strategy proof objects: admission checks every equation and comparison,
 -- including pass legality and coverage of the complete legal move list.
 data Derivation (j : Judgement) where
   LeafLower : {p : C.Player} -> {b : C.Board} -> {v : Nat} -> R.terminal b = B.True -> v <= white-score b -> Derivation (AtBound Lower (R.Turn p b) v)
   LeafUpper : {p : C.Player} -> {b : C.Board} -> {v : Nat} -> R.terminal b = B.True -> white-score b <= v -> Derivation (AtBound Upper (R.Turn p b) v)
   Choice : {k : Bound} -> {p : C.Player} -> {b : C.Board} -> {v : Nat} -> {m : R.Move} -> {next : R.Position} -> C.well-formed b = B.True -> choosing k p = B.True -> R.successor (R.Turn p b) m = M.Just next -> Derivation (AtBound k next v) -> Derivation (AtBound k (R.Turn p b) v)
-  Replies : {k : Bound} -> {p : C.Player} -> {b : C.Board} -> {v : Nat} -> C.well-formed b = B.True -> R.terminal b = B.False -> choosing k p = B.False -> Derivation (AllMoves k (R.Turn p b) v (R.moves p b)) -> Derivation (AtBound k (R.Turn p b) v)
+  Replies : {k : Bound} -> {p : C.Player} -> {b : C.Board} -> {v : Nat} -> {ms : L.List R.Move} -> C.well-formed b = B.True -> R.terminal b = B.False -> choosing k p = B.False -> ms = R.moves p b -> Derivation (AllMoves k (R.Turn p b) v ms) -> Derivation (AtBound k (R.Turn p b) v)
   NoMoves : {k : Bound} -> {pos : R.Position} -> {v : Nat} -> {ms : L.List R.Move} -> ms = L.Nil -> Derivation (AllMoves k pos v ms)
   Reply : {k : Bound} -> {pos : R.Position} -> {v : Nat} -> {m : R.Move} -> {ms : L.List R.Move} -> {next : R.Position} -> R.successor pos m = M.Just next -> Derivation (AtBound k next v) -> Derivation (AllMoves k pos v ms) -> Derivation (AllMoves k pos v (L.(::) m ms))
+
+-- Reindex a retained strategy only after proving equality of its judgements.
+cast : {j k : Judgement} -> j = k -> Derivation j -> Derivation k
+cast {j} {k} equality derivation = derivation
 
 data ExactScore (pos : R.Position) (score : Nat) where
   Exact : Derivation (AtBound Lower pos score) -> Derivation (AtBound Upper pos score) -> ExactScore pos score

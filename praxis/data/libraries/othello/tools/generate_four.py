@@ -13,6 +13,29 @@ DIRECTIONS = tuple((r, c) for r in (-1, 0, 1) for c in (-1, 0, 1) if r or c)
 BLACK, WHITE = 1, 2
 
 
+def symmetries():
+    """The eight colour-preserving isometries of a square board."""
+    for reflected in range(2):
+        for turns in range(4):
+            permutation = []
+            for i in range(SIDE * SIDE):
+                r, c = divmod(i, SIDE)
+                if reflected:
+                    c = SIDE - 1 - c
+                for _ in range(turns):
+                    r, c = c, SIDE - 1 - r
+                permutation.append(r * SIDE + c)
+            yield tuple(permutation)
+
+
+SYMMETRIES = tuple(symmetries())
+
+
+@cache
+def canonical(b):
+    return min(tuple(b[i] for i in permutation) for permutation in SYMMETRIES)
+
+
 def initial():
     b = [0] * 16
     b[5], b[6], b[9], b[10] = WHITE, BLACK, BLACK, WHITE
@@ -66,8 +89,32 @@ def white_wins(b, p):
     return any(results) if p == WHITE else all(results)
 
 
+@cache
+def proof_cost(b, p):
+    """Minimum unfolded winning proof size, or None when White cannot win.
+
+    Call with a canonical board. Costs count repeated subtrees separately;
+    this does not claim to minimize the size of the shared certificate DAG.
+    Unlike first-success search, this explores alternate winning choices to
+    reduce the eventual proof. It is intended only for the small 4x4 board.
+    """
+    ms = moves(b, p)
+    if not ms:
+        return 1 if b.count(WHITE) > b.count(BLACK) else None
+    costs = []
+    for m in ms:
+        cost = proof_cost(canonical(play(b, p, m)), 3 - p)
+        if p == BLACK and cost is None:
+            return None
+        if cost is not None:
+            costs.append(cost)
+    if not costs:
+        return None
+    return 1 + (min(costs) if p == WHITE else sum(costs))
+
+
 def strategy():
-    assert white_wins(initial(), BLACK)
+    assert proof_cost(canonical(initial()), BLACK) is not None
     nodes = {}
 
     def visit(b, p):
@@ -75,7 +122,13 @@ def strategy():
             return nodes[b, p][0]
         ms = moves(b, p)
         if p == WHITE and ms:
-            ms = (next(m for m in order(ms) if white_wins(play(b, p, m), BLACK)),)
+            choices = [(proof_cost(canonical(play(b, p, m)), BLACK), m)
+                       for m in order(ms)]
+            best = min(cost for cost, _ in choices if cost is not None)
+            ms = (next(m for cost, m in choices if cost == best),)
+        # Only identical positions are shared in the emitted proof. Symmetry
+        # is an untrusted search optimization: every orientation is replayed
+        # with its own legal moves and rule premises in Praxis.
         children = tuple((m, visit(play(b, p, m), 3 - p)) for m in ms)
         ident = len(nodes)
         nodes[b, p] = (ident, children)
@@ -110,22 +163,23 @@ def emit(nodes, root):
         lines += [f'b{ident} : C.Board', f'b{ident} = {board_text(b)}',
                   f'd{ident} : K.Derivation (K.AtBound K.Lower {pos} 9)']
         if not children:
-            lines += [f'd{ident} = K.Derivation.LeafLower rfl rfl', '']
+            lines += [f'd{ident} = K.Derivation.LeafLower (by decide) (by decide)', '']
         elif p == WHITE:
             m, child = children[0]
-            lines += [f'd{ident} = K.Derivation.Choice {{K.Lower}} {{{player}}} {{b{ident}}} {{9}} {{{move_text(m)}}} {{R.Turn {other} b{child}}} rfl rfl rfl d{child}', '']
+            lines += [f'd{ident} = K.Derivation.Choice {{K.Lower}} {{{player}}} {{b{ident}}} {{9}} {{{move_text(m)}}} {{R.Turn {other} b{child}}} (by decide) (by decide) (by decide) d{child}', '']
         else:
             # Explicit tail indices prevent inference from assuming move coverage.
-            body = f'K.Derivation.NoMoves {{K.Lower}} {{{pos}}} {{9}} {{Nil}} (by rfl)'
+            body = f'K.Derivation.NoMoves {{K.Lower}} {{{pos}}} {{9}} {{Nil}} (by decide)'
             for offset in reversed(range(len(children))):
                 m, child = children[offset]
                 tail = ' :: '.join(move_text(m1) for m1, _ in children[offset + 1:])
                 tail = tail + ' :: Nil' if tail else 'Nil'
-                body = f'K.Derivation.Reply {{K.Lower}} {{{pos}}} {{9}} {{{move_text(m)}}} {{{tail}}} {{R.Turn {other} b{child}}} rfl d{child} ({body})'
-            lines += [f'd{ident} = K.Derivation.Replies rfl rfl rfl ({body})', '']
+                body = f'K.Derivation.Reply {{K.Lower}} {{{pos}}} {{9}} {{{move_text(m)}}} {{{tail}}} {{R.Turn {other} b{child}}} (by decide) d{child} ({body})'
+            all_moves = ' :: '.join(move_text(m) for m, _ in children) + ' :: Nil'
+            lines += [f'd{ident} = K.Derivation.Replies {{K.Lower}} {{{player}}} {{b{ident}}} {{9}} {{{all_moves}}} (by decide) (by decide) (by decide) (by decide) ({body})', '']
     lines += ['-- Problem 1: White can force a tournament score strictly above half.',
               'white-wins : K.Derivation (K.AtBound K.Lower I.four-opening 9)',
-              f'white-wins = d{root}', '']
+              f'white-wins = K.cast {{K.AtBound K.Lower (R.Turn C.Black b{root}) 9}} {{K.AtBound K.Lower I.four-opening 9}} (by decide) d{root}', '']
     return '\n'.join(lines)
 
 
@@ -136,7 +190,8 @@ def main():
     nodes, root = strategy()
     source = emit(nodes, root)
     print(f'{len(nodes)} certificate positions; {len(source.encode())} bytes; root {root}')
-    print(f'{white_wins.cache_info()}')
+    print(f'Unfolded proof size: {proof_cost(canonical(initial()), BLACK)}')
+    print(f'{proof_cost.cache_info()}')
     if args.output:
         args.output.write_text(source)
 
