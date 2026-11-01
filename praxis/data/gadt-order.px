@@ -14,7 +14,7 @@ plt-of-lt {S n} {S m} h = SuccSucc (plt-of-lt h)
 plt-of-lt {n} {0} h = absurd h
 
 plt-trans : {n m k : nat} -> PLt n m -> PLt m k -> PLt n k
-plt-trans ZeroSucc (SuccSucc {n} {m} p) = ZeroSucc
+plt-trans ZeroSucc (SuccSucc {n} {m} p) = ZeroSucc {m}
 plt-trans (SuccSucc p) (SuccSucc q) = SuccSucc (plt-trans p q)
 
 lt-trans : {n m k: nat} -> n < m -> m < k -> n < k

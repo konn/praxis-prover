@@ -1,0 +1,13 @@
+module Game.Othello where
+
+data Piece = B | W
+data Fin (n : nat) where
+  mk : (k : nat) -> k < n -> Fin n
+
+data Vec n a where
+  nil  : Vec 0 a
+  (::) : a -> Vec n a -> Vec (S n) a
+
+infixr 5 ::
+
+type Board n a = Vec n (Vec n a)

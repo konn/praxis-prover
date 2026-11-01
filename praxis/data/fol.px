@@ -1,0 +1,29 @@
+module Logic.FOL where
+
+data Fin n where
+  mk : {n : nat} -> (k : nat) -> k < n -> Fin n
+
+-- | Locally-nameless term
+data Term rel fn (n : nat) v  where
+  FVar : v -> Term rel fn n v
+  BVar : Fin n -> Term rel fn n v
+  App  : fn (Formula rel fn n v) (Term rel fn n v) -> Term rel fn n v
+
+data Formula rel fn (n : nat) v where
+  Rel : rel (Formula rel fn n v) (Term rel fn n v) -> Formula rel fn n v
+  Not : Formula rel fn n v -> Formula rel fn n v
+  (:/\) : Formula rel fn n v -> Formula rel fn n v -> Formula rel fn n v
+  (:\/) : Formula rel fn n v -> Formula rel fn n v -> Formula rel fn n v
+  (:->) : Formula rel fn n v -> Formula rel fn n v -> Formula rel fn n v
+  Any : Formula rel fn (S n) v -> Formula rel fn n v
+  All : Formula rel fn (S n) v -> Formula rel fn n v
+
+{- 
+
+
+data ZF_Func fml term
+
+data ZF_Rel fml term = term :∈ term
+
+data List x = nil | x :: List x
+ -}
