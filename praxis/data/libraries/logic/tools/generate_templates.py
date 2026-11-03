@@ -115,30 +115,66 @@ def templates():
     yield "peirce", "Classical", ("a", "b"), abstract(f, body)
 
 
+@dataclass(frozen=True)
+class Expression:
+    head: str
+    args: tuple = ()
+
+    def flat(self):
+        return "(" + " ".join([self.head, *(arg.flat() for arg in self.args)]) + ")"
+
+    def render(self, indent=0):
+        flat = self.flat()
+        if not self.args or indent + len(flat) <= 100:
+            return flat
+        return "(" + self.head + "\n" + "\n".join(
+            " " * (indent + 2) + arg.render(indent + 2) for arg in self.args
+        ) + ")"
+
+
+# Group MP steps rather than declaring one helper per node. Whole-template
+# inlining exceeds the current checker's definitional-equality resources for
+# the two largest templates. Six is a practical block size, not a logic rule.
+# A block can finish above this threshold when its two children are joined.
+INLINE_MPS = 6
+
+
 def emit(name, calculus, params, root):
     nodes = {}
+    parts = []
     lines = []
     binders = "".join("{" + x + " : Formula} -> " for x in params)
     captures = "".join(" {" + x + "}" for x in params)
 
+    def declare(node, proof, expression):
+        lines.extend([
+            f"{node} : {binders}{calculus} {proof.typ.px()}",
+            f"{node}{captures} =",
+            "  " + expression.render(2),
+            "",
+        ])
+
     def visit(p):
         if p in nodes:
             return nodes[p]
-        if p.tag == "MP":
-            f, x = p.args
-            ftext, xtext = visit(f), visit(x)
-            expr = f"{calculus}.MP {{{x.typ.px()}}} {{{p.typ.px()}}} ({ftext}) ({xtext})"
-        else:
+        if p.tag != "MP":
             assert p.tag in {"K", "S", "Explosion", "DNE"}
             assert p.tag != "DNE" or calculus == "Classical"
-            return calculus + "." + p.tag + "".join(" {" + a.px() + "}" for a in p.params)
-        node = f"{name}-step-{len(nodes)}"
-        nodes[p] = node + captures
-        lines.extend([f"{node} : {binders}{calculus} {p.typ.px()}", f"{node}{captures} = {expr}", ""])
+            return Expression(calculus + "." + p.tag + "".join(" {" + a.px() + "}" for a in p.params)), 0
+        f, fcost = visit(p.args[0])
+        x, xcost = visit(p.args[1])
+        # Praxis infers the antecedent and conclusion from these proof terms.
+        expression, cost = Expression(calculus + ".MP", (f, x)), 1 + fcost + xcost
+        if cost >= INLINE_MPS and p != root:
+            node = f"{name}-part-{len(parts) + 1}"
+            parts.append(node)
+            declare(node, p, expression)
+            expression, cost = Expression(node + captures), 0
+        nodes[p] = expression, cost
         return nodes[p]
 
-    result = visit(root)
-    lines.extend([f"{name} : {binders}{calculus} {root.typ.px()}", f"{name}{captures} = {result}", ""])
+    result, _ = visit(root)
+    declare(name, root, result)
     return "\n".join(lines)
 
 

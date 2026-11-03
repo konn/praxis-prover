@@ -43,7 +43,7 @@ small arithmetic builtin set. Imports, callbacks and dictionaries are not
 yet supported by this command.
 
 Checking and evaluation are separate phases. The CLI checks the module on
-each invocation; the full demo currently takes roughly 2–3 minutes to
+each invocation; the full demo currently takes roughly half a minute to
 certify on the development machine. This is checker cost, not the running
 time of the transformation. The evaluator API accepts an already checked
 module and can reuse it for different inputs, as an interactive frontend
@@ -83,6 +83,13 @@ terms and bracket abstraction to generate these certificates and the
 classical Peirce example. The script is untrusted: every generated
 definition is checked by Praxis. It adds no axioms or inference rules.
 
+The generator emits five named proofs and seven intermediate parts, grouping
+MP steps and letting Praxis infer their intermediate formula indices.
+It previously named every MP step, producing 86 declarations. The remaining
+parts keep the two largest proofs within the current checker's
+definitional-equality resources; inlining every step into one body does not
+yet certify. This grouping preserves the actual Hilbert proof trees.
+
 ```sh
 python3 praxis/data/libraries/logic/tools/generate_templates.py --check
 ```
@@ -110,7 +117,8 @@ finite-witness form of Glivenko:
 Prf_CPC(p,A)  ⊢  Prf_IPC(G(p),nn(A)).
 ```
 
-The compiler also retains separate `#closed` and `#index` certificates.
+The compiler also retains separate `#closed` and `#index` certificates,
+projected from the checked joint contract instead of repeating its induction.
 `contradiction` composes `G` with the last helper to prove
 
 ```text

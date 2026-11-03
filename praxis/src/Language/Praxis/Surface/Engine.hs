@@ -966,7 +966,10 @@ proveSpec k fd spec = do
     indexProjection g = do
       guard (specName spec == "#index")
       let name = functionLemma info "#contract"
-      guard (name `Set.member` knowLibrary k)
+      -- User-generated contracts have mangled names and are deliberately
+      -- absent from the source-visible prelude/library name set. This table
+      -- contains every certified lemma, including those internal contracts.
+      guard (Map.member name (knowRuleMetas k))
       p <- predicate (fdResult fd)
       value <- either (const Nothing) Just (termCT CVar (functionApplication fd))
       let member = Rel RelLt (Nat 0) (fromCT (predicateAt p value))

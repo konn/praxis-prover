@@ -4,6 +4,7 @@
 module Language.Praxis.Surface.CheckTest (checkTests) where
 
 import Control.Monad (forM_)
+import Data.List (isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Multiset qualified as MS
 import Data.Set qualified as Set
@@ -47,6 +48,31 @@ checkTests =
         let name = "u_RepeatedMembership_sdiagonal_s_x23_closed"
         cert <- maybe (assertFailure "missing closure certificate") pure (Map.lookup name (coreCertificates core))
         either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal name [] [] MS.empty) [])
+    , testCase "indexed functions project their certified joint contract" $ do
+        p <- either assertFailure pure prelude
+        let source =
+              T.unlines
+                [ "module ContractProjection where"
+                , "data Tag (n : Nat) where"
+                , "  Stop : Tag 0"
+                , "  More : {n : Nat} -> Tag n -> Tag (S n)"
+                , "copy : Tag n -> Tag n"
+                , "copy Stop = Stop"
+                , "copy (More p) = More (copy p)"
+                , "mark : Tag 0"
+                , "mark = Stop"
+                ]
+            checked = checkSource p "contract-projection.px" source
+        errors checked @?= []
+        (_, core) <- maybe (assertFailure "missing checked contract projection") pure (checkedFinal checked)
+        let name = "u_ContractProjection_scopy_s_x23_index"
+            certificateNames = Map.keys (coreCertificates core)
+            declarations = [decl | decl <- checkedCore checked, ("theorem " <> T.pack name <> " :") `T.isPrefixOf` decl]
+        assertBool "index proof repeated induction" (not (any ((name <> "_s_x23_case") `isPrefixOf`) certificateNames))
+        assertBool "index projection did not use its joint contract" (any (T.isInfixOf "exact u_ContractProjection_scopy_s_x23_contract") declarations)
+        let replayName = "u_ContractProjection_smark_s_x23_index"
+        cert <- maybe (assertFailure "missing projected index certificate") pure (Map.lookup replayName (coreCertificates core))
+        either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal replayName [] [] MS.empty) [])
     , testCase "ordinary and indexed syntax share a constructor telescope" $ do
         p <- either assertFailure pure prelude
         let source = T.unlines ["module Uniform where", "data Plain a = plain a", "data Explicit a where", "  explicit : a -> Explicit a"]
