@@ -76,11 +76,14 @@ jobs:
         path: dist-newstyle
         key: ${{steps.cache-keys.outputs.dist}}
 
+    # Keep this check separate so its heap limit detects term-sharing regressions.
+    - name: Certify Glivenko with a bounded heap
+      run: ${{env.cabal}} test praxis --test-show-details=direct --test-options='-p /Glivenko/ -j2 +RTS -N2 -M512m -s -RTS'
+
     # doctests need GHC, the package database, and the environment file from this build.
     - name: Run Tests
-      # Glivenko certification and the repeated-antecedent replay regression
-      # have high peak memory use. Temporarily exclude them on hosted runners,
-      # while keeping both available locally.
+      # Glivenko ran above. The independent repeated-antecedent replay still
+      # expands a large primitive proof; temporarily keep it local only.
       # Apply Tasty's filter only to praxis, not to the CoPRA doctest runner.
       run: |
         ${{env.cabal}} test praxis --test-show-details=direct --test-option=-p --test-option='!/Glivenko/&&!/constructor membership preserves repeated antecedents/'

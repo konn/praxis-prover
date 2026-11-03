@@ -51,6 +51,18 @@ module and can reuse it for different inputs, as an interactive frontend
 would do. Improving certification of composed proof-producing functions
 remains a performance task.
 
+The proof generator shares unchanged term subtrees between rewrite steps,
+so retaining a calculation no longer copies the whole term at every step.
+CI runs the complete Glivenko group separately with a 512 MiB heap limit,
+including certification, independent Hilbert checking of the evaluated
+translation, and rejection of malformed proofs. Run the same memory check
+from the repository root with:
+
+```sh
+cabal test praxis --test-show-details=direct \
+  --test-options='-p /Glivenko/ -j2 +RTS -N2 -M512m -s -RTS'
+```
+
 ## The algorithm is a Praxis function
 
 The main interface is:

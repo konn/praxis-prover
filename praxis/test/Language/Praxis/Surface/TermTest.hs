@@ -4,15 +4,17 @@
 module Language.Praxis.Surface.TermTest (termTests) where
 
 import Bound (Var (..), fromScope, toScope)
+import Control.Exception (evaluate)
 import Control.Monad (forM_)
 import Data.Either (isLeft)
 import Data.Text (Text)
-import Language.Praxis.Surface.CoreText (CT (..), TermLowering (..), consSeq, fieldT, lowerTermWith, standardLowering, termCT)
+import Language.Praxis.Surface.CoreText (CT (..), TermLowering (..), consSeq, fieldT, lowerTermWith, replaceCT, standardLowering, termCT)
 import Language.Praxis.Surface.Engine (fromCT)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Term qualified as Term
 import Language.Praxis.Surface.Types (Ty (..))
+import System.Mem.StableName (makeStableName)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -20,7 +22,30 @@ termTests :: TestTree
 termTests =
   testGroup
     "term erasure"
-    [ testCase "nested obligations retain their variable scope and source order" $ do
+    [ testCase "core rewriting shares untouched branches and argument tails" $ do
+        let untouched = CSym "tree" [CVar "left", CVar "right"]
+            suffix = [untouched, CNum 7]
+            original = CSym "pair" (CVar "target" : suffix)
+            replace (CVar "target") = Just (CNum 3)
+            replace _ = Nothing
+            rewritten = replaceCT replace original
+        rewritten @?= CSym "pair" (CNum 3 : suffix)
+        case rewritten of
+          CSym _ (_ : rest@(kept : _)) -> do
+            originalNode <- makeStableName =<< evaluate untouched
+            keptNode <- makeStableName =<< evaluate kept
+            originalTail <- makeStableName =<< evaluate suffix
+            keptTail <- makeStableName =<< evaluate rest
+            assertBool "an unchanged subtree was copied" (originalNode == keptNode)
+            assertBool "an unchanged argument tail was copied" (originalTail == keptTail)
+          _ -> assertFailure "rewriting changed the application shape"
+    , testCase "core rewriting is outermost and leaves closure binders closed" $ do
+        let rewrite (CVar "x") = Just (CNum 4)
+            rewrite (CSym "stop" _) = Just (CVar "x")
+            rewrite _ = Nothing
+            original = CCallback (CClosure ["x"] (CVar "x") [CVar "x"]) (CSym "stop" [CVar "x"])
+        replaceCT rewrite original @?= CCallback (CClosure ["x"] (CVar "x") [CNum 4]) (CVar "x")
+    , testCase "nested obligations retain their variable scope and source order" $ do
         let first = Rel RelEq (Var "x") (Nat 0)
             second = Rel RelEq (Var "y") (Var "x")
             input = call "f" [proof first 1, call "g" [Var "x", proof second 2], Nat 3]

@@ -166,16 +166,27 @@ ifChain tag bs = foldr (\(i, b) acc -> CSym "ifte" [CSym "eq" [tag, CNum i], b, 
 
 -- | Replace every subterm the function has a replacement for, outermost first.
 replaceCT :: (CT -> Maybe CT) -> CT -> CT
-replaceCT f t = case f t of
-  Just u -> u
-  Nothing -> case t of
-    CSym g args -> CSym g (map (replaceCT f) args)
-    CPartial g dict n -> CPartial g (map (replaceCT f) dict) n
-    CIndexedPartial g captures n prefixCount -> CIndexedPartial g (map (replaceCT f) captures) n prefixCount
-    CCallback code environment -> CCallback (replaceCT f code) (replaceCT f environment)
-    -- A closure's body is closed over its binders: only what it captures is replaced.
-    CClosure ps body captured -> CClosure ps body (map (replaceCT f) captured)
-    _ -> t
+replaceCT f original = maybe original id (changed original)
+  where
+    -- Keep untouched subtrees, including their argument lists. Rewriting a
+    -- small redex must not copy every other branch of the term: calculation
+    -- chains retain successive terms while producing their certificates.
+    changed t = case f t of
+      Just u -> Just u
+      Nothing -> case t of
+        CSym g args -> CSym g <$> children args
+        CPartial g dict n -> (\xs -> CPartial g xs n) <$> children dict
+        CIndexedPartial g captures n prefixCount -> (\xs -> CIndexedPartial g xs n prefixCount) <$> children captures
+        CCallback code environment -> case (changed code, changed environment) of
+          (Nothing, Nothing) -> Nothing
+          (code', environment') -> Just (CCallback (maybe code id code') (maybe environment id environment'))
+        -- A closure's body is closed over its binders: only its captures change.
+        CClosure ps body captured -> CClosure ps body <$> children captured
+        _ -> Nothing
+    children [] = Nothing
+    children (x : xs) = case (changed x, children xs) of
+      (Nothing, Nothing) -> Nothing
+      (x', xs') -> Just (maybe x id x' : maybe xs id xs')
 
 -- | The variables of a term.
 varsCT :: CT -> [Text]
