@@ -18,6 +18,7 @@ extra-doc-files:
   README.md
 
 extra-source-files:
+  data/libraries/logic/tools/*.py
   src-pra/*.pra
   src-pra/*.prf
   test/data/**/*.px
@@ -28,6 +29,9 @@ data-files:
   data/libraries/base/README.md
   data/libraries/base/package.toml
   data/libraries/base/src/**/*.px
+  data/libraries/logic/README.md
+  data/libraries/logic/package.toml
+  data/libraries/logic/src/**/*.px
 
 source-repository head
   type: git
@@ -76,6 +80,7 @@ library
     Language.Praxis.Surface.Encode
     Language.Praxis.Surface.Engine
     Language.Praxis.Surface.Env
+    Language.Praxis.Surface.Eval
     Language.Praxis.Surface.Evidence
     Language.Praxis.Surface.Fixity
     Language.Praxis.Surface.Index
@@ -143,12 +148,14 @@ test-suite praxis-test
     Language.Praxis.Surface.ComputationIndexTest
     Language.Praxis.Surface.CoreTest
     Language.Praxis.Surface.DependentClassTest
+    Language.Praxis.Surface.EvalTest
     Language.Praxis.Surface.EvidenceTest
     Language.Praxis.Surface.ExactPredicateTest
     Language.Praxis.Surface.FiniteElaborationTest
     Language.Praxis.Surface.FiniteFixtures
     Language.Praxis.Surface.FiniteQuantifierTest
     Language.Praxis.Surface.FiniteTacticTest
+    Language.Praxis.Surface.GlivenkoTest
     Language.Praxis.Surface.IndexedInstanceTest
     Language.Praxis.Surface.InstanceContextTest
     Language.Praxis.Surface.LogicalPreconditionTest

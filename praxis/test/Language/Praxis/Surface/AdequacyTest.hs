@@ -70,6 +70,7 @@ import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
 import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), DataInfo (..), FunInfo (..), Role (..), TeleEntry (..), TheoremInfo (..), emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Eval qualified as Runtime
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
 import Language.Praxis.Surface.Mangle (demangle, mangleVariable)
@@ -92,7 +93,7 @@ adequacyTests :: TestTree
 adequacyTests =
   testGroup
     "adequacy of the translation"
-    ( [certifies, parameterTests, testProperty "generator exhaustion fails" (expectFailure (withWitness "deliberately broken generator" (pure Nothing :: Gen (Maybe Int)) (const (property True))))]
+    ( [certifies, parameterTests, runtimeAdequacy, testProperty "generator exhaustion fails" (expectFailure (withWitness "deliberately broken generator" (pure Nothing :: Gen (Maybe Int)) (const (property True))))]
         <> [ withResource (load path) (const (pure ())) \get ->
                testGroup
                  path
@@ -106,6 +107,35 @@ adequacyTests =
            | path <- ["test/data/adequacy.px", "test/data/list.px", "test/data/gadt.px", "test/data/nat.px"]
            ]
     )
+
+-- The production shared-tree evaluator is a third implementation. Compare
+-- it with both independent interpreters, including stored implicit indices.
+-- This tests preservation on samples; it is not a universal proof of it.
+runtimeAdequacy :: TestTree
+runtimeAdequacy = withResource prepare (const (pure ())) $ \get ->
+  testProperty "shared evaluator agrees with surface semantics and generated core" $ ioProperty do
+    (ld, checked) <- get
+    pure $ forAll ((,) <$> chooseInt (0, 5) <*> chooseInt (0, 5)) $ \(m, n) ->
+      conjoin
+        [ let coreName = "u_RuntimeAdequacy_s" <> name
+              reference = evalRef ld (apps (Global (Ref RefFunction coreName)) (map (Var . VNat) args))
+              symbolic = evalCore ld Map.empty (CSym coreName (map CNum args))
+              runtime = Runtime.evalValue <$> Runtime.evaluateEntryWithNats 10000 ("RuntimeAdequacy." <> name) args checked
+           in counterexample (T.unpack name <> " " <> show args) $
+                conjoin [runtime === Right (toRuntime reference), symbolic === encode reference]
+        | (name, args) <- [("build", [fromIntegral m]), ("mirrored", [fromIntegral m]), ("total", [fromIntegral m]), ("fill", map fromIntegral [m, n]), ("arithmetic", map fromIntegral [m, n])]
+        ]
+  where
+    path = "test/data/runtime-adequacy.px"
+    prepare = do
+      ld <- load path
+      p <- either assertFailure pure prelude
+      source <- TIO.readFile path
+      let checked = checkSource p path source
+      [reportMessage r | r <- checkedReports checked, reportSeverity r == SevError] @?= []
+      pure (ld, checked)
+    toRuntime (VNat n) = Runtime.NatValue n
+    toRuntime (VCon name fields) = Runtime.DataValue (demangle name) (map toRuntime fields)
 
 certifies :: TestTree
 certifies = testCase "adequacy.px: its data types and functions certify, with an introduction lemma for each constructor; its statements are left to sorry" do

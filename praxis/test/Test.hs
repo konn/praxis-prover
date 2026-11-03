@@ -10,11 +10,13 @@ import Language.Praxis.Surface.ClassAdmissionTest (classAdmissionTests)
 import Language.Praxis.Surface.ComputationIndexTest (computationIndexTests)
 import Language.Praxis.Surface.CoreTest (coreTests)
 import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
+import Language.Praxis.Surface.EvalTest (evalTests)
 import Language.Praxis.Surface.EvidenceTest (evidenceTests)
 import Language.Praxis.Surface.ExactPredicateTest (exactPredicateTests)
 import Language.Praxis.Surface.FiniteElaborationTest (finiteElaborationTests)
 import Language.Praxis.Surface.FiniteQuantifierTest (finiteQuantifierTests)
 import Language.Praxis.Surface.FiniteTacticTest (finiteTacticTests)
+import Language.Praxis.Surface.GlivenkoTest (glivenkoTests)
 import Language.Praxis.Surface.IndexedInstanceTest (indexedInstanceTests)
 import Language.Praxis.Surface.InstanceContextTest (instanceContextTests)
 import Language.Praxis.Surface.LogicalPreconditionTest (logicalPreconditionTests)
@@ -50,6 +52,8 @@ main =
       , finiteElaborationTests
       , exactPredicateTests
       , evidenceTests
+      , evalTests
+      , glivenkoTests
       , instanceContextTests
       , logicalPreconditionTests
       , methodContractTests

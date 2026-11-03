@@ -3612,10 +3612,12 @@ obligations k g = Database obligationHead byHead [assumed, anyMember, exactMembe
         , name == actual ->
             Map.unions [predicatesGiven t (parameterPredicate c) | (u, c) <- zip used ps, Just t <- [listToMaybe (drop u ts)]]
       _ -> Map.empty
-    -- The memberships of the pairs no hypothesis states, proved first and added
-    -- as hypotheses; then the appeal, from the results of the other subgoals.
+    -- A lemma's antecedent is a multiset. If two fields instantiate to the
+    -- same value, one existing membership hypothesis cannot fill both places.
+    -- Materialize repeated requirements by checked cuts as well as missing
+    -- memberships; then appeal using the results of the other subgoals.
     afterMemberships pairs rest appeal =
-      let needed = [(a, q) | (a, q) <- pairs, not (hasMembership g q a)]
+      let needed = [pair | (previous, pair@(a, q)) <- zip (scanl (flip (:)) [] pairs) pairs, pair `elem` previous || not (hasMembership g q a)]
        in Reduce (map (\(a, q) -> OMember q a) needed <> rest) \rs ->
             let (proofs, others) = splitAt (length needed) rs
              in mconcat ["have (" <> membershipText q a <> ") { " <> r <> " }; " | ((a, q), r) <- zip needed proofs] <> appeal others

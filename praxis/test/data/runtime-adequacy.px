@@ -1,0 +1,32 @@
+module RuntimeAdequacy where
+
+data Tree = Tip | Fork Tree Tree
+
+build : Nat -> Tree
+build 0 = Tip
+build (S n) = Fork (build n) (build n)
+
+mirror : Tree -> Tree
+mirror Tip = Tip
+mirror (Fork a b) = Fork (mirror b) (mirror a)
+
+mirrored : Nat -> Tree
+mirrored n = mirror (Fork (build n) Tip)
+
+sum : Tree -> Nat
+sum Tip = 1
+sum (Fork a b) = sum a + sum b
+
+total : Nat -> Nat
+total n = sum (build n)
+
+data Vec (n : Nat) where
+  Nil : Vec 0
+  Cons : {n : Nat} -> Nat -> Vec n -> Vec (S n)
+
+fill : {n : Nat} -> Nat -> Vec n
+fill {0} x = Nil
+fill {S n} x = Cons x (fill {n} x)
+
+arithmetic : Nat -> Nat -> Nat
+arithmetic x y = x * y + (x - y)

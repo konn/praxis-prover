@@ -1,0 +1,7 @@
+[package]
+name = "logic"
+version = "0.1.0.0"
+synopsis = "Finitistic proof transformations for propositional logic"
+
+[lib]
+source-dir = "src"

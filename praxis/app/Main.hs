@@ -10,8 +10,10 @@ import Data.Text.IO qualified as TIO
 import Data.Version (showVersion)
 import Language.Praxis.Package.Build
 import Language.Praxis.Surface.Check
+import Language.Praxis.Surface.Eval (EvalResult (..), evaluateEntryWithNats, renderValue)
 import Language.Praxis.Surface.Prelude
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
+import Numeric.Natural (Natural)
 import Options.Applicative
 import Paths_praxis (version)
 import System.Directory (doesDirectoryExist)
@@ -20,7 +22,7 @@ import System.FilePath (takeExtension, takeFileName)
 import System.IO (hPutStrLn, stderr)
 
 -- | What the command line asks for.
-newtype Command = Check CheckOptions
+data Command = Check CheckOptions | Evaluate FilePath String [Natural] Int Int
 
 data CheckOptions = CheckOptions
   { dumpCore :: !Bool
@@ -31,16 +33,39 @@ data CheckOptions = CheckOptions
 
 main :: IO ()
 main = do
-  Check CheckOptions {..} <- execParser (info (commandP <**> versionP <**> helper) (fullDesc <> header "praxis - a finitistic prover over primitive recursive arithmetic"))
+  requested <- execParser (info (commandP <**> versionP <**> helper) (fullDesc <> header "praxis - a finitistic prover over primitive recursive arithmetic"))
   p <- either (\e -> hPutStrLn stderr ("the prelude did not certify: " <> e) *> exitFailure) pure prelude
-  oks <- mapM (checkTarget p dumpCore dumpPra alone) (if null targets then ["."] else targets)
-  if and oks then exitSuccess else exitFailure
+  case requested of
+    Check CheckOptions {..} -> do
+      oks <- mapM (checkTarget p dumpCore dumpPra alone) (if null targets then ["."] else targets)
+      if and oks then exitSuccess else exitFailure
+    Evaluate source entry arguments fuel depth -> do
+      src <- readFileUtf8 source
+      hPutStrLn stderr ("Checking " <> source <> "...")
+      let checked = fst (checkModule (\_ _ -> []) (initialBuild p) {buildRetainGeneratedText = False} mempty Nothing source src)
+      ok <- printChecked False False source checked
+      when (not ok) exitFailure
+      hPutStrLn stderr ("Evaluating " <> entry <> "...")
+      case evaluateEntryWithNats fuel (T.pack entry) arguments checked of
+        Left err -> hPutStrLn stderr err *> exitFailure
+        Right result -> do
+          TIO.putStrLn (renderValue depth (evalValue result))
+          hPutStrLn stderr ("Evaluated " <> show (evalCalls result) <> " distinct calls; " <> show (evalNodes result) <> " shared value nodes.")
 
 commandP :: Parser Command
 commandP =
   hsubparser $
-    command "check" $
-      info (Check <$> checkP) (progDesc "Check the modules of a project, a package, or files, printing every report; fail when one has an error")
+    command "check" (info (Check <$> checkP) (progDesc "Check the modules of a project, a package, or files, printing every report; fail when one has an error"))
+      <> command "eval" (info evalP (progDesc "Check a standalone module and evaluate a first-order definition on shared constructor trees"))
+
+evalP :: Parser Command
+evalP = do
+  source <- strArgument (metavar "FILE.px")
+  entry <- strOption (long "entry" <> metavar "QUALIFIED.NAME" <> help "Definition to evaluate")
+  arguments <- many (option auto (long "nat" <> metavar "N" <> help "Natural argument in runtime order; repeat for multiple arguments"))
+  fuel <- option auto (long "fuel" <> value 1000000 <> showDefault <> metavar "N" <> help "Maximum evaluation steps")
+  depth <- option auto (long "depth" <> value 12 <> showDefault <> metavar "N" <> help "Maximum display depth; deeper values are shown as ...")
+  pure (Evaluate source entry arguments fuel depth)
 
 checkP :: Parser CheckOptions
 checkP = do

@@ -38,6 +38,15 @@ checkTests =
         p <- either assertFailure pure prelude
         let checked = checkSource p "builtin.px" "data T = C\n{-# BUILTIN NOT_A_ROLE T #-}\n"
         assertBool "the pragma must be rejected" (any (T.isInfixOf "BUILTIN" . T.pack) (errors checked))
+    , testCase "constructor membership preserves repeated antecedents" $ do
+        p <- either assertFailure pure prelude
+        let source = T.unlines ["module RepeatedMembership where", "data Fm = Atom Nat | Imp Fm Fm", "diagonal : Fm -> Fm", "diagonal a = Imp a a"]
+            checked = checkSource p "repeated-membership.px" source
+        errors checked @?= []
+        (_, core) <- maybe (assertFailure "missing checked repeated membership") pure (checkedFinal checked)
+        let name = "u_RepeatedMembership_sdiagonal_s_x23_closed"
+        cert <- maybe (assertFailure "missing closure certificate") pure (Map.lookup name (coreCertificates core))
+        either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal name [] [] MS.empty) [])
     , testCase "ordinary and indexed syntax share a constructor telescope" $ do
         p <- either assertFailure pure prelude
         let source = T.unlines ["module Uniform where", "data Plain a = plain a", "data Explicit a where", "  explicit : a -> Explicit a"]

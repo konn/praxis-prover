@@ -91,6 +91,7 @@ import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
 import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), Renamed, ScopeError (..), moduleExports, renameModule)
+import Language.Praxis.Surface.Syntax (Pattern)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span (..))
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ty (..))
@@ -135,6 +136,8 @@ data Core = Core
   -- ^ Elaboration hints from closed checked equations; every reuse is checked again.
   , coreBodies :: !(Map Text [SurfaceCore.Body Certificate])
   -- ^ Explicit typed bodies whose evidence has been replaced by checked PRA certificates.
+  , corePatterns :: !(Map Text [[Pattern]])
+  -- ^ Runtime patterns in the same order as 'coreBodies', for surface evaluation.
   , coreDisplay :: !(Map Text Text)
   -- ^ Inspection-only renderings retaining clause names and patterns; never used for checking or lowering.
   , coreMembership :: !(Map Text (Text, [Int]))
@@ -158,7 +161,7 @@ surfaceCore :: Core -> [Text]
 surfaceCore = Map.elems . coreDisplay
 
 initialCore :: Prelude -> Core
-initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (certificateStore (preludeCertificates p)) Map.empty Map.empty Map.empty Map.empty Set.empty
+initialCore p = Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) (certificateStore (preludeCertificates p)) Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty
 
 -- | Extend the core with definitions, as @prf@ equations.
 addDefinitions :: [Text] -> Core -> Either String Core
@@ -486,6 +489,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
                           { runCore =
                               core
                                 { coreBodies = Map.insert (funCore (fdInfo fd)) bodies (coreBodies core)
+                                , corePatterns = Map.insert (funCore (fdInfo fd)) (map fcPatterns (fdClauses fd)) (corePatterns core)
                                 , coreDisplay = Map.insert (funCore (fdInfo fd)) (CorePretty.function env fd) (coreDisplay core)
                                 }
                           }
