@@ -1,0 +1,41 @@
+module Logic.FirstOrder.Proof where
+
+open import Logic.FirstOrder.Syntax
+
+-- Finite closed Hilbert derivations of classical first-order logic with
+-- equality. Native premises check syntax side conditions; they are not
+-- object axioms and do not assert the truth of the conclusion in Praxis.
+-- This module presents logic only, with no arithmetic theory axioms.
+data Derivation (a : Formula) where
+  K : {a b : Formula} -> scope a = 0 -> scope b = 0 -> Derivation (Imp a (Imp b a))
+  S : {a b c : Formula} -> scope a = 0 -> scope b = 0 -> scope c = 0 -> Derivation (Imp (Imp a (Imp b c)) (Imp (Imp a b) (Imp a c)))
+  Explosion : {a : Formula} -> scope a = 0 -> Derivation (Imp Bottom a)
+  DNE : {a : Formula} -> scope a = 0 -> Derivation (Imp (Imp (Imp a Bottom) Bottom) a)
+  MP : {a b : Formula} -> Derivation (Imp a b) -> Derivation a -> Derivation b
+  Reflexivity : {t : Term} -> term-scope t = 0 -> Derivation (Equal t t)
+  Instantiate : {a b : Formula} -> {t : Term} -> b = open-body t a -> scope a <= 1 -> term-scope t = 0 -> scope b = 0 -> Derivation (Imp (All a) b)
+  Distribute : {a b : Formula} -> scope a <= 1 -> scope b <= 1 -> Derivation (Imp (All (Imp a b)) (Imp (All a) (All b)))
+  Vacuous : {a : Formula} -> scope a = 0 -> Derivation (Imp a (All a))
+  SubstituteEquals : {a l r : Formula} -> {s t : Term} -> l = open-body s a -> r = open-body t a -> scope a <= 1 -> term-scope s = 0 -> term-scope t = 0 -> scope l = 0 -> scope r = 0 -> Derivation (Imp (Equal s t) (Imp l r))
+  Generalize : {a b : Formula} -> {x : Nat} -> b = close-body x a -> scope a = 0 -> scope (All b) = 0 -> Derivation a -> Derivation (All b)
+
+reflexivity-schema : {t : Term} -> term-scope t = 0 -> Derivation (Equal t t)
+reflexivity-schema {t} closed = Reflexivity {t} closed
+
+zero-reflexive : Derivation (Equal Zero Zero)
+zero-reflexive = Reflexivity {Zero} (by rfl)
+
+-- The atom 0 is closed into bound index 0. No native reflection occurs.
+all-reflexive : Derivation (All (Equal (Bound 0) (Bound 0)))
+all-reflexive = Generalize {Equal (Free 0) (Free 0)} {Equal (Bound 0) (Bound 0)} {0} (by decide) (by rfl) (by decide) (Reflexivity {Free 0} (by rfl))
+
+instantiate-zero : Derivation (Imp (All (Equal (Bound 0) (Bound 0))) (Equal Zero Zero))
+instantiate-zero = Instantiate {Equal (Bound 0) (Bound 0)} {Equal Zero Zero} {Zero} (by decide) (by decide) (by rfl) (by decide)
+
+specialized-reflexive : Derivation (Equal Zero Zero)
+specialized-reflexive = MP instantiate-zero all-reflexive
+
+-- A nested binder exercises the shifting depth of opening, while leaving
+-- the inner bound variable bound by its original quantifier.
+nested-instantiation : Derivation (Imp (All (All (Equal (Bound 1) (Bound 0)))) (All (Equal (Free 7) (Bound 0))))
+nested-instantiation = Instantiate {All (Equal (Bound 1) (Bound 0))} {All (Equal (Free 7) (Bound 0))} {Free 7} (by decide) (by decide) (by rfl) (by decide)

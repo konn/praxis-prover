@@ -10,6 +10,7 @@ import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Eval
+import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Prelude (prelude)
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -18,14 +19,14 @@ glivenkoTests :: TestTree
 glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
   testGroup
     "Glivenko"
-    [ testCase "uniform transformation and contradiction contracts certify" $ do
+    [ testCase "internal schemata and uniform transformation contracts certify" $ do
         checked <- getChecked
         (_, core) <- maybe (assertFailure "no checked Glivenko module") pure (checkedFinal checked)
-        forM_ ["glivenko", "contradiction", "embed", "recover"] $ \name ->
+        forM_ [["identity"], ["ClassicalExamples", "peirce-law"], ["glivenko"], ["contradiction"], ["embed"], ["recover"]] $ \name ->
           forM_ ["contract", "closed", "index"] $ \suffix ->
             assertBool
-              (name <> " has no " <> suffix <> " certificate")
-              (Map.member ("u_Logic_sGlivenko_s" <> name <> "_s_x23_" <> suffix) (coreCertificates core))
+              (T.unpack (T.intercalate "." name <> " has no " <> suffix <> " certificate"))
+              (Map.member (T.unpack (mangleGlobal (["Logic", "Glivenko"] <> name <> ["#" <> suffix]))) (coreCertificates core))
     , testCase "evaluated Peirce proof and Glivenko output pass independent Hilbert checking" $ do
         checked <- getChecked
         result <- run checked "demo-proofs"
@@ -42,7 +43,7 @@ glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
     , testCase "malformed MP and classical-to-intuitionistic casts are rejected" $ do
         p <- either assertFailure pure prelude
         source <- TIO.readFile sourcePath
-        let declarations = fst (T.breakOn "identity :" source)
+        let declarations = fst (T.breakOn "-- Internal proof schemata" source)
             badMP = "bad : Intuitionistic (Atom 0)\nbad = Intuitionistic.MP {Bottom} {Atom 0} (Intuitionistic.Explosion {Atom 0}) (Intuitionistic.K {Atom 0} {Bottom})\n"
             badDNE = "bad : Intuitionistic (Imp (Imp (Imp (Atom 0) Bottom) Bottom) (Atom 0))\nbad = Classical.DNE {Atom 0}\n"
         forM_ [badMP, badDNE] $ \bad -> do

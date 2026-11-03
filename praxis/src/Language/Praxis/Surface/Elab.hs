@@ -97,11 +97,13 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void, absurd)
 import Language.Praxis.Surface.Builtin (BuiltinRole (..), builtinRoleName, registerBuiltin)
+import Language.Praxis.Surface.Construction.Internal qualified as Construction
 import Language.Praxis.Surface.Core qualified as Core
 import Language.Praxis.Surface.Desugar (Dependency (..), Requirement (..), Requirements, requirement, requirements)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
 import Language.Praxis.Surface.Index
+import Language.Praxis.Surface.Internal qualified as Internal
 import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Rename (RDecl (..), Renamed (..))
 import Language.Praxis.Surface.Resolve (Database (..), Policy (..), Step (..), solve)
@@ -125,6 +127,10 @@ data Item
   | IClass !ClassInfo !Span ![Slot] ![PremiseDef] !Requirements !(Map.Map Text QualName)
   | -- | A requested builtin registration, admitted by the checker in source order.
     IBuiltin !(Located Text) !(Located QualName)
+  | -- | An internal presentation whose actual encoding must be checked in source order.
+    IInternal !(Located QualName)
+  | -- | An ordinary function, admitted only after its selected presentation checks.
+    IInternalFun !(Located QualName) !FunDef
   | -- | a declaration which did not elaborate; the rest go on without it
     IFailed !ElabError
 
@@ -345,8 +351,15 @@ elabModule fx env0 rn = withModules (walk envData decls [])
             Right (e', items) -> (e', Map.insert (owner, name) items done)
 
     headOf c = either (const Nothing) Just (resolveExpr fx (R.clauseLhs c)) >>= fmap fst . lhsParts
-    clausesOf owner name = [c | RDecl o (Located _ (R.DClause c)) <- decls, o == owner, headOf c == Just name]
-    signed owner = [n | RDecl o (Located _ (R.DSignature (Located _ n) _)) <- decls, o == owner]
+    -- The renamer groups each signature with its lexical clauses. Never
+    -- gather by name across flattened internal blocks: a clause outside a
+    -- block must not become part of a proof inside it (or conversely).
+    clausesOf owner name rest =
+      let belongs = \case
+            RDecl o (Located _ (R.DClause c)) -> o == owner && headOf c == Just name
+            _ -> False
+          (group, following) = span belongs rest
+       in ([c | RDecl _ (Located _ (R.DClause c)) <- group], following)
 
     walk env [] acc = (env, reverse acc)
     walk env0' (RDecl owner (Located sp d) : rest) acc =
@@ -358,6 +371,9 @@ elabModule fx env0 rn = withModules (walk envData decls [])
             R.DOpenImport {} -> walk env rest acc
             R.DModule {} -> walk env rest acc
             R.DPrivate {} -> walk env rest acc
+            R.DInternal family _ -> case Internal.internalFamily env family of
+              Left (esp, why) -> walk env rest (IFailed (ElabError esp why) : acc)
+              Right info -> walk env rest (IInternal (Located (location family) (dataQual info)) : acc)
             -- The prepass permits recursive headers; the source-order pass
             -- gives constructor proof terms their lexical builtin registry.
             R.DData dd -> case elabDataDecl fx env (Map.lookup (owner, unLocated (R.dataName dd)) kindSigs) sp dd of
@@ -375,12 +391,24 @@ elabModule fx env0 rn = withModules (walk envData decls [])
             R.DKindSig (Located ksp n) _
               | (owner, n) `elem` dataNames -> walk env rest acc
               | otherwise -> walk env rest (IFailed (ElabError ksp ("a kind signature for no data type of this module: " <> T.unpack n)) : acc)
-            R.DSignature (Located _ name) ty -> case elabDecl fx env sp name ty (clausesOf owner name) of
-              Left err -> walk env rest (IFailed err : acc)
-              Right (env', item) -> walk env' rest (item : acc)
-            R.DClause c -> case headOf c of
-              Just name | name `elem` signed owner -> walk env rest acc
-              _ -> walk env rest (IFailed (ElabError sp "a clause with no signature for its name") : acc)
+            R.DSignature (Located _ name) ty ->
+              let (clauses, following) = clausesOf owner name rest
+               in case elabDecl fx env sp name ty clauses of
+                    Left err -> walk env following (IFailed err : acc)
+                    Right (env', item) -> walk env' following (item : acc)
+            R.DInternalSignature family (Located _ name) ty ->
+              let (rawClauses, following) = clausesOf owner name rest
+                  elaborate = do
+                    theory <- first (uncurry ElabError) (Internal.internalFamily env family)
+                    signature <- Internal.internalSignature family <$> resolved fx ty
+                    (env', item) <- elabDecl fx env sp name signature rawClauses
+                    case item of
+                      IFun fd -> Right (env', IInternalFun (Located (location family) (dataQual theory)) fd)
+                      _ -> Left (ElabError sp "an internal declaration must construct a derivation value")
+               in case elaborate of
+                    Left err -> walk env following (IFailed err : acc)
+                    Right (env', item) -> walk env' following (item : acc)
+            R.DClause _ -> walk env rest (IFailed (ElabError sp "a clause with no signature in its lexical block") : acc)
             R.DClass cd -> case elabClass fx env cd of
               Left err -> walk env rest (IFailed err : acc)
               Right env' -> case Map.lookup (qualify env [Ident (unLocated (R.className cd))]) (envGlobals env') of
@@ -2169,7 +2197,9 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     R.RExpr e -> do
       e' <- liftE (resolved fx e)
       fst <$> elabTerm (CollectProofArguments [(name, fmap (fst . (vars !!)) prop) | (name, prop) <- own]) envBody (logicalFunSlots info) [(n, (i, t)) | (i, (n, t)) <- zip [0 ..] vars] e' (applyTy refined result)
-    _ -> failAt rsp "a function's clause is a term, not a proof"
+    R.RBy _ ->
+      fst <$> elabTerm (CollectProofArguments [(name, fmap (fst . (vars !!)) prop) | (name, prop) <- own]) envBody (logicalFunSlots info) namedContext (Located rsp (R.EProof rhs)) (applyTy refined result)
+    _ -> failAt rsp "a function's clause constructs a value; calc requires a proposition goal"
   prepared <-
     either (failAt rsp) pure $
       if PAbsurd `elem` pats
@@ -2707,6 +2737,11 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         t <- agree env sp expected ty
         elabTerm proofArguments env givens ctx l t
   R.EParen x -> elabTerm proofArguments env givens ctx x expected
+  R.EProof (R.RBy tactics) -> do
+    construction <- Construction.construct constructionArgument (Just expected) sp tactics
+    term <- either (uncurry failAt) pure construction
+    elabTerm proofArguments env givens ctx term expected
+  R.EProof _ -> failAt sp "a construction expression uses by; calc requires a proposition goal"
   _ | TArrow {} <- expected -> schema
   R.ENat n -> do
     t <- agree env sp expected TNat
@@ -2759,28 +2794,18 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
           free = [v | (v, _) <- typeIndexNames env r, v `notElem` map fst (tsValues sc)]
        in elabTypeIn env sc {tsValues = tsValues sc <> [(v, IxVar ("@" <> v)) | v <- nub free]} r
     application hd imps args = do
-      h <- headOf hd
+      h <- headOf expected hd
       let n = ahParams h
           proofAt = ahProofs h
           arity = length (ahDomains h) + length proofAt
           -- The arguments at its domains; those at its propositions are proofs.
           termArgs = [a | (i, a) <- zip [0 ..] args, i `notElem` map fst proofAt]
-          (typeImplicits, valueImplicits) = splitAt (length (ahTypeImplicits h)) imps
       -- Values are first-order: a function or a constructor is applied in full, never passed or returned.
       when (length args < arity) $ failAt sp ("applied to " <> show (length args) <> " of its " <> show arity <> " arguments: a function is not a value, so it is applied in full")
       case drop arity args of
         extra : _ -> failAt (location extra) "applied to too many arguments"
         [] -> pure ()
-      case drop (length (ahImplicits h)) valueImplicits of
-        extra : _
-          | null (ahImplicits h) -> failAt (location extra) "an implicit argument, where there is none to give"
-          | otherwise -> failAt (location extra) ("applied to " <> show (length imps) <> " implicit arguments, where it takes " <> show (length (ahImplicits h)))
-        [] -> pure ()
-      -- The implicit arguments given, in braces; then the parameters the type expected fixes, then those the arguments do.
-      selectedTypes <- forM (zip (ahTypeImplicits h) typeImplicits) \(i, argument') -> (i,) <$> liftE (elabTypeIn env (envScope env) argument')
-      given <- foldM (implicitArg n) emptyAssignment {asTypes = IM.fromList selectedTypes} (zip (ahImplicits h) valueImplicits)
-      s0 <- maybe (failAt sp (mismatch env expected (substScheme n given (ahResult h)))) pure (matchTy n (ahResult h) expected given)
-      let hinted = foldl (proofHint n args) s0 (ahProofShapes h)
+      hinted <- applicationAssignment expected h imps args
       (s1, done, pending) <- foldM (argument (ahDependent h) n) (hinted, IM.empty, []) (zip3 [0 :: Int ..] (ahDomains h) termArgs)
       (settled, done') <- settle (ahDependent h) n s1 done pending
       s2 <- ahRefine h settled
@@ -2804,8 +2829,46 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
             | x : ts' <- ts = x : inOrder (i + 1) ts'
             | otherwise = []
       pure (At (Irrelevant sp) (Typed t [substScheme n s2 (TParam i []) | i <- [0 .. fst n - 1]] (if ahRecordIndices h then IM.toList (asValues s2) else []) (apply (inOrder (0 :: Int) terms))), t)
+    -- Construction scripts ask the ordinary application checker for each
+    -- next domain. Already supplied arguments refine dependent indices and
+    -- type parameters; the completed term still undergoes full checking.
+    constructionArgument Nothing term =
+      failAt (location term) "apply in a native proof argument needs a proof term: use exact with a named proof or a parenthesized by block"
+    constructionArgument (Just wanted) term = do
+      let (hd, args0) = rawArgs term
+          (imps, args, late) = splitImplicits args0
+      forM_ (take 1 late) \x -> failAt (location x) "an implicit argument, in braces, comes before the explicit ones"
+      h <- headOf wanted hd
+      let proofPositions = map fst (ahProofs h)
+          arity = length (ahDomains h) + length proofPositions
+          termArgs = [a | (i, a) <- zip [0 ..] args, i `notElem` proofPositions]
+      when (length args > arity) $ failAt (location term) "apply supplies more explicit arguments than its head takes"
+      if length args == arity
+        then pure Nothing
+        else do
+          start <- applicationAssignment wanted h imps args
+          (assigned, _, _) <- foldM (argument (ahDependent h) (ahParams h)) (start, IM.empty, []) (zip3 [0 :: Int ..] (ahDomains h) termArgs)
+          pure $
+            Just $
+              if length args `elem` proofPositions
+                then Nothing
+                else Just (substScheme (ahParams h) assigned (ahDomains h !! length termArgs))
+    applicationAssignment wanted h imps args = do
+      let n = ahParams h
+          (typeImplicits, valueImplicits) = splitAt (length (ahTypeImplicits h)) imps
+      case drop (length (ahImplicits h)) valueImplicits of
+        extra : _
+          | null (ahImplicits h) -> failAt (location extra) "an implicit argument, where there is none to give"
+          | otherwise -> failAt (location extra) ("applied to " <> show (length imps) <> " implicit arguments, where it takes " <> show (length (ahImplicits h)))
+        [] -> pure ()
+      -- The implicit arguments given, in braces; then the parameters the type expected fixes, then those the arguments do.
+      selectedTypes <- forM (zip (ahTypeImplicits h) typeImplicits) \(i, argument') -> (i,) <$> liftE (elabTypeIn env (envScope env) argument')
+      given <- foldM (implicitArg n) emptyAssignment {asTypes = IM.fromList selectedTypes} (zip (ahImplicits h) valueImplicits)
+      s0 <- maybe (failAt sp (mismatch env wanted (substScheme n given (ahResult h)))) pure (matchTy n (ahResult h) wanted given)
+      pure (foldl (proofHint n args) s0 (ahProofShapes h))
     proofHint n args s (pos, shape)
-      | Just hypotheses <- proofHypotheses proofArguments
+      | pos < length args
+      , Just hypotheses <- proofHypotheses proofArguments
       , Located _ (R.EName (QName [] (Ident name))) <- stripParen (args !! pos)
       , Just actual <- lookup name hypotheses =
           fromMaybe s (matchProposition (snd n) shape actual s)
@@ -2851,7 +2914,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     -- What an argument's type says of the parameters of its head's type.
     found n asp d t s = maybe (failAt asp (mismatch env (substScheme n s d) t)) pure (matchTy n d t s)
     -- The head of an application: a variable, a builtin, a function, a constructor or a method.
-    headOf (Located hsp h) = case h of
+    headOf hint (Located hsp h) = case h of
       R.EName (QName [] (Ident x)) | Just (v, t) <- lookup x ctx -> case t of
         TArrow {}
           | (_, ref, _) : _ <- [entry | entry@(name, _, _) <- envSchemas env, name == x] ->
@@ -2865,7 +2928,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
             requireIndexDependencies hsp used
             let ty = case value of Typed t _ _ _ -> t; _ -> ixType env (envScope env) ix
             pure (plain (0, 0) [] ty value)
-      R.EName q -> resolveHead hsp q
+      R.EName q -> resolveHead hint hsp q
       R.ENat k -> pure (plain (0, 0) [] TNat (Nat k))
       R.EParen x -> (\(e', t) -> plain (0, 0) [] t e') <$> elabTerm proofArguments env givens ctx x THole
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
@@ -2969,14 +3032,14 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
               (target, fromWanted) = normalizeIndex env wanted
         , actual == target
         ]
-    resolveHead hsp q = case builtin q of
+    resolveHead hint hsp q = case builtin q of
       Just b -> pure b
       Nothing -> do
         let terms = [g | g <- resolve env q, isTerm g]
             candidates = case (q, terms) of
               (QName [] s, []) -> map GCtor (constructorsNamed env s)
               _ -> terms
-            byType = case expected of
+            byType = case hint of
               TData dn _ _ -> [g | g@(GCtor c) <- candidates, renderQualName (ctorData c) == dn]
               _ -> []
         case (byType, candidates) of

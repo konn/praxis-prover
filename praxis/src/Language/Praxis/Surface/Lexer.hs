@@ -183,6 +183,7 @@ keywords =
   , "open"
   , "import"
   , "private"
+  , "internal"
   , "public"
   , "renaming"
   , "using"

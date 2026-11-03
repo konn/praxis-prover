@@ -153,6 +153,8 @@ data Decl
     DModule !(Located Text) ![Located Decl]
   | -- | @private@ and its declarations, which the module does not export
     DPrivate ![Located Decl]
+  | -- | @internal Family where@: declarations of object proofs in an indexed family.
+    DInternal !(Located QName) ![Located Decl]
   | -- | A builtin role assigned to a name by a @BUILTIN@ pragma.
     DBuiltin !(Located Text) !(Located QName)
   | DData !DataDecl
@@ -164,6 +166,8 @@ data Decl
     DFixity !Assoc !Rational ![Located Text]
   | -- | @name : type@
     DSignature !(Located Segment) !(Located Expr)
+  | -- | A renamed internal signature, retaining its selected canonical proof family.
+    DInternalSignature !(Located QName) !(Located Segment) !(Located Expr)
   | -- | a clause of a function or of a proof
     DClause !Clause
   | -- | @class C a => D a where@ and the signatures of its methods

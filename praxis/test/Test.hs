@@ -8,7 +8,9 @@ import Language.Praxis.Surface.BuiltinTest (builtinTests)
 import Language.Praxis.Surface.CheckTest (checkTests)
 import Language.Praxis.Surface.ClassAdmissionTest (classAdmissionTests)
 import Language.Praxis.Surface.ComputationIndexTest (computationIndexTests)
+import Language.Praxis.Surface.ConstructionTest (constructionTests)
 import Language.Praxis.Surface.CoreTest (coreTests)
+import Language.Praxis.Surface.DefinitionsTest (definitionsTests)
 import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
 import Language.Praxis.Surface.EvalTest (evalTests)
 import Language.Praxis.Surface.EvidenceTest (evidenceTests)
@@ -16,9 +18,12 @@ import Language.Praxis.Surface.ExactPredicateTest (exactPredicateTests)
 import Language.Praxis.Surface.FiniteElaborationTest (finiteElaborationTests)
 import Language.Praxis.Surface.FiniteQuantifierTest (finiteQuantifierTests)
 import Language.Praxis.Surface.FiniteTacticTest (finiteTacticTests)
+import Language.Praxis.Surface.FirstOrderFixtures (loadFirstOrderFixture)
+import Language.Praxis.Surface.FirstOrderTest (firstOrderTests)
 import Language.Praxis.Surface.GlivenkoTest (glivenkoTests)
 import Language.Praxis.Surface.IndexedInstanceTest (indexedInstanceTests)
 import Language.Praxis.Surface.InstanceContextTest (instanceContextTests)
+import Language.Praxis.Surface.InternalTest (internalTests)
 import Language.Praxis.Surface.LogicalPreconditionTest (logicalPreconditionTests)
 import Language.Praxis.Surface.MethodContractTest (methodContractTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
@@ -46,6 +51,7 @@ main =
       , coreTests
       , dependentClassTests
       , computationIndexTests
+      , constructionTests
       , indexedInstanceTests
       , finiteQuantifierTests
       , finiteTacticTests
@@ -54,6 +60,9 @@ main =
       , evidenceTests
       , evalTests
       , glivenkoTests
+      , internalTests
+      , withResource loadFirstOrderFixture (const (pure ())) $ \get ->
+          testGroup "first-order" [firstOrderTests get, definitionsTests get]
       , instanceContextTests
       , logicalPreconditionTests
       , methodContractTests

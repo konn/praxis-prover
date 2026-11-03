@@ -177,6 +177,34 @@ tests =
           , (3, "Fin", SemanticTokenTypes_Type, [])
           ]
         map targetSpan (definitionsAt source doc (Position 2 19)) @?= [Span (2, 6) (2, 9)]
+    , testCase "internal families and namespaced proof values navigate to their declarations" $ do
+        let source =
+              T.unlines
+                [ "module InternalExample where"
+                , "data Formula = Atom Nat"
+                , "data Proof (a : Formula) where"
+                , "  Axiom : Proof (Atom 0)"
+                , "module Results where"
+                , "  internal Proof where"
+                , "    witness : Atom 0"
+                , "    witness = by exact Axiom"
+                , "outside : Proof (Atom 0)"
+                , "outside = Results.witness"
+                ]
+        doc <- analyseDocument Px "<document>" source
+        docParsed doc @?= True
+        let toks = tokensOf source doc
+        mapM_
+          (\expected -> assertBool (show expected) (expected `elem` toks))
+          [ (6, "internal", SemanticTokenTypes_Keyword, [])
+          , (6, "Proof", SemanticTokenTypes_Type, [])
+          , (7, "witness", SemanticTokenTypes_Function, [SemanticTokenModifiers_Declaration])
+          , (7, "Atom", SemanticTokenTypes_EnumMember, [])
+          , (8, "Axiom", SemanticTokenTypes_EnumMember, [])
+          ]
+        map targetSpan (definitionsAt source doc (Position 5 12)) @?= [Span (3, 6) (3, 11)]
+        map targetSpan (definitionsAt source doc (Position 7 25)) @?= [Span (4, 3) (4, 8)]
+        map targetSpan (definitionsAt source doc (Position 9 20)) @?= [Span (7, 5) (7, 12)]
     , testCase "classes, instances and tactics: methods, the functions of an instance, keywords in tactic position, the names a tactic introduces" $ do
         doc <- analyseDocument Px "<document>" classes
         assertBool "the module parsed" (docParsed doc)

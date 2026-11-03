@@ -142,6 +142,7 @@ allDecls :: [Located Decl] -> [Decl]
 allDecls = concatMap \(Located _ d) -> case d of
   DModule _ ds -> allDecls ds
   DPrivate ds -> allDecls ds
+  DInternal _ ds -> allDecls ds
   _ -> [d]
 
 -- | The fixities of the operators among the names given, which a module exports with them.

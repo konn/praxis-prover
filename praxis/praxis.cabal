@@ -101,6 +101,9 @@ library
 
   -- cabal-gild: discover src --include=src/**/Internal.hs --include=src/**/Internal/**/*.hs
   other-modules:
+    Language.Praxis.Surface.Construction.Internal
+    Language.Praxis.Surface.Internal
+
   build-depends:
     bound,
     containers,
@@ -146,7 +149,9 @@ test-suite praxis-test
     Language.Praxis.Surface.CheckTest
     Language.Praxis.Surface.ClassAdmissionTest
     Language.Praxis.Surface.ComputationIndexTest
+    Language.Praxis.Surface.ConstructionTest
     Language.Praxis.Surface.CoreTest
+    Language.Praxis.Surface.DefinitionsTest
     Language.Praxis.Surface.DependentClassTest
     Language.Praxis.Surface.EvalTest
     Language.Praxis.Surface.EvidenceTest
@@ -155,9 +160,12 @@ test-suite praxis-test
     Language.Praxis.Surface.FiniteFixtures
     Language.Praxis.Surface.FiniteQuantifierTest
     Language.Praxis.Surface.FiniteTacticTest
+    Language.Praxis.Surface.FirstOrderFixtures
+    Language.Praxis.Surface.FirstOrderTest
     Language.Praxis.Surface.GlivenkoTest
     Language.Praxis.Surface.IndexedInstanceTest
     Language.Praxis.Surface.InstanceContextTest
+    Language.Praxis.Surface.InternalTest
     Language.Praxis.Surface.LogicalPreconditionTest
     Language.Praxis.Surface.MethodContractTest
     Language.Praxis.Surface.ParserTest

@@ -1,0 +1,92 @@
+module Logic.FirstOrder.Definitions where
+
+open import Logic.FirstOrder.Syntax
+open import Logic.FirstOrder.Proof
+
+-- One fresh binary relation, defined by a quantifier-free base-language
+-- template. Its two parameters are distinct constructors, not free atoms.
+-- The template cannot capture a name, contain a bound variable, or mention
+-- the relation being defined. Arguments may be arbitrary scoped terms.
+data TemplateTerm = First | Second | ConstantZero | Successor TemplateTerm | Plus TemplateTerm TemplateTerm | Times TemplateTerm TemplateTerm
+data RelationBody = Falsehood | Equation TemplateTerm TemplateTerm | Relation Nat TemplateTerm TemplateTerm | Implies RelationBody RelationBody
+
+instantiate-term : TemplateTerm -> Term -> Term -> Term
+instantiate-term First first second = first
+instantiate-term Second first second = second
+instantiate-term ConstantZero first second = Zero
+instantiate-term (Successor t) first second = Succ (instantiate-term t first second)
+instantiate-term (Plus t u) first second = Add (instantiate-term t first second) (instantiate-term u first second)
+instantiate-term (Times t u) first second = Mul (instantiate-term t first second) (instantiate-term u first second)
+
+instantiate-body : RelationBody -> Term -> Term -> Formula
+instantiate-body Falsehood first second = Bottom
+instantiate-body (Equation t u) first second = Equal (instantiate-term t first second) (instantiate-term u first second)
+instantiate-body (Relation r t u) first second = Rel r (instantiate-term t first second) (instantiate-term u first second)
+instantiate-body (Implies a b) first second = Imp (instantiate-body a first second) (instantiate-body b first second)
+
+-- Defined is fresh by construction: it is distinct from every Rel r in
+-- the embedded base language. This version retains one definition body,
+-- rather than a list of successive relation or graph-function definitions.
+data ExtendedFormula = Base Formula | Defined Term Term | Implication ExtendedFormula ExtendedFormula | Universal ExtendedFormula
+
+expand : RelationBody -> ExtendedFormula -> Formula
+expand d (Base a) = a
+expand d (Defined t u) = instantiate-body d t u
+expand d (Implication a b) = Imp (expand d a) (expand d b)
+expand d (Universal a) = All (expand d a)
+
+-- Check the unexpanded syntax, including an argument that the definition
+-- does not use. Expansion alone could otherwise hide an escaping index.
+source-scope : ExtendedFormula -> Nat
+source-scope (Base a) = scope a
+source-scope (Defined t u) = maximum (term-scope t) (term-scope u)
+source-scope (Implication a b) = maximum (source-scope a) (source-scope b)
+source-scope (Universal a) = source-scope a - 1
+
+data DefinitionGoal = Goal RelationBody ExtendedFormula
+
+expand-goal : DefinitionGoal -> Formula
+expand-goal (Goal d a) = expand d a
+
+-- Elaboration by construction: retain the definition, readable formula,
+-- and an actual base derivation of the expanded conclusion. This is not
+-- normalization of a separately axiomatized extended proof calculus.
+-- The native premise is a checked syntax guard, not an object axiom.
+data DefinitionProof (g : DefinitionGoal) where
+  Expanded : {d : RelationBody} -> {a : ExtendedFormula} -> source-scope a = 0 -> Derivation (expand d a) -> DefinitionProof (Goal d a)
+
+-- Its generated PRA contract certifies elimination uniformly over the
+-- definition body, source formula, and retained proof witness.
+erase : DefinitionProof g -> Derivation (expand-goal g)
+erase (Expanded {d} {a} closed proof) = proof
+
+-- Original-language conclusions are fixed literally by expansion.
+base-fixed : (d : RelationBody) -> (a : Formula) -> expand d (Base a) = a
+base-fixed d a = rfl
+
+-- A concrete relation definition and proofs using it.
+same : RelationBody
+same = Equation First Second
+
+same-scope : (t : Term) -> term-scope t = 0 -> source-scope (Defined t t) = 0
+same-scope t closed = calc
+  source-scope (Defined t t)
+  = maximum (term-scope t) (term-scope t)
+  = maximum 0 0 := cong closed
+  = 0
+
+internal DefinitionProof where
+  same-reflexive : {t : Term} -> term-scope t = 0 -> Goal same (Defined t t)
+  same-reflexive {t} closed = by
+    exact Expanded {same} {Defined t t} (same-scope t closed) (Reflexivity {t} closed)
+
+  all-same-reflexive : Goal same (Universal (Defined (Bound 0) (Bound 0)))
+  all-same-reflexive = by
+    exact Expanded {same} {Universal (Defined (Bound 0) (Bound 0))} (by decide) all-reflexive
+
+-- Leaving the internal block exports actual first-order proof objects.
+base-reflexive : {t : Term} -> term-scope t = 0 -> Derivation (Equal t t)
+base-reflexive {t} closed = erase (same-reflexive {t} closed)
+
+base-all-reflexive : Derivation (All (Equal (Bound 0) (Bound 0)))
+base-all-reflexive = erase all-same-reflexive

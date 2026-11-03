@@ -24,8 +24,17 @@ data Classical (a : Formula) where
   DNE : {a : Formula} -> Classical (Imp (Imp (Imp a Bottom) Bottom) a)
   MP : {a b : Formula} -> Classical (Imp a b) -> Classical a -> Classical b
 
-identity : {a : Formula} -> Intuitionistic (Imp a a)
-identity {a} = Intuitionistic.MP (Intuitionistic.MP (Intuitionistic.S {a} {Imp a a} {a}) (Intuitionistic.K {a} {Imp a a})) (Intuitionistic.K {a} {a})
+-- Internal proof schemata produce ordinary indexed derivation values.
+internal Intuitionistic where
+  identity : {a : Formula} -> Imp a a
+  identity {a} = by
+    apply MP
+    {
+      apply MP
+      { exact S {a} {Imp a a} {a} }
+      { exact K {a} {Imp a a} }
+    }
+    { exact K {a} {a} }
 
 -- The easy direction preserves the conclusion literally.
 embed : Intuitionistic a -> Classical a
@@ -250,6 +259,14 @@ peirce {a} {b} =
     (peirce-part-2 {a} {b}))
 -- END GENERATED HILBERT TEMPLATES
 
+-- The namespace is independent of the selected theory. Leaving the block
+-- exposes ClassicalExamples.peirce-law as a Classical derivation schema.
+module ClassicalExamples where
+  internal Classical where
+    peirce-law : {a b : Formula} -> Imp (Imp (Imp a b) a) a
+    peirce-law {a} {b} = by
+      exact peirce {a} {b}
+
 -- Glivenko's algorithm: its result-membership and result-index contracts
 -- are generated and certified in PRA, uniformly over the input derivation.
 glivenko : Classical a -> Intuitionistic (nn a)
@@ -298,7 +315,7 @@ translation : Classical a -> Translation
 translation p = Translated p (glivenko p)
 
 demo-proofs : Nat -> Nat -> Translation
-demo-proofs p q = translation (peirce {Atom p} {Atom q})
+demo-proofs p q = translation (ClassicalExamples.peirce-law {Atom p} {Atom q})
 
 data Demo = Result Formula Nat Nat
 

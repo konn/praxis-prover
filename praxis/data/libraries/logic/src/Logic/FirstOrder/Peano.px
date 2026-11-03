@@ -1,0 +1,90 @@
+module Logic.FirstOrder.Peano where
+
+open import Logic.FirstOrder.Syntax
+open import Logic.FirstOrder.Proof
+
+-- This finite witness type presents all arithmetic axiom schemata, including
+-- induction on formulas. Its constructors are syntax, not native PRA axioms.
+data Axiom = SuccessorNonzero Term | SuccessorInjective Term Term | AddZero Term | AddSuccessor Term Term | MulZero Term | MulSuccessor Term Term | Induction Formula
+
+neg : Formula -> Formula
+neg a = Imp a Bottom
+
+-- Induction is restricted to the arithmetic language, with equality and no
+-- additional relation symbol. Free atoms remain schematic number parameters.
+arithmetic-formula : Formula -> Nat
+arithmetic-formula Bottom = 1
+arithmetic-formula (Equal t u) = 1
+arithmetic-formula (Rel r t u) = 0
+arithmetic-formula (Imp a b) = arithmetic-formula a * arithmetic-formula b
+arithmetic-formula (All a) = arithmetic-formula a
+
+induction-step : Nat -> Formula -> Formula
+induction-step x a = All (close-body x (Imp (open-body (Free x) a) (open-body (Succ (Free x)) a)))
+
+induction-formula : Formula -> Formula
+induction-formula a = Imp (open-body Zero a) (Imp (induction-step (support a) a) (All a))
+
+axiom-formula : Axiom -> Formula
+axiom-formula (SuccessorNonzero t) = neg (Equal (Succ t) Zero)
+axiom-formula (SuccessorInjective t u) = Imp (Equal (Succ t) (Succ u)) (Equal t u)
+axiom-formula (AddZero t) = Equal (Add t Zero) t
+axiom-formula (AddSuccessor t u) = Equal (Add t (Succ u)) (Succ (Add t u))
+axiom-formula (MulZero t) = Equal (Mul t Zero) Zero
+axiom-formula (MulSuccessor t u) = Equal (Mul t (Succ u)) (Add (Mul t u) t)
+axiom-formula (Induction a) = induction-formula a
+
+-- Zero means that all term parameters are locally closed and an induction
+-- body needs at most its one designated induction-variable binder.
+axiom-scope : Axiom -> Nat
+axiom-scope (SuccessorNonzero t) = term-scope t
+axiom-scope (SuccessorInjective t u) = maximum (term-scope t) (term-scope u)
+axiom-scope (AddZero t) = term-scope t
+axiom-scope (AddSuccessor t u) = maximum (term-scope t) (term-scope u)
+axiom-scope (MulZero t) = term-scope t
+axiom-scope (MulSuccessor t u) = maximum (term-scope t) (term-scope u)
+axiom-scope (Induction a) = scope a - 1
+
+axiom-language : Axiom -> Nat
+axiom-language (SuccessorNonzero t) = 1
+axiom-language (SuccessorInjective t u) = 1
+axiom-language (AddZero t) = 1
+axiom-language (AddSuccessor t u) = 1
+axiom-language (MulZero t) = 1
+axiom-language (MulSuccessor t u) = 1
+axiom-language (Induction a) = arithmetic-formula a
+
+-- Scope/equality evidence is checked by PRA before an arithmetic witness can
+-- be used. PA itself remains a datatype of finite object derivations.
+data PA (a : Formula) where
+  Logic : {a : Formula} -> arithmetic-formula a = 1 -> Derivation a -> PA a
+  Arithmetic : {a : Formula} -> (w : Axiom) -> a = axiom-formula w -> axiom-scope w = 0 -> axiom-language w = 1 -> scope a = 0 -> PA a
+  MP : {a b : Formula} -> PA (Imp a b) -> PA a -> PA b
+  Generalize : {a b : Formula} -> {x : Nat} -> b = close-body x a -> scope a = 0 -> scope (All b) = 0 -> PA a -> PA (All b)
+
+scope-add-zero : {t : Term} -> term-scope t = 0 -> scope (Equal (Add t Zero) t) = 0
+scope-add-zero {t} closed = calc
+  scope (Equal (Add t Zero) t)
+  = maximum (maximum (term-scope t) 0) (term-scope t)
+  = maximum (maximum 0 0) 0 := cong closed
+  = 0
+
+add-zero-schema : {t : Term} -> term-scope t = 0 -> PA (Equal (Add t Zero) t)
+add-zero-schema {t} closed = Arithmetic {Equal (Add t Zero) t} (AddZero t) (by rfl) closed (by rfl) (by exact scope-add-zero {t} closed)
+
+-- A uniform proof constructor, not a finite list of induction instances.
+-- The caller supplies the syntactic side conditions as checked PRA evidence.
+induction-schema : {a : Formula} -> scope a - 1 = 0 -> arithmetic-formula a = 1 -> scope (induction-formula a) = 0 -> PA (induction-formula a)
+induction-schema {a} scoped language conclusion = Arithmetic {induction-formula a} (Induction a) (by rfl) scoped language conclusion
+
+-- Internal statements are object formulas; their exported values are still
+-- PA derivations with ordinary PRA membership and conclusion certificates.
+internal PA where
+  induction-reflexivity : induction-formula (Equal (Bound 0) (Bound 0))
+  induction-reflexivity = by exact induction-schema {Equal (Bound 0) (Bound 0)} (by decide) (by rfl) (by decide)
+
+  one-plus-zero : Equal (Add (Succ Zero) Zero) (Succ Zero)
+  one-plus-zero = by exact add-zero-schema {Succ Zero} (by rfl)
+
+  arithmetic-reflexive : Equal Zero Zero
+  arithmetic-reflexive = by exact PA.Logic {Equal Zero Zero} (by rfl) zero-reflexive

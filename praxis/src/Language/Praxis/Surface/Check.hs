@@ -86,6 +86,7 @@ import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), Ind
 import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), classEvidenceName, displayQualName, emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Evidence qualified as Evidence
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
+import Language.Praxis.Surface.Internal qualified as Internal
 import Language.Praxis.Surface.Lexer (renderSyntaxError, syntaxErrorPosition)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
@@ -370,6 +371,16 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
         requireEvidence r slots premises requirements $
           r {runCheckedDeclarations = Set.union (runCheckedDeclarations r) (Set.fromList (classQual info : map methodQual (classMethods info) <> map lawQual (classLaws info)))}
       IBuiltin role target -> register role target r
+      IInternal target -> admitInternal target r r
+      IInternalFun target fd -> admitInternal target r (step r (IFun fd))
+
+    -- Failed presentation admission must also prevent each definition from
+    -- gaining certificates usable by later declarations or imported modules.
+    admitInternal (Located sp target) r success = case Map.lookup target (envGlobals env) of
+      Just (GData info) -> case Internal.validateInternalEncoding env (runCheckedDeclarations r) (runMembers r) info of
+        Left why -> report sp SevError why r
+        Right () -> success
+      _ -> report sp SevError "internal mode requires a checked derivation datatype" r
 
     -- Run this gate before code generation or proof erasure: dependencies of
     -- even an unused local fact must already have succeeded, never its owner.

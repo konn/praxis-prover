@@ -55,6 +55,7 @@ moduleDefinitions path rn = Map.fromListWith (\_ old -> old) (headers <> concatM
     headers = [(q, at sp) | (sp, q) <- rnHeaders rn]
     decl (RDecl owner (Located _ d)) = case d of
       DSignature (Located sp n) _ -> [(owner <> [n], at sp)]
+      DInternalSignature _ (Located sp n) _ -> [(owner <> [n], at sp)]
       DTypeAlias (Located sp n) _ _ -> [(owner <> [Ident n], at sp)]
       DData dd ->
         let q = owner <> [Ident (unLocated (dataName dd))]
@@ -106,7 +107,15 @@ indexModule :: Lines -> Module -> Renamed -> Env -> Set Text -> Definitions -> I
 indexModule ls raw rn env library defs = Index (normalizeTokens tokens) refs
   where
     cx = Cx ls env library defs implicits
-    implicits = Map.fromList [(owner <> [n], implicitKinds ty) | RDecl owner (Located _ (DSignature (Located _ n) ty)) <- rnDecls rn]
+    implicits =
+      Map.fromList
+        [ (owner <> [n], implicitKinds ty)
+        | RDecl owner (Located _ d) <- rnDecls rn
+        , (n, ty) <- case d of
+            DSignature (Located _ n) ty -> [(n, ty)]
+            DInternalSignature _ (Located _ n) ty -> [(n, ty)]
+            _ -> []
+        ]
     Index tokens refs =
       foldMap (\(sp, _) -> token sp SemanticTokenTypes_Namespace [SemanticTokenModifiers_Declaration]) (rnHeaders rn)
         <> foldMap (resolvedName cx) (rnResolved rn)
@@ -119,6 +128,7 @@ allDecls = concatMap \d@(Located _ decl) ->
   d : case decl of
     DModule _ ds -> allDecls ds
     DPrivate ds -> allDecls ds
+    DInternal _ ds -> allDecls ds
     _ -> []
 
 -- * Globals
@@ -377,6 +387,8 @@ pattern cx locals (Located sp e) = case e of
 declIndex :: Cx -> RDecl -> Index
 declIndex cx (RDecl owner (Located _ d)) = case d of
   DSignature (Located nsp n) ty -> declared cx nsp (owner <> [n]) <> expr cx TypeMode Map.empty ty
+  DInternal (Located fsp family) _ -> keywordBefore cx fsp "internal" <> qualified cx fsp (segments family)
+  DInternalSignature _ (Located nsp n) ty -> declared cx nsp (owner <> [n]) <> internalSignature cx Map.empty ty
   DClause c -> clauseIndex cx owner c
   DData dd -> dataIndex cx owner dd
   DTypeAlias n ps body ->
@@ -387,6 +399,19 @@ declIndex cx (RDecl owner (Located _ d)) = case d of
   DClass cd -> classIndex cx owner cd
   DInstance idl -> instanceIndex cx owner idl
   _ -> mempty
+
+{- | An internal signature retains ordinary argument types, but its final
+expression denotes an object formula rather than a Praxis type.
+-}
+internalSignature :: Cx -> Locals -> Located Expr -> Index
+internalSignature cx locals value@(Located _ e) = case e of
+  EPi b body ->
+    let (ix, locals') = binder cx locals b
+     in ix <> internalSignature cx locals' body
+  EArrow a b -> expr cx TypeMode locals a <> internalSignature cx locals b
+  EParen body -> internalSignature cx locals body
+  EConstrained cs body -> foldMap (constraint cx) cs <> internalSignature cx locals body
+  _ -> expr cx ValueMode locals value
 
 -- | The name of a signature: a function, or a theorem, declared.
 declared :: Cx -> Span -> QualName -> Index

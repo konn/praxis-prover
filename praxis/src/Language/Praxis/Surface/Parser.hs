@@ -9,6 +9,7 @@ The grammar of the surface language, over the tokens and the layout of
 >            | 'import' ['"' library '"'] qname ['as' qname] {directive}
 >            | 'open' 'import' ['"' library '"'] qname ['as' qname] {directive} ['public']
 >            | 'module' Name 'where' {decl}             -- a module within the module
+>            | 'internal' qname 'where' {decl}          -- proof values in an indexed calculus
 >            | 'private' {decl}                         -- declarations the module does not export
 >            | '{-#' 'BUILTIN' role qname '#-}'          -- a builtin role assigned to a name
 >            | 'data' Name {param} [':' kind] ['=' ctor {'|' ctor} | 'where' {name ':' expr}]
@@ -82,7 +83,7 @@ spanned start x = locatedFrom start (pure x)
 -- * Declarations
 
 declP :: Parser (Located Decl)
-declP = located (choice [builtinP, openP, importP, nestedModuleP, privateP, dataP, kindSigP, classP, instanceP, fixityP, try signatureP, clauseP]) <?> "declaration"
+declP = located (choice [builtinP, openP, importP, nestedModuleP, privateP, internalP, dataP, kindSigP, classP, instanceP, fixityP, try signatureP, clauseP]) <?> "declaration"
 
 -- | A builtin binding, with the role and the qualified target located separately.
 builtinP :: Parser Decl
@@ -153,6 +154,14 @@ nestedModuleP = do
 -- | @private@ and its declarations, laid out or in braces.
 privateP :: Parser Decl
 privateP = keyword "private" *> (DPrivate <$> block declP)
+
+-- | @internal Family where@: object proof declarations, with the usual layout.
+internalP :: Parser Decl
+internalP = do
+  keyword "internal"
+  family <- qualifiedName
+  keyword "where"
+  DInternal family <$> block declP
 
 -- | An unqualified name: an identifier, or an operator in parentheses.
 nameSegment :: Parser (Located Segment)

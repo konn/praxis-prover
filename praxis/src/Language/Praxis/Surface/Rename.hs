@@ -90,6 +90,7 @@ moduleImports = concatMap decl . moduleDecls
       DOpenImport imp _ -> [one imp]
       DModule _ ds -> concatMap decl ds
       DPrivate ds -> concatMap decl ds
+      DInternal _ ds -> concatMap decl ds
       _ -> []
     one (Import lib (Located sp mq) _ _) = (sp, unLocated <$> lib, qnameSegments mq)
 
@@ -159,6 +160,8 @@ data Scope = Scope
   , scExports :: !(Map Segment QualName)
   , scPrivate :: !Bool
   , scOpened :: ![(QualName, Map Segment QualName)]
+  , scInternal :: !(Maybe (Located QName, Map Segment QualName))
+  -- ^ the selected proof family and its constructors, scoped to an internal block
   , scImports :: !(Map QualName (Map Segment QualName))
   , scImported :: !(Map QualName QualName)
   -- ^ the canonical name of each module imported, by the name it is in scope by
@@ -191,7 +194,7 @@ renameModule fx env imports modQ m =
   let imported = [meName e | Right e <- Map.elems imports]
       visible = modQ : imported
       cx = Ctx fx env imports (Set.fromList [last (ctorQual c) | GCtor c <- Map.elems (envGlobals env), any (`isPrefixOf` ctorData c) imported])
-      sc0 = Scope modQ Map.empty Map.empty False [] Map.empty Map.empty Map.empty [] Set.empty Set.empty [] [] []
+      sc0 = Scope modQ Map.empty Map.empty False [] Nothing Map.empty Map.empty Map.empty [] Set.empty Set.empty [] [] []
       (sc, decls) = renameLevel cx sc0 (moduleDecls m)
       header = [(sp, modQ) | Just (Located sp _) <- [moduleName m]]
    in (Renamed modQ decls (reverse (scModules sc)) (scExports sc) visible (reverse (scResolved sc)) (header <> reverse (scHeaders sc)), reverse (scErrors sc))
@@ -243,11 +246,16 @@ isCtorQual cx sc q =
 isCtorName :: Ctx -> Scope -> Segment -> Bool
 isCtorName cx sc s = Set.member s (scCtors sc) || Set.member s (cxImportedCtors cx)
 
--- | The globals an unqualified name means in scope: the one declared, else those the opened namespaces give it.
+-- | Declared names take precedence over the selected proof constructors, then openings.
 lookupBare :: Scope -> Segment -> [QualName]
 lookupBare sc s = case Map.lookup s (scTop sc) of
   Just q -> [q]
-  Nothing -> nub [q | (_, view) <- scOpened sc, Just q <- [Map.lookup s view]]
+  Nothing -> case internalConstructor sc s of
+    Just q -> [q]
+    Nothing -> nub [q | (_, view) <- scOpened sc, Just q <- [Map.lookup s view]]
+
+internalConstructor :: Scope -> Segment -> Maybe QualName
+internalConstructor sc name = scInternal sc >>= Map.lookup name . snd
 
 {- |
 The names never resolved to a global: the builtins of the language, the
@@ -281,7 +289,10 @@ enclosing one; the rest navigates namespaces.
 resolveName :: Ctx -> Scope -> Locals -> Span -> QName -> RM Resolution
 resolveName cx sc locals sp q@(QName quals base) = case quals of
   []
-    | isLocal locals base || builtin base -> pure Unchanged
+    | isLocal locals base -> pure Unchanged
+    | Just _ <- scInternal sc, Just g <- Map.lookup base (scTop sc) -> pure (Canonical (toQName g))
+    | Just g <- internalConstructor sc base -> pure (Canonical (toQName g))
+    | builtin base -> pure Unchanged
     | otherwise -> case lookupBare sc base of
         [] -> pure Unchanged
         [g] -> pure (Canonical (toQName g))
@@ -388,6 +399,10 @@ renamePattern cx sc = go
     go (Located sp e) = case e of
       EParen x -> first (Located sp . EParen) <$> go x
       EName (QName [] (Ident x))
+        | Just _ <- scInternal sc
+        , [g] <- lookupBare sc (Ident x)
+        , isCtorQual cx sc g ->
+            pure (Located sp (EName (toQName g)), [])
         | builtin (Ident x) -> pure (Located sp e, [])
         | otherwise -> ctorOrVar sp x
       EName q -> (\q' -> (Located sp (EName q'), [])) <$> rename cx sc Set.empty sp q
@@ -530,7 +545,9 @@ renameLevel cx sc0 decls0 = let (sc1, out) = foldl step (predeclared, []) flat i
     flatten p = concatMap \d@(Located _ decl) -> case decl of
       DPrivate inner -> flatten True inner
       _ -> [(p, d)]
-    predeclared = foldl predeclareAlias (foldl predeclare sc0 [(p, d) | (p, Located _ (DData d)) <- flat]) [(p, n) | (p, Located _ (DTypeAlias n _ _)) <- flat]
+    predeclared = case scInternal sc0 of
+      Just _ -> sc0
+      Nothing -> foldl predeclareAlias (foldl predeclare sc0 [(p, d) | (p, Located _ (DData d)) <- flat]) [(p, n) | (p, Located _ (DTypeAlias n _ _)) <- flat]
     predeclareAlias sc (p, n) =
       (declare (Ident (unLocated n)) (scModule sc <> [Ident (unLocated n)]) sc {scPrivate = p}) {scPrivate = scPrivate sc}
     predeclare sc (p, d) =
@@ -551,6 +568,10 @@ renameLevel cx sc0 decls0 = let (sc1, out) = foldl step (predeclared, []) flat i
       let sc' = sc {scPrivate = p}
           emit s ds = (s, reverse (map (owner s) ds) <> out)
        in case d of
+            _
+              | Just _ <- scInternal sc'
+              , not (internalDeclaration d) ->
+                  (failed (ScopeError sp "an internal block permits proof signatures and clauses, openings, imports, fixities, modules, private blocks, and nested internal blocks") sc', out)
             DOpen lq dirs public -> case namespaceOf cx sc' lq of
               Left err -> (failed err sc', out)
               Right (own, members) -> case applyDirectives dirs members of
@@ -573,11 +594,30 @@ renameLevel cx sc0 decls0 = let (sc1, out) = foldl step (predeclared, []) flat i
                       , scExports = scExports sc'
                       , scPrivate = p
                       , scOpened = scOpened sc'
+                      , scInternal = scInternal sc'
                       , scImports = scImports sc'
+                      , scImported = scImported sc'
                       , scModules = (q, scExports scInner) : scModules scInner
                       }
                in (namespace q (scExports scInner) (declare (Ident name) q left), reverse ds <> out)
             DPrivate _ -> (sc', out)
+            DInternal family inner -> case namespaceOf cx sc' family of
+              Left err -> (failed err sc', out)
+              Right (own, members) ->
+                let selected = Located (location family) (toQName own)
+                    constructors = Map.filter (isCtorQual cx sc') members
+                    entered = resolvedTo [(location family, own)] sc' {scInternal = Just (selected, constructors)}
+                    (scInner, ds) = renameLevel cx entered inner
+                    left =
+                      scInner
+                        { scPrivate = p
+                        , scOpened = scOpened sc'
+                        , scInternal = scInternal sc'
+                        , scImports = scImports sc'
+                        , scImported = scImported sc'
+                        }
+                    marker = owner sc' (Located sp (DInternal selected []))
+                 in (left, reverse (marker : ds) <> out)
             DBuiltin role (Located nsp name) -> case rename cx sc' Set.empty nsp name of
               Left err -> (failed err sc', out)
               Right name' -> emit sc' [Located sp (DBuiltin role (Located nsp name'))]
@@ -599,17 +639,34 @@ renameLevel cx sc0 decls0 = let (sc1, out) = foldl step (predeclared, []) flat i
                   renamed = do
                     ty' <- expression cx declared Set.empty ty
                     clauses <- forM (clausesOf name) (renameClause cx declared)
-                    pure (Located sp (DSignature (Located nsp name) ty') : [Located (spanning (location (clauseLhs c)) (location (clauseRhs c))) (DClause c) | c <- clauses])
+                    let signature = case scInternal declared of
+                          Nothing -> DSignature (Located nsp name) ty'
+                          Just (family, _) -> DInternalSignature family (Located nsp name) ty'
+                    pure (Located sp signature : [Located (spanning (location (clauseLhs c)) (location (clauseRhs c))) (DClause c) | c <- clauses])
                in either (\err -> (failed err declared, out)) (emit declared) renamed
+            DInternalSignature {} -> (failed (ScopeError sp "an internal signature was already renamed") sc', out)
             DClause c
               | headSeg c `elem` map Just signed -> (sc', out)
-              | otherwise -> emit sc' [Located sp d]
+              | otherwise ->
+                  (failed (ScopeError sp "a clause needs a signature in the same lexical block") sc', out)
             DClass cd -> case renameClass cx sc' cd of
               Left err -> (failed err sc', out)
               Right (cd', sc'') -> emit sc'' [Located sp (DClass cd')]
             DInstance idl -> case renameInstance cx sc' idl of
               Left err -> (failed err sc', out)
               Right (idl', sc'') -> emit sc'' [Located sp (DInstance idl')]
+
+    internalDeclaration = \case
+      DSignature {} -> True
+      DClause {} -> True
+      DOpen {} -> True
+      DImport {} -> True
+      DOpenImport {} -> True
+      DFixity {} -> True
+      DModule {} -> True
+      DPrivate {} -> True
+      DInternal {} -> True
+      _ -> False
 
 -- | A data type: the kinds of its parameters and its own, and the types of its constructors' fields, over its parameters.
 renameData :: Ctx -> Scope -> DataDecl -> RM DataDecl

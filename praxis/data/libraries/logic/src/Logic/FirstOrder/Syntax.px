@@ -1,0 +1,219 @@
+module Logic.FirstOrder.Syntax where
+
+-- A concrete first-order arithmetic language, with binary relation symbols.
+-- Free atoms and bound de Bruijn indices are deliberately different nodes.
+data Term = Free Nat | Bound Nat | Zero | Succ Term | Add Term Term | Mul Term Term
+data Formula = Bottom | Equal Term Term | Rel Nat Term Term | Imp Formula Formula | All Formula
+
+maximum : Nat -> Nat -> Nat
+maximum n m = n + (m - n)
+
+equal-nat : Nat -> Nat -> Nat
+equal-nat 0 0 = 1
+equal-nat 0 (S n) = 0
+equal-nat (S n) 0 = 0
+equal-nat (S n) (S m) = equal-nat n m
+
+select-term : Nat -> Term -> Term -> Term
+select-term 0 yes no = no
+select-term (S n) yes no = yes
+
+-- The minimum number of surrounding binders needed to scope this syntax.
+term-scope : Term -> Nat
+term-scope (Free x) = 0
+term-scope (Bound n) = S n
+term-scope Zero = 0
+term-scope (Succ t) = term-scope t
+term-scope (Add t u) = maximum (term-scope t) (term-scope u)
+term-scope (Mul t u) = maximum (term-scope t) (term-scope u)
+
+scope : Formula -> Nat
+scope Bottom = 0
+scope (Equal t u) = maximum (term-scope t) (term-scope u)
+scope (Rel r t u) = maximum (term-scope t) (term-scope u)
+scope (Imp a b) = maximum (scope a) (scope b)
+scope (All a) = scope a - 1
+
+-- All free atoms are smaller than this bound; bound indices do not contribute.
+term-support : Term -> Nat
+term-support (Free x) = S x
+term-support (Bound n) = 0
+term-support Zero = 0
+term-support (Succ t) = term-support t
+term-support (Add t u) = maximum (term-support t) (term-support u)
+term-support (Mul t u) = maximum (term-support t) (term-support u)
+
+support : Formula -> Nat
+support Bottom = 0
+support (Equal t u) = maximum (term-support t) (term-support u)
+support (Rel r t u) = maximum (term-support t) (term-support u)
+support (Imp a b) = maximum (support a) (support b)
+support (All a) = support a
+
+-- Raw free substitution never revisits an inserted term. It is capture-free
+-- under quantifiers when the replacement has term-scope zero.
+subst-term : Nat -> Term -> Term -> Term
+subst-term x replacement (Free y) = select-term (equal-nat x y) replacement (Free y)
+subst-term x replacement (Bound n) = Bound n
+subst-term x replacement Zero = Zero
+subst-term x replacement (Succ t) = Succ (subst-term x replacement t)
+subst-term x replacement (Add t u) = Add (subst-term x replacement t) (subst-term x replacement u)
+subst-term x replacement (Mul t u) = Mul (subst-term x replacement t) (subst-term x replacement u)
+
+subst-free : Nat -> Term -> Formula -> Formula
+subst-free x replacement Bottom = Bottom
+subst-free x replacement (Equal t u) = Equal (subst-term x replacement t) (subst-term x replacement u)
+subst-free x replacement (Rel r t u) = Rel r (subst-term x replacement t) (subst-term x replacement u)
+subst-free x replacement (Imp a b) = Imp (subst-free x replacement a) (subst-free x replacement b)
+subst-free x replacement (All a) = All (subst-free x replacement a)
+
+-- Simultaneous template parameters Free 0 and Free 1. In particular, one
+-- argument may contain Free 0 or Free 1 without being substituted again.
+subst-second-atom : Term -> Nat -> Term
+subst-second-atom second 0 = second
+subst-second-atom second (S n) = Free (S (S n))
+
+subst-two-atom : Term -> Term -> Nat -> Term
+subst-two-atom first second 0 = first
+subst-two-atom first second (S n) = subst-second-atom second n
+
+subst-two-term : Term -> Term -> Term -> Term
+subst-two-term first second (Free x) = subst-two-atom first second x
+subst-two-term first second (Bound n) = Bound n
+subst-two-term first second Zero = Zero
+subst-two-term first second (Succ t) = Succ (subst-two-term first second t)
+subst-two-term first second (Add t u) = Add (subst-two-term first second t) (subst-two-term first second u)
+subst-two-term first second (Mul t u) = Mul (subst-two-term first second t) (subst-two-term first second u)
+
+subst-two : Term -> Term -> Formula -> Formula
+subst-two first second Bottom = Bottom
+subst-two first second (Equal t u) = Equal (subst-two-term first second t) (subst-two-term first second u)
+subst-two first second (Rel r t u) = Rel r (subst-two-term first second t) (subst-two-term first second u)
+subst-two first second (Imp a b) = Imp (subst-two first second a) (subst-two first second b)
+subst-two first second (All a) = All (subst-two first second a)
+
+rename-term : Nat -> Nat -> Term -> Term
+rename-term old new t = subst-term old (Free new) t
+
+rename-free : Nat -> Nat -> Formula -> Formula
+rename-free old new a = subst-free old (Free new) a
+
+-- Replacing one bound index inside a term needs no binder traversal.
+open-term : Nat -> Term -> Term -> Term
+open-term k replacement (Free x) = Free x
+open-term k replacement (Bound n) = select-term (equal-nat k n) replacement (Bound n)
+open-term k replacement Zero = Zero
+open-term k replacement (Succ t) = Succ (open-term k replacement t)
+open-term k replacement (Add t u) = Add (open-term k replacement t) (open-term k replacement u)
+open-term k replacement (Mul t u) = Mul (open-term k replacement t) (open-term k replacement u)
+
+-- An upper bound on raw bound indices, without subtracting at quantifiers.
+bound-limit : Formula -> Nat
+bound-limit Bottom = 0
+bound-limit (Equal t u) = maximum (term-scope t) (term-scope u)
+bound-limit (Rel r t u) = maximum (term-scope t) (term-scope u)
+bound-limit (Imp a b) = maximum (bound-limit a) (bound-limit b)
+bound-limit (All a) = bound-limit a
+
+-- Rows are openings at 0,1,...; beyond the finite rows the original syntax
+-- is unchanged. Bottom-up tables make the increasing binder depth explicit
+-- data, keeping all recursive function parameters fixed.
+data Openings = Default Formula | Row Formula Openings
+
+snoc-opening : Formula -> Openings -> Openings
+snoc-opening a (Default original) = Row a (Default original)
+snoc-opening a (Row b rest) = Row b (snoc-opening a rest)
+
+open-atom : Nat -> Term -> Formula -> Formula
+open-atom k replacement Bottom = Bottom
+open-atom k replacement (Equal t u) = Equal (open-term k replacement t) (open-term k replacement u)
+open-atom k replacement (Rel r t u) = Rel r (open-term k replacement t) (open-term k replacement u)
+open-atom k replacement (Imp a b) = Imp a b
+open-atom k replacement (All a) = All a
+
+atom-openings : Nat -> Term -> Formula -> Openings
+atom-openings 0 replacement a = Default a
+atom-openings (S n) replacement a = snoc-opening (open-atom n replacement a) (atom-openings n replacement a)
+
+imp-left : Formula -> Openings -> Openings
+imp-left a (Default b) = Default (Imp a b)
+imp-left a (Row b rest) = Row (Imp a b) (imp-left a rest)
+
+imp-right : Formula -> Openings -> Openings
+imp-right b (Default a) = Default (Imp a b)
+imp-right b (Row a rest) = Row (Imp a b) (imp-right b rest)
+
+imp-openings : Openings -> Openings -> Openings
+imp-openings (Default a) (Default b) = Default (Imp a b)
+imp-openings (Default a) (Row b rest) = Row (Imp a b) (imp-left a rest)
+imp-openings (Row a rest) (Default b) = Row (Imp a b) (imp-right b rest)
+imp-openings (Row a as) (Row b bs) = Row (Imp a b) (imp-openings as bs)
+
+all-openings : Openings -> Openings
+all-openings (Default a) = Default (All a)
+all-openings (Row a rest) = Row (All a) (all-openings rest)
+
+tail-openings : Openings -> Openings
+tail-openings (Default a) = Default a
+tail-openings (Row a rest) = rest
+
+openings : Nat -> Term -> Formula -> Openings
+openings limit replacement Bottom = atom-openings limit replacement Bottom
+openings limit replacement (Equal t u) = atom-openings limit replacement (Equal t u)
+openings limit replacement (Rel r t u) = atom-openings limit replacement (Rel r t u)
+openings limit replacement (Imp a b) = imp-openings (openings limit replacement a) (openings limit replacement b)
+openings limit replacement (All a) = all-openings (tail-openings (openings limit replacement a))
+
+lookup-opening : Nat -> Openings -> Formula
+lookup-opening 0 (Default a) = a
+lookup-opening 0 (Row a rest) = a
+lookup-opening (S n) (Default a) = a
+lookup-opening (S n) (Row a rest) = lookup-opening n rest
+
+open-at : Nat -> Term -> Formula -> Formula
+open-at k replacement a = lookup-opening k (openings (bound-limit a) replacement a)
+
+open-body : Term -> Formula -> Formula
+open-body replacement a = open-at 0 replacement a
+
+-- Closing is a separate operation: it binds one free atom. There must be a
+-- table row at every depth reached by a quantifier, including depth zero.
+binder-depth : Formula -> Nat
+binder-depth Bottom = 0
+binder-depth (Equal t u) = 0
+binder-depth (Rel r t u) = 0
+binder-depth (Imp a b) = maximum (binder-depth a) (binder-depth b)
+binder-depth (All a) = S (binder-depth a)
+
+close-atom-openings : Nat -> Nat -> Formula -> Openings
+close-atom-openings 0 x a = Default a
+close-atom-openings (S n) x a = snoc-opening (subst-free x (Bound n) a) (close-atom-openings n x a)
+
+close-openings : Nat -> Nat -> Formula -> Openings
+close-openings limit x Bottom = close-atom-openings limit x Bottom
+close-openings limit x (Equal t u) = close-atom-openings limit x (Equal t u)
+close-openings limit x (Rel r t u) = close-atom-openings limit x (Rel r t u)
+close-openings limit x (Imp a b) = imp-openings (close-openings limit x a) (close-openings limit x b)
+close-openings limit x (All a) = all-openings (tail-openings (close-openings limit x a))
+
+close-body : Nat -> Formula -> Formula
+close-body x a = lookup-opening 0 (close-openings (S (binder-depth a)) x a)
+
+-- Concrete nested-binder checks are native PRA equalities, not object axioms.
+scope-bound-example : scope (All (Equal (Bound 0) Zero)) = 0
+scope-bound-example = rfl
+
+scope-escaping-example : scope (All (Equal (Bound 1) Zero)) = 1
+scope-escaping-example = rfl
+
+open-nested-example : open-body (Free 7) (All (Equal (Bound 1) (Bound 0))) = All (Equal (Free 7) (Bound 0))
+open-nested-example = by decide
+
+simultaneous-example : subst-two (Free 1) (Free 0) (Equal (Free 0) (Free 1)) = Equal (Free 1) (Free 0)
+simultaneous-example = by decide
+
+close-nested-example : close-body 7 (All (Equal (Free 7) (Bound 0))) = All (Equal (Bound 1) (Bound 0))
+close-nested-example = by decide
+
+open-close-example : open-body (Free 7) (close-body 7 (All (Equal (Free 7) (Bound 0)))) = All (Equal (Free 7) (Bound 0))
+open-close-example = by decide
