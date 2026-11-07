@@ -31,8 +31,10 @@ module Language.Praxis.Surface.Index (
   Unified (..),
   unifyIx,
   unifyIxNamed,
+  unifyIxRanked,
   unifyAll,
   unifyAllNamed,
+  unifyAllRanked,
 
   -- * Terms
   ixToExpr,
@@ -121,25 +123,33 @@ unifyIx = unifyIxNamed []
 
 -- | 'unifyIx', what it says of a clash naming the value parameters by the names given.
 unifyIxNamed :: [Text] -> (Key -> Bool) -> Ix -> Ix -> Subst -> Unified
-unifyIxNamed names flexible a0 b0 s = go (applyIx s a0) (applyIx s b0)
+unifyIxNamed names flexible = unifyIxRanked names (\k -> if flexible k then Just 0 else Nothing)
+
+{- |
+'unifyIxNamed', the variables it may solve ranked: of two such variables
+unified, the one of the lower rank is solved by the other, and the left one
+of equal ranks.  A variable no rank is given is never solved.
+-}
+unifyIxRanked :: [Text] -> (Key -> Maybe Int) -> Ix -> Ix -> Subst -> Unified
+unifyIxRanked names rank a0 b0 s = go (applyIx s a0) (applyIx s b0)
   where
     render = renderIx names
     go a b
       | a == b = Unified s
-      | Just k <- keyOf a, flexible k = bind k b
-      | Just k <- keyOf b, flexible k = bind k a
+      | Just k <- keyOf a, Just i <- rank k, all (i <=) (keyOf b >>= rank) = bind k b
+      | Just k <- keyOf b, Just _ <- rank k = bind k a
       | otherwise = case (a, b) of
-          (IxSucc x, IxSucc y) -> unifyIxNamed names flexible x y s
+          (IxSucc x, IxSucc y) -> unifyIxRanked names rank x y s
           (IxSucc x, IxNat n)
-            | n > 0 -> unifyIxNamed names flexible x (IxNat (n - 1)) s
+            | n > 0 -> unifyIxRanked names rank x (IxNat (n - 1)) s
             | otherwise -> Clash (render a <> " is a successor, and 0 is not")
           (IxNat n, IxSucc y)
-            | n > 0 -> unifyIxNamed names flexible (IxNat (n - 1)) y s
+            | n > 0 -> unifyIxRanked names rank (IxNat (n - 1)) y s
             | otherwise -> Clash ("0 is not a successor, and " <> render b <> " is")
           (IxNat m, IxNat n) -> Clash (show m <> " is not " <> show n)
           (IxCon c xs, IxCon d ys)
             | c /= d -> Clash (render a <> " and " <> render b <> " are built by different constructors")
-            | length xs == length ys -> unifyAllNamed names flexible (zip xs ys) s
+            | length xs == length ys -> unifyAllRanked names rank (zip xs ys) s
           (IxCon {}, IxNat _) -> Clash (render a <> " is no numeral")
           (IxCon {}, IxSucc _) -> Clash (render a <> " is no successor")
           (IxNat _, IxCon {}) -> Clash (render b <> " is no numeral")
@@ -165,10 +175,14 @@ unifyAll = unifyAllNamed []
 
 -- | 'unifyAll', what it says of a clash naming the value parameters by the names given.
 unifyAllNamed :: [Text] -> (Key -> Bool) -> [(Ix, Ix)] -> Subst -> Unified
-unifyAllNamed names flexible pairs s0 = foldl step (Unified s0) pairs
+unifyAllNamed names flexible = unifyAllRanked names (\k -> if flexible k then Just 0 else Nothing)
+
+-- | 'unifyAllNamed', the variables it may solve ranked as 'unifyIxRanked' ranks them.
+unifyAllRanked :: [Text] -> (Key -> Maybe Int) -> [(Ix, Ix)] -> Subst -> Unified
+unifyAllRanked names rank pairs s0 = foldl step (Unified s0) pairs
   where
     step acc (x, y) = case acc of
-      Unified s -> unifyIxNamed names flexible x y s
+      Unified s -> unifyIxRanked names rank x y s
       other -> other
 
 -- * Terms

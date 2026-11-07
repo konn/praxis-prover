@@ -52,3 +52,13 @@ embed-size (f :@ x) = calc
   = S (psize f + qsize (embed x)) := cong (embed-size f)
   = S (psize f + psize x) := cong (embed-size x)
   = psize (f :@ x)
+
+data Use (a : Formula) (b : Formula) where
+  Var : {a : Formula} -> Use a a
+  Other : {a b : Formula} -> Pf b -> Use a b
+
+-- The clause names c and a, and matching Var forces them equal: a named
+-- variable is solved as an unnamed one would be, by the other.
+forced : {a b c : Formula} -> Pf (c :=> b) -> Use a c -> Nat
+forced {a} {b} {c} f Var = psize f
+forced {a} {b} {c} f (Other x) = S (psize x)

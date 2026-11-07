@@ -2151,7 +2151,7 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       )
       s0
       (zip [0 ..] (zip ipats implicit'))
-  (epats, evars, eproofs, refined) <- patternsFrom env s1 (zip args explicitTerms)
+  (epats, evars, eproofs, refined) <- patternsFrom env (map fst ivars) s1 (zip args explicitTerms)
   let pats = ipats <> epats
       vars = ivars <> evars
       -- The proofs the patterns bind, of the preconditions of the constructors matched.
@@ -2345,7 +2345,7 @@ data types in the GADT style concluded of the indices, the variables' types
 at it.
 -}
 patterns :: Env -> [(Ty, Located R.Expr)] -> TC ([Pattern], [(Text, Ty)], [[BoundProof]], Subst)
-patterns env = patternsFrom env emptySubst
+patterns env = patternsFrom env [] emptySubst
 
 {- |
 A proof of a constructor a pattern binds: the name it gives it, if any, and
@@ -2354,13 +2354,13 @@ signature by @$i@, and an entry nothing in the clause stands for by @?@.
 -}
 type BoundProof = (Maybe Text, Expr Text)
 
--- | 'patterns', from what is known of the indices already; with the proofs each pattern binds.
-patternsFrom :: Env -> Subst -> [(Ty, Located R.Expr)] -> TC ([Pattern], [(Text, Ty)], [[BoundProof]], Subst)
-patternsFrom env s0 pts = do
+-- | 'patterns', from the variables bound and what is known of the indices already; with the proofs each pattern binds.
+patternsFrom :: Env -> [Text] -> Subst -> [(Ty, Located R.Expr)] -> TC ([Pattern], [(Text, Ty)], [[BoundProof]], Subst)
+patternsFrom env bound0 s0 pts = do
   (results, refined, _) <-
     foldM
       (\(acc, s, bound) (t, p) -> (\(pat, vs, ps, s') -> (acc <> [(pat, vs, ps)], s', nub (bound <> map fst vs <> implicitPatternNames p))) <$> elabPattern env bound s (applyTy s t) p)
-      ([], s0, [])
+      ([], s0, bound0)
       pts
   let vars = [(n, applyTy refined t) | (n, t) <- concatMap (\(_, vs, _) -> vs) results]
   case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | (n, _) <- vars]), k > 1] of
@@ -2371,12 +2371,28 @@ patternsFrom env s0 pts = do
       [] -> R.noSpan
       ps@(p0 : _) -> R.spanning (location (snd p0)) (location (snd (last ps)))
 
--- | The variables of indices matching may solve: the value parameters of the signature, the implicit arguments of the
--- constructors matched, and the hidden variables bound for the stored ones no pattern names, which are such arguments too.
+{- | The variables of indices matching may solve: the value parameters of the signature, the implicit arguments of the
+constructors matched, and the hidden variables bound for the stored ones no pattern names, which are such arguments too.
+-}
 flexibleKey :: Key -> Bool
 flexibleKey = \case
   KParam _ -> True
   KVar v -> "#" `T.isPrefixOf` v || "\183" `T.isPrefixOf` v
+
+{- |
+The variables of indices matching a clause's patterns may solve, ranked as
+'unifyIxRanked' ranks them: first the 'flexibleKey' ones, then the variables
+its patterns bind, named or not.  Two patterns which force variables equal
+make one stand for the other, whether or not their author named them; but of
+a variable the clause binds and one matching brings in, the latter is solved
+by the former, so that the clause's own stay in it.  One name bound twice is
+refused before this.
+-}
+rankIn :: [Text] -> Key -> Maybe Int
+rankIn names k
+  | flexibleKey k = Just 0
+  | KVar v <- k, v `elem` names = Just 1
+  | otherwise = Nothing
 
 {- |
 A pattern against the type expected, the variables it binds, and what it
@@ -2463,7 +2479,7 @@ elabPattern env bound s expected le@(Located sp e) = case e of
       sMatched <-
         if null expectedIdx
           then pure s
-          else case unifyAllNamed (valueNamesOf env) flexibleKey (zip expectedIdx (map inst (constructorResult g))) s of
+          else case unifyAllRanked (valueNamesOf env) (rankIn bound) (zip expectedIdx (map inst (constructorResult g))) s of
             Unified s' -> pure s'
             Clash why -> failAt csp ("this pattern can never match here: " <> why)
             Stuck why -> failAt csp ("cannot match on this index: " <> why)
@@ -2473,7 +2489,7 @@ elabPattern env bound s expected le@(Located sp e) = case e of
               (Recovered _ _, Located psp (R.EName (QName [] (Ident name)))) -> do
                 when (name `elem` seen && applyIx st (ghost entry) /= IxVar name) $
                   failAt psp ("the implicit name " <> T.unpack name <> " is bound to a different index")
-                case unifyIxNamed (valueNamesOf env) flexibleKey (ghost entry) (IxVar name) st of
+                case unifyIxRanked (valueNamesOf env) (rankIn (name : seen)) (ghost entry) (IxVar name) st of
                   Unified st' -> pure (st', name : seen)
                   Clash why -> failAt psp ("this implicit pattern can never match: " <> why)
                   Stuck why -> failAt psp ("this implicit pattern disagrees with its index: " <> why)
@@ -2522,7 +2538,7 @@ elabPattern env bound s expected le@(Located sp e) = case e of
               (p, vs, _, st') <- elabPattern env (bound <> concatMap (map fst . snd) acc) st (applyTy st f) a >>= nested
               st'' <- case patternIx p of
                 Nothing -> pure st'
-                Just x -> case unifyIxNamed (valueNamesOf env) flexibleKey (applyIx st' (ghost (tele !! pos))) x st' of
+                Just x -> case unifyIxRanked (valueNamesOf env) (rankIn (bound <> concatMap (map fst . snd) acc <> map fst vs)) (applyIx st' (ghost (tele !! pos))) x st' of
                   Unified u -> pure u
                   Clash why -> failAt (location a) ("this pattern can never match here: " <> why)
                   Stuck why -> failAt (location a) ("cannot match on this value: " <> why)
