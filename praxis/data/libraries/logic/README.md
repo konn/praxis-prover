@@ -101,6 +101,22 @@ A → ¬¬A
 ¬¬⊥ → ⊥
 ```
 
+Theorems about the transformations are ordinary Praxis theorems over these
+proof values. `embed-size` proves by clauses that embedding preserves the
+size of a proof, with a calculation in the MP case:
+
+```text
+embed-size (Intuitionistic.MP {a} {b} f x) = calc
+  classical-size (embed (Intuitionistic.MP {a} {b} f x))
+  = classical-size (Classical.MP {a} {b} (embed f) (embed x))
+  = S (classical-size (embed f) + classical-size (embed x))
+  = S (intuitionistic-size f + classical-size (embed x))
+      := cong (embed-size f)
+  = S (intuitionistic-size f + intuitionistic-size x)
+      := cong (embed-size x)
+  = intuitionistic-size (Intuitionistic.MP {a} {b} f x)
+```
+
 ## Entering and leaving a theory
 
 The same file constructs the identity schema with construction tactics in

@@ -27,6 +27,7 @@ glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
             assertBool
               (T.unpack (T.intercalate "." name <> " has no " <> suffix <> " certificate"))
               (Map.member (T.unpack (mangleGlobal (["Logic", "Glivenko"] <> name <> ["#" <> suffix]))) (coreCertificates core))
+        assertBool "embed-size did not certify" ("Logic.Glivenko.embed-size" `elem` checkedTheorems checked)
     , testCase "evaluated Peirce proof and Glivenko output pass independent Hilbert checking" $ do
         checked <- getChecked
         result <- run checked "demo-proofs"
