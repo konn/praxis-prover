@@ -2167,7 +2167,8 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
         | (serial, (position, ty)) <- zip [1 ..] (schemaArguments (runtimeTys <> args))
         , PVar (Hint name) <- [pats !! position]
         ]
-      envBody = env {envScope = scope {tsValues = [(v, IxVar v) | v <- aliases] <> [(v, applyIx refined x) | (v, x) <- tsValues scope, v `notElem` aliases]}, envSchemas = schemas}
+      -- A name the patterns bind stands for what matching solved it by, as a name they leave out would.
+      envBody = env {envScope = scope {tsValues = [(v, applyIx refined (IxVar v)) | v <- aliases] <> [(v, applyIx refined x) | (v, x) <- tsValues scope, v `notElem` aliases]}, envSchemas = schemas}
   let varIndex v = lookup v (zip (map fst vars) [0 ..])
       namedContext = [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] vars]
       valueExpr i = indexTermInWithDependencies envBody namedContext (applyIx refined (IxParam i))

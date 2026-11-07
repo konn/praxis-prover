@@ -1497,18 +1497,69 @@ indexCase k g = case refute k g of
     let (prep, eqs) = digest k g
     (prep <>) <$> conclude k g eqs (goalConcl g)
 
--- | The goal closed by a clash of the equations of indices among its hypotheses, once unfolded and taken apart: zero against a successor.
+{- |
+The goal closed by a clash of the equations of indices among its hypotheses,
+once unfolded and taken apart: zero against a successor, two numerals that
+differ, or the codes of two constructors of different tags, whose tags their
+@#tag@ lemmas give.
+-}
 refute :: Knowledge -> Goal -> Either String Builder
-refute k g = case [(n, l) | (n, l, r) <- eqs, clash l r] of
-  (n, l) : _ -> Right (prep <> (if l == CNum 0 then "symmetry " <> fromText n <> " as IxR; SuccNonZero on IxR" else "SuccNonZero on " <> fromText n))
+refute k g = case mapMaybe clashing eqs of
+  tac : _ -> Right (prep <> tac)
   [] -> Left "no equation of indices clashes"
   where
     (prep, eqs) = digest k g
-    clash l r = (l == CNum 0 && successor r) || (successor l && r == CNum 0)
+    clashing (n, l, r)
+      | l == CNum 0 && successor r = Just ("symmetry " <> fromText n <> " as IxR; SuccNonZero on IxR")
+      | successor l && r == CNum 0 = Just ("SuccNonZero on " <> fromText n)
+      | CNum i <- l, CNum j <- r, i /= j = Just (numerals n i j)
+      | CSym c xs <- l
+      , CSym d ys <- r
+      , Just cc <- codeOf k c xs
+      , Just dc <- codeOf k d ys
+      , ctorIndex cc /= ctorIndex dc =
+          let tags = n <> "t"
+              i = fromIntegral (ctorIndex cc)
+              j = fromIntegral (ctorIndex dc)
+           in Just
+                ( "have "
+                    <> fromText tags
+                    <> ": "
+                    <> equationText (CNum i) (CNum j)
+                    <> " { calc "
+                    <> render (CNum i)
+                    <> " = "
+                    <> render (hdT l)
+                    <> " by cong "
+                    <> fromText (ctorLemma cc "tag")
+                    <> " = "
+                    <> render (hdT r)
+                    <> " by cong "
+                    <> fromText n
+                    <> " = "
+                    <> render (CNum j)
+                    <> " by cong "
+                    <> fromText (ctorLemma dc "tag")
+                    <> " }; "
+                    <> numerals tags i j
+                )
+      | otherwise = Nothing
     successor = \case
       CSym "S" [_] -> True
       CNum j -> j > 0
       _ -> False
+    -- Two numerals which differ: their predecessors, until one is zero.
+    numerals n i j
+      | i == 0 = "symmetry " <> fromText n <> " as " <> fromText (n <> "r") <> "; SuccNonZero on " <> fromText (n <> "r")
+      | j == 0 = "SuccNonZero on " <> fromText n
+      | otherwise = "SuccInj on " <> fromText n <> " as " <> fromText (n <> "p") <> "; " <> numerals (n <> "p") (i - 1) (j - 1)
+
+-- | The constructor a core symbol applied to arguments is the code of: a constructor's, applied to a value for every position of its code.
+codeOf :: Knowledge -> Text -> [CT] -> Maybe CtorInfo
+codeOf k core args = do
+  c <- find ((== core) . ctorCore) [c | GCtor c <- Map.elems (envGlobals (knowEnv k))]
+  guard (length args == length (ctorFields c))
+  pure c
 
 -- | The equations among a goal's hypotheses, by their names, their sides as core terms.
 goalEquations :: Goal -> [(Text, CT, CT)]
@@ -1517,8 +1568,11 @@ goalEquations g = [(h, l, r) | (h, HProp p) <- goalHyps g, Rel RelEq a b <- [str
 {- |
 The equations among a goal's hypotheses, unfolded and taken apart: each
 unfolded by the unfolding lemmas, stated as a new hypothesis when that
-changes it; a successor against a successor taken apart by injectivity, again
-and again.  The tactic stating them, and every equation at hand, by name.
+changes it; a successor against a successor, and the code of a constructor
+against the code of the same one, taken apart by injectivity, again and
+again — the latter at each position where the codes differ, by the
+constructor's @#field@ lemma there.  The tactic stating them, and every
+equation at hand, by name.
 -}
 digest :: Knowledge -> Goal -> (Builder, [(Text, CT, CT)])
 digest = digestWith "Ix"
@@ -1535,12 +1589,42 @@ digestWith prefix k g = foldl one ("", []) (zip [1 :: Int ..] (goalEquations g))
             Nothing -> ("", h, l, r)
           (tac2, derived) = injective h1 l1 r1
        in (tac <> tac1 <> tac2, acc <> [(h, l, r)] <> [(h1, l1, r1) | h1 /= h] <> derived)
-    -- A successor against a successor: the predecessors, again and again.
+    -- A successor against a successor: the predecessors; a constructor's code against its code: the fields which differ; again and again.
     injective h l r = case (l, r) of
       (CSym "S" [a], CSym "S" [b]) ->
         let n = freshPrefix <> h <> "i"
             (t, more) = injective n a b
          in ("SuccInj on " <> fromText h <> " as " <> fromText n <> "; " <> t, (n, a, b) : more)
+      (CSym c xs, CSym c' ys)
+        | c == c'
+        , Just ctor <- codeOf k c xs
+        , length xs == length ys ->
+            let field j (t, more) (a, b) =
+                  let n = freshPrefix <> h <> "f" <> T.pack (show j)
+                      lemma = fromText (ctorLemma ctor ("field-" <> T.pack (show j)))
+                      stated =
+                        "have "
+                          <> fromText n
+                          <> ": "
+                          <> equationText a b
+                          <> " { calc "
+                          <> render a
+                          <> " = "
+                          <> render (fieldT j l)
+                          <> " by cong "
+                          <> lemma
+                          <> " = "
+                          <> render (fieldT j r)
+                          <> " by cong "
+                          <> fromText h
+                          <> " = "
+                          <> render b
+                          <> " by cong "
+                          <> lemma
+                          <> " }; "
+                      (t', more') = injective n a b
+                   in (t <> stated <> t', more <> [(n, a, b)] <> more')
+             in foldl (\acc (j, a, b) -> field j acc (a, b)) ("", []) [(j, a, b) | (j, a, b) <- zip3 [0 :: Int ..] xs ys, a /= b]
       _ -> ("", [])
 
 -- | A hypothesis @l = r@ unfolded, @l' = r'@, stated under the name given when that changes it: the tactic, and the sides.

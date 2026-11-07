@@ -1,0 +1,33 @@
+module ConstructorIndices where
+
+data Formula = Atom Nat | Bottom | Formula :=> Formula
+
+infixr 5 :=>
+
+data Context = Empty | Context :> Formula
+
+infixl 4 :>
+
+data Member (a : Formula) (g : Context) where
+  Here : {g : Context} -> {a : Formula} -> Member a (g :> a)
+  There : {g : Context} -> {a b : Formula} -> Member a g -> Member a (g :> b)
+
+data Use (g : Context) (a : Formula) (b : Formula) where
+  Var : {g : Context} -> {a : Formula} -> Use g a a
+  Other : {g : Context} -> {a b : Formula} -> Member b g -> Use g a b
+
+-- Injectivity: Here's context g' :> a' against g :> a gives a' = a, the
+-- index of the Var built.
+hypothesis : {g : Context} -> {a b : Formula} -> Member b (g :> a) -> Use g a b
+hypothesis {g} {a} Here = Var
+hypothesis {g} {a} (There m) = Other m
+
+-- Disjointness: no context g :> a is Empty, so no case is left.
+no-member : {a : Formula} -> Member a Empty -> Use Empty a a
+no-member ()
+
+-- Matching Var solves the clause's a by c :=> b; the body's {a} stands for
+-- that solution, as an unnamed variable would.
+wrap : {g : Context} -> {a b c : Formula} -> Use g a (c :=> b) -> Use g (c :=> b) (c :=> b)
+wrap {g} {a} {b} {c} Var = Var {g} {a}
+wrap {g} {a} {b} {c} (Other m) = Var {g} {c :=> b}

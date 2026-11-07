@@ -762,6 +762,10 @@ checkTests =
         let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_ImplicitPatterns_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["embed", "copy"]
         assertBool "embed-size did not certify" ("ImplicitPatterns.embed-size" `elem` checkedTheorems c)
+    , testCase "equations of constructors' codes in indices: the same constructor's are taken apart, different ones' refuted, and a name matching solves stands for its solution" $ do
+        c <- checkFile "test/data/constructor-indices.px"
+        errors c @?= []
+        mapM_ (\f -> assertBool ("the indices of " <> T.unpack f) (("ConstructorIndices." <> f <> ".#index") `elem` checkedTheorems c)) ["hypothesis", "no-member", "wrap"]
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
         c <- checkFile "test/data/nat.px"
         errors c @?= []
