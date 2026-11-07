@@ -43,7 +43,7 @@ glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
     , testCase "malformed MP and classical-to-intuitionistic casts are rejected" $ do
         p <- either assertFailure pure prelude
         source <- TIO.readFile sourcePath
-        let declarations = fst (T.breakOn "-- Internal proof schemata" source)
+        let declarations = fst (T.breakOn "-- Proof schemata built by construction tactics" source)
             badMP = "bad : Intuitionistic (Atom 0)\nbad = Intuitionistic.MP {Bottom} {Atom 0} (Intuitionistic.Explosion {Atom 0}) (Intuitionistic.K {Atom 0} {Bottom})\n"
             badDNE = "bad : Intuitionistic (((Atom 0 :=> Bottom) :=> Bottom) :=> Atom 0)\nbad = Classical.DNE {Atom 0}\n"
         forM_ [badMP, badDNE] $ \bad -> do
