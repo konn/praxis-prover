@@ -123,6 +123,8 @@ data Checked = Checked
   , checkedTheorems :: ![Text]
   , checkedFinal :: !(Maybe (Knowledge, Core))
   , checkedRenamed :: !(Maybe Renamed)
+  , checkedFixities :: !Fixities
+  -- ^ the fixities of the operators in scope, for printers of its values
   }
 
 -- * The core state
@@ -284,14 +286,14 @@ checkModule :: (Env -> FunDef -> [Spec]) -> Build -> Imports -> Maybe QualName -
 checkModule specsOf build imports name file src = case parseModule file src of
   Left err ->
     let (l, c) = syntaxErrorPosition err
-     in (Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing Nothing, build)
+     in (Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing Nothing Map.empty, build)
   Right m ->
     let modQ = fromMaybe (headerName m) name
         imported = Map.unions [meFixities e | Right e <- Map.elems imports]
      in case moduleFixitiesWith imported m of
           Left ferr ->
             let (sp, msg) = renderFixityError ferr
-             in (Checked [Report sp SevError (T.pack msg)] [] [] Nothing Nothing, build)
+             in (Checked [Report sp SevError (T.pack msg)] [] [] Nothing Nothing Map.empty, build)
           Right fx ->
             let (renamed, scopeErrors) = renameModule fx (buildEnv build) imports modQ m
                 (env, items) = elabModule fx (buildEnv build) renamed
@@ -337,7 +339,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
         , runObligations = []
         }
     finish r =
-      ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r)) Nothing
+      ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r)) Nothing fx
       , Build
           { buildCore = runCore r
           , buildRetainGeneratedText = buildRetainGeneratedText build0

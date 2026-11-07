@@ -29,6 +29,7 @@ module Language.Praxis.Surface.Fixity (
   moduleFixitiesWith,
   exportedFixities,
   fixityOf,
+  undeclaredFixity,
   isRelation,
   isConnective,
 
@@ -89,6 +90,10 @@ connectives =
     , ("<->", Fixity AssocNone 20)
     ]
 
+-- | The fixity of a term operator no declaration gives one.
+undeclaredFixity :: Fixity
+undeclaredFixity = Fixity AssocLeft (termTier 9)
+
 -- | Whether an operator is a relation between terms.
 isRelation :: Text -> Bool
 isRelation = (`elem` relations)
@@ -108,7 +113,7 @@ fixityOf :: Fixities -> Operator -> Fixity
 fixityOf fx op
   | isRelation name = relationFixity
   | Just f <- Map.lookup name connectives = f
-  | otherwise = Map.findWithDefault (Fixity AssocLeft (termTier 9)) name fx
+  | otherwise = Map.findWithDefault undeclaredFixity name fx
   where
     name = segmentRaw (qnameBase (operatorName op))
 

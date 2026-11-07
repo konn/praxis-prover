@@ -24,8 +24,13 @@ cabal run praxis -- eval praxis/data/libraries/logic/src/Logic/Glivenko.px \
 ```
 
 The demo constructs a classical proof of Peirce's law
-`P = ((p → q) → p) → p`, runs the verified transformation, and returns
-`Result <output conclusion> <input proof size> <output proof size>`.
+`P = ((p → q) → p) → p`, runs the verified transformation, and prints
+`Result <output conclusion> <input proof size> <output proof size>`:
+
+```text
+Result (((((Atom 0 :=> Atom 1) :=> Atom 0) :=> Atom 0) :=> Bottom) :=> Bottom) 35 1273
+```
+
 The conclusion is `¬¬P`. Sizes count nodes of the unfolded Hilbert proof;
 runtime allocation statistics count shared nodes instead.
 The supplied example has 35 classical proof nodes and 1,273 intuitionistic
@@ -42,6 +47,12 @@ the command; the function itself may construct and transform their values.
 It supports first-order functions, constructor patterns, naturals and a
 small arithmetic builtin set. Imports, callbacks and dictionaries are not
 yet supported by this command.
+
+Values print as surface syntax. An operator constructor such as `:=>` is
+written between its operands, parenthesised by its declared fixity, and a
+constructor goes by its bare name unless two constructors printed in the
+same value share it: `demo-proofs` shows `Classical.MP` and
+`Intuitionistic.MP`, but `Atom` and `Bottom`.
 
 Checking and evaluation are separate phases. The CLI checks the module on
 each invocation; the full demo currently takes roughly half a minute to
