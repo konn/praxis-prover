@@ -29,6 +29,7 @@ import Language.Praxis.Surface.MethodContractTest (methodContractTests)
 import Language.Praxis.Surface.ParserTest (parserTests)
 import Language.Praxis.Surface.Prelude
 import Language.Praxis.Surface.ProjectionIndexTest (projectionIndexTests)
+import Language.Praxis.Surface.PropositionCodeTest (propositionCodeTests)
 import Language.Praxis.Surface.QuantifierCaptureTest (quantifierCaptureTests)
 import Language.Praxis.Surface.ResolveTest (resolveTests)
 import Language.Praxis.Surface.TermTest (termTests)
@@ -48,6 +49,7 @@ main =
       , projectionIndexTests
       , quantifierCaptureTests
       , termTests
+      , propositionCodeTests
       , coreTests
       , dependentClassTests
       , computationIndexTests

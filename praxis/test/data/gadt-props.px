@@ -1,0 +1,108 @@
+module GadtProps where
+
+-- Constructors whose preconditions are propositions beyond a single equation
+-- or comparison: the membership of a code checks the code of each, and a
+-- pattern names the proof as a hypothesis, which repacking the value reuses: a
+-- stored implicit argument is bound in the pattern, for the code to take it.
+
+-- A conjunction of two comparisons, the field mentioned twice.
+data Both (n : Nat) where
+  MkBoth : (k : Nat) -> (0 < k ∧ k < n) -> Both n
+
+both-value : Both n -> Nat
+both-value (MkBoth k h) = k
+
+both-copy : Both n -> Both n
+both-copy (MkBoth {n} k h) = MkBoth k h
+
+-- Building: the obligation 0 < 1 ∧ 1 < 3, by the tactics given.
+both-one : Both 3
+both-one = MkBoth 1 (by constructor; rfl; rfl)
+
+-- A disjunction.
+data Small where
+  MkSmall : (k : Nat) -> (k = 0 ∨ k = 1) -> Small
+
+small-value : Small -> Nat
+small-value (MkSmall k h) = k
+
+small-copy : Small -> Small
+small-copy (MkSmall k h) = MkSmall k h
+
+small-zero : Small
+small-zero = MkSmall 0 (by left; rfl)
+
+small-one : Small
+small-one = MkSmall 1 (by right; rfl)
+
+-- A disequality, and a negation: the proof given at the call is a hypothesis.
+data NonZero where
+  MkNonZero : (k : Nat) -> k ≠ 0 -> NonZero
+
+non-zero : {k : Nat} -> k ≠ 0 -> NonZero
+non-zero {k} h = MkNonZero k h
+
+non-zero-copy : NonZero -> NonZero
+non-zero-copy (MkNonZero k h) = MkNonZero k h
+
+data Positive where
+  MkPositive : (k : Nat) -> ¬ (k = 0) -> Positive
+
+positive : {k : Nat} -> ¬ (k = 0) -> Positive
+positive {k} h = MkPositive k h
+
+positive-copy : Positive -> Positive
+positive-copy (MkPositive k h) = MkPositive k h
+
+-- An implication: its antecedent is a hypothesis of the obligation, which states it as a theorem does.
+data Guarded where
+  MkGuarded : (a : Nat) -> (b : Nat) -> (0 < a → 0 < b) -> Guarded
+
+guarded-zero : Guarded
+guarded-zero = MkGuarded 0 0 (by assumption)
+
+guarded-copy : Guarded -> Guarded
+guarded-copy (MkGuarded a b h) = MkGuarded a b h
+
+-- A bounded universal quantifier: every number below the field is below the index.
+data AllBelow (n : Nat) where
+  MkAllBelow : (k : Nat) -> (∀ (i : Nat) < k, i < n) -> AllBelow n
+
+all-below-two : AllBelow 2
+all-below-two = MkAllBelow 2 (by intro i; assumption)
+
+all-below-copy : AllBelow n -> AllBelow n
+all-below-copy (MkAllBelow {n} k h) = MkAllBelow k h
+
+-- A bounded existential quantifier: the index is the successor of a number below the field.
+data SomeBelow (n : Nat) where
+  MkSomeBelow : (k : Nat) -> (∃ (i : Nat) < k, S i = n) -> SomeBelow n
+
+some-below : SomeBelow 1
+some-below = MkSomeBelow 3 (by exists 0; rfl; rfl)
+
+some-below-copy : SomeBelow n -> SomeBelow n
+some-below-copy (MkSomeBelow {n} k h) = MkSomeBelow k h
+
+-- Nested quantifiers, numerals and ⊤ in one precondition.
+data Grid (n : Nat) where
+  MkGrid : (k : Nat) -> ((∀ (i : Nat) < k, ∀ (j : Nat) ≤ i, j + 1 ≤ n) ∧ ⊤) -> Grid n
+
+grid-copy : Grid n -> Grid n
+grid-copy (MkGrid {n} k h) = MkGrid k h
+
+-- A precondition mentioning an implicit argument recovered from a field's index.
+data Vec a n where
+  nil : Vec a 0
+  (:-) : {n : Nat} -> a -> Vec a n -> Vec a (S n)
+
+infixr 5 :-
+
+data Short (m : Nat) where
+  MkShort : {n : Nat} -> (xs : Vec Nat n) -> (n < m ∨ n = m) -> Short m
+
+short-nil : Short 1
+short-nil = MkShort nil (by left; rfl)
+
+short-copy : Short m -> Short m
+short-copy (MkShort {n} {m} xs h) = MkShort xs h

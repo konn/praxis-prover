@@ -500,16 +500,25 @@ is an index — a variable, a numeral, `S`, a constructor or a function applied
 is a variable; against a numeral, `k` is refused, as nothing solves it. A
 proposition among a constructor's arguments, `Exists : (k : nat) -> n + S k =
 m -> ELt n m`, is a precondition: a proof its code does not store, over the
-implicit arguments and the named fields, an equation or a comparison for now.
-Constructor preconditions do not admit quantified propositions; the finite
-quantifier syntax applies to theorem propositions and function preconditions.
-Building with the constructor gives a proof of it, checked as an obligation
-as a function's precondition is; the membership of a code checks it as it
-checks an equation of indices, so a pattern names it, `Exists k h`, and `h`
-is a hypothesis of the case, `n + S k = m` at the fields. The indices of its
-result are patterns — variables, numerals, `S` and constructors — so that
-matching on the constructor can solve them; indices elsewhere may apply
-functions and the arithmetic of `Nat`.
+implicit arguments and the named fields. It may be any proposition whose
+quantifiers are bounded — an equation, a comparison, `≠`, the connectives
+`∧`, `∨`, `→`, `↔` and `¬`, `⊤`, `⊥`, and `∀ (i : Nat) < t, …` or
+`∃ (i : Nat) ≤ t, …` over `Nat`, nested as needed —
+`MkBoth : (k : Nat) -> (0 < k ∧ k < n) -> Both n`,
+`MkAllBelow : (k : Nat) -> (∀ (i : Nat) < k, i < n) -> AllBelow n`. Such a
+proposition is decidable, so the membership of a code checks it, by its code,
+as it checks an equation of indices; an unbounded quantifier is refused, and
+the finite quantifier syntax over a type applies to theorem propositions and
+function preconditions only. Building with the constructor gives a proof of
+it, checked as an obligation as a function's precondition is, its
+implications' antecedents hypotheses of the obligation; a pattern names it,
+`Exists k h`, and `h` is a hypothesis of the case, `n + S k = m` at the
+fields, which proves the precondition again where the value is rebuilt,
+`MkBoth {n} k h`. A constructor which stores an implicit argument takes it at
+runtime, so a clause rebuilding the value binds it in the pattern, `{n}`.
+The indices of its result are patterns — variables, numerals, `S` and
+constructors — so that matching on the constructor can solve them; indices
+elsewhere may apply functions and the arithmetic of `Nat`.
 
 A signature's free variables at indices are its implicit value parameters,
 as its free type variables are its type parameters: `n : Nat` in `tail`, and

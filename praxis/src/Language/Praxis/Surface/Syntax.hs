@@ -33,6 +33,7 @@ module Language.Praxis.Surface.Syntax (
   stripLocations,
   spine,
   apps,
+  boundedProposition,
   isProofArg,
   dropProofs,
   mapGlobals,
@@ -339,6 +340,30 @@ spine = go []
 -- | A head applied to arguments.
 apps :: Expr a -> [Expr a] -> Expr a
 apps = foldl App
+
+{- |
+Whether an expression is a proposition every quantifier of which is
+bounded: relations between terms, the connectives, @⊤@, @⊥@, and quantifiers
+with a bound, under which the same holds.  Such a proposition is decided by
+a primitive recursive function of its terms, and so has a code the core can
+check.  A quantifier without a bound, or what is no proposition, is refused,
+with why.
+-}
+boundedProposition :: Expr a -> Either String ()
+boundedProposition = go
+  where
+    go :: Expr b -> Either String ()
+    go = \case
+      At _ e -> go e
+      Rel {} -> Right ()
+      Conn _ a b -> go a *> go b
+      Arrow a b -> go a *> go b
+      Not a -> go a
+      Top -> Right ()
+      Bottom -> Right ()
+      Quant _ _ (Just _) _ body -> go (fromScope body)
+      Quant {} -> Left "a quantifier without a bound"
+      _ -> Left "not a proposition"
 
 -- | Whether an argument is a proof, which the code does not take.
 isProofArg :: Expr a -> Bool

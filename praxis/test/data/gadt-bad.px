@@ -90,6 +90,6 @@ kind-implicit = fzero {nil}
 data Dup (n : nat) where
   MkDup : {m : nat} -> (m : nat) -> Dup m
 
--- A precondition of a constructor which is no equation or comparison.
-data Both (n : nat) where
-  MkBoth : (k : nat) -> (k < n ∧ 0 < k) -> Both n
+-- A precondition of a constructor quantifying without a bound: its membership cannot decide it.
+data Everywhere where
+  MkEverywhere : (k : nat) -> (∀ (i : Nat), i < k) -> Everywhere

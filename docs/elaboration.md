@@ -140,25 +140,29 @@ library of praxis-copra.
   the lemmas below are rules over them.
 - **`T.#is-def`, `T.#is-beta`** unfold the predicate at a variable, and
   `T.#collapse-i` collapses a dispatch at tag `i` over variables.
-- **Introduction** `C.#intro : 0 < U₁.is x_{j₁}, …, U.#idx-j e = i, … |- 0 < T.is (C x̄)`,
-  a hypothesis for each field whose membership the branch of `C` checks and
-  one for each equation of indices it checks: the predicate unfolds at the
-  code (`#is-def`, `#is-beta`), the tag selects the branch (`C.#tag`,
-  `T.#collapse-i`), the shape conjunct is `eqRefl` once the fields are
-  rewritten to the variables (`C.#field-j`), the conjunct of a field of `T`
-  itself is its hypothesis through the history (`histAt` with `C.#lt-j`), an
-  equation's conjunct is its hypothesis by `eqIntro` once the fields are
-  rewritten, and `conjIntro` joins them. By induction on a value, the code of
-  every value of `T` is a member — premise (M) of § Adequacy.
+- **Introduction** `C.#intro : 0 < U₁.is x_{j₁}, …, U.#idx-j e = i, …, P, … |- 0 < T.is (C x̄)`,
+  a hypothesis for each field whose membership the branch of `C` checks,
+  one for each equation of indices it checks, and one for each precondition
+  `P` of `C`: the predicate unfolds at the code (`#is-def`, `#is-beta`), the
+  tag selects the branch (`C.#tag`, `T.#collapse-i`), the shape conjunct is
+  `eqRefl` once the fields are rewritten to the variables (`C.#field-j`), the
+  conjunct of a field of `T` itself is its hypothesis through the history
+  (`histAt` with `C.#lt-j`), an equation's conjunct is its hypothesis by
+  `eqIntro` once the fields are rewritten, a precondition's conjunct, the
+  code of `P`, is its hypothesis by the core's `reify`, and `conjIntro` joins
+  them. By induction on a value, the code of every value of `T` is a member —
+  premise (M) of § Adequacy.
 - **Inversion** `T.#inversion : 0 < T.is t |- ⋁ᵢ (t = Cᵢ (fields t) ∧
-  memberships ∧ equations of indices)`, proved by case analysis on the tag
-  with `eqBool`, `collapseT/F`, `conjElim1/2`, `eqElim`, and `histAt` with
-  `C.#lt-j` for the recursive fields. Induction rests on it.
+  memberships ∧ equations of indices ∧ preconditions)`, proved by case
+  analysis on the tag with `eqBool`, `collapseT/F`, `conjElim1/2`, `eqElim`,
+  `reflect` for the preconditions, and `histAt` with `C.#lt-j` for the
+  recursive fields. Induction rests on it.
 
 Which fields contribute a membership conjunct, and by which predicate, is
 recorded (`encodedMembers`, a `FieldPred` over the type's parameters), and
 so are the equations of indices each constructor's branch checks
-(`encodedIndexEquations`, over the positions of its code). They are the
+(`encodedIndexEquations`, over the positions of its code) and its
+preconditions (`encodedProps`, propositions over the positions). They are the
 single source both the inversion and the proof engine read: they cannot
 disagree.
 
@@ -209,8 +213,38 @@ whose lemmas their unfolding lemmas need, and before the predicate; their
 closure lemmas, which need the predicate, come after it (`Check`). An index of
 a type encoded later is not checked, as a field of such a type is no member.
 
-The inversion gives the equations as hypotheses of each case of an induction,
-which the engine uses as it does the indices a theorem states of its binders:
+**Preconditions.** A proposition among a constructor's arguments,
+`MkBoth : (k : Nat) -> (0 < k ∧ k < n) -> Both n`, is a precondition: a
+proof its code does not store. The branch of the constructor checks it after
+the equations of indices, by its code (`Encode.ctorPropositions`,
+`CoreText.propCode`): the term whose truth, `0 < c`, the proposition is, as
+`PRA.Reflection` reads formulas — `eq s t` for an equation, a comparison or
+the truth of a term for itself, `conj`, `disj` and `imp` for the connectives,
+`imp ⟦A⟧ 0` for `¬A`, and for a bounded quantifier the schema searching with
+the code of its body, `holdsBelow {λ i ȳ. ⟦A⟧} t s̄` for `∀ i < t. A` and
+`lt (mu {λ i ȳ. ⟦A⟧} t s̄) t` for `∃ i < t. A`, the λ closed over the maximal
+subterms of the body not mentioning `i`, as the core closes the λ of a
+quantifier it reads (`CoreText.predicateOver`). The surface writes the same
+code the core's `reify` gives the formula, so that the introduction turns
+the hypothesis `P` into the truth of its code by `reify`, and the inversion
+reads the formula back from the truth of the code by `reflect`;
+`PropositionCodeTest` checks the agreement on each relation, connective and
+quantifier, nested quantifiers included. A precondition is therefore any
+proposition every quantifier of which is bounded (`Syntax.boundedProposition`):
+such a proposition is decided by a primitive recursive function of its terms,
+which is what lets the membership predicate check it. An unbounded quantifier
+is refused: its truth is no primitive recursive function of the code, and a
+stored proof code could not be read back as the proposition without the
+reflection principle PRA lacks. A precondition over an implicit argument
+recovered from a field mentions the field's index function, `Vec.#idx xs`,
+where the obligation proving it at a construction states the index itself:
+the engine establishes the proposition at the indices the index functions
+give, then takes the equations back on the code by congruence, between
+`reify` of the goal and `reflect` of the result (`Engine.indexedPremise`).
+
+The inversion gives the equations and the preconditions as hypotheses of each
+case of an induction, a pattern naming the proof of a precondition; the
+equations the engine uses as it does the indices a theorem states of its binders:
 to prove the indices an appeal needs, and to rewrite by where a hypothesis or
 the induction hypothesis proves the goal once unfolded
 (`Engine.bridgeChain`). Where a constructor is introduced, the engine proves
@@ -551,10 +585,11 @@ proposition and validates every argument and its finite-domain evidence.
 Inference cannot discard an argument when a bounded conclusion remains
 unresolved. Explicit proof antecedents are matched before finite values.
 
-Constructor preconditions retain their separate restriction to equations
-and comparisons. Their permitted terms retain desugaring dependencies,
-but a quantified constructor precondition is rejected because the datatype
-membership encoding does not yet support that form.
+Constructor preconditions admit the connectives and the numerically bounded
+quantifiers, which the datatype membership encoding checks by the code of
+the proposition (§ Data types, Preconditions). A finite quantifier over a
+type is not admitted there: its decoding needs the dictionary of a `Finite`
+instance, which a constructor's signature has no place for.
 
 ### Type synonyms
 
