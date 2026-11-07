@@ -19,10 +19,10 @@ glivenkoTests :: TestTree
 glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
   testGroup
     "Glivenko"
-    [ testCase "internal schemata and uniform transformation contracts certify" $ do
+    [ testCase "internal schemata, bracket abstraction and uniform transformation contracts certify" $ do
         checked <- getChecked
         (_, core) <- maybe (assertFailure "no checked Glivenko module") pure (checkedFinal checked)
-        forM_ [["identity"], ["ClassicalExamples", "peirce-law"], ["glivenko"], ["contradiction"], ["embed"], ["recover"]] $ \name ->
+        forM_ [["identity"], ["ClassicalExamples", "peirce-law"], ["glivenko"], ["contradiction"], ["embed"], ["recover"], ["deduction"], ["close"], ["double-negation-mp"]] $ \name ->
           forM_ ["contract", "closed", "index"] $ \suffix ->
             assertBool
               (T.unpack (T.intercalate "." name <> " has no " <> suffix <> " certificate"))
@@ -41,14 +41,16 @@ glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
         proofConclusion "Intuitionistic" output @?= Right (nn peirce)
         assertBool "the classical proof was accepted intuitionistically" (isLeft (proofConclusion "Intuitionistic" input))
         assertBool "unexpectedly large evaluator allocation" (evalNodes result < 100000)
-    , testCase "malformed MP and classical-to-intuitionistic casts are rejected" $ do
+    , testCase "malformed MP, classical-to-intuitionistic casts and misused hypotheses are rejected" $ do
         p <- either assertFailure pure prelude
         source <- TIO.readFile sourcePath
         let declarations = fst (T.breakOn "-- Proof schemata built by construction tactics" source)
+            machinery = fst (T.breakOn "-- The double-negation lemmas Glivenko's algorithm uses" source)
             badMP = "bad : Intuitionistic (Atom 0)\nbad = Intuitionistic.(:@) {Bottom} {Atom 0} (Intuitionistic.Explosion {Atom 0}) (Intuitionistic.K {Atom 0} {Bottom})\n"
             badDNE = "bad : Intuitionistic (((Atom 0 :=> Bottom) :=> Bottom) :=> Atom 0)\nbad = Classical.DNE {Atom 0}\n"
-        forM_ [badMP, badDNE] $ \bad -> do
-          let checked = checkSource p "invalid-glivenko.px" (declarations <> bad)
+            badHyp = "bad : Intuitionistic (Atom 0 :=> Atom 1)\nbad = close (deduction (Hyp Here))\n"
+        forM_ [declarations <> badMP, declarations <> badDNE, machinery <> badHyp] $ \program -> do
+          let checked = checkSource p "invalid-glivenko.px" program
           assertBool "an invalid object proof was certified" (any ((== SevError) . reportSeverity) (checkedReports checked))
     ]
   where

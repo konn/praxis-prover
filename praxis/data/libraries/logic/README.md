@@ -57,12 +57,10 @@ constructors printed in the same value share it: `demo-proofs` shows
 ponens.
 
 Checking and evaluation are separate phases. The CLI checks the module on
-each invocation; the full demo currently takes roughly half a minute to
-certify on the development machine. This is checker cost, not the running
-time of the transformation. The evaluator API accepts an already checked
-module and can reuse it for different inputs, as an interactive frontend
-would do. Improving certification of composed proof-producing functions
-remains a performance task.
+each invocation; the demo takes a few seconds to certify and run on the
+development machine, nearly all of it checker cost, not the running time
+of the transformation. The evaluator API accepts an already checked module
+and can reuse it for different inputs, as an interactive frontend would do.
 
 The proof generator shares unchanged term subtrees between rewrite steps,
 so retaining a calculation no longer copies the whole term at every step.
@@ -179,7 +177,7 @@ module ClassicalExamples where
       exact peirce {a} {b}
 ```
 
-Here `peirce` is the generated Hilbert proof above. Leaving the block
+Here `peirce` is the Hilbert proof built by bracket abstraction. Leaving the block
 retains `ClassicalExamples.peirce-law` as a normal exported function with a
 `Classical` result. The demo passes its proof to `translation`, which calls
 `glivenko`. Namespace qualification and the selected calculus are
@@ -250,24 +248,42 @@ semantic soundness proofs of these first-order presentations remain to be
 proved. The existing kernel checks all generated PRA contracts; it does
 not adopt PA's axioms or infer object-level truth.
 
-## Generated Hilbert proofs
+## Bracket abstraction in Praxis
 
-The four helper schemata are ordinary finite K/S/explosion/MP proofs. The authoring script
-[`generate_templates.py`](tools/generate_templates.py) uses typed lambda
-terms and bracket abstraction to generate these certificates and the
-classical Peirce example. The script is untrusted: every generated
-definition is checked by Praxis. It adds no axioms or inference rules.
+The double-negation lemmas `glivenko` uses (`double-negation-intro`,
+`-mp` and `-dne`) and `bottom-out`, which `contradiction` uses, are
+ordinary finite K/S/explosion/MP proofs; the classical Peirce example adds
+one DNE axiom. They are written as lambda terms and compiled by bracket
+abstraction, which is itself a Praxis function over derivations, checked
+like the rest:
 
-The generator emits five named proofs and seven intermediate parts, grouping
-MP steps and letting Praxis infer their intermediate formula indices.
-It previously named every MP step, producing 86 declarations. The remaining
-parts keep the two largest proofs within the current checker's
-definitional-equality resources; inlining every step into one body does not
-yet certify. This grouping preserves the actual Hilbert proof trees.
-
-```sh
-python3 praxis/data/libraries/logic/tools/generate_templates.py --check
+```haskell
+-- \f. \p. \nb. f (\g. p (\x. nb (g x)))
+double-negation-mp {a} {b} = close (deduction (deduction (deduction (
+  Hyp (There (There Here)) :@ deduction (
+    Hyp (There (There Here)) :@ deduction (
+      Hyp (There (There Here)) :@ (Hyp (There Here) :@ Hyp Here)))))))
 ```
+
+`Open g a` is an intuitionistic derivation of `a` under a context `g` of
+hypotheses, `Hyp m` one of them by its typed de Bruijn index `m : Member a
+g`. `deduction : Open (g :> a) b -> Open g (a :=> b)` is the deduction
+theorem: it discharges the newest hypothesis, `annotate` first marking each
+node by whether it uses that hypothesis (`Use`, in the co-de Bruijn style),
+and `abstract` then emitting K for an unused part, the identity for the
+hypothesis, and eta or S for an application. `close : Open Empty a ->
+Intuitionistic a` reads a derivation under no hypotheses as a closed one.
+Their index contracts are certified, so each lemma's type follows from the
+types of the lambda term's parts, and `eval` computes its Hilbert proof:
+the same trees the earlier Python generator produced. Peirce's law is
+classical; its abstraction over `f` applies `S (K DNE)` in the classical
+calculus to the `embed`ding of an intuitionistic part built this way.
+
+The lemmas are computed where they are used, not stored as trees: each
+application in `glivenko` runs the abstraction at its own formulas. The
+demo's evaluation therefore takes about 170,000 evaluator steps where the
+stored trees took about 73,000, well within the default `--fuel` of
+1,000,000; a larger input needs proportionally more.
 
 ## What PRA certifies
 

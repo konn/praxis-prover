@@ -18,7 +18,6 @@ extra-doc-files:
   README.md
 
 extra-source-files:
-  data/libraries/logic/tools/*.py
   src-pra/*.pra
   src-pra/*.prf
   test/data/**/*.px
