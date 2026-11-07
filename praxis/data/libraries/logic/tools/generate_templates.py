@@ -16,10 +16,19 @@ class Formula:
     name: str
     args: tuple = ()
 
-    def px(self):
+    def infix(self):
+        """Praxis source for the formula: implication is the infixr `:=>`."""
         if not self.args:
             return self.name
-        return "(" + self.name + " " + " ".join(x.px() for x in self.args) + ")"
+        assert self.name == "Imp", self
+        a, b = self.args
+        return a.px() + " :=> " + b.infix()
+
+    def px(self):
+        """The formula as an argument: parenthesized unless atomic."""
+        if not self.args:
+            return self.name
+        return "(" + self.infix() + ")"
 
 
 def arrow(a, b):
@@ -160,7 +169,7 @@ def emit(name, calculus, params, root):
         if p.tag != "MP":
             assert p.tag in {"K", "S", "Explosion", "DNE"}
             assert p.tag != "DNE" or calculus == "Classical"
-            return Expression(calculus + "." + p.tag + "".join(" {" + a.px() + "}" for a in p.params)), 0
+            return Expression(calculus + "." + p.tag + "".join(" {" + a.infix() + "}" for a in p.params)), 0
         f, fcost = visit(p.args[0])
         x, xcost = visit(p.args[1])
         # Praxis infers the antecedent and conclusion from these proof terms.
