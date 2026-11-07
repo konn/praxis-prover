@@ -92,7 +92,7 @@ import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
 import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), Renamed, ScopeError (..), moduleExports, renameModule)
-import Language.Praxis.Surface.Syntax (Pattern)
+import Language.Praxis.Surface.Syntax (Expr, Pattern)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span (..))
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ty (..))
@@ -239,9 +239,9 @@ data Build = Build
   -- ^ declarations whose entire checking step, including generated contracts, succeeded
   , buildMembers :: !(Map Text [(Int, FieldPred)])
   , buildIndexEqs :: !(Map Text [(CT, CT)])
-  -- ^ the equations of indices the branch of each constructor checks, by its core name, then its preconditions
-  , buildProps :: !(Map Text [(CT, CT)])
-  -- ^ the preconditions of each constructor, the last of its equations, by its core name
+  -- ^ the equations of indices the branch of each constructor checks, by its core name
+  , buildProps :: !(Map Text [Expr Text])
+  -- ^ the preconditions of each constructor, checked after its equations of indices, by its core name
   , buildUnfoldings :: ![Unfolding]
   , buildClosures :: !(Map Text Closure)
   , buildIndexSpecs :: !(Map Text IndexSpec)
@@ -307,9 +307,9 @@ data Run = Run
   , runCertified :: ![Text]
   , runMembers :: !(Map Text [(Int, FieldPred)])
   , runIndexEqs :: !(Map Text [(CT, CT)])
-  -- ^ the equations of indices the branch of each constructor checks, by its core name, then its preconditions
-  , runProps :: !(Map Text [(CT, CT)])
-  -- ^ the preconditions of each constructor, the last of its equations, by its core name
+  -- ^ the equations of indices the branch of each constructor checks, by its core name
+  , runProps :: !(Map Text [Expr Text])
+  -- ^ the preconditions of each constructor, checked after its equations of indices, by its core name
   , runUnfoldings :: ![Unfolding]
   , runClosures :: !(Map Text Closure)
   , runIndexSpecs :: !(Map Text IndexSpec)

@@ -34,10 +34,13 @@ module Language.Praxis.Surface.CoreText (
 
   -- * From the surface
   termCT,
+  fromCT,
   TermLowering (..),
   standardLowering,
   lowerTermWith,
   propText,
+  propCode,
+  codeIsFormula,
   Pred (..),
   membershipText,
   predicateAt,
@@ -53,16 +56,17 @@ module Language.Praxis.Surface.CoreText (
   unwordsB,
 ) where
 
-import Bound (Var (..), fromScope)
+import Bound (Var (..), abstract, fromScope)
 import Control.Monad (unless)
 import Data.Char (isAlphaNum)
-import Data.List (intersperse, mapAccumL, nub, partition)
+import Data.List (elemIndex, intersperse, mapAccumL, nub, partition)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromText, fromUnboundedDec, runBuilder)
 import Data.Traversable qualified as Traversable
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Term qualified as Term
+import Language.Praxis.Surface.Types (Ty (..))
 import Numeric.Natural (Natural)
 import Text.Read (readMaybe)
 
@@ -358,6 +362,118 @@ propText fresh var expression = go mentioned var expression
       Quant {} -> Left "an unbounded quantifier"
       _ -> Left "not a proposition"
     paren t = "(" <> t <> ")"
+
+{- |
+The code of a surface proposition: the term whose truth, @0 < c@, the
+proposition is, as the core reads the formula 'propText' writes.  An
+equation @s = t@ is @eq s t@; a comparison stands for itself, @lt s t@, as
+does the truth of a term, @0 < u@, when @u@ reads as no formula; @⊤@ is
+@eq 0 0@, @⊥@ is @0@; the connectives are @conj@, @disj@ and @imp@, @~A@
+being @imp ⟦A⟧ 0@; and a bounded quantifier is the schema searching with
+the code of its body, @holdsBelow {λ i ȳ. ⟦A⟧} t s̄@ for @∀ i < t. A@ and
+@lt (mu {λ i ȳ. ⟦A⟧} t s̄) t@ for @∃ i < t. A@, the λ its canonical
+closure ('predicateOver'), as the core closes the λ of a quantifier it
+reads.  So the code is the one the core's @reify@ gives the formula, and
+@reflect@ reads the formula back from.
+-}
+propCode :: (a -> CT) -> Expr a -> Either String CT
+propCode = go (0 :: Int)
+  where
+    go :: Int -> (b -> CT) -> Expr b -> Either String CT
+    go depth v = \case
+      At _ e -> go depth v e
+      Rel r a b -> do
+        x <- termCT v a
+        y <- termCT v b
+        pure case r of
+          RelEq -> equationCode x y
+          RelNe -> CSym "imp" [equationCode x y, CNum 0]
+          RelLt -> equationCode (CSym "lt" [x, y]) (CNum 1)
+          RelLe -> equationCode (CSym "le" [x, y]) (CNum 1)
+          RelGt -> equationCode (CSym "lt" [y, x]) (CNum 1)
+          RelGe -> equationCode (CSym "le" [y, x]) (CNum 1)
+      Conn c a b -> do
+        x <- go depth v a
+        y <- go depth v b
+        pure case c of
+          And -> CSym "conj" [x, y]
+          Or -> CSym "disj" [x, y]
+          Iff -> CSym "conj" [CSym "imp" [x, y], CSym "imp" [y, x]]
+      Arrow a b -> (\x y -> CSym "imp" [x, y]) <$> go depth v a <*> go depth v b
+      Not a -> (\x -> CSym "imp" [x, CNum 0]) <$> go depth v a
+      Top -> Right (CSym "eq" [CNum 0, CNum 0])
+      Bottom -> Right (CNum 0)
+      Quant q _ (Just (rel, bound)) _ body -> do
+        b <- termCT v bound
+        let limit = case rel of
+              Below -> b
+              AtMost -> CSym "S" [b]
+            -- The bound variable stands apart until the body's own variables are known, then is named apart from them.
+            placeholder = "%bound" <> T.pack (show depth)
+        inner <- go (depth + 1) (\case B () -> CVar placeholder; F x -> v x) (fromScope body)
+        let taken = varsCT inner
+            name = until (`notElem` taken) (<> "'") ("q" <> T.pack (show depth))
+            closure = predicateParam (predicateOver name (replaceCT (\case CVar u | u == placeholder -> Just (CVar name); _ -> Nothing) inner))
+        pure case q of
+          Forall -> applySchema "holdsBelow" [closure] [limit]
+          Exists -> CSym "lt" [applySchema "mu" [closure] [limit], limit]
+      Quant {} -> Left "an unbounded quantifier"
+      _ -> Left "not a proposition"
+    -- An atom's code: of @c = 1@, the code @c@ when it reads as a formula of its own, and of @0 < u@ the term @u@ when it does not.
+    equationCode s t
+      | t == CNum 1, Just u <- positive s, not (codeIsFormula u) = u
+      | t == CNum 1, booleanCode s = s
+      | otherwise = CSym "eq" [s, t]
+    positive = \case
+      CSym "lt" [CNum 0, u] -> Just u
+      _ -> Nothing
+
+{- |
+Whether a code reads as a formula of its own rather than as its truth alone:
+@0@, an equation, a comparison, a bounded quantifier or a connective.  Such a
+code the core's @reflect@ turns into that formula, and @reify@ back; any
+other term @u@ is the code of @0 < u@, which is its truth as it stands.
+-}
+codeIsFormula :: CT -> Bool
+codeIsFormula = \case
+  CNum 0 -> True
+  CSym "eq" [_, _] -> True
+  CSym c [_, _] | c `elem` ["conj", "disj", "imp"] -> True
+  t -> booleanCode t
+
+-- | Whether a code is its own equation with 1 as a formula: a comparison, or an instance of @holdsBelow@.
+booleanCode :: CT -> Bool
+booleanCode = \case
+  CSym c [_, _] | c `elem` ["lt", "le", "lte"] -> True
+  CSym "holdsBelow" (_ : _) -> True
+  _ -> False
+
+{- |
+A core term as a surface expression over core variables, to be substituted
+into a proposition: a symbol applied by a builtin reference, whatever it
+names, since lowering treats every reference alike.  A closure keeps its
+closed code and its captures as they are: opening and repacking a λ could
+change the fixed code while leaving its behaviour the same.
+-}
+fromCT :: CT -> Expr Text
+fromCT = \case
+  CVar v -> Var v
+  CSym f args -> apps (Global (Ref RefBuiltin f)) (map fromCT args)
+  CNum n -> Nat n
+  CRaw t -> Global (Ref RefBuiltin t)
+  CStatic t -> Global (Ref RefStatic t)
+  CPartial f dict n -> apps (Global (Ref (RefPartial n) f)) (map fromCT dict)
+  CIndexedPartial f captures n prefixCount -> apps (Global (Ref (RefIndexedPartial n prefixCount) f)) (map fromCT captures)
+  CCallback (CStatic name) environment -> SchemaParameter THole (Ref RefStatic name) (fromCT environment)
+  CCallback (CClosure binders body []) environment ->
+    case traverse (const Nothing) (abstract (`elemIndex` binders) (fromCT body)) of
+      Just closedCode -> SchemaPacked (map Hint binders) closedCode (fromCT environment)
+      Nothing -> Hole
+  CCallback {} -> Hole
+  CClosure binders body captures ->
+    case traverse (const Nothing) (abstract (`elemIndex` binders) (fromCT body)) of
+      Just closedCode -> PredicatePacked (map Hint binders) closedCode (map fromCT captures)
+      Nothing -> Hole
 
 {- |
 A membership predicate: a symbol, with the parameters of its schema, the

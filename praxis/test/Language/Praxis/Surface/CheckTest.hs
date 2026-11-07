@@ -724,7 +724,7 @@ checkTests =
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
         mapM_
           (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls))
-          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64]), ("bad-proof", [71, 72]), ("bad-implicit", [78, 79]), ("extra-implicit", [82, 83]), ("kind-implicit", [86, 87]), ("Dup", [90, 91]), ("Both", [94, 95])]
+          [("impossible", [13, 14]), ("tail-zero", [17, 18]), ("nil-any", [21, 22]), ("head-any", [25, 26]), ("never", [29, 30, 31]), ("Box", [34, 35, 36]), ("Expr", [39, 40]), ("bad-type", [43, 44]), ("length-any", [55, 56]), ("Lost", [59, 60]), ("bad-kind", [63, 64]), ("bad-proof", [71, 72]), ("bad-implicit", [78, 79]), ("extra-implicit", [82, 83]), ("kind-implicit", [86, 87]), ("Dup", [90, 91]), ("Everywhere", [94, 95])]
         -- A clash names the signature's value, not its position.
         assertBool "the clash of never names n" (any ("S n is a successor, and 0 is not" `T.isInfixOf`) [m | Report _ SevError m <- checkedReports c])
         assertBool "fine is certified" ("GadtBad.fine.#index" `elem` checkedTheorems c)
@@ -739,6 +739,23 @@ checkTests =
         -- Building values: each introduction takes the indices of the premises, found from the function's own.
         let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_GadtPremises_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["detach", "step"]
+    , testCase "a constructor's precondition joins, negates, implies or quantifies boundedly: the membership checks its code, a pattern names it, and building gives it as an obligation" $ do
+        c <- checkFile "test/data/gadt-props.px"
+        errors c @?= []
+        -- The code of each precondition is a conjunct of the membership predicate: the connectives on codes, and the schemas the bounded quantifiers search with.
+        let predicate name = [l | l <- checkedCore c, ("u_GadtProps_s" <> name <> "_sis ") `T.isPrefixOf` l]
+        assertBool "Both's predicate checks a conjunction" (any ("conj" `T.isInfixOf`) (predicate "Both"))
+        assertBool "Small's predicate checks a disjunction" (any ("disj" `T.isInfixOf`) (predicate "Small"))
+        assertBool "NonZero's predicate checks a negation" (any ("imp" `T.isInfixOf`) (predicate "NonZero"))
+        assertBool "AllBelow's predicate checks a bounded universal" (any ("holdsBelow" `T.isInfixOf`) (predicate "AllBelow"))
+        assertBool "SomeBelow's predicate checks a bounded existential" (any ("(mu " `T.isInfixOf`) (predicate "SomeBelow"))
+        assertBool "Short's predicate checks a precondition at a recovered index" (any (\l -> "disj" `T.isInfixOf` l && "u_GadtProps_sVec_s_x23_idx" `T.isInfixOf` l) (predicate "Short"))
+        -- Building a value gives its precondition as an obligation, proved by the tactics given.
+        let obligationsOf f = [n | n <- checkedTheorems c, ("GadtProps." <> f <> ".#obligation") `T.isPrefixOf` n]
+        mapM_ (\f -> assertBool ("the obligation of " <> T.unpack f) (not (null (obligationsOf f)))) ["both-one", "small-zero", "small-one", "guarded-zero", "all-below-two", "some-below", "short-nil"]
+        -- The membership of every result: of a value built, its precondition by the obligation; of one repacked, by the hypothesis the pattern names; of one taking a proof, by that hypothesis.
+        let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_GadtProps_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["both_done", "both_dcopy", "small_dzero", "small_done", "small_dcopy", "non_dzero", "non_dzero_dcopy", "positive", "positive_dcopy", "guarded_dzero", "guarded_dcopy", "all_dbelow_dtwo", "all_dbelow_dcopy", "some_dbelow", "some_dbelow_dcopy", "grid_dcopy", "short_dnil", "short_dcopy"]
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
         c <- checkFile "test/data/nat.px"
         errors c @?= []

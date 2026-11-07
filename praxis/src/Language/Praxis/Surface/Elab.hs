@@ -779,10 +779,9 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
         proofScope = scopeFields {tsValues = [(v, i) | (v, i@(IxParam pos)) <- tsValues scopeFields, pos < available]}
         ctx = [(v, (pos, ty)) | (v, IxParam pos) <- tsValues proofScope, Just ty <- [lookup v (tsValueTys proofScope)]]
     (p, needed) <- runTCWithRequirements (elabProp env {envScope = proofScope} [] ctx t)
-    -- The membership predicate checks it as it checks an equation of indices: an equation, or a comparison, which is one.
-    case stripLocations p of
-      Rel r _ _ | r /= RelNe -> pure ()
-      _ -> Left (ElabError (location t) (what <> ": a precondition of a constructor is an equation or a comparison, for now"))
+    -- The membership predicate checks it as it checks an equation of indices, by the code of the proposition: a
+    -- decidable one, every quantifier in it bounded.
+    either (\why -> Left (ElabError (location t) (what <> ": a precondition of a constructor is a proposition the membership of its type decides: an equation, a comparison, connectives, and quantifiers with a bound; this one has " <> why))) pure (boundedProposition p)
     pure ((a, toScope (fmap B p)), needed)
   let proofs = map fst checkedProofs
       needed = foldMap snd checkedProofs
@@ -2182,7 +2181,9 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       boundVar v
         | Just i <- T.stripPrefix "$" v >>= readMaybe . T.unpack = valueExpr i
         | v == "?" = Nothing
-        | otherwise = (\i -> (Var i, Set.empty)) <$> varIndex v
+        | Just i <- varIndex v = Just (Var i, Set.empty)
+        -- An implicit argument recovered from a field, named in the pattern: the index function at the field.
+        | otherwise = indexTermInWithDependencies envBody namedContext (IxVar v)
       ownRecorded = [(h, p, used) | (Just h, (_, prop)) <- zip proofNames (funProofs info), Just (p, used) <- [ownProp prop]] <> [(h, p, used) | (Just h, q) <- boundProofs, Just (p, used) <- [boundProp q]]
       own = [(h, p) | (h, p, _) <- ownRecorded]
       contextRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (foldMap (\(_, _, used) -> used) ownRecorded))

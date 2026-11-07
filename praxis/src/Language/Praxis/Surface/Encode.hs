@@ -25,6 +25,13 @@ indexed type, the equations of that type's indices at the entry
 ('ctorIndexEquations').  It is therefore defined after the index functions,
 which come after the codes: 'encodedCodes', with the lemmas about them, then
 the index functions, then 'encodedPredicate', with the lemmas about it.
+After those equations it checks the constructor's preconditions, the
+propositions of its proofs, which its code does not store, each by its code
+('ctorPropositions'): a proposition every quantifier of which is bounded is
+decided by a primitive recursive function of its terms, and the core's
+@reify@ and @reflect@ pass between it and the truth of its code.  The
+introduction takes the proposition as a hypothesis, and the inversion gives
+it back, so that a clause's pattern may name the proof as a hypothesis.
 
 The lemmas about the predicate are its unfolding, the introduction of each
 constructor, @C.#intro@, the inversion, @T.#inversion@, and the induction
@@ -51,12 +58,13 @@ module Language.Praxis.Surface.Encode (
   validateEncoding,
   paramName,
 
-  -- * Equations of indices
+  -- * Equations of indices and preconditions
   ctorIndexEquations,
   ctorPropositions,
   position,
   positionVar,
   atPositions,
+  propositionAt,
 
   -- * Names of the generated lemmas
   ctorLemma,
@@ -69,16 +77,16 @@ module Language.Praxis.Surface.Encode (
 ) where
 
 import Bound (Var (..), fromScope)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Data.List (nub, sort)
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import Data.Maybe (catMaybes, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Builder.Linear (Builder, fromDec, fromText, runBuilder)
 import Data.Void (absurd)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Env
-import Language.Praxis.Surface.Mangle (mangleGlobal)
+import Language.Praxis.Surface.Mangle (mangleGlobal, mangleVariable)
 import Language.Praxis.Surface.Syntax qualified as S
 import Language.Praxis.Surface.Syntax.Raw (segmentRaw)
 import Language.Praxis.Surface.Types (Ix (..), Kind (..), Ty (..), normIx)
@@ -97,9 +105,9 @@ data Encoded = Encoded
   , encodedMembers :: ![(Text, [(Int, FieldPred)])]
   -- ^ for each constructor, by its core name, the fields whose membership its branch of the predicate checks, with their predicates
   , encodedIndexEquations :: ![(Text, [(CT, CT)])]
-  -- ^ for each constructor, by its core name, the equations of indices its branch checks after those, over the positions of its code, then its preconditions
-  , encodedProps :: ![(Text, [(CT, CT)])]
-  -- ^ for each constructor, by its core name, its preconditions, the last of its equations: the propositions of its proofs, as equations over the positions of its code
+  -- ^ for each constructor, by its core name, the equations of indices its branch checks after those, over the positions of its code
+  , encodedProps :: ![(Text, [S.Expr Text])]
+  -- ^ for each constructor, by its core name, its preconditions, which its branch checks after the equations of indices: the propositions of its proofs, over the positions of its code
   , encodedParams :: ![Int]
   -- ^ the parameters of the type whose predicates its own takes, those its fields' memberships use
   , encodedVariadic :: !Bool
@@ -255,28 +263,37 @@ entryTerm indexFns c e = case teRole <$> listToMaybe (drop e (constructorTele (c
   Nothing -> Nothing
 
 {- |
-The preconditions of a constructor, the propositions of its proofs, as the
-equations the core states them by, over the positions of its code: the
-membership predicate checks them as it checks the equations of indices,
-after those, the introduction takes them as hypotheses, and the inversion
-gives them.  A comparison is the equation of its truth, @lt s t = 1@.  A proposition mentioning an entry the code does not determine is
-rejected by 'validateEncoding' before this encoding is admitted.
+The preconditions of a constructor, the propositions of its proofs, over the
+positions of its code, their terms the entries of its telescope as
+'entryTerm' gives them; and the code of each ('propCode'), which the
+membership predicate checks as it checks an equation of indices, after
+those.  The introduction takes the proposition as a hypothesis and proves
+the truth of its code, by the core's @reify@; the inversion gives the
+proposition back from that truth, by @reflect@.  A proposition mentioning
+an entry the code does not determine, or quantifying without a bound, has no
+code, with why: 'validateEncoding' then refuses the encoding.
 -}
-ctorPropositions :: (Text -> Maybe [Text]) -> CtorInfo -> [(CT, CT)]
-ctorPropositions indexFns c = case ctorSignature c of
-  g ->
-    let term = termCT \case
-          B e -> fromMaybe (CVar "?") (entryTerm indexFns c e)
-          F v -> absurd v
-        holds f a b = (\x y -> (CSym f [x, y], CNum 1)) <$> term a <*> term b
-        equation p = case S.stripLocations (fromScope p) of
-          S.Rel S.RelEq a b -> (,) <$> term a <*> term b
-          S.Rel S.RelLt a b -> holds "lt" a b
-          S.Rel S.RelLe a b -> holds "le" a b
-          S.Rel S.RelGt a b -> holds "lt" b a
-          S.Rel S.RelGe a b -> holds "le" b a
-          _ -> Left "a precondition which is no equation or comparison"
-     in [(l, r) | (_, p) <- constructorProofs g, Right (l, r) <- [equation p], "?" `notElem` varsCT (CSym "eq" [l, r])]
+ctorPropositions :: (Text -> Maybe [Text]) -> CtorInfo -> [Either String (S.Expr Text, CT)]
+ctorPropositions indexFns c = [proposition p | (_, p) <- constructorProofs (ctorSignature c)]
+  where
+    entry e = maybe (S.Var "?") fromCT (entryTerm indexFns c e)
+    proposition p = do
+      let prop =
+            fromScope p >>= \case
+              B e -> entry e
+              F v -> absurd v
+      S.boundedProposition prop
+      when ("?" `elem` prop) $ Left "it mentions an entry the code does not determine"
+      code <- propCode CVar prop
+      pure (prop, code)
+
+-- | A proposition over the positions of a code, at the terms the function gives them, as 'atPositions' takes a term there.
+propositionAt :: (Int -> CT) -> S.Expr Text -> S.Expr Text
+propositionAt at prop = prop >>= \v -> maybe (S.Var v) (fromCT . at) (position v)
+
+-- | The formula of a precondition, as the generated lemmas state it; one 'ctorPropositions' admitted always has one.
+propositionText :: S.Expr Text -> Builder
+propositionText prop = either (\why -> error ("internal: a precondition admitted has no formula: " <> why)) id (propText (\h -> "b_" <> mangleVariable h) CVar prop)
 
 {- | Refuse an encoding which would silently omit a logical condition. A
 missing membership predicate is an explicitly weaker representation; a
@@ -295,8 +312,9 @@ validateEncoding indexFns d = forM_ (dataCtors d) $ \c -> do
         IxSchema _ -> True
         IxPartial _ _ _ xs -> all knownIndex xs
         _ -> False
-  unless (length (ctorPropositions indexFns c) == length (constructorProofs signature)) $
-    failure "a proof field's proposition cannot be represented by the PRA membership predicate"
+  forM_ (ctorPropositions indexFns c) $ \case
+    Left why -> failure ("a proof field's proposition cannot be checked by the PRA membership predicate: " <> why)
+    Right _ -> pure ()
   forM_ (zip [0 ..] (constructorTele signature)) $ \(i, entry) -> case teType entry of
     TData name _ indices@(_ : _) -> do
       unless (maybe False ((== length indices) . length) (indexFns name)) $
@@ -305,9 +323,9 @@ validateEncoding indexFns d = forM_ (dataCtors d) $ \c -> do
         failure "a field's indices are not determined by its numerical representation"
     _ -> pure ()
 
--- | The equations of indices a constructor's branch checks, at a code: each as the code of its truth, @s == t@.
-indexEquationCodes :: (CtorInfo -> [(CT, CT)]) -> CtorInfo -> CT -> [CT]
-indexEquationCodes eqsOf c k = [CSym "eq" [atPositions (`fieldT` k) l, atPositions (`fieldT` k) r] | (l, r) <- eqsOf c]
+-- | The codes a constructor's branch checks after the memberships of its fields, at a code: those given over the positions of its code, at the fields of the code.
+conjunctCodes :: (CtorInfo -> [CT]) -> CtorInfo -> CT -> [CT]
+conjunctCodes codesOf c k = [atPositions (`fieldT` k) code | code <- codesOf c]
 
 -- | The core name of a lemma about a constructor: @C.#tag@, @C.#field-1@, …
 ctorLemma :: CtorInfo -> Text -> Text
@@ -350,17 +368,18 @@ var j = CVar ("v_" <> T.pack (show j))
 {- |
 The membership predicate's step, over @k@ and its history @h@: the dispatch
 on the tag, each branch the exact shape, the memberships of the fields, and
-the equations of indices given for the constructor.  The predicates of the
-data types already encoded are given by name.
+the codes given for the constructor over the positions of its code — the
+equations of indices of its entries, then its preconditions.  The predicates
+of the data types already encoded are given by name.
 -}
-membershipBody :: (Text -> Maybe (Text, [Int])) -> (CtorInfo -> [(CT, CT)]) -> DataInfo -> CT -> CT -> CT
+membershipBody :: (Text -> Maybe (Text, [Int])) -> (CtorInfo -> [CT]) -> DataInfo -> CT -> CT -> CT
 membershipBody = membershipBodyWith []
 
 -- | 'membershipBody', the terms given after each field where its parameter's predicate is applied or passed on.
-membershipBodyWith :: [CT] -> (Text -> Maybe (Text, [Int])) -> (CtorInfo -> [(CT, CT)]) -> DataInfo -> CT -> CT -> CT
-membershipBodyWith extras known eqsOf d k h = ifChain (hdT k) (map branch (dataCtors d))
+membershipBodyWith :: [CT] -> (Text -> Maybe (Text, [Int])) -> (CtorInfo -> [CT]) -> DataInfo -> CT -> CT -> CT
+membershipBodyWith extras known codesOf d k h = ifChain (hdT k) (map branch (dataCtors d))
   where
-    branch c = case map snd (fieldMembershipsWith extras known d c k h) <> indexEquationCodes eqsOf c k of
+    branch c = case map snd (fieldMembershipsWith extras known d c k h) <> conjunctCodes codesOf c k of
       [] -> shape c
       ms -> CSym "conj" [shape c, conjs ms]
     shape c = CSym "eq" [k, CSym (ctorCore c) [fieldT j k | j <- [0 .. length (ctorFields c) - 1]]]
@@ -386,12 +405,12 @@ fieldMembershipsWith extras known d c k h = [(j, code j fp) | (j, fp) <- fieldPr
       fp -> fieldCodeWith extras fp (fieldT j k)
 
 -- | The step function of the membership predicate, as a schema parameter.
-membershipLambda :: (Text -> Maybe (Text, [Int])) -> (CtorInfo -> [(CT, CT)]) -> DataInfo -> Text
+membershipLambda :: (Text -> Maybe (Text, [Int])) -> (CtorInfo -> [CT]) -> DataInfo -> Text
 membershipLambda = membershipLambdaWith []
 
 -- | 'membershipLambda', the terms given after each field where its parameter's predicate is applied or passed on.
-membershipLambdaWith :: [CT] -> (Text -> Maybe (Text, [Int])) -> (CtorInfo -> [(CT, CT)]) -> DataInfo -> Text
-membershipLambdaWith extras known eqsOf d = runBuilder ("{λ k h. " <> render (membershipBodyWith extras known eqsOf d (CVar "k") (CVar "h")) <> "}")
+membershipLambdaWith :: [CT] -> (Text -> Maybe (Text, [Int])) -> (CtorInfo -> [CT]) -> DataInfo -> Text
+membershipLambdaWith extras known codesOf d = runBuilder ("{λ k h. " <> render (membershipBodyWith extras known codesOf d (CVar "k") (CVar "h")) <> "}")
 
 {- |
 The definitions and lemmas of a data type, given the membership predicates
@@ -415,9 +434,12 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
     isCore = dataIs d
     params = predicateParams known d
     fieldsOf = [fieldPreds known d params c | c <- ctors]
-    -- The equations a constructor's branch checks: of its entries' indices, then its preconditions, alike.
-    eqsOf c = ctorIndexEquations indexFns c <> ctorPropositions indexFns c
-    propositions = [(ctorCore c, ctorPropositions indexFns c) | c <- ctors]
+    -- The equations of indices of a constructor's entries, and its preconditions with their codes, over the positions of its code.
+    eqsOf c = ctorIndexEquations indexFns c
+    propsOf c = [p | Right p <- ctorPropositions indexFns c]
+    -- The codes a constructor's branch checks after the memberships: each equation of indices as the code of its truth, then the codes of its preconditions.
+    codesOf c = [CSym "eq" [l, r] | (l, r) <- eqsOf c] <> map snd (propsOf c)
+    propositions = [(ctorCore c, map fst (propsOf c)) | c <- ctors]
     variadic = case params of
       [i] -> any (any ((== FieldParam i) . snd)) fieldsOf && all (all (passes i . snd)) fieldsOf
       _ -> False
@@ -459,7 +481,7 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
                     <> "\nby "
                     <> proof
                 )
-    lam = membershipLambda known eqsOf d
+    lam = membershipLambda known codesOf d
     -- An equation's left side is the name and its arguments, unparenthesised.
     codes =
       [ runBuilder (unwordsB (map fromText (ctorCore c : fields)) <> " = " <> render (consSeq (toInteger (ctorIndex c)) (map CVar fields)))
@@ -471,7 +493,7 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
           ( fromText isCore
               <> paramsHead
               <> (if variadic then " n $[ys] = " else " n = ")
-              <> if null ctors then "0" else "cvrec " <> fromText (if variadic then membershipLambdaWith [CVar "$[ys]"] known eqsOf d else lam) <> " n"
+              <> if null ctors then "0" else "cvrec " <> fromText (if variadic then membershipLambdaWith [CVar "$[ys]"] known codesOf d else lam) <> " n"
           )
       ]
 
@@ -480,13 +502,14 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
     members = [(ctorCore c, fieldPreds known d params c) | c <- ctors]
     indexEquations = [(ctorCore c, eqsOf c) | c <- ctors]
 
-    {- The memberships of its fields, and the equations of indices of its
-    entries |- 0 < T.is (C x̄): the code of every value is a member, the
-    premise of the adequacy of statements.  The predicate unfolds at the code
-    to the branch of C, whose shape conjunct is eqRefl once the fields are
-    rewritten to the variables, whose membership conjuncts are the
-    hypotheses, through the history for the fields of T itself, and whose
-    equations are the hypotheses once the fields are rewritten. -}
+    {- The memberships of its fields, the equations of indices of its
+    entries, and its preconditions |- 0 < T.is (C x̄): the code of every
+    value is a member, the premise of the adequacy of statements.  The
+    predicate unfolds at the code to the branch of C, whose shape conjunct is
+    eqRefl once the fields are rewritten to the variables, whose membership
+    conjuncts are the hypotheses, through the history for the fields of T
+    itself, and whose equations and preconditions are the truths of the
+    hypotheses once the fields are rewritten. -}
     intro c =
       let k = length (ctorFields c)
           vs = map var [0 .. k - 1]
@@ -494,7 +517,8 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
           h = histAt' applied
           mems = fieldMemberships known d c applied h
           eqs = eqsOf c
-          dispatch = membershipBody known eqsOf d applied h
+          props = propsOf c
+          dispatch = membershipBody known codesOf d applied h
           tagged = replaceCT (\u -> if u == hdT applied then Just (CNum (fromIntegral (ctorIndex c))) else Nothing) dispatch
           br = nth (ctorIndex c) dispatch
           shapeCode = CSym "eq" [applied, CSym (ctorCore c) [fieldT j applied | j <- [0 .. k - 1]]]
@@ -590,10 +614,10 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
                 <> show' idx
                 <> " }; "
             _ -> error "internal: a membership conjunct of another form"
-          -- An equation of indices: its conjunct, the fields rewritten to the variables position by position, is its hypothesis's truth.
-          equation idx (l, r) =
-            let code0 = CSym "eq" [atPositions (`fieldT` applied) l, atPositions (`fieldT` applied) r]
-                ps = positions (CSym "eq" [l, r])
+          -- A conjunct checked after the memberships, its code at the fields: the fields rewritten to the variables position by position, then its truth at the variables by the proof given.
+          conjunct idx code final =
+            let code0 = atPositions (`fieldT` applied) code
+                ps = positions code
                 steps = scanl (\s p -> replaceCT (\u -> if u == fieldT p applied then Just (vs !! p) else Nothing) s) code0 ps
              in "have M"
                   <> show' idx
@@ -602,10 +626,18 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
                   <> " = 1) { calc "
                   <> lt0 code0
                   <> mconcat [" = " <> lt0 s <> " by cong " <> fieldLemma' p | (p, s) <- zip ps (drop 1 steps)]
-                  <> " = 1 by exact eqIntro on H"
-                  <> show' idx
+                  <> " = 1 by "
+                  <> final
                   <> " }; "
-          codes' = map snd mems <> indexEquationCodes eqsOf c applied
+          -- An equation of indices: the truth of its code is its hypothesis's, by eqIntro.
+          equation idx (l, r) = conjunct idx (CSym "eq" [l, r]) ("exact eqIntro on H" <> show' idx)
+          -- A precondition: the truth of its code from the hypothesis stating it, by reify where the code reads as the formula; where the hypothesis is that truth, as it stands.
+          proposition idx (_, code) =
+            conjunct idx code $
+              if codeIsFormula code
+                then "(reify H" <> show' idx <> " as R" <> show' idx <> "; exact R" <> show' idx <> ")"
+                else "exact H" <> show' idx
+          codes' = map snd mems <> conjunctCodes codesOf c applied
           conjs = \case
             [m] -> m
             m : ms -> CSym "conj" [m, conjs ms]
@@ -634,9 +666,9 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
           , lemma
               name
               vs
-              ([lt0eq1 (onField code (vs !! j)) | (j, code) <- mems] <> [eqn (atPositions (vs !!) l) (atPositions (vs !!) r) | (l, r) <- eqs])
+              ([lt0eq1 (onField code (vs !! j)) | (j, code) <- mems] <> [eqn (atPositions (vs !!) l) (atPositions (vs !!) r) | (l, r) <- eqs] <> [propositionText (propositionAt (vs !!) prop) | (prop, _) <- props])
               (lt0eq1 isApplied)
-              (unfold <> shape <> mconcat (zipWith member [1 ..] mems) <> mconcat (zipWith equation [length mems + 1 ..] eqs) <> conclude)
+              (unfold <> shape <> mconcat (zipWith member [1 ..] mems) <> mconcat (zipWith equation [length mems + 1 ..] eqs) <> mconcat (zipWith proposition [length mems + length eqs + 1 ..] props) <> conclude)
           )
 
     ctorLemmas c =
@@ -722,25 +754,26 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
           -- Reuse the checked schema: normalizing the whole instantiated
           -- predicate can exhaust conversion fuel for large GADTs.
           [ (dataLemma d "is-def", lemma (dataLemma d "is-def") [n] [] (eqn (isAt n) (cvrecAt n)) "refl")
-          , (dataLemma d "is-beta", lemma (dataLemma d "is-beta") [n] [] (eqn (cvrecAt n) (membershipBody known eqsOf d n (histAt' n))) "exact cvrecUnfold")
+          , (dataLemma d "is-beta", lemma (dataLemma d "is-beta") [n] [] (eqn (cvrecAt n) (membershipBody known codesOf d n (histAt' n))) "exact cvrecUnfold")
           ]
 
-    -- 0 < T.is t |- the disjunction of the shapes t may have, with the memberships of their fields and the equations of their indices.
+    -- 0 < T.is t |- the disjunction of the shapes t may have, with the memberships of their fields, the equations of their indices and their preconditions.
     inversion = (dataLemma d "inversion", lemma (dataLemma d "inversion") [t] [lt0eq1 (isAt t)] (disjunction (map (disjunctAt t) ctors)) script)
-    -- The disjunct of a constructor at a code: the code is the constructor at its fields, which are members, and the equations of indices hold.
+    -- The disjunct of a constructor at a code: the code is the constructor at its fields, which are members, and the equations of indices and the preconditions hold.
     disjunctAt x c =
       let fs = [fieldT j x | j <- [0 .. length (ctorFields c) - 1]]
           eqT = "(" <> render x <> " = " <> render (CSym (ctorCore c) fs) <> ")"
           mems = [lt0eq1 (onField m (fieldT j x)) | (j, m) <- fieldMemberships known d c x (histAt' x)]
           eqs = [eqn l r | (l, r) <- indexEquationsAt c x]
-       in conjunction (eqT : mems <> eqs)
+          props = [propositionText (propositionAt (`fieldT` x) prop) | (prop, _) <- propsOf c]
+       in conjunction (eqT : mems <> eqs <> props)
 
     {- The induction principle, 0 < T.is t, Γ |- 0 < q(t) for an abstract
     function q of the code, the motive, with a premise for each constructor
     over its fields as variables of its own: under the memberships of the
-    fields and the equations of indices the constructor's introduction takes,
-    and the induction hypotheses, the motive at the fields of T itself, the
-    motive holds at the constructor.  It is course-of-values induction,
+    fields, the equations of indices and the preconditions the constructor's
+    introduction takes, and the induction hypotheses, the motive at the
+    fields of T itself, the motive holds at the constructor.  It is course-of-values induction,
     cvInduction, on imp (T.is n) (q n): in the step, the inversion splits the
     code on its constructors, and the induction hypothesis at a field is the
     instance in the history, belowElim, at the field's membership, the field
@@ -761,6 +794,7 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
           facts =
             [lt0eq1 (onField code (vs !! j)) | (j, code) <- fieldMemberships known d c applied (histAt' applied)]
               <> [eqn (atPositions (vs !!) l) (atPositions (vs !!) r) | (l, r) <- eqsOf c]
+              <> [propositionText (propositionAt (vs !!) prop) | (prop, _) <- propsOf c]
           ihs = [truthQ (vs !! j) | j <- recursiveFields c]
        in " ("
             <> premiseName c
@@ -813,14 +847,14 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
       [b] -> b h
       b : bs -> "DisjL on " <> h <> " as " <> h <> "a " <> h <> "b { " <> b (h <> "a") <> " } { " <> splitDisj (h <> "b") bs <> " }"
     {- A branch, from its disjunct: the equation of the code, Km, then the
-    memberships and the equations of indices, K1 … in order; the induction
-    hypotheses of the fields of T; the premise at the fields; and the motive
-    at the code by the equation. -}
+    memberships, the equations of indices and the preconditions, K1 … in
+    order; the induction hypotheses of the fields of T; the premise at the
+    fields; and the motive at the code by the equation. -}
     inductionBranch c h =
       let fs = [fieldT j cv | j <- [0 .. length (ctorFields c) - 1]]
           applied = CSym (ctorCore c) fs
           mems = fieldMemberships known d c cv (histAt' cv)
-          conjuncts = length mems + length (eqsOf c)
+          conjuncts = length mems + length (eqsOf c) + length (propsOf c)
           splitConj = case conjuncts of
             0 -> "have Km: (" <> render cv <> " = " <> render applied <> ") { exact " <> h <> " }; "
             _ -> "ConjL on " <> h <> " as Km " <> conjNames conjuncts <> "; "
@@ -891,10 +925,10 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
       x : xs -> "(" <> x <> " /\\ " <> conjunction xs <> ")"
       [] -> "(0 = 0)"
 
-    body = membershipBody known eqsOf d t (histAt' t)
+    body = membershipBody known codesOf d t (histAt' t)
     rest i = foldr (\(j, b) acc -> CSym "ifte" [CSym "eq" [hdT t, CNum j], b, acc]) (CNum 0) (drop i (zip [0 ..] (branches t)))
     branches x = [branchOf c x | c <- ctors]
-    branchOf c x = case membershipBody known eqsOf d x (histAt' x) of
+    branchOf c x = case membershipBody known codesOf d x (histAt' x) of
       b -> nth (ctorIndex c) b
     -- The branch of a dispatch at an index.
     nth i = \case
@@ -978,11 +1012,12 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
                 <> " by exact collapseT }; "
                 <> extract (ctors !! i) br
                 <> " }"
-    -- From 0 < the branch of c: the equation, the memberships and the equations of indices, then the disjunct of c.
+    -- From 0 < the branch of c: the equation, the memberships, the equations of indices and the preconditions, then the disjunct of c.
     extract c br =
       let mems = fieldMemberships known d c t (histAt' t)
           eqs = indexEquationsAt c t
-          codes' = map snd mems <> [CSym "eq" [l, r] | (l, r) <- eqs]
+          props = propsOf c
+          codes' = map snd mems <> conjunctCodes codesOf c t
           ctorApplied = CSym (ctorCore c) [fieldT j t | j <- [0 .. length (ctorFields c) - 1]]
           eqCode = CSym "eq" [t, ctorApplied]
           start = "have P: ((lt 0 " <> render br <> ") = 1) { calc (lt 0 " <> render br <> ") = (lt 0 " <> isT <> ") by cong W = 1 by exact H1 }; "
@@ -1022,7 +1057,7 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
                 <> h
                 <> " }; "
                 <> splitConj ("J" <> show' idx) more (idx + 1)
-          memProofs = mconcat (zipWith memProof [1 :: Int ..] mems) <> mconcat (zipWith eqProof [length mems + 1 ..] eqs)
+          memProofs = mconcat (zipWith memProof [1 :: Int ..] mems) <> mconcat (zipWith eqProof [length mems + 1 ..] eqs) <> mconcat (zipWith propProof [length mems + length eqs + 1 ..] props)
           memProof idx (j, code) = case code of
             CSym "at" [hh, _, f] ->
               "have Lf"
@@ -1071,6 +1106,10 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
             _ -> "have M" <> show' idx <> ": " <> lt0eq1 code <> " { exact K" <> show' idx <> " }; "
           -- An equation of indices, from the truth of its code.
           eqProof idx (l, r) = "have M" <> show' idx <> ": " <> eqn l r <> " { exact eqElim on K" <> show' idx <> " }; "
+          -- A precondition, from the truth of its code: the formula the code reads as, by reflect; or that truth as it stands.
+          propProof idx (prop, code)
+            | codeIsFormula code = "reflect K" <> show' idx <> " as M" <> show' idx <> "; "
+            | otherwise = "have M" <> show' idx <> ": " <> propositionText (propositionAt (`fieldT` t) prop) <> " { exact K" <> show' idx <> " }; "
           conclude = case codes' of
             [] -> "exact E"
             _ -> conjR ("E" : ["M" <> show' idx | idx <- [1 .. length codes']])

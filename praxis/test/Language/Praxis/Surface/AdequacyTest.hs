@@ -65,7 +65,7 @@ import Language.Praxis.PRA.Signature (Signature, signatureKernelEnv)
 import Language.Praxis.PRA.Syntax.Parser (parseTerm, plainScope)
 import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..), checkSource, headerName)
 import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
-import Language.Praxis.Surface.CoreText (CT (..), isParameter)
+import Language.Praxis.Surface.CoreText (CT (..), isParameter, termCT)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule, fcBody)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
@@ -165,6 +165,8 @@ data Loaded = Loaded
   -- ^ the membership predicates, by the qualified names of the data types, with the parameters whose predicates they take
   , ldIndexEqs :: !(Map Text [(CT, CT)])
   -- ^ the equations of indices each constructor's branch of its type's membership checks, by its core name, over the positions of its code
+  , ldProps :: !(Map Text [Expr Text])
+  -- ^ the preconditions each constructor's branch checks after those, by its core name, over the positions of its code
   , ldUnfoldings :: !(Map Text [(CT, CT)])
   -- ^ the sides of the unfolding lemmas of each function, by its core name
   , ldParameterValues :: !(Maybe [Value])
@@ -206,6 +208,7 @@ load path = do
       , ldPredicates = Map.fromList [(dataIs d, d) | d <- datas]
       , ldMembership = membership
       , ldIndexEqs = Map.fromList (concatMap encodedIndexEquations encodings)
+      , ldProps = Map.fromList (concatMap encodedProps encodings)
       , ldUnfoldings = Map.fromList unfoldings
       , ldParameterValues = Nothing
       , ldBuiltin = builtin
@@ -475,6 +478,51 @@ truth ld = \case
           Exists -> any at range
   e -> error ("not a proposition of the fragment: " <> show (fmap (const ()) e))
 
+{- |
+The truth of a surface proposition over core variables, its terms lowered
+to the core and evaluated there, by the assignment given: what 'truth' is
+for a proposition over values.  Independent of the codes the encoding gives
+propositions, so that a membership checked by them is compared with the
+proposition as the surface reads it.
+-}
+truthCore :: Loaded -> Map Text Code -> Expr Text -> Bool
+truthCore ld env = go
+  where
+    go = \case
+      At _ e -> go e
+      Rel r a b ->
+        let x = term a
+            y = term b
+         in case r of
+              RelEq -> x == y
+              RelNe -> x /= y
+              RelLt -> numeral x < numeral y
+              RelLe -> numeral x <= numeral y
+              RelGt -> numeral x > numeral y
+              RelGe -> numeral x >= numeral y
+      Conn c a b -> case c of
+        And -> go a && go b
+        Or -> go a || go b
+        Iff -> go a == go b
+      Arrow a b -> not (go a) || go b
+      Not a -> not (go a)
+      Top -> True
+      Bottom -> False
+      Quant q _ (Just (rel, bound)) _ body ->
+        let n = numeral (term bound)
+            range = case rel of
+              Below -> takeWhile (< n) [0 ..]
+              AtMost -> [0 .. n]
+            at i = go (instantiate1 (Nat i) body)
+         in case q of
+              Forall -> all at range
+              Exists -> any at range
+      e -> error ("not a proposition of the fragment: " <> show (fmap (const ()) e))
+    term e = either (\why -> error ("a term of a precondition does not lower: " <> why)) (evalCore ld env) (termCT CVar e)
+    numeral = \case
+      CN n -> n
+      c -> error ("a code where a numeral is expected: " <> show c)
+
 -- | A proposition's top-level implications, as hypotheses and a conclusion.
 implications :: Expr a -> ([Expr a], Expr a)
 implications = \case
@@ -611,18 +659,21 @@ matchCodes ps vs
 {- |
 Shape membership, as the declaration of a data type states it: a
 constructor of the type, every field of the type itself, or of a data type
-encoded before it, a member in turn, and the equations of indices of the
-constructor's entries holding at the fields of the code.
+encoded before it, a member in turn, the equations of indices of the
+constructor's entries holding at the fields of the code, and its
+preconditions true of them.
 -}
 member :: Loaded -> DataInfo -> [Code -> Bool] -> Code -> Bool
 member ld d predicates = \case
-  CK c fs | Just ci <- find ((== c) . ctorCore) (dataCtors d) -> length fs == length (ctorFields ci) && and (zipWith ok (ctorFields ci) fs) && all (indexed fs) (Map.findWithDefault [] c (ldIndexEqs ld))
+  CK c fs | Just ci <- find ((== c) . ctorCore) (dataCtors d) -> length fs == length (ctorFields ci) && and (zipWith ok (ctorFields ci) fs) && all (indexed fs) (Map.findWithDefault [] c (ldIndexEqs ld)) && all (holdsOf fs) (Map.findWithDefault [] c (ldProps ld))
   _ -> False
   where
-    -- An equation of indices, at the fields of a code by their positions.
-    indexed fs (l, r) =
-      let at = Map.fromList [("#" <> T.pack (show p), f) | (p, f) <- zip [0 :: Int ..] fs]
-       in evalCore ld at l == evalCore ld at r
+    -- The fields of a code, by their positions.
+    positionsOf fs = Map.fromList [("#" <> T.pack (show p), f) | (p, f) <- zip [0 :: Int ..] fs]
+    -- An equation of indices, at the fields of a code.
+    indexed fs (l, r) = evalCore ld (positionsOf fs) l == evalCore ld (positionsOf fs) r
+    -- A precondition, at the fields of a code: the truth of the proposition, its terms evaluated as the core does.
+    holdsOf fs = truthCore ld (positionsOf fs)
     self = renderQualName (dataQual d)
     positions = maybe [] snd (Map.lookup self (ldMembership ld))
     parameters = Map.fromList (zip positions predicates)
