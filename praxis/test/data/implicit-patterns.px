@@ -1,0 +1,54 @@
+module ImplicitPatterns where
+
+data Formula = Atom Nat | Bottom | Formula :=> Formula
+
+infixr 5 :=>
+
+-- Modus ponens stores its conclusion b in its code; its antecedent a is
+-- recovered from the index of x.
+data Pf (a : Formula) where
+  K : {a b : Formula} -> Pf (a :=> b :=> a)
+  S : {a b c : Formula} -> Pf ((a :=> b :=> c) :=> (a :=> b) :=> a :=> c)
+  (:@) : {a b : Formula} -> Pf (a :=> b) -> Pf a -> Pf b
+
+data Qf (a : Formula) where
+  K : {a b : Formula} -> Qf (a :=> b :=> a)
+  S : {a b c : Formula} -> Qf ((a :=> b :=> c) :=> (a :=> b) :=> a :=> c)
+  (:@) : {a b : Formula} -> Qf (a :=> b) -> Qf a -> Qf b
+
+infixl 9 :@
+
+-- The pattern leaves the implicit arguments of :@ unnamed. The stored
+-- conclusion is bound to a hidden variable, which the :@ built here stores.
+embed : Pf a -> Qf a
+embed (Pf.K {a} {b}) = Qf.K {a} {b}
+embed (Pf.S {a} {b} {c}) = Qf.S {a} {b} {c}
+embed (f :@ x) = embed f :@ embed x
+
+-- An implicit pattern _ for a stored argument is bound to a hidden variable too.
+copy : Pf a -> Pf a
+copy (Pf.K {a} {b}) = Pf.K {a} {b}
+copy (Pf.S {a} {b} {c}) = Pf.S {a} {b} {c}
+copy ((:@) {_} {_} f x) = copy f :@ copy x
+
+psize : Pf a -> Nat
+psize (Pf.K {a} {b}) = 1
+psize (Pf.S {a} {b} {c}) = 1
+psize (f :@ x) = S (psize f + psize x)
+
+qsize : Qf a -> Nat
+qsize (Qf.K {a} {b}) = 1
+qsize (Qf.S {a} {b} {c}) = 1
+qsize (f :@ x) = S (qsize f + qsize x)
+
+-- A calculation whose terms build :@ over the hidden conclusion.
+embed-size : (p : Pf a) -> qsize (embed p) ≡ psize p
+embed-size (Pf.K {a} {b}) = rfl
+embed-size (Pf.S {a} {b} {c}) = rfl
+embed-size (f :@ x) = calc
+  qsize (embed (f :@ x))
+  = qsize (embed f :@ embed x)
+  = S (qsize (embed f) + qsize (embed x))
+  = S (psize f + qsize (embed x)) := cong (embed-size f)
+  = S (psize f + psize x) := cong (embed-size x)
+  = psize (f :@ x)

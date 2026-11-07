@@ -108,7 +108,7 @@ proof values. `embed-size` proves by clauses that embedding preserves the
 size of a proof, with a calculation for modus ponens:
 
 ```text
-embed-size ((:@) {a} {b} f x) = calc
+embed-size (f :@ x) = calc
   classical-size (embed (f :@ x))
   = classical-size (embed f :@ embed x)
   = S (classical-size (embed f) + classical-size (embed x))

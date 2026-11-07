@@ -756,6 +756,12 @@ checkTests =
         -- The membership of every result: of a value built, its precondition by the obligation; of one repacked, by the hypothesis the pattern names; of one taking a proof, by that hypothesis.
         let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_GadtProps_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["both_done", "both_dcopy", "small_dzero", "small_done", "small_dcopy", "non_dzero", "non_dzero_dcopy", "positive", "positive_dcopy", "guarded_dzero", "guarded_dcopy", "all_dbelow_dtwo", "all_dbelow_dcopy", "some_dbelow", "some_dbelow_dcopy", "grid_dcopy", "short_dnil", "short_dcopy"]
+    , testCase "a pattern leaves a constructor's implicit arguments unnamed: a stored one is bound to a hidden variable, which the body builds with" $ do
+        c <- checkFile "test/data/implicit-patterns.px"
+        errors c @?= []
+        let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_ImplicitPatterns_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["embed", "copy"]
+        assertBool "embed-size did not certify" ("ImplicitPatterns.embed-size" `elem` checkedTheorems c)
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
         c <- checkFile "test/data/nat.px"
         errors c @?= []

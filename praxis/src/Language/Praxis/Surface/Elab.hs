@@ -2371,11 +2371,12 @@ patternsFrom env s0 pts = do
       [] -> R.noSpan
       ps@(p0 : _) -> R.spanning (location (snd p0)) (location (snd (last ps)))
 
--- | The variables of indices matching may solve: the value parameters of the signature, and the implicit arguments of the constructors matched.
+-- | The variables of indices matching may solve: the value parameters of the signature, the implicit arguments of the
+-- constructors matched, and the hidden variables bound for the stored ones no pattern names, which are such arguments too.
 flexibleKey :: Key -> Bool
 flexibleKey = \case
   KParam _ -> True
-  KVar v -> "#" `T.isPrefixOf` v
+  KVar v -> "#" `T.isPrefixOf` v || "\183" `T.isPrefixOf` v
 
 {- |
 A pattern against the type expected, the variables it binds, and what it
@@ -2497,7 +2498,21 @@ elabPattern env bound s expected le@(Located sp e) = case e of
         Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
         Located _ R.EWildcard -> pure Nothing
         Located psp _ -> failAt psp "a proof of a constructor is named by a variable or _: a proposition has no constructors"
-      let stored = [(pos, k, applyTy s1 (substParams typeArgs (mapIx inst (teType entry))), pat) | ((pos, entry), pat) <- zip implicitEntries implicit, Stored k <- [teRole entry]]
+      -- An implicit argument its code stores is bound to a variable: the one the pattern names, or else, when
+      -- matching leaves it unsolved or at a parameter the clause does not bind, a hidden one no source can name,
+      -- so that the body may use it as a value, as a constructor it builds needs its stored implicit arguments.
+      -- One matching solved is the value it was solved by; a recovered one needs no variable either: the index
+      -- function at its field gives it.
+      let hidden en = Located csp (R.EName (QName [] (Ident ("\183" <> teName en <> "@" <> T.pack (show line) <> ":" <> T.pack (show col)))))
+          unsolved en = case applyIx s1 (ghost en) of
+            IxVar v -> "#" `T.isPrefixOf` v
+            IxParam _ -> True
+            _ -> False
+          storedPattern en = \case
+            Just pat | Located _ (R.EName (QName [] (Ident _))) <- stripParen pat -> Just pat
+            _ | unsolved en -> Just (hidden en)
+            _ -> Nothing
+          stored = [(pos, k, applyTy s1 (substParams typeArgs (mapIx inst (teType entry))), pat) | ((pos, entry), given) <- zip implicitEntries (map Just implicit <> repeat Nothing), Stored k <- [teRole entry], Just pat <- [storedPattern entry given]]
           matchedFields = [(pos, k, ty, pat) | (pos, k, ty, pat) <- stored] <> [(pos, k, ty, pat) | (pos, (k, _), ty, pat) <- zip4 entries explicits fields valueArgs]
       -- Each field's pattern, and what it says the field is, which holds of its entry: the types of the fields
       -- after it and the indices of the result may mention it, as a named field, @(m : nat) ->@, is in scope there.
