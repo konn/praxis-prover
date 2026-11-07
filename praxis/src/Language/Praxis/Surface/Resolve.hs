@@ -68,7 +68,13 @@ solve policy db = go
         run = \case
           Refuse e -> Left e
           Reduce gs build -> build <$> traverse (go (depth - 1)) gs
+        -- The first step that succeeds, else the last one's failure. The
+        -- rest is looked at only when a step fails: a later step may be
+        -- costly to so much as offer, an unfolding to normal form say.
         firstOf = \case
           [] -> Left (dbNone db g)
-          [s] -> run s
-          s : rest -> either (const (firstOf rest)) Right (run s)
+          s : rest -> case run s of
+            Right r -> Right r
+            Left e
+              | null rest -> Left e
+              | otherwise -> firstOf rest
