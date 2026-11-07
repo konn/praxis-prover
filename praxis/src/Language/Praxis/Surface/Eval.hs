@@ -228,9 +228,9 @@ proof tree.
 
 A constructor is written by the shortest qualification which no other
 constructor printed in the value shares, so by its bare name unless two of
-them clash. An operator constructor applied to its two explicit fields is
-written between them, parenthesised by its fixity; one whose code also
-stores implicit arguments is applied in prefix form, which shows them.
+them clash. An operator constructor is always written between its two
+explicit fields, parenthesised by its fixity; implicit arguments its code
+stores are left out, as source text leaves them to inference.
 -}
 renderValueWith :: Display -> Int -> Value -> Text
 renderValueWith display depth value = fst (go depth value)
@@ -241,6 +241,23 @@ renderValueWith display depth value = fst (go depth value)
     explicitOf n arity = maybe [0 .. arity - 1] shapeExplicit (Map.lookup n (displayConstructors display))
     fixityOf' segs = Map.findWithDefault undeclaredFixity (operatorText segs) (displayFixities display)
 
+    -- The operands an operator constructor is written between, if it is one.
+    operands name fields = case explicitOf name (length fields) of
+      [i, j]
+        | isOperator (segmentsOf display name)
+        , Just l <- listToMaybe (drop i fields)
+        , Just r <- listToMaybe (drop j fields) ->
+            Just (l, r)
+      _ -> Nothing
+
+    -- The constructor names the display prints.
+    namesUpTo :: Int -> Value -> Set.Set Text
+    namesUpTo d = \case
+      NatValue _ -> Set.empty
+      DataValue name fields
+        | null fields || d <= 0 -> Set.singleton name
+        | otherwise -> Set.insert name (Set.unions (map (namesUpTo (d - 1)) (maybe fields (\(l, r) -> [l, r]) (operands name fields))))
+
     go :: Int -> Value -> (Text, Binding)
     go _ (NatValue n) = (T.pack (show n), Tight)
     go d (DataValue name fields) =
@@ -248,18 +265,12 @@ renderValueWith display depth value = fst (go depth value)
        in case fields of
             [] -> (prefixName segs, Tight)
             _
-              | isOperator segs
-              , [i, j] <- explicitOf name (length fields)
-              , length fields == 2
-              , Just l <- at i
-              , Just r <- at j ->
+              | Just (l, r) <- operands name fields ->
                   let fx = fixityOf' segs
                       shown v = if d <= 0 then ("...", Tight) else go (d - 1) v
                    in (operand AssocLeft fx (shown l) <> " " <> infixName segs <> " " <> operand AssocRight fx (shown r), Infix fx)
               | d <= 0 -> (prefixName segs <> " ...", Applied)
               | otherwise -> (T.unwords (prefixName segs : map (argument . go (d - 1)) fields), Applied)
-      where
-        at k = listToMaybe (drop k fields)
 
 -- | How a printed piece binds: a token or a parenthesised piece, an application, or an operator at its fixity.
 data Binding = Tight | Applied | Infix !Fixity
@@ -278,14 +289,6 @@ operand side outer (t, binding) = case binding of
     , not (fixityAssoc outer == side && fixityAssoc inner == side) ->
         "(" <> t <> ")"
   _ -> t
-
--- | The constructor names a bounded display prints.
-namesUpTo :: Int -> Value -> Set.Set Text
-namesUpTo d = \case
-  NatValue _ -> Set.empty
-  DataValue name fields
-    | null fields || d <= 0 -> Set.singleton name
-    | otherwise -> Set.insert name (Set.unions (map (namesUpTo (d - 1)) fields))
 
 {- |
 The segments of a printed constructor name: the module's description of it,

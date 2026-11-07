@@ -126,19 +126,44 @@ def templates():
 
 @dataclass(frozen=True)
 class Expression:
+    """A leaf, an axiom instance or a part, or modus ponens `f :@ x`."""
+
     head: str
     args: tuple = ()
 
+    @property
+    def mp(self):
+        return bool(self.args)
+
+    def operand(self):
+        # `:@` is infixl and application binds tighter: only a right operand
+        # which is itself modus ponens needs parentheses.
+        return "(" + self.flat() + ")" if self.mp else self.flat()
+
     def flat(self):
-        return "(" + " ".join([self.head, *(arg.flat() for arg in self.args)]) + ")"
+        if not self.mp:
+            return self.head
+        f, x = self.args
+        return f.flat() + " :@ " + x.operand()
+
+    def spine(self):
+        """The leftmost leaf of a left-nested chain, and its right operands."""
+        if not self.mp:
+            return self, []
+        f, x = self.args
+        head, operands = f.spine()
+        return head, operands + [x]
 
     def render(self, indent=0):
         flat = self.flat()
-        if not self.args or indent + len(flat) <= 100:
+        if not self.mp or indent + len(flat) <= 100:
             return flat
-        return "(" + self.head + "\n" + "\n".join(
-            " " * (indent + 2) + arg.render(indent + 2) for arg in self.args
-        ) + ")"
+        head, operands = self.spine()
+        lines = [head.render(indent)]
+        for x in operands:
+            body = "(" + x.render(indent + 6) + ")" if x.mp else x.render(indent + 5)
+            lines.append(" " * (indent + 2) + ":@ " + body)
+        return "\n".join(lines)
 
 
 # Group MP steps rather than declaring one helper per node. Whole-template
@@ -173,7 +198,7 @@ def emit(name, calculus, params, root):
         f, fcost = visit(p.args[0])
         x, xcost = visit(p.args[1])
         # Praxis infers the antecedent and conclusion from these proof terms.
-        expression, cost = Expression(calculus + ".MP", (f, x)), 1 + fcost + xcost
+        expression, cost = Expression(":@", (f, x)), 1 + fcost + xcost
         if cost >= INLINE_MPS and p != root:
             node = f"{name}-part-{len(parts) + 1}"
             parts.append(node)

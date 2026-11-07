@@ -44,7 +44,7 @@ evalTests =
         shown 12 "looser" >>= (@?= "A :+ (B :=> A)")
         shown 12 "wrapped" >>= (@?= "Wrap (A :=> B) 3")
         shown 12 "clash" >>= (@?= "Pair P.K Q.K")
-        shown 12 "stored" >>= (@?= "(:+:) 3 Leaf Leaf")
+        shown 12 "stored" >>= (@?= "Leaf :+: Leaf")
         shown 0 "wrapped" >>= (@?= "Wrap ...")
         shown 1 "nested" >>= (@?= "(... :=> ...) :=> ... :=> ...")
         -- Without the module's fixities every operator is the parser's default, left-associative.

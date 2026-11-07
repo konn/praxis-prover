@@ -48,11 +48,13 @@ It supports first-order functions, constructor patterns, naturals and a
 small arithmetic builtin set. Imports, callbacks and dictionaries are not
 yet supported by this command.
 
-Values print as surface syntax. An operator constructor such as `:=>` is
-written between its operands, parenthesised by its declared fixity, and a
-constructor goes by its bare name unless two constructors printed in the
-same value share it: `demo-proofs` shows `Classical.MP` and
-`Intuitionistic.MP`, but `Atom` and `Bottom`.
+Values print as surface syntax. An operator constructor such as `:=>` or
+`:@` is always written between its operands, parenthesised by its declared
+fixity, leaving out the implicit arguments its code stores, as source text
+leaves them to inference. A constructor goes by its bare name unless two
+constructors printed in the same value share it: `demo-proofs` shows
+`Classical.:@` and `Intuitionistic.:@`, since both calculi have modus
+ponens.
 
 Checking and evaluation are separate phases. The CLI checks the module on
 each invocation; the full demo currently takes roughly half a minute to
@@ -103,18 +105,18 @@ A → ¬¬A
 
 Theorems about the transformations are ordinary Praxis theorems over these
 proof values. `embed-size` proves by clauses that embedding preserves the
-size of a proof, with a calculation in the MP case:
+size of a proof, with a calculation for modus ponens:
 
 ```text
-embed-size (Intuitionistic.MP {a} {b} f x) = calc
-  classical-size (embed (Intuitionistic.MP {a} {b} f x))
-  = classical-size (Classical.MP {a} {b} (embed f) (embed x))
+embed-size ((:@) {a} {b} f x) = calc
+  classical-size (embed (f :@ x))
+  = classical-size (embed f :@ embed x)
   = S (classical-size (embed f) + classical-size (embed x))
   = S (intuitionistic-size f + classical-size (embed x))
       := cong (embed-size f)
   = S (intuitionistic-size f + intuitionistic-size x)
       := cong (embed-size x)
-  = intuitionistic-size (Intuitionistic.MP {a} {b} f x)
+  = intuitionistic-size (f :@ x)
 ```
 
 ## Entering and leaving a theory
@@ -125,9 +127,9 @@ an ordinary definition:
 ```text
 identity : {a : Formula} -> Intuitionistic (a :=> a)
 identity {a} = by
-  apply Intuitionistic.MP
+  apply (:@)
   {
-    apply Intuitionistic.MP
+    apply (:@)
     { exact Intuitionistic.S {a} {a :=> a} {a} }
     { exact Intuitionistic.K {a} {a :=> a} }
   }
@@ -139,8 +141,9 @@ explicit arguments; the ordinary indexed term checker validates every
 premise. The `by` block, tactic words, and `{ ... }` focus blocks use
 Praxis's existing tactic syntax and parser. Each focus block constructs
 one argument. Formula parameters make `identity` a uniform theorem schema.
-The constructors are qualified because both calculi have `K`, `S`, and
-`MP`, and outside internal mode a bare `S` is the natural successor.
+Modus ponens, `(:@)`, is found by the expected type. `K` and `S` are
+qualified because both calculi have them,
+and outside internal mode a bare `S` is the natural successor.
 
 Internal mode states the same declaration by its object formula:
 
@@ -148,9 +151,9 @@ Internal mode states the same declaration by its object formula:
 internal Intuitionistic where
   identity : {a : Formula} -> a :=> a
   identity {a} = by
-    apply MP
+    apply (:@)
     {
-      apply MP
+      apply (:@)
       { exact S {a} {a :=> a} {a} }
       { exact K {a} {a :=> a} }
     }
@@ -160,7 +163,7 @@ internal Intuitionistic where
 An internal signature states an object formula. Elaboration wraps its final
 result in the selected proof family, so this declares the same ordinary
 function `identity : {a : Formula} -> Intuitionistic (a :=> a)`. `K`, `S`,
-and `MP` denote the selected family's constructors inside the block; in
+and `(:@)` denote the selected family's constructors inside the block; in
 particular, this `S` is its Hilbert axiom, even though the surface language
 also has natural successor. Internal mode selects the proof family and
 wraps result signatures; construction itself needs no internalization.
