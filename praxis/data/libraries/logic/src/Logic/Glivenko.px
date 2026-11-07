@@ -304,6 +304,23 @@ intuitionistic-size (Intuitionistic.S {a} {b} {c}) = 1
 intuitionistic-size (Intuitionistic.Explosion {a}) = 1
 intuitionistic-size (Intuitionistic.MP {a} {b} f x) = S (intuitionistic-size f + intuitionistic-size x)
 
+-- Embedding an intuitionistic proof into the classical calculus preserves its
+-- size: a calculation in the MP case, the induction hypotheses at the premises.
+embed-size : (p : Intuitionistic a)
+  -> classical-size (embed p) ≡ intuitionistic-size p
+embed-size (Intuitionistic.K {a} {b}) = rfl
+embed-size (Intuitionistic.S {a} {b} {c}) = rfl
+embed-size (Intuitionistic.Explosion {a}) = rfl
+embed-size (Intuitionistic.MP {a} {b} f x) = calc
+  classical-size (embed (Intuitionistic.MP {a} {b} f x))
+  = classical-size (Classical.MP {a} {b} (embed f) (embed x))
+  = S (classical-size (embed f) + classical-size (embed x))
+  = S (intuitionistic-size f + classical-size (embed x))
+      := cong (embed-size f)
+  = S (intuitionistic-size f + intuitionistic-size x)
+      := cong (embed-size x)
+  = intuitionistic-size (Intuitionistic.MP {a} {b} f x)
+
 conclusion : Intuitionistic a -> Formula
 conclusion (Intuitionistic.K {a} {b}) = a :=> b :=> a
 conclusion (Intuitionistic.S {a} {b} {c}) = (a :=> b :=> c) :=> (a :=> b) :=> a :=> c
