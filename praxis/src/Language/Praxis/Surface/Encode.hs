@@ -26,6 +26,16 @@ indexed type, the equations of that type's indices at the entry
 which come after the codes: 'encodedCodes', with the lemmas about them, then
 the index functions, then 'encodedPredicate', with the lemmas about it.
 
+The lemmas about the predicate are its unfolding, the introduction of each
+constructor, @C.#intro@, the inversion, @T.#inversion@, and the induction
+principle, @T.#induction@: a rule over an abstract function @q@ of the code,
+the motive, with a premise for each constructor over its fields as variables
+of its own, under their memberships, the equations of their indices and the
+induction hypotheses, @0 < q(x)@ at each field of @T@ itself, concluding @0
+< T.is t, Γ |- 0 < q(t)@.  It is proved once, by course-of-values induction
+on @imp (T.is n) (q n)@ with the inversion, and every induction on a value of
+@T@ the proof engine assembles appeals to it ("Language.Praxis.Surface.Engine").
+
 Every lemma is generated as a declaration of the core, in its concrete
 syntax, and certified by the core like any other; see
 "Language.Praxis.Surface.CoreText" for how the text is built.  Definitional
@@ -52,6 +62,8 @@ module Language.Praxis.Surface.Encode (
   ctorLemma,
   dataLemma,
   collapseLemma,
+  natInductionLemma,
+  inductionLocal,
   membershipBody,
   membershipLambda,
 ) where
@@ -309,6 +321,29 @@ dataLemma d suffix = mangleGlobal (map segmentRaw (dataQual d) <> ["#" <> suffix
 collapseLemma :: DataInfo -> Int -> Text
 collapseLemma d i = dataLemma d ("collapse-" <> T.pack (show i))
 
+{- |
+The induction principle of @Nat@, @Nat.#induction@, by the name a data type's
+has: stated and proved in the prelude, @src-pra/prelude.pra@, in the shape
+of a generated one, a premise for @0@ and one for the successor over a
+variable of its own, 'inductionLocal' @0@, without the membership of the
+value, which every code has.
+-}
+natInductionLemma :: Text
+natInductionLemma = mangleGlobal ["Nat", "#induction"]
+
+{- |
+The variable of its own a premise of an induction principle has for the
+field at a position, @v_0@, @v_1@, …: what an appeal to the principle leaves
+the premise over, since no variable of a goal is named so — the core names of
+a goal's variables are mangled surface names, @v_x@, or the engine's own,
+@e_0@, @z_1@ — so that a proof of the premise can name them.
+-}
+inductionLocal :: Int -> Text
+inductionLocal j = "v_" <> T.pack (show j)
+
+inductionLocalVar :: Int -> CT
+inductionLocalVar = CVar . inductionLocal
+
 var :: Int -> CT
 var j = CVar ("v_" <> T.pack (show j))
 
@@ -441,7 +476,7 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
       ]
 
     codeLemmas = concatMap ctorLemmas ctors <> collapses
-    predicateLemmas = membership <> map intro ctors <> [inversion]
+    predicateLemmas = membership <> map intro ctors <> [inversion, induction]
     members = [(ctorCore c, fieldPreds known d params c) | c <- ctors]
     indexEquations = [(ctorCore c, eqsOf c) | c <- ctors]
 
@@ -691,13 +726,160 @@ encodeData known isVariadic indexFns d = Encoded codes codeLemmas predicate pred
           ]
 
     -- 0 < T.is t |- the disjunction of the shapes t may have, with the memberships of their fields and the equations of their indices.
-    inversion = (dataLemma d "inversion", lemma (dataLemma d "inversion") [t] [lt0eq1 (isAt t)] (disjunction (map disjunct ctors)) script)
-    disjunct c =
-      let fs = [fieldT j t | j <- [0 .. length (ctorFields c) - 1]]
-          eqT = "(" <> render t <> " = " <> render (CSym (ctorCore c) fs) <> ")"
-          mems = [lt0eq1 (onField m (fieldT j t)) | (j, m) <- fieldMemberships known d c t (histAt' t)]
-          eqs = [eqn l r | (l, r) <- indexEquationsAt c t]
+    inversion = (dataLemma d "inversion", lemma (dataLemma d "inversion") [t] [lt0eq1 (isAt t)] (disjunction (map (disjunctAt t) ctors)) script)
+    -- The disjunct of a constructor at a code: the code is the constructor at its fields, which are members, and the equations of indices hold.
+    disjunctAt x c =
+      let fs = [fieldT j x | j <- [0 .. length (ctorFields c) - 1]]
+          eqT = "(" <> render x <> " = " <> render (CSym (ctorCore c) fs) <> ")"
+          mems = [lt0eq1 (onField m (fieldT j x)) | (j, m) <- fieldMemberships known d c x (histAt' x)]
+          eqs = [eqn l r | (l, r) <- indexEquationsAt c x]
        in conjunction (eqT : mems <> eqs)
+
+    {- The induction principle, 0 < T.is t, Γ |- 0 < q(t) for an abstract
+    function q of the code, the motive, with a premise for each constructor
+    over its fields as variables of its own: under the memberships of the
+    fields and the equations of indices the constructor's introduction takes,
+    and the induction hypotheses, the motive at the fields of T itself, the
+    motive holds at the constructor.  It is course-of-values induction,
+    cvInduction, on imp (T.is n) (q n): in the step, the inversion splits the
+    code on its constructors, and the induction hypothesis at a field is the
+    instance in the history, belowElim, at the field's membership, the field
+    being below the code (C.#lt-j). -}
+    induction = (dataLemma d "induction", runBuilder inductionRule)
+    cv = CVar "v_m"
+    truthQ x = "((lt 0 (q" <> argQ x <> ")) = 1)"
+    argQ x = case x of
+      CSym _ (_ : _) -> render x
+      _ -> "(" <> render x <> ")"
+    -- The fields of the type itself, whose memberships the predicate checks through the history: those with induction hypotheses.
+    recursiveFields c = [j | (j, FieldData p _) <- fieldPreds known d params c, p == isCore]
+    premiseName c = "c_" <> fromDec (ctorIndex c)
+    premiseOf c =
+      let k = length (ctorFields c)
+          vs = map inductionLocalVar [0 .. k - 1]
+          applied = CSym (ctorCore c) vs
+          facts =
+            [lt0eq1 (onField code (vs !! j)) | (j, code) <- fieldMemberships known d c applied (histAt' applied)]
+              <> [eqn (atPositions (vs !!) l) (atPositions (vs !!) r) | (l, r) <- eqsOf c]
+          ihs = [truthQ (vs !! j) | j <- recursiveFields c]
+       in " ("
+            <> premiseName c
+            <> (if k == 0 then "" else " forall " <> unwordsB (map render vs))
+            <> " : "
+            <> intercalateB ", " (facts <> ihs <> ["Γ"])
+            <> " |- "
+            <> truthQ applied
+            <> ")"
+    inductionRule =
+      "rule "
+        <> fromText (dataLemma d "induction")
+        <> " ("
+        <> render t
+        <> " : term) (z_1 : var)"
+        <> mconcat [" (" <> fromText (paramName i) <> "(z_1) : term)" | i <- params]
+        <> " (Γ : ctx) (q(z_1) : term)"
+        <> mconcat (map premiseOf ctors)
+        <> " : "
+        <> lt0eq1 (isAt t)
+        <> ", Γ |- "
+        <> truthQ t
+        <> "\nby "
+        <> inductionProof
+    inductionProof
+      | null ctors = "have F: (_|_) { exact " <> fromText (dataLemma d "inversion") <> " on H1 }; ExFalso"
+      | otherwise =
+          "have C: ((lt 0 (imp "
+            <> render (isAt t)
+            <> " (q"
+            <> argQ t
+            <> "))) = 1) { exact cvInduction "
+            <> render cv
+            <> " "
+            <> render t
+            <> " { have Q: ("
+            <> lt0eq1 (isAt cv)
+            <> " ==> "
+            <> truthQ cv
+            <> ") { ImplR as M; have I: ("
+            <> disjunction (map (disjunctAt cv) ctors)
+            <> ") { exact "
+            <> fromText (dataLemma d "inversion")
+            <> " on M }; "
+            <> splitDisj "I" (map inductionBranch ctors)
+            <> " }; exact impIntro } }; exact impElim on C H1"
+    -- The branches of the inversion, hypothesis by hypothesis.
+    splitDisj h = \case
+      [] -> "ExFalso"
+      [b] -> b h
+      b : bs -> "DisjL on " <> h <> " as " <> h <> "a " <> h <> "b { " <> b (h <> "a") <> " } { " <> splitDisj (h <> "b") bs <> " }"
+    {- A branch, from its disjunct: the equation of the code, Km, then the
+    memberships and the equations of indices, K1 … in order; the induction
+    hypotheses of the fields of T; the premise at the fields; and the motive
+    at the code by the equation. -}
+    inductionBranch c h =
+      let fs = [fieldT j cv | j <- [0 .. length (ctorFields c) - 1]]
+          applied = CSym (ctorCore c) fs
+          mems = fieldMemberships known d c cv (histAt' cv)
+          conjuncts = length mems + length (eqsOf c)
+          splitConj = case conjuncts of
+            0 -> "have Km: (" <> render cv <> " = " <> render applied <> ") { exact " <> h <> " }; "
+            _ -> "ConjL on " <> h <> " as Km " <> conjNames conjuncts <> "; "
+          conjNames nm = case nm of
+            1 -> "K1"
+            _ -> "Kr1; " <> mconcat ["ConjL on Kr" <> show' q <> " as K" <> show' q <> (if q + 1 == nm then " K" <> show' (q + 1) else " Kr" <> show' (q + 1)) <> "; " | q <- [1 .. nm - 1]] <> "skip"
+          hypothesis j =
+            let f = fs !! j
+                kname = "K" <> show' (1 + length (takeWhile ((/= j) . fst) mems))
+             in "have Lf"
+                  <> show' j
+                  <> ": "
+                  <> ltT f applied
+                  <> " { exact "
+                  <> fromText (ctorLemma c ("lt-" <> T.pack (show j)))
+                  <> " }; have Lm"
+                  <> show' j
+                  <> ": "
+                  <> ltT f cv
+                  <> " { calc (lt "
+                  <> render f
+                  <> " "
+                  <> render cv
+                  <> ") = (lt "
+                  <> render f
+                  <> " "
+                  <> render applied
+                  <> ") by cong Km = 1 by exact Lf"
+                  <> show' j
+                  <> " }; have IHc"
+                  <> show' j
+                  <> ": ((lt 0 (imp "
+                  <> render (isAt f)
+                  <> " (q"
+                  <> argQ f
+                  <> "))) = 1) { exact belowElim _ "
+                  <> render cv
+                  <> " "
+                  <> render f
+                  <> " }; have IHr"
+                  <> show' j
+                  <> ": "
+                  <> truthQ f
+                  <> " { exact impElim on IHc"
+                  <> show' j
+                  <> " "
+                  <> kname
+                  <> " }; "
+       in splitConj
+            <> mconcat (map hypothesis (recursiveFields c))
+            <> "have A1: "
+            <> truthQ applied
+            <> " { exact "
+            <> premiseName c
+            <> " }; calc (lt 0 (q"
+            <> argQ cv
+            <> ")) = (lt 0 (q"
+            <> argQ applied
+            <> ")) by cong Km = 1 by exact A1"
     -- The equations of indices of a constructor, at the fields of a code.
     indexEquationsAt c x = [(atPositions (`fieldT` x) l, atPositions (`fieldT` x) r) | (l, r) <- eqsOf c]
     disjunction = \case

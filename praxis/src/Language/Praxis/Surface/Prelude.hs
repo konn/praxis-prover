@@ -10,9 +10,11 @@ that is not a successor, the history @hist@ of a function and
 course-of-values recursion @cvrec@: a structurally recursive function of the
 surface language is an instance of @cvrec@, its recursive calls looked up in
 the history.  Its lemmas, @src-pra/prelude.pra@, state what the proofs the
-surface language generates appeal to, @histAt@ first of all; they are
-certified here, with the library of praxis-copra and the unfolding lemmas of
-the definitions in scope, when the prelude is first needed.
+surface language generates appeal to, @histAt@ first of all, and the
+induction principle of @Nat@, @Nat.#induction@, in the shape of the
+principles generated for data types; they are certified here, with the
+library of praxis-copra and the unfolding lemmas of the definitions in
+scope, when the prelude is first needed.
 -}
 module Language.Praxis.Surface.Prelude (
   Prelude (..),

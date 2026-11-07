@@ -11,18 +11,20 @@ matching on a value — becomes one core tactic, and every auxiliary theorem it
 needs, each a declaration the core certifies before the theorem.  Nothing here
 is trusted: the core checks the result like any declaration.
 
-Structural induction on a value @x : T@ is assembled from the core library:
-course-of-values induction, @cvInduction@, on the motive @0 < imp (T.is x)
-⟦P(x)⟧@, where @P@ is the goal with the hypotheses mentioning @x@ reverted
-into it; in the step, the inversion of the membership, @T.#inversion@,
-splits on the constructors, and each case is an auxiliary theorem, whose
-statement has the constructor's fields as its free variables, their
-memberships and the induction hypotheses for the recursive ones, and whose
-proof is the user's.  The induction hypotheses come from the history,
-@belowElim@ at a field below the code, and the case is transported to the
-goal by the equation the inversion gave, on the code of the motive.  A proof
-by clauses matching on a value is the same induction, its recursive calls
-the induction hypotheses.
+Structural induction on a value @x : T@ appeals to the induction principle
+of its type, @T.#induction@, generated and certified with the type
+("Language.Praxis.Surface.Encode"), and on a value of @Nat@ to the prelude's
+@Nat.#induction@: a rule over an abstract function of the code, the motive,
+with a premise for each constructor over its fields as variables of its own.
+The motive is the goal with the hypotheses mentioning @x@ reverted into it,
+at its code, @⟦P(x)⟧@, and each premise is proved by an auxiliary theorem,
+the case: its statement has the constructor's fields as its free variables,
+their memberships and the induction hypotheses for the recursive ones, and
+its proof is the user's.  The premise gives the induction hypotheses as the
+truths of codes, which the proof of the premise reflects, and concludes the
+truth of the motive's code at the constructor, which it reifies the case's
+conclusion to ('principleScript').  A proof by clauses matching on a value
+is the same induction, its recursive calls the induction hypotheses.
 
 The tactics are those of Lean 4, and Rocq's spellings; this phase translates
 @rfl@, @exact@, @cong@, @calc@, @induction@, @intros@, focused blocks, bare
@@ -91,7 +93,7 @@ import Language.Praxis.Surface.Compile (functionLemma, ruleBinders)
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.Desugar (Dependency (AdmittedClass))
 import Language.Praxis.Surface.Elab
-import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), atPositions, ctorLemma, dataLemma)
+import Language.Praxis.Surface.Encode (FieldPred (..), ParamPred (..), atPositions, ctorLemma, dataLemma, inductionLocal, natInductionLemma)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Evidence qualified as Required
 import Language.Praxis.Surface.Fixity (Fixities, renderFixityError, resolveExpr)
@@ -4462,11 +4464,11 @@ induction k info n g sp v names = case lookup v (goalVars g) of
   _ -> dataInduction k info n g sp v names
 
 {- |
-Induction on a value of @Nat@, by the core's own: a case for @0@, and one for
-the successor of the eigenvariable, under the induction hypothesis at it.
-The hypotheses mentioning the value join the induction formula, and each case
-has them again at its instance, as the core's @induction@ gives them.  Each
-case is an auxiliary theorem, which the case in the core appeals to.
+Induction on a value of @Nat@, by the prelude's principle, @Nat.#induction@:
+a case for @0@, and one for the successor of the eigenvariable, under the
+induction hypothesis at it.  The hypotheses mentioning the value join the
+motive, and each case has them again at its instance, introduced in the
+premise before the case is appealed to.  Each case is an auxiliary theorem.
 -}
 natInduction :: TheoremInfo -> Goal -> Span -> Text -> Either EngineError ([Goal], [Out] -> Either EngineError Out)
 natInduction info g sp core = pure ([base, step], finish)
@@ -4506,7 +4508,13 @@ natInduction info g sp core = pure ([base, step], finish)
       params <- traverse (either (Left . EngineError sp) Right . ruleParams) [base, step]
       let blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
           appeal i = "exact " <> fromText (auxName i) <> staticArgs (params !! i) <> blocks
-      pure (Out ("induction " <> fromText core <> " as " <> fromText eigen <> " { " <> appeal 0 <> " } { " <> appeal 1 <> " }") (concat decls))
+          local = inductionLocal 0
+          cases =
+            [ PrincipleCase (Nat 0) [] (length dependent) (appeal 0)
+            , PrincipleCase (App (Global (Ref RefBuiltin "S")) (Var local)) [local] (length dependent) (appeal 1)
+            ]
+      script <- either (Left . EngineError sp) Right (principleScript natInductionLemma core Nothing motive (map fst dependent) cases)
+      pure (Out script (concat decls))
 
 {- |
 Induction on several values at once, as a function recursing on them
@@ -4870,8 +4878,7 @@ dataInduction k info _ g sp v _ = do
   (isCore, used) <- maybe (Left (EngineError sp "the data type has no membership predicate")) Right (Map.lookup self (knowMembership k))
   -- The value's membership, and the predicates of its type's parameters it is at.
   (memberHyp, valuePs) <- maybe (Left (EngineError sp (T.unpack v <> " has no membership hypothesis"))) Right (listToMaybe [(h, ps) | (h, HMember (Pred p ps) x) <- goalHyps g, p == isCore, x == core])
-  let isAt = predicateAt (Pred isCore valuePs)
-      fieldPred = fieldPredicate used valuePs
+  let fieldPred = fieldPredicate used valuePs
   let mentions = \case
         HProp p -> core `elem` foldr (:) [] p
         HMember _ x -> x == core
@@ -4879,10 +4886,12 @@ dataInduction k info _ g sp v _ = do
       kept = [(h, hy) | (h, hy) <- goalHyps g, h /= memberHyp, not (mentions hy)]
       motive = foldr (Arrow . snd) (goalConcl g) reverted
       at x = motive >>= \w -> if w == core then x else Var w
+      -- The fields of the type itself, whose memberships the predicate checks through the history: those with induction hypotheses, as the principle gives them.
+      recursiveFields c = [j | (j, FieldData p _) <- Map.findWithDefault [] (ctorCore c) (knowMembers k), p == isCore]
       caseGoal c =
         let fields = [(core <> "_" <> T.pack (show j), substTy typeArgs fty) | (j, fty) <- zip [0 :: Int ..] (ctorFields c)]
             fieldVar j = fst (fields !! j)
-            recursive = [fieldVar j | (j, TData dn _ _) <- zip [0 ..] (ctorFields c), dn == self]
+            recursive = map fieldVar (recursiveFields c)
             members = [HMember (fieldPred fp) (fieldVar j) | (j, fp) <- Map.findWithDefault [] (ctorCore c) (knowMembers k)]
             -- The equations of indices of its entries, which its membership gives after the memberships.
             atFields = atPositions (CVar . fieldVar)
@@ -4907,7 +4916,6 @@ dataInduction k info _ g sp v _ = do
       goals = map snd opened
       tag = let (l, col) = R.spanStart sp in "L" <> T.pack (show l) <> "C" <> T.pack (show col)
       auxName i = mangleGlobal (map segmentRaw (thmQual info) <> ["#case-" <> tag <> "-" <> T.pack (show i)])
-      eigen = head [name | i <- [0 :: Int ..], let name = "e_" <> T.pack (show i), name `notElem` map (fst . snd) (goalVars g)]
       finish outs = do
         auxDecls <- forM (zip3 [0 :: Int ..] (zip cases (map fst opened)) outs) \(i, (cg, intro), o) -> do
           decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (intro <> outTactic o))
@@ -4917,7 +4925,11 @@ dataInduction k info _ g sp v _ = do
         params <- traverse (either (Left . EngineError sp) Right . ruleParams) cases
         let blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
             appeal i = "exact " <> fromText (auxName i) <> staticArgs (params !! i) <> blocks
-        script <- either (Left . EngineError sp) Right (mkScript k appeal dat isAt fieldPred core memberHyp eigen motive reverted)
+            -- The premises of the principle, each over the fields of its constructor as the principle names them.
+            premise i c =
+              let locals = map inductionLocal [0 .. length (ctorFields c) - 1]
+               in PrincipleCase (apps (Global (Ref RefConstructor (ctorCore c))) (map Var locals)) (map (locals !!) (recursiveFields c)) 0 (appeal i)
+        script <- either (Left . EngineError sp) Right (principleScript (dataLemma dat "induction") core (Just memberHyp) motive (map fst reverted) (zipWith premise [0 ..] (dataCtors dat)))
         pure (Out script (concat auxDecls))
   pure (goals, finish)
   where
@@ -4947,164 +4959,126 @@ substTy args = \case
   TArrow a b -> TArrow (substTy args a) (substTy args b)
   t -> t
 
--- | The core script of an induction, the auxiliary theorems of its cases named as given.
-mkScript :: Knowledge -> (Int -> Builder) -> DataInfo -> (CT -> CT) -> (FieldPred -> Pred) -> Text -> Text -> Text -> Expr Text -> [(Text, Expr Text)] -> Either String Builder
-mkScript k appeal dat isAt fieldPred t memberHyp m motive reverted = do
-  let at x = motive >>= \w -> if w == t then x else Var w
-      code x = codeOf (at x)
-  codeM <- code (Var m)
-  codeT <- code (Var t)
-  inversion <- inversionText
-  branches <- forM (zip [0 ..] (dataCtors dat)) \(i, c) -> branch i c
-  let split = splitDisj "I" branches
-      step = "have Q: (((lt 0 " <> render (isAt (CVar m)) <> ") = 1) ==> ((lt 0 " <> codeM <> ") = 1)) { ImplR as M; have I: (" <> inversion <> ") { exact " <> fromText (dataLemma dat "inversion") <> " on M }; " <> split <> " }; exact impIntro"
-  finishText <- finishing
+-- | A case of an induction by a principle: how its premise is proved from the auxiliary theorem of the case.
+data PrincipleCase = PrincipleCase
+  { pcValue :: !(Expr Text)
+  -- ^ the value of the case over the variables of the premise, 'inductionLocal': the constructor at them, @0@, or @S v_0@
+  , pcInductive :: ![Text]
+  -- ^ the variables of the premise with induction hypotheses, the fields of the type itself
+  , pcIntroduced :: !Int
+  {- ^ how many of the motive's leading implications, the hypotheses reverted
+  into it, the auxiliary theorem takes as hypotheses again: all of them for a
+  value of @Nat@, none for one of a data type, whose case keeps them
+  -}
+  , pcAppeal :: !Builder
+  -- ^ the appeal to the auxiliary theorem of the case
+  }
+
+{- |
+The core script of an induction on a value by the principle named, of its
+type: @Nat.#induction@, or @T.#induction@ with the value's membership
+hypothesis.  The principle's motive is inferred from the goal, the truth of
+the code of the motive given — the goal with the hypotheses reverted into it
+— at the value, which the script proves first and then reflects, eliminating
+the implications by the hypotheses reverted.  Each premise of the principle
+is over the variables of its own the engine knows ('inductionLocal'), under
+the facts of the case and its induction hypotheses, the truths of the motive's
+code at the inductive variables: the proof of the premise names each, since
+the premise's hypotheses have no names it knows, reflects it to the motive
+there, proves the motive at the case's value by the auxiliary theorem, and
+reifies it to the premise's conclusion.  A motive which is the truth of a
+term, @0 < u@, is its own code: nothing is reflected or reified.
+-}
+principleScript :: Text -> Text -> Maybe Text -> Expr Text -> [Text] -> [PrincipleCase] -> Either String Builder
+principleScript principle value memberHyp motive reverted cases = do
+  codeV <- codeAt (Var value)
+  blocks <- traverse block cases
+  let appeal = "exact " <> fromText principle <> " " <> fromText value <> maybe "" ((" on " <>) . fromText) memberHyp <> mconcat [" { " <> b <> " }" | b <- blocks]
   pure
-    ( "have C: ((lt 0 (imp "
-        <> render (isAt (CVar t))
-        <> " "
-        <> codeT
-        <> ")) = 1) { exact cvInduction "
-        <> fromText m
-        <> " "
-        <> fromText t
-        <> " { "
-        <> step
-        <> " } }; have "
-        <> (if ownCode then "R1" else "R")
-        <> ": ((lt 0 "
-        <> codeT
-        <> ") = 1) { exact impElim on C "
-        <> fromText memberHyp
+    ( "have C: ((lt 0 "
+        <> codeV
+        <> ") = 1) { "
+        <> appeal
         <> " }; "
-        <> (if ownCode then "" else "reflect R as R1; ")
-        <> finishText
+        <> if ownCode then eliminations "C" reverted else "reflect C as R1; " <> eliminations "R1" reverted
     )
   where
-    m' = CVar m
-    ctorApplied c = CSym (ctorCore c) [fieldT j m' | j <- [0 .. length (ctorFields c) - 1]]
-    membersOf c = Map.findWithDefault [] (ctorCore c) (knowMembers k)
-    -- The equations of indices of a constructor's entries, at the fields of m.
-    equationsOf c = [(atPositions (`fieldT` m') l, atPositions (`fieldT` m') r) | (l, r) <- Map.findWithDefault [] (ctorCore c) (knowIndexEqs k)]
-    disjunct c = do
-      let eqT = "(" <> fromText m <> " = " <> render (ctorApplied c) <> ")"
-          mems = [membershipText (fieldPred p) (fieldT j m') | (j, p) <- membersOf c]
-      pure (conjunction (eqT : mems <> [equationText l r | (l, r) <- equationsOf c]))
-    conjunction = \case
-      [x] -> x
-      x : xs -> "(" <> x <> " /\\ " <> conjunction xs <> ")"
-      [] -> "(0 = 0)"
-    inversionText = do
-      ds <- traverse disjunct (dataCtors dat)
-      pure (disjunction ds)
-    disjunction = \case
-      [] -> "_|_"
-      [x] -> x
-      x : xs -> "(" <> x <> " \\/ " <> disjunction xs <> ")"
-    -- The branches of the inversion, hypothesis by hypothesis.
-    splitDisj h = \case
-      [] -> "ExFalso"
-      [b] -> b h
-      b : bs -> "DisjL on " <> h <> " as " <> h <> "a " <> h <> "b { " <> b (h <> "a") <> " } { " <> splitDisj (h <> "b") bs <> " }"
-    branch i c = do
-      let mems = membersOf c
-          selfFields = [j | (j, TData dn _ _) <- zip [0 ..] (ctorFields c), dn == renderQualName (dataQual dat)]
-          applied = ctorApplied c
-      codeCase <- motiveCode applied
-      codeM <- motiveCode m'
-      ihs <- forM selfFields \j -> do
-        codeF <- motiveCode (fieldT j m')
-        let f = render (fieldT j m')
-            kname = "K" <> fromDec (1 + length (takeWhile ((/= j) . fst) mems))
-        pure
-          ( "have Lf"
-              <> fromDec j
-              <> ": ((lt "
-              <> f
-              <> " "
-              <> render applied
-              <> ") = 1) { exact "
-              <> fromText (ctorLemma c ("lt-" <> T.pack (show j)))
-              <> " }; have Lm"
-              <> fromDec j
-              <> ": ((lt "
-              <> f
-              <> " "
-              <> fromText m
-              <> ") = 1) { calc (lt "
-              <> f
-              <> " "
-              <> fromText m
-              <> ") = (lt "
-              <> f
-              <> " "
-              <> render applied
-              <> ") by cong Km = 1 by exact Lf"
-              <> fromDec j
-              <> " }; have IHc"
-              <> fromDec j
-              <> ": ((lt 0 (imp "
-              <> render (isAt (fieldT j m'))
-              <> " "
-              <> codeF
-              <> ")) = 1) { exact belowElim _ "
-              <> fromText m
-              <> " "
-              <> f
-              <> " }; have "
-              <> (if ownCode then "IHr" else "IHd")
-              <> fromDec j
-              <> ": ((lt 0 "
-              <> codeF
-              <> ") = 1) { exact impElim on IHc"
-              <> fromDec j
-              <> " "
-              <> kname
-              <> " }; "
-              <> (if ownCode then "" else "reflect IHd" <> fromDec j <> " as IHr" <> fromDec j <> "; ")
-          )
-      caseFormula <- formula (motiveAt (fromCT applied))
-      -- The equation of the code, then the memberships and the equations of indices, K1 … in order.
-      let conjuncts = length mems + length (equationsOf c)
-          splitConj h = case conjuncts of
-            0 -> "have Km: (" <> fromText m <> " = " <> render applied <> ") { exact " <> h <> " }; "
-            _ -> "ConjL on " <> h <> " as Km " <> conjNames conjuncts <> "; "
-          conjNames nm = case nm of
-            1 -> "K1"
-            _ -> "Kr1; " <> mconcat ["ConjL on Kr" <> fromDec q <> " as K" <> fromDec q <> (if q + 1 == nm then " K" <> fromDec (q + 1) else " Kr" <> fromDec (q + 1)) <> "; " | q <- [1 .. nm - 1]] <> "skip"
-      pure \h ->
-        splitConj h
-          <> mconcat ihs
-          <> (if ownCode then "have A1: " else "have A: ")
-          <> caseFormula
-          <> " { "
-          <> appeal i
-          <> (if ownCode then " }; calc (lt 0 " else " }; reify A as A1; calc (lt 0 ")
-          <> codeM
-          <> ") = (lt 0 "
-          <> codeCase
-          <> ") by cong Km = 1 by exact A1"
-    motiveAt x = motive >>= \w -> if w == t then x else Var w
-    motiveCode x = codeOf (motiveAt (fromCT x))
-    -- The truth of a term, 0 < u or u > 0, which the core states alike, is its own
-    -- code, u: reflect and reify have nothing to do on it.  Where it was written.
+    motiveAt x = motive >>= \w -> if w == value then x else Var w
+    -- The truth of a term, 0 < u or u > 0, which the core states alike, is its own code, u.
     truthOf e = case stripLocations e of
       Rel RelLt a u | isZero a -> Just u
       Rel RelGt u a | isZero a -> Just u
       _ -> Nothing
-    ownCode = maybe False (not . isZero) (truthOf motive)
-    codeOf e = case truthOf e of
-      Just u | ownCode -> render <$> termCT CVar u
-      _ -> (\f -> "[[" <> f <> "]]") <$> formula e
     isZero x = case stripLocations x of
       Nat 0 -> True
       _ -> False
-    finishing = case reverted of
-      [] -> Right "exact R1"
-      _ -> Right (implEliminations "R1" (map fst reverted))
-    implEliminations h = \case
+    ownCode = maybe False (not . isZero) (truthOf motive)
+    codeAt x =
+      let e = motiveAt x
+       in case truthOf e of
+            Just u | ownCode -> render <$> termCT CVar u
+            _ -> (\f -> "[[" <> f <> "]]") <$> formula e
+    eliminations h = \case
       [] -> "exact " <> h
-      x : xs -> "ImplL on " <> h <> " as " <> h <> "i { exact " <> fromText x <> " } { " <> implEliminations (h <> "i") xs <> " }"
+      x : xs -> "ImplL on " <> h <> " as " <> h <> "i { exact " <> fromText x <> " } { " <> eliminations (h <> "i") xs <> " }"
+    {- The code of the motive at a value as the principle states it, the
+    motive's code with the value for the variable.  It is the code of the
+    motive at the value, but at 0 where the motive has the truth of the
+    variable itself, 0 < x: its code is x, so 0 there, the code of _|_, where
+    the code of 0 < 0 is the comparison.  Those atoms taken as absurd, the
+    motive at 0 has the code the principle states. -}
+    expectedCode x = case stripLocations x of
+      Nat 0 | truthsMentioned -> (\f -> "[[" <> f <> "]]") <$> formula (falsified >>= \w -> if w == value then x else Var w)
+      _ -> codeAt x
+    falsified = falsifyTruths (== value) motive
+    truthsMentioned = fmap runBuilder (formula falsified) /= fmap runBuilder (formula motive)
+    {- The proof of a premise: the induction hypotheses reflected, and the
+    case's conclusion reified, where the motive is not its own code; where
+    the code of the case's conclusion differs from the code the principle
+    states, at 0 for the truth of the value, the comparison 0 < 0 is 0 by
+    congruence. -}
+    block pc
+      | ownCode = pure (pcAppeal pc)
+      | otherwise = do
+          ihs <- forM (zip [1 :: Int ..] (pcInductive pc)) \(j, v) -> do
+            c <- codeAt (Var v)
+            pure ("have IHc" <> fromDec j <> ": ((lt 0 " <> c <> ") = 1) { assumption }; reflect IHc" <> fromDec j <> " as IHr" <> fromDec j <> "; ")
+          caseF <- formula (motiveAt (pcValue pc))
+          expected <- expectedCode (pcValue pc)
+          let intros = mconcat ["ImplR as D" <> fromDec q <> "; " | q <- [1 .. pcIntroduced pc]]
+              reified = "[[" <> caseF <> "]]"
+              finishCase
+                | runBuilder expected == runBuilder reified = "exact A1"
+                | otherwise = "have Z: ((lt 0 0) = 0) { refl }; calc (lt 0 " <> expected <> ") = (lt 0 " <> reified <> ") by cong Z = 1 by exact A1"
+          pure (mconcat ihs <> "have A: " <> caseF <> " { " <> intros <> pcAppeal pc <> " }; reify A as A1; " <> finishCase)
+
+{- |
+A formula with the truths of the variables given, @0 < x@ or @x > 0@, taken
+as absurd: what has the code of the formula at @0@ for them, since the code
+of such an atom is the variable, @0@ at @0@, the code of @_|_@, where the code
+of @0 < 0@ itself is the comparison.
+-}
+falsifyTruths :: (a -> Bool) -> Expr a -> Expr a
+falsifyTruths isValue = go
+  where
+    go e = case e of
+      At sp x -> At sp (go x)
+      Rel RelLt a b | zero a, value b -> Bottom
+      Rel RelGt b a | zero a, value b -> Bottom
+      Arrow a b -> Arrow (go a) (go b)
+      Conn c a b -> Conn c (go a) (go b)
+      Not a -> Not (go a)
+      Quant q h bound ty body -> Quant q h bound ty (toScope (falsifyTruths (either (const False) isValue . unvar) (Bound.fromScope body)))
+      _ -> e
+    zero x = case stripLocations x of
+      Nat 0 -> True
+      _ -> False
+    value x = case stripLocations x of
+      Var v -> isValue v
+      _ -> False
+    unvar = \case
+      B b -> Left b
+      F v -> Right v
 
 -- | A core term as a surface expression over core variables, to be substituted into a motive.
 fromCT :: CT -> Expr Text

@@ -1,0 +1,36 @@
+module InductionPrinciple where
+
+-- Induction on a value of Nat appeals to the prelude's principle, Nat.#induction.
+-- The base case has the absurd hypothesis 0 < 0: the motive's code at 0 is not
+-- the code of the motive at the value, where the truth of the value is its own
+-- code, which the proof of the case bridges.
+pos-pred : (n : Nat) -> 0 < n -> S (n - 1) ≡ n
+pos-pred n h = by
+  induction n
+  { exact zeroPosAbsurd h }
+  { rfl }
+
+data Tree = Leaf | Node Tree Nat Tree
+
+size : Tree -> Nat
+size Leaf = 0
+size (Node l x r) = S (size l + size r)
+
+-- A function whose results are members of Tree: its closure lemma is proved
+-- by Tree.#induction.
+mirror : Tree -> Tree
+mirror Leaf = Leaf
+mirror (Node l x r) = Node (mirror r) x (mirror l)
+
+-- Two induction hypotheses, one for each recursive field, by Tree.#induction.
+mirror-size : (t : Tree) -> size (mirror t) ≡ size t
+mirror-size t = by
+  induction t
+  { rfl }
+  { intros l x r
+    calc
+      size (mirror (Node l x r))
+      = S (size (mirror r) + size (mirror l))
+      = S (size r + size (mirror l)) := by cong IH2
+      = S (size r + size l) := by cong IH1
+      = S (size l + size r) := by cong addComm }

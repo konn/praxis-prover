@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Data.Map.Strict qualified as Map
+import Data.Text qualified as T
 import Language.Praxis.Package.PackageTest (packageTests)
 import Language.Praxis.Surface.AdequacyTest (adequacyTests)
 import Language.Praxis.Surface.BuiltinCheckTest (builtinCheckTests)
@@ -12,6 +13,7 @@ import Language.Praxis.Surface.ConstructionTest (constructionTests)
 import Language.Praxis.Surface.CoreTest (coreTests)
 import Language.Praxis.Surface.DefinitionsTest (definitionsTests)
 import Language.Praxis.Surface.DependentClassTest (dependentClassTests)
+import Language.Praxis.Surface.Encode (natInductionLemma)
 import Language.Praxis.Surface.EvalTest (evalTests)
 import Language.Praxis.Surface.EvidenceTest (evidenceTests)
 import Language.Praxis.Surface.ExactPredicateTest (exactPredicateTests)
@@ -42,7 +44,7 @@ main =
       "praxis"
       [ testCase "the prelude certifies, and states the lemmas generated proofs appeal to" $ do
           p <- either assertFailure pure prelude
-          mapM_ (\n -> assertBool n (Map.member n (preludeLemmas p))) ["hdCons", "tlCons", "dropConsSucc", "cvrecUnfold", "histAt", "cvInduction", "belowElim"]
+          mapM_ (\n -> assertBool n (Map.member n (preludeLemmas p))) ["hdCons", "tlCons", "dropConsSucc", "cvrecUnfold", "histAt", "cvInduction", "belowElim", T.unpack natInductionLemma]
       , parserTests
       , resolveTests
       , projectionIndexTests

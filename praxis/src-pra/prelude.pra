@@ -119,3 +119,17 @@ theorem collapseF : |- (if 0 then a else b) = b by refl
 
 -- Every code is a member of Nat: what a law or a closure at Nat is given for the membership of a value.
 theorem anyIsMember : |- 0 < anyIs n by refl
+
+-- The induction principle of Nat, named as the surface language names a data
+-- type's, Nat.#induction, mangled: what the engine's induction on a value of
+-- Nat appeals to, as it appeals to T.#induction, generated with a data type
+-- T, on a value of T.  It has the shape of a generated one: the motive is an
+-- abstract function q of the code, the truth of q at a code the motive there,
+-- and the premise of the successor is over a variable of its own, v_0, as the
+-- premises of a generated principle are over the fields of their constructor.
+-- Every code is a value of Nat, so no membership is assumed.
+rule u_Nat_s_x23_induction (v_t : term) (z_1 : var) (Γ : ctx) (q(z_1) : term)
+  (c_0 : Γ |- ((lt 0 (q(0))) = 1))
+  (c_1 forall v_0 : ((lt 0 (q(v_0))) = 1), Γ |- ((lt 0 (q(S v_0))) = 1))
+  : Γ |- ((lt 0 (q(v_t))) = 1)
+by Ind v_0 (((lt 0 (q(v_0))) = 1)) v_t { exact c_0 } { exact c_1 }

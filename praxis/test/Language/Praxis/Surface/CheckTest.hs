@@ -18,6 +18,7 @@ import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Core qualified as SurfaceCore
 import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, predicateOver, predicateParam)
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
+import Language.Praxis.Surface.Encode (natInductionLemma)
 import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, initialSourceBindings, membershipProof, theoremStatement)
 import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), Env, FunInfo (..), Global (..), TeleEntry (..), constructorsNamed, emptyEnv, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
@@ -428,6 +429,26 @@ checkTests =
         c <- checkFile "test/data/list.px"
         errors c @?= []
         checkedTheorems c @?= ["Data.List.append-nil", "Data.List.append-nil-tactically"]
+    , testCase "a data type has an induction principle, a rule over the motive's code, which every induction on its values appeals to" $ do
+        c <- checkFile "test/data/list.px"
+        errors c @?= []
+        let principle = [l | l <- checkedCore c, "rule u_Data_sList_sList_s_x23_induction " `T.isPrefixOf` l]
+        length principle @?= 1
+        -- A premise for each constructor over its fields: under the memberships the inversion gives and the induction hypothesis at the field of the type itself.
+        assertBool "the premise of Nil" (any ("(c_0 : Γ |- ((lt 0 (q(u_Data_sList_sList_sNil))) = 1))" `T.isInfixOf`) principle)
+        assertBool "the premise of (:)" (any ("(c_1 forall v_0 v_1 : ((lt 0 (p0 v_0)) = 1), ((lt 0 (u_Data_sList_sList_sis {p0} v_1)) = 1), ((lt 0 (q(v_1))) = 1), Γ |- ((lt 0 (q(u_Data_sList_sList_s_x3a_ v_0 v_1))) = 1))" `T.isInfixOf`) principle)
+        assertBool "the conclusion" (any (" : ((lt 0 (u_Data_sList_sList_sis {p0} v_t)) = 1), Γ |- ((lt 0 (q(v_t))) = 1)\nby " `T.isInfixOf`) principle)
+        -- The inductions of the module appeal to it: the proof by clauses, the proof by the tactic, and the closure of (<>).
+        length [() | l <- checkedCore c, "exact u_Data_sList_sList_s_x23_induction " `T.isInfixOf` l] @?= 3
+    , testCase "induction on a value of Nat appeals to the prelude's principle, also where the motive has the truth of the value" $ do
+        c <- checkFile "test/data/induction-principle.px"
+        errors c @?= []
+        checkedTheorems c @?= ["InductionPrinciple.pos-pred", "InductionPrinciple.mirror-size"]
+        let appeals name = length [() | l <- checkedCore c, ("exact " <> name <> " ") `T.isInfixOf` l]
+        appeals natInductionLemma @?= 1
+        -- The closure of mirror, and the theorem by the tactic.
+        appeals "u_InductionPrinciple_sTree_s_x23_induction" @?= 2
+        assertBool "the code of the motive at 0 is bridged by congruence" (any ("have Z: ((lt 0 0) = 0) { refl }; calc " `T.isInfixOf`) (checkedCore c))
     , testCase "the FOL example's data types are encoded, and their lemmas certify" $ do
         c <- checkFile "test/data/fol.px"
         errors c @?= []

@@ -154,6 +154,21 @@ library of praxis-copra.
   memberships ∧ equations of indices)`, proved by case analysis on the tag
   with `eqBool`, `collapseT/F`, `conjElim1/2`, `eqElim`, and `histAt` with
   `C.#lt-j` for the recursive fields. Induction rests on it.
+- **Induction principle** `T.#induction`, a rule over an abstract function
+  `q` of the code, the motive, with a premise for each constructor over its
+  fields as variables of its own:
+  ```
+  rule T.#induction (t : term) (z : var) (p0(z) : term) … (Γ : ctx) (q(z) : term)
+    (c_i ∀ x̄ : memberships of x̄, equations of indices, 0 < q(x_j) for the fields of T, Γ |- 0 < q(Cᵢ x̄))
+    : 0 < T.is t, Γ |- 0 < q(t)
+  ```
+  proved once, by course-of-values induction `cvInduction` on `imp (T.is n)
+  (q n)`: the inversion splits the code on its constructors, and the
+  induction hypothesis at a field is its instance in the history,
+  `belowElim`, the field being below the code (`C.#lt-j`), at the field's
+  membership. The prelude states `Nat.#induction` in the same shape, a
+  premise for `0` and one for `S v_0`, proved by `Ind`. Every induction the
+  engine assembles appeals to the principle of the value's type.
 
 Which fields contribute a membership conjunct, and by which predicate, is
 recorded (`encodedMembers`, a `FieldPred` over the type's parameters), and
@@ -768,20 +783,25 @@ names of hypotheses. User hypothesis names never reach the core.
    `memberships of the fields, P(recursive fields) (the IHs), the other
    hypotheses |- P(C x̄)`, its fields free variables, proved by the user's
    case — named `thm.#case-L<line>C<col>-i`, unique by source position.
-3. The theorem's own script:
+3. The theorem's own script appeals to the type's principle, `T.#induction`
+   (`Nat.#induction` for a value of `Nat`), whose motive `q` is inferred by
+   abstracting `x` in the code of `P(x)`:
    ```
-   have C: (0 < imp (T.is x) [[P(x)]]) { exact cvInduction m x {
-     have Q: (0 < T.is m ==> 0 < [[P(m)]]) { ImplR as M;
-       have I: (…) { exact T.#inversion };  DisjL … per constructor {
-         (ConjL: Km : m = C (fields m), memberships K…)
-         (per recursive field: its lt, belowElim, impElim, reflect → the IH)
-         have A: (P(C (fields m))) { exact case-i };  reify A as A1;
-         calc (0 < [[P(m)]]) = (0 < [[P(C (fields m))]]) by cong Km = 1 by exact A1 } };
-     exact impIntro } };
-   have R: (0 < [[P(x)]]) { exact impElim on C Hmember };  reflect R as R1;  (ImplL for the reverted)
+   have C: (0 < [[P(x)]]) { exact T.#induction x on Hmember
+     { per constructor, over the premise's own variables v̄:
+       (per recursive field v_j: have IHc: (0 < [[P(v_j)]]) { assumption }; reflect IHc as IHr)
+       have A: (P(C v̄)) { exact case-i }; reify A as A1; exact A1 } … };
+   reflect C as R1;  (ImplL for the reverted)
    ```
-   The case is transported to `m` as an *atom*, the truth of the motive's
-   code, which is what `cong` can rewrite whatever the shape of `P`.
+   The premise's hypotheses have names the engine does not know, so the
+   induction hypotheses are restated by `assumption`; its variables it does
+   know, `v_0`, `v_1`, …, which no variable of a goal is named. The
+   premise gives the induction hypotheses as truths of codes and concludes
+   the truth of the motive's code at the constructor, so the case is
+   reflected and reified at that boundary; a motive `0 < u` is its own code
+   and needs neither. At `0`, where the motive has the truth of the value
+   itself, `0 < x`, its code at `0` is `0`, the code of `_|_`, not the code
+   of `0 < 0`: the two differ by `lt 0 0 = 0` alone, which `cong` bridges.
 
 **`rfl`** rewrites the sides by the unfolding lemmas, outermost first,
 wherever a function meets a constructor, and closes with the core's
@@ -1026,9 +1046,10 @@ asked of members.
    constructors' entries, so the index functions are defined before the
    predicate.
 5. Unfolding lemmas hold for all codes.
-6. The inversion lemma and the engine read the same record of which fields
-   carry memberships, and of which equations of indices each constructor's
-   branch checks.
+6. The inversion lemma, the induction principle and the engine read the same
+   record of which fields carry memberships, and of which equations of
+   indices each constructor's branch checks; the engine appeals to the
+   principle rather than assembling the induction itself.
 7. Declarations are certified in order; a failure is never a lemma; a theorem
    is not in scope in its own proof.
 8. The engine builds text, never proof terms: the core certifies it.
