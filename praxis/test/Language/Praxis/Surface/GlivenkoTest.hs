@@ -45,7 +45,7 @@ glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
         source <- TIO.readFile sourcePath
         let declarations = fst (T.breakOn "-- Internal proof schemata" source)
             badMP = "bad : Intuitionistic (Atom 0)\nbad = Intuitionistic.MP {Bottom} {Atom 0} (Intuitionistic.Explosion {Atom 0}) (Intuitionistic.K {Atom 0} {Bottom})\n"
-            badDNE = "bad : Intuitionistic (Imp (Imp (Imp (Atom 0) Bottom) Bottom) (Atom 0))\nbad = Classical.DNE {Atom 0}\n"
+            badDNE = "bad : Intuitionistic (((Atom 0 :=> Bottom) :=> Bottom) :=> Atom 0)\nbad = Classical.DNE {Atom 0}\n"
         forM_ [badMP, badDNE] $ \bad -> do
           let checked = checkSource p "invalid-glivenko.px" (declarations <> bad)
           assertBool "an invalid object proof was certified" (any ((== SevError) . reportSeverity) (checkedReports checked))
@@ -64,7 +64,7 @@ formula :: Text -> [Value] -> Value
 formula name = DataValue ("Logic.Glivenko.Formula." <> name)
 
 imp :: Value -> Value -> Value
-imp a b = formula "Imp" [a, b]
+imp a b = formula ":=>" [a, b]
 
 bottom :: Value
 bottom = formula "Bottom" []
@@ -93,5 +93,5 @@ proofConclusion system = go
     valid = mapM_ checkFormula
     checkFormula (DataValue "Logic.Glivenko.Formula.Atom" [NatValue _]) = Right ()
     checkFormula (DataValue "Logic.Glivenko.Formula.Bottom" []) = Right ()
-    checkFormula (DataValue "Logic.Glivenko.Formula.Imp" [a, b]) = valid [a, b]
+    checkFormula (DataValue "Logic.Glivenko.Formula.:=>" [a, b]) = valid [a, b]
     checkFormula _ = Left "invalid formula"

@@ -36,13 +36,13 @@ For example, in the Glivenko module:
 ```text
 module ClassicalExamples where
   internal Classical where
-    peirce-law : {a b : Formula} -> Imp (Imp (Imp a b) a) a
+    peirce-law : {a b : Formula} -> ((a :=> b) :=> a) :=> a
     peirce-law {a} {b} = by
       exact peirce {a} {b}
 ```
 
 This exports `ClassicalExamples.peirce-law` with result type
-`Classical (Imp (Imp (Imp a b) a) a)`. The demo passes that proof to the
+`Classical (((a :=> b) :=> a) :=> a)`. The demo passes that proof to the
 verified `glivenko` transformation. Internal blocks preserve enclosing
 namespaces, support qualified theory names, and scope their constructor
 selection locally. Formula parameters give uniform theorem schemata;

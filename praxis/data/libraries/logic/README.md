@@ -96,20 +96,20 @@ The same file uses internal mode to construct the identity schema:
 
 ```text
 internal Intuitionistic where
-  identity : {a : Formula} -> Imp a a
+  identity : {a : Formula} -> a :=> a
   identity {a} = by
     apply MP
     {
       apply MP
-      { exact S {a} {Imp a a} {a} }
-      { exact K {a} {Imp a a} }
+      { exact S {a} {a :=> a} {a} }
+      { exact K {a} {a :=> a} }
     }
     { exact K {a} {a} }
 ```
 
 An internal signature states an object formula. Elaboration wraps its final
 result in the selected proof family, so this declares the ordinary function
-`identity : {a : Formula} -> Intuitionistic (Imp a a)`. Formula parameters
+`identity : {a : Formula} -> Intuitionistic (a :=> a)`. Formula parameters
 make it a uniform theorem schema. `K`, `S`, and `MP` denote the selected
 family's constructors inside the block; in particular, this `S` is its
 Hilbert axiom, even though the surface language also has natural successor.
@@ -127,7 +127,7 @@ Internal mode also works inside ordinary namespaces:
 ```text
 module ClassicalExamples where
   internal Classical where
-    peirce-law : {a b : Formula} -> Imp (Imp (Imp a b) a) a
+    peirce-law : {a b : Formula} -> ((a :=> b) :=> a) :=> a
     peirce-law {a} {b} = by
       exact peirce {a} {b}
 ```
@@ -145,9 +145,9 @@ and bare-constructor overload candidates retain their existing module-wide
 behavior.
 
 Only the result is wrapped. An input proof remains explicitly typed, for
-example `Intuitionistic a -> Imp b a` inside an intuitionistic block means
-`Intuitionistic a -> Intuitionistic (Imp b a)`. Native `->` describes the
-Praxis function; `Imp` constructs the object implication. Internal mode
+example `Intuitionistic a -> b :=> a` inside an intuitionistic block means
+`Intuitionistic a -> Intuitionistic (b :=> a)`. Native `->` describes the
+Praxis function; `:=>` constructs the object implication. Internal mode
 does not reinterpret native arithmetic propositions or quantifiers.
 
 The initial implementation selects checked indexed datatypes with one
