@@ -59,6 +59,7 @@ module Language.Praxis.Surface.Engine (
   Spec (..),
   SpecProof (..),
   proveSpec,
+  usesSharedFacts,
   closureSpec,
   membershipCase,
   equationCase,
@@ -306,6 +307,12 @@ data Knowledge = Knowledge
   -- ^ Completely checked declarations and certificates available to surface elaboration.
   , knowReductions :: !(Map CT (CT, Text))
   -- ^ Closed reduction equations available for checked reuse across declarations.
+  , knowSharing :: !Bool
+  {- ^ whether a case of a function's specification states the facts of the
+  applications its body nests once, 'shareApplications': an economy, which
+  the checker gives up on for a lemma the kernel refuses so proved, an
+  appeal there finding a fact stated beside the one it means
+  -}
   }
 
 data EngineError = EngineError !Span !String
@@ -988,7 +995,142 @@ proveSpec k fd spec = do
           (normalized, equations) = digestWith "BeforeIH" k g'
           new = [(h, HProp (Rel RelEq (fromCT l) (fromCT r))) | (h, l, r) <- equations, h `notElem` map fst (goalHyps g')]
           (specialized, g'') = specializeIHs k g' {goalHyps = goalHyps g' <> new}
-       in ((intro <> normalized <> specialized) <>) <$> specCase spec k g''
+          (shared, g''') = shareApplications k (funCore info) g''
+          -- Where the facts shared leave the case unproved, it is proved as it is without them.
+          proof = case specCase spec k g''' of
+            Right p -> Right (shared <> p)
+            Left why
+              | length (goalHyps g''') == length (goalHyps g'') -> Left why
+              | otherwise -> specCase spec k g''
+       in ((intro <> normalized <> specialized) <>) <$> proof
+
+{- |
+The facts of the applications a function's body nests, stated once,
+innermost first, before a case of its specification is proved: the indices
+its function's index specification gives an application inside another one,
+and, where every function and constructor the body names is over no type
+parameters, the membership of its value too, by its function's closure lemma
+or its constructor's introduction.  An appeal to the outer one's
+specification then finds its arguments' facts among the hypotheses, instead
+of proving them again inside its own proof, and the inner ones' again inside
+those, as deep as the applications nest.  The body is the function's
+application, the one the conclusion makes, unfolded once.
+
+A lemma over a type parameter is a rule over its predicate, whose hypothesis
+@0 < w(x)@ any membership mentioning @x@ is an instance of; a membership
+stated beside the one an appeal to it means would leave the appeal unable to
+tell them apart.  So memberships are shared only where no such lemma can be
+appealed to: none of the body's names, nor any its functions' definitions
+name, as deep as they go, is over a type parameter, since the case's proof
+may unfold a function with no closure lemma and appeal to those its
+definition names.  Indices are shared only of functions over no type
+parameters, and a goal over type parameters shares nothing.  A fact not
+proved here is left to the case's proof.
+
+An obligation, the proof a clause gives, is appealed to as a theorem whose
+hypotheses are its clause's context: one naming a variable its conclusion
+does not has every hypothesis of that form an instance of it.  So a
+function with obligations shares nothing; nor does a body whose nested
+applications form a single chain, each fact wanted about once.  The gates
+are an economy, not a guarantee: a case the facts shared leave unproved
+is proved without them, and a lemma the kernel refuses with them is
+generated again without, 'knowSharing'.
+-}
+shareApplications :: Knowledge -> Text -> Goal -> (Builder, Goal)
+shareApplications k core g
+  | not (knowSharing k) || not (null (goalDict g)) = ("", g)
+  | not (null (knowObligations k)) || not (branching || repeated) = ("", g)
+  | otherwise = foldl share ("", g) (zip [1 :: Int ..] nested)
+  where
+    prefix = head [p | p <- sharedPrefix : [sharedPrefix <> T.pack (show i) <> "_" | i <- [1 :: Int ..]], all (not . T.isPrefixOf p . fst) (goalHyps g)]
+    bodies = [body | t@(CSym h _) <- nub (concatMap subterms (termsIn (stripLocations (goalConcl g)))), h == core, Just (u, _, body) <- [unfoldRedex k t], u == t]
+    applications = nub [t | body <- bodies, t@(CSym h _) <- subterms body, h /= core]
+    globals = Map.elems (envGlobals (knowEnv k))
+    functionOf h = find ((== h) . funCore) [f | GFun f <- globals]
+    constructorOf h = find ((== h) . ctorCore) [c | GCtor c <- globals]
+    dataOf c = listToMaybe [d | GData d <- [Map.findWithDefault (GCtor c) (ctorData c) (envGlobals (knowEnv k))]]
+    -- Over no type parameters: a function's scheme, a constructor's type.
+    monomorphic h = case (functionOf h, constructorOf h) of
+      (Just info, _) -> null (schemeParams (funScheme info)) && maybe True (null . ixsPremises) (Map.lookup h (knowIndexSpecs k))
+      (_, Just c) -> maybe False (null . dataParams) (dataOf c)
+      _ -> True
+    -- Every function and constructor the body names, those a callback's
+    -- code or environment, a closure's body or a partial application names
+    -- too, and those the definitions of its functions name in turn: a lemma
+    -- a callback is passed to appeals to the callback's inside its premise,
+    -- and a function unfolded where it has no closure lemma to its
+    -- definition's.
+    everyMonomorphic = all monomorphic (Set.toList (reachable Set.empty (concatMap namesIn bodies)))
+    reachable seen = \case
+      [] -> seen
+      h : rest
+        | h `Set.member` seen -> reachable seen rest
+        | otherwise -> reachable (Set.insert h seen) (Map.findWithDefault [] h definitions <> rest)
+    definitions = Map.fromListWith (<>) [(h, namesIn (unfoldingRhs uf)) | uf <- knowUnfoldings k, CSym h _ <- [unfoldingLhs uf]]
+    namesIn t = case t of
+      CSym h args -> h : concatMap namesIn args
+      CStatic h -> [h]
+      CCallback code environment -> namesIn code <> namesIn environment
+      CPartial h dict _ -> h : concatMap namesIn dict
+      CIndexedPartial h captures _ _ -> h : concatMap namesIn captures
+      CClosure _ body captured -> namesIn body <> concatMap namesIn captured
+      _ -> []
+    indexed (CSym h _) = Map.member h (knowIndexSpecs k) && isJust (functionOf h) && monomorphic h
+    indexed _ = False
+    member (CSym h _) = everyMonomorphic && (Map.member h (knowClosures k) || isJust (constructorOf h))
+    member _ = False
+    candidates = [t | t <- applications, indexed t || member t]
+    -- Those inside another, innermost first.
+    nested = [t | t <- candidates, any (\u -> u /= t && t `elem` subterms u) candidates]
+    -- A fact proved where it is wanted is proved again where the nested
+    -- applications branch, two neither inside the other, or one occurs
+    -- twice: there sharing pays.  Along a single chain each is wanted about
+    -- once, and stating them all beforehand only lengthens every context
+    -- the proof searches.
+    branching = or [not (t `elem` subterms u || u `elem` subterms t) | (i, t) <- zip [1 :: Int ..] nested, u <- drop i nested]
+    repeated = any (\t -> length (filter (== t) occurrences) > 1) nested
+    occurrences = [t | body <- bodies, t@(CSym _ _) <- subterms body]
+    -- A constructor's code is a member by its type's predicate, where that takes no parameters' predicates.
+    constructorPred h = do
+      c <- constructorOf h
+      d <- dataOf c
+      (symbol, used) <- Map.lookup (renderQualName (dataQual d)) (knowMembership k)
+      guard (null used)
+      pure (Pred symbol [])
+    -- The subterms of a term, each after its own.
+    subterms t = case t of
+      CSym _ args -> concatMap subterms args <> [t]
+      _ -> [t]
+    termsIn = \case
+      Rel _ a b -> [t | Right t <- [termCT CVar a, termCT CVar b]]
+      Conn _ a b -> termsIn (stripLocations a) <> termsIn (stripLocations b)
+      _ -> []
+    share (tac, g0) (i, t@(CSym h _)) =
+      let name j = prefix <> T.pack (show i) <> "_" <> T.pack (show j)
+          membership = do
+            guard (member t)
+            p <- termPred k g0 t <|> constructorPred h
+            guard (not (hasMembership g0 p t))
+            proof <- either (const Nothing) Just (membershipProof k g0 p t)
+            pure ("have " <> fromText (name 0) <> ": " <> membershipText p t <> " { " <> proof <> " }; ", (name 0, HProp (Rel RelLt (Nat 0) (fromCT (predicateAt p t)))))
+          (tac1, g1) = maybe (tac, g0) (\(stated, hyp) -> (tac <> stated, g0 {goalHyps = goalHyps g0 <> [hyp]})) membership
+          index (acc, gi) (j, (fn, _)) =
+            let lhs = CSym fn [t]
+             in case indexOf k gi (goalEquations gi) lhs of
+                  Right (e, proof)
+                    | not (hasEquation gi lhs e) ->
+                        (acc <> "have " <> fromText (name j) <> ": " <> equationText lhs e <> " { " <> proof <> " }; ", gi {goalHyps = goalHyps gi <> [(name j, HProp (Rel RelEq (fromCT lhs) (fromCT e)))]})
+                  _ -> (acc, gi)
+       in foldl index (tac1, g1) (zip [1 :: Int ..] (if indexed t then maybe [] ixsPost (Map.lookup h (knowIndexSpecs k)) else []))
+    share acc _ = acc
+
+-- | The names of the hypotheses 'shareApplications' states begin so: 'digest' leaves them as they are, applications it is not to unfold.
+sharedPrefix :: Text
+sharedPrefix = "Shared"
+
+-- | Whether a generated declaration states facts 'shareApplications' shares, the hypotheses it names so.
+usesSharedFacts :: Text -> Bool
+usesSharedFacts = T.isInfixOf ("have " <> sharedPrefix)
 
 -- | The dictionary of a function's lemmas: its own, then the membership predicate of each type parameter its values are of, parameters of the lemma's rule.
 lemmaDictionary :: FunDef -> [Slot]
@@ -1092,7 +1234,7 @@ specializeIHs k g0 = foldl one ("", g0) (zip [1 :: Int ..] (nub (map snd (goalIH
               h : _ -> Just ("exact " <> fromText h)
               [] -> case preconditionsAt k g Map.empty [(l, r)] of
                 Right t -> Just (t <> "assumption")
-                Left _ -> listToMaybe [b | (h', HProp _) <- goalHyps g, Just b <- [hypothesisBridge k g {goalConcl = a} h']]
+                Left _ -> listToMaybe [b | (h', HProp _) <- goalHyps g, not (sharedPrefix `T.isPrefixOf` h'), Just b <- [hypothesisBridge k g {goalConcl = a} h']]
       _ -> Nothing
     split acc@(tac, g) h c = case stripLocations c of
       Conn And a b ->
@@ -1370,7 +1512,7 @@ preconditionsAt k g sigma props = fmap mconcat . forM props $ \(l0, r0) -> do
         [] -> l
       -- A hypothesis it is once both are unfolded, as S n < S m is n < m: tried before an
       -- obligation, whose conclusion may match where its own hypotheses do not.
-      bridged = listToMaybe [b | (h, HProp _) <- goalHyps g, Just b <- [hypothesisBridge k g {goalConcl = Rel RelEq (fromCT l) (fromCT r)} h]]
+      bridged = listToMaybe [b | (h, HProp _) <- goalHyps g, not (sharedPrefix `T.isPrefixOf` h), Just b <- [hypothesisBridge k g {goalConcl = Rel RelEq (fromCT l) (fromCT r)} h]]
   if hasEquation g l r
     then Right ""
     else case (bridged, found l, found rewritten) of
@@ -1571,7 +1713,8 @@ unfolded by the unfolding lemmas, stated as a new hypothesis when that
 changes it; a successor against a successor, and the code of a constructor
 against the code of the same one, taken apart by injectivity, again and
 again — the latter at each position where the codes differ, by the
-constructor's @#field@ lemma there.  The tactic stating them, and every
+constructor's @#field@ lemma there; those 'shareApplications' states left as
+they are, applications not to be unfolded.  The tactic stating them, and every
 equation at hand, by name.
 -}
 digest :: Knowledge -> Goal -> (Builder, [(Text, CT, CT)])
@@ -1582,13 +1725,15 @@ digestWith :: Text -> Knowledge -> Goal -> (Builder, [(Text, CT, CT)])
 digestWith prefix k g = foldl one ("", []) (zip [1 :: Int ..] (goalEquations g))
   where
     freshPrefix = head [p | p <- prefix : [prefix <> T.pack (show i) <> "_" | i <- [1 :: Int ..]], all (not . T.isPrefixOf p . fst) (goalHyps g)]
-    one (tac, acc) (i, (h, l, r)) =
-      let name = freshPrefix <> T.pack (show i)
-          (tac1, h1, l1, r1) = case restate k h l r name of
-            Just (t, l', r') -> (t, name, l', r')
-            Nothing -> ("", h, l, r)
-          (tac2, derived) = injective h1 l1 r1
-       in (tac <> tac1 <> tac2, acc <> [(h, l, r)] <> [(h1, l1, r1) | h1 /= h] <> derived)
+    one (tac, acc) (i, (h, l, r))
+      | sharedPrefix `T.isPrefixOf` h = (tac, acc <> [(h, l, r)])
+      | otherwise =
+          let name = freshPrefix <> T.pack (show i)
+              (tac1, h1, l1, r1) = case restate k h l r name of
+                Just (t, l', r') -> (t, name, l', r')
+                Nothing -> ("", h, l, r)
+              (tac2, derived) = injective h1 l1 r1
+           in (tac <> tac1 <> tac2, acc <> [(h, l, r)] <> [(h1, l1, r1) | h1 /= h] <> derived)
     -- A successor against a successor: the predecessors; a constructor's code against its code: the fields which differ; again and again.
     injective h l r = case (l, r) of
       (CSym "S" [a], CSym "S" [b]) ->
@@ -1673,20 +1818,30 @@ conclude k g eqs concl = case stripLocations concl of
   Top -> Right "refl"
   _ -> Left "the conclusion is no equation of indices"
 
--- | An equation of indices: both sides unfolded, and what is left closed by 'closeEq'.
+{- |
+An equation of indices: closed by 'closeEq' as it is, or else once one side
+is unfolded, the right first, or both.  One side is tried alone first so that
+a definition only one side applies is unfolded without the other's, which may
+be costly to unfold: a derivation computed by a function, say, against an
+index a function names.
+-}
 indexEquation :: Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> CT -> Either String Builder
-indexEquation k g eqs l r
-  | Right proof <- closeEq indexFuel k g eqs l r = Right proof
-  | otherwise = do
-      let ls = reductionsOf k l
-          rs = reductionsOf k r
-          l' = lastTerm l ls
-          r' = lastTerm r rs
+indexEquation k g eqs l r = case closeEq indexFuel k g eqs l r of
+  Right proof -> Right proof
+  Left why -> firstOf why attempts
+  where
+    -- The first attempt closing it, else the last one's failure.
+    firstOf why = \case
+      [] -> Left why
+      a : rest -> either (\e -> firstOf e rest) Right a
+    ls = reductionsOf k l
+    rs = reductionsOf k r
+    attempts = [attempt [] rs | not (null rs)] <> [attempt ls [] | not (null ls)] <> [attempt ls rs | not (null ls), not (null rs)]
+    attempt ls' rs' = do
+      let l' = lastTerm l ls'
+          r' = lastTerm r rs'
       mid <- closeEq indexFuel k g eqs l' r'
-      pure
-        if null ls && null rs
-          then mid
-          else "calc " <> render l <> forth ls <> (if l' == r' then "" else " = " <> render r' <> " by (" <> mid <> ")") <> back rs r
+      pure ("calc " <> render l <> forth ls' <> (if l' == r' then "" else " = " <> render r' <> " by (" <> mid <> ")") <> back rs' r)
 
 -- | How many index specifications a proof of an equation of indices goes through, one after another.
 indexFuel :: Int
@@ -1696,10 +1851,22 @@ indexFuel = 16
 An equation of indices, both sides unfolded: equal; an equation at hand,
 either way round, or rewriting by one; congruence of corresponding arguments
 at a common head; or the index the specification of a function gives an
-index function's application, and on from there.
+index function's application, and on from there; or, last, a function
+applied at the head of a side, unfolded once.
 -}
 closeEq :: Int -> Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> CT -> Either String Builder
-closeEq fuel k g eqs l r
+closeEq = closeEqUnfolding True
+
+{- |
+'closeEq', unfolding a head or not.  The arguments congruence compares are
+closed without it: where unfolding keeps the head, as a function's recursive
+call on itself does, congruence is tried again at each step, and with it
+each argument's failing search, and the same inside the argument, the work
+doubling at each level down.  Unfolding an argument is left to
+'indexEquation'.
+-}
+closeEqUnfolding :: Bool -> Int -> Knowledge -> Goal -> [(Text, CT, CT)] -> CT -> CT -> Either String Builder
+closeEqUnfolding unfolding fuel k g eqs l r
   | canonical l == canonical r = Right "refl"
   | n : _ <- [h | (h, a, b) <- eqs, a == l, b == r] = Right ("exact " <> fromText n)
   | n : _ <- [h | (h, a, b) <- eqs, a == r, b == l] = Right ("symmetry " <> fromText n <> " as IxS; exact IxS")
@@ -1720,16 +1887,33 @@ closeEq fuel k g eqs l r
   , e /= l =
       if e == r
         then Right p
-        else (\rest -> "calc " <> render l <> " = " <> render e <> " by (" <> p <> ") = " <> render r <> " by (" <> rest <> ")") <$> closeEq (fuel - 1) k g eqs e r
+        else (\rest -> "calc " <> render l <> " = " <> render e <> " by (" <> p <> ") = " <> render r <> " by (" <> rest <> ")") <$> closeEqUnfolding unfolding (fuel - 1) k g eqs e r
   | Right (e, p) <- indexOf k g eqs r
   , e /= r =
       let flipped = "have IxT: " <> equationText r e <> " { " <> p <> " }; symmetry IxT as IxU; exact IxU"
        in if e == l
             then Right flipped
-            else (\rest -> "calc " <> render l <> " = " <> render e <> " by (" <> rest <> ") = " <> render r <> " by (" <> flipped <> ")") <$> closeEq (fuel - 1) k g eqs l e
+            else (\rest -> "calc " <> render l <> " = " <> render e <> " by (" <> rest <> ") = " <> render r <> " by (" <> flipped <> ")") <$> closeEqUnfolding unfolding (fuel - 1) k g eqs l e
+  -- A function applied, its definition at hand: that side unfolded once, the
+  -- right first, where nothing else closes it, before anything below unfolds
+  -- the other side as far as it goes.
+  | unfolding
+  , Just (tac, r') <- headUnfolding r =
+      (\rest -> "calc " <> render l <> " = " <> render r' <> " by (" <> rest <> ") = " <> render r <> " by " <> tac) <$> closeEqUnfolding unfolding (fuel - 1) k g eqs l r'
+  | unfolding
+  , Just (tac, l') <- headUnfolding l =
+      (\rest -> "calc " <> render l <> " = " <> render l' <> " by " <> tac <> " = " <> render r <> " by (" <> rest <> ")") <$> closeEqUnfolding unfolding (fuel - 1) k g eqs l' r
   | otherwise = Left ("cannot show " <> shown)
   where
     shown = T.unpack (runBuilder (equationText l r))
+    -- A function's application rewritten by its unfolding lemma, where the application itself is what it rewrites.
+    headUnfolding t = case t of
+      CSym h _
+        | any ((== h) . funCore) [f | GFun f <- Map.elems (envGlobals (knowEnv k))]
+        , Just (u, tac, t') <- unfoldRedex k t
+        , u == t ->
+            Just (tac, t')
+      _ -> Nothing
     rewrites a b = replaceCT (\t -> if t == a then Just b else Nothing) l == r || replaceCT (\t -> if t == b then Just a else Nothing) l == r
     -- Follow equations already in the context, in either direction. Fuel
     -- bounds the path length and visited terms prevent equality cycles.
@@ -1748,7 +1932,7 @@ closeEq fuel k g eqs l r
     -- arguments may rely on different hypotheses without adding an axiom.
     congruent f xs ys = do
       steps <- forM [(i, x, y) | (i, (x, y)) <- zip [0 :: Int ..] (zip xs ys), x /= y] \(i, x, y) -> do
-        proof <- closeEq (fuel - 1) k g eqs x y
+        proof <- closeEqUnfolding False (fuel - 1) k g eqs x y
         let name = freshPrefix <> fromDec fuel <> "_" <> fromDec i
             next = CSym f (take (i + 1) ys <> drop (i + 1) xs)
         pure (" = " <> render next <> " by (have " <> name <> ": " <> equationText x y <> " { " <> proof <> " }; cong " <> name <> ")")
@@ -3913,7 +4097,7 @@ runTactics k info n g0 sp tacs0 = do
           let (prep, eqs) = digest k g
            in case conclude k g eqs (asEquation (goalConcl g)) of
                 Right proof -> Right (closed (prep <> proof), more)
-                Left _ -> Right (closed (fromMaybe "cong" (listToMaybe [proof | (h, HProp _) <- goalHyps g, Just proof <- [hypothesisBridge k g h]])), more)
+                Left _ -> Right (closed (fromMaybe "cong" (listToMaybe [proof | (h, HProp _) <- goalHyps g, not (sharedPrefix `T.isPrefixOf` h), Just proof <- [hypothesisBridge k g h]])), more)
         R.TTerm e -> case unLocated e of
           R.EProof rhs -> (,more) <$> proveRhs k info n g (Located tsp rhs)
           _ -> do

@@ -1,0 +1,73 @@
+module SharedCallbacks where
+
+-- Nested constructor applications whose memberships a closure proof may
+-- state once, beside a function over a type parameter passed as a callback:
+-- in a lambda, or applied partially.  Its closure lemma is a rule over the
+-- predicate of that parameter, appealed to inside the premise of the
+-- lemma the callback is passed to; a membership stated beside the one the
+-- appeal means would leave it unable to tell them apart, and the lemma
+-- generated would fail to certify.  The closures of prefix, lambda and
+-- partial themselves are not established, sharing or not.
+
+data T = A | B T | C T T
+
+data Ts = TNil | TCons T Ts
+
+mapTs : (T -> T) -> Ts -> Ts
+mapTs f TNil = TNil
+mapTs f (TCons t ts) = TCons (f t) (mapTs f ts)
+
+applyT : (T -> T) -> T -> T
+applyT k x = k x
+
+tag : a -> T -> T
+tag x A = A
+tag x (B t) = B (tag x t)
+tag x (C s t) = C (tag x s) (tag x t)
+
+prefix : T -> Ts -> Ts
+prefix x ts = TCons (B (B x)) (mapTs (\y -> tag (B x) y) ts)
+
+lambda : T -> T
+lambda x = C (B (B x)) (applyT (\y -> tag (B x) y) x)
+
+partial : T -> T
+partial x = C (B (B x)) (applyT (tag (B x)) x)
+
+-- A helper with no closure lemma of its own, its other clause's callback
+-- closure not being established: where the membership of its application
+-- is needed, the helper is unfolded, and the closure of the function over a
+-- type parameter its definition names is appealed to, though the body
+-- names only the helper.  So are a contract's.
+
+data Flag = On | Off
+
+helper : Flag -> T -> T
+helper On y = tag y y
+helper Off y = applyT (\z -> tag (B z) z) y
+
+unfolded : T -> T
+unfolded x = C (helper On x) (B (B x))
+
+data Vec n where
+  VNil : Vec 0
+  VCons : {n : nat} -> T -> Vec n -> Vec (S n)
+
+contract : T -> Vec n -> Vec (S (S n))
+contract x v = VCons (helper On x) (VCons (B (B x)) v)
+
+-- A proof given for a constructor's precondition is an obligation, a
+-- theorem whose hypotheses are its clause's context, the membership of x
+-- among them, which its conclusion 0 < 1 does not mention: every
+-- membership of a T stated beside x's is an instance of it, monomorphic
+-- names or not.  So a function with obligations shares nothing.
+
+data W = MkW T
+
+data Pos where
+  MkPos : (k : Nat) -> 0 < k -> T -> Pos
+
+data R = D W Pos
+
+obliged : T -> R
+obliged x = D (MkW (B x)) (MkPos 1 (by rfl) x)

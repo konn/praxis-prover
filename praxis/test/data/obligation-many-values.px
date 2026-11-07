@@ -1,0 +1,35 @@
+module ObligationManyValues where
+
+-- An obligation over six values, each with its membership and its index, of
+-- which its conclusion names none: each hypothesis has its one instance in
+-- the clause's context, and the appeal finds them at once.
+
+data V0 n where
+  N0 : V0 0
+  C0 : {n : nat} -> V0 n -> V0 (S n)
+
+data V1 n where
+  N1 : V1 0
+  C1 : {n : nat} -> V1 n -> V1 (S n)
+
+data V2 n where
+  N2 : V2 0
+  C2 : {n : nat} -> V2 n -> V2 (S n)
+
+data V3 n where
+  N3 : V3 0
+  C3 : {n : nat} -> V3 n -> V3 (S n)
+
+data V4 n where
+  N4 : V4 0
+  C4 : {n : nat} -> V4 n -> V4 (S n)
+
+data V5 n where
+  N5 : V5 0
+  C5 : {n : nat} -> V5 n -> V5 (S n)
+
+data Pos where
+  MkPos : (k : Nat) -> 0 < k -> Pos
+
+big : { n0 n1 n2 n3 n4 n5 : nat} -> V0 n0 -> V1 n1 -> V2 n2 -> V3 n3 -> V4 n4 -> V5 n5 -> Pos
+big {n0} {n1} {n2} {n3} {n4} {n5} v0 v1 v2 v3 v4 v5 = MkPos 1 (by rfl)

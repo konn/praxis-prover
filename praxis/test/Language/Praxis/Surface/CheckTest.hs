@@ -766,6 +766,17 @@ checkTests =
         c <- checkFile "test/data/constructor-indices.px"
         errors c @?= []
         mapM_ (\f -> assertBool ("the indices of " <> T.unpack f) (("ConstructorIndices." <> f <> ".#index") `elem` checkedTheorems c)) ["hypothesis", "no-member", "wrap"]
+    , testCase "sharing the facts of nested applications costs no lemma: beside a function over a type parameter passed as a callback, in a lambda or applied partially, or named by the definition of a helper unfolded, and beside an obligation whose hypotheses name a variable its conclusion does not" $ do
+        c <- checkFile "test/data/shared-callbacks.px"
+        errors c @?= []
+        let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_SharedCallbacks_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["mapTs", "applyT", "tag", "unfolded", "contract", "obliged"]
+        assertBool "the contract of contract" (any (" u_SharedCallbacks_scontract_s_x23_contract " `T.isInfixOf`) (checkedCore c))
+    , localOption (mkTimeout 60000000) $ testCase "an obligation over many values its conclusion does not name is appealed to at once" $ do
+        c <- checkFile "test/data/obligation-many-values.px"
+        errors c @?= []
+        let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_ObligationManyValues_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
+        assertBool "the closure of big" (closed "big")
     , testCase "theorems over Nat, by its induction: clauses on 0 and S n, the tactic, a comparison by unfolding, and a value not named" $ do
         c <- checkFile "test/data/nat.px"
         errors c @?= []

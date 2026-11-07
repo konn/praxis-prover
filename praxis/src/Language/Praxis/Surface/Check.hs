@@ -82,7 +82,7 @@ import Language.Praxis.Surface.Core.Pretty qualified as CorePretty
 import Language.Praxis.Surface.CoreText (CT (..))
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
-import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal)
+import Language.Praxis.Surface.Engine (Closure, EngineError (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), indexSpec, indexSpecOf, proveClosure, proveSpec, proveTheorem, statementGoal, usesSharedFacts)
 import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), classEvidenceName, displayQualName, emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Evidence qualified as Evidence
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
@@ -529,15 +529,30 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
             Right decls -> certifyTheorem (tdSpan td) name r decls
 
     -- The lemmas of the library a proof may cite by name: those certified, but the modules' own, which are mangled.
-    knowledge r = Knowledge (activeEnv r) fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"]) (knownDeclarations r) (coreReductions (runCore r))
+    knowledge = knowledgeWith True
+    knowledgeWith sharing r = Knowledge (activeEnv r) fx (coreMembership (runCore r)) (runMembers r) (runIndexEqs r) (runProps r) (runUnfoldings r) (runClosures r) (coreVariadic (runCore r)) (runIndexSpecs r) (runObligations r) (Map.fromList [(T.pack name, map (T.pack . fst) (PRA.lemmaMetas lemma)) | (name, lemma) <- Map.toList (coreLemmas (runCore r))]) (Set.fromList [T.pack n | n <- Map.keys (coreLemmas (runCore r)), take 2 n /= "u_"]) (knownDeclarations r) (coreReductions (runCore r)) sharing
+
+    -- A function's lemma, generated and certified, as the engine proves it
+    -- first: stating the facts of the applications its body nests once.
+    -- Where the kernel refuses declarations so proved, they are generated
+    -- again without, each fact proved where it is needed, from the run
+    -- before the first attempt.
+    economically :: (Bool -> Run -> (Run, [(Text, Text)])) -> Run -> Run
+    economically attempt r = case attempt True r of
+      (r', decls)
+        | errorCount r' > errorCount r
+        , any (usesSharedFacts . snd) decls ->
+            fst (attempt False r)
+        | otherwise -> r'
+    errorCount = length . filter ((== SevError) . reportSeverity) . runReports
 
     -- The closure lemma of a function, when its result is of a data type and it can be proved: a failure is a bug of the generator.
-    closure fd r = case proveClosure (knowledge r) fd of
-      Left (EngineError sp msg) -> report sp SevError ("internal: the closure of " <> funName fd <> ": " <> msg) r
+    closure fd = economically \sharing r -> case proveClosure (knowledgeWith sharing r) fd of
+      Left (EngineError sp msg) -> (report sp SevError ("internal: the closure of " <> funName fd <> ": " <> msg) r, [])
       Right Nothing
-        | not (null (fdImpossible fd)) || requiresEvidence [] (fdResult fd) -> report (fdSpan fd) SevError (funName fd <> ": the membership of its results, under the indices of its arguments, could not be proved") r
-        | otherwise -> r
-      Right (Just (cl, decls)) -> certifyClosure fd cl r decls
+        | not (null (fdImpossible fd)) || requiresEvidence [] (fdResult fd) -> (report (fdSpan fd) SevError (funName fd <> ": the membership of its results, under the indices of its arguments, could not be proved") r, [])
+        | otherwise -> (r, [])
+      Right (Just (cl, decls)) -> (certifyClosure fd cl r decls, decls)
     -- A result carrying erased evidence, possibly inside a container, must
     -- have a certified membership contract before its evidence can be used.
     requiresEvidence seen = \case
@@ -567,21 +582,21 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
         | null (ixsPost s) -> r {runIndexSpecs = Map.insert (funCore (fdInfo fd)) s (runIndexSpecs r)}
         | otherwise ->
             let name = funName fd
-             in case proveSpec (knowledge r) fd (indexSpec s) of
-                  Left (EngineError sp msg) -> report sp SevError (name <> ": " <> msg) r
-                  Right (Left why) -> report (fdSpan fd) SevError (name <> ": the indices of its result: " <> why) r
+             in flip economically r \sharing r0 -> case proveSpec (knowledgeWith sharing r0) fd (indexSpec s) of
+                  Left (EngineError sp msg) -> (report sp SevError (name <> ": " <> msg) r0, [])
+                  Right (Left why) -> (report (fdSpan fd) SevError (name <> ": the indices of its result: " <> why) r0, [])
                   Right (Right proof) ->
-                    let r' = certifyTheorem (fdSpan fd) (name <> ".#index") r (spDecls proof)
-                     in if Map.member (T.unpack (ixsLemma s)) (coreLemmas (runCore r')) then r' {runIndexSpecs = Map.insert (funCore (fdInfo fd)) s (runIndexSpecs r')} else r'
+                    let r' = certifyTheorem (fdSpan fd) (name <> ".#index") r0 (spDecls proof)
+                     in (if Map.member (T.unpack (ixsLemma s)) (coreLemmas (runCore r')) then r' {runIndexSpecs = Map.insert (funCore (fdInfo fd)) s (runIndexSpecs r')} else r', spDecls proof)
 
     -- The specifications asked of a function, each proved and certified as a theorem is; a failure is reported.
     specify fd r0 = foldl (specified fd) r0 (specsOf env fd)
     specified fd r s =
       let name = funName fd <> "." <> T.unpack (specName s)
-       in case proveSpec (knowledge r) fd s of
-            Left (EngineError sp msg) -> report sp SevError (name <> ": " <> msg) r
-            Right (Left why) -> report (fdSpan fd) SevError (name <> ": " <> why) r
-            Right (Right proof) -> certifyTheorem (fdSpan fd) name r (spDecls proof)
+       in flip economically r \sharing r0 -> case proveSpec (knowledgeWith sharing r0) fd s of
+            Left (EngineError sp msg) -> (report sp SevError (name <> ": " <> msg) r0, [])
+            Right (Left why) -> (report (fdSpan fd) SevError (name <> ": " <> why) r0, [])
+            Right (Right proof) -> (certifyTheorem (fdSpan fd) name r0 (spDecls proof), spDecls proof)
 
     -- A theorem's declarations, the auxiliary ones first; the first failure is the theorem's.
     certifyTheorem sp name r = \case
