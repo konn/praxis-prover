@@ -24,8 +24,13 @@ cabal run praxis -- eval praxis/data/libraries/logic/src/Logic/Glivenko.px \
 ```
 
 The demo constructs a classical proof of Peirce's law
-`P = ((p → q) → p) → p`, runs the verified transformation, and returns
-`Result <output conclusion> <input proof size> <output proof size>`.
+`P = ((p → q) → p) → p`, runs the verified transformation, and prints
+`Result <output conclusion> <input proof size> <output proof size>`:
+
+```text
+Result (((((Atom 0 :=> Atom 1) :=> Atom 0) :=> Atom 0) :=> Bottom) :=> Bottom) 35 1273
+```
+
 The conclusion is `¬¬P`. Sizes count nodes of the unfolded Hilbert proof;
 runtime allocation statistics count shared nodes instead.
 The supplied example has 35 classical proof nodes and 1,273 intuitionistic
@@ -42,6 +47,12 @@ the command; the function itself may construct and transform their values.
 It supports first-order functions, constructor patterns, naturals and a
 small arithmetic builtin set. Imports, callbacks and dictionaries are not
 yet supported by this command.
+
+Values print as surface syntax. An operator constructor such as `:=>` is
+written between its operands, parenthesised by its declared fixity, and a
+constructor goes by its bare name unless two constructors printed in the
+same value share it: `demo-proofs` shows `Classical.MP` and
+`Intuitionistic.MP`, but `Atom` and `Bottom`.
 
 Checking and evaluation are separate phases. The CLI checks the module on
 each invocation; the full demo currently takes roughly half a minute to
@@ -92,7 +103,30 @@ A → ¬¬A
 
 ## Entering and leaving a theory
 
-The same file uses internal mode to construct the identity schema:
+The same file constructs the identity schema with construction tactics in
+an ordinary definition:
+
+```text
+identity : {a : Formula} -> Intuitionistic (a :=> a)
+identity {a} = by
+  apply Intuitionistic.MP
+  {
+    apply Intuitionistic.MP
+    { exact Intuitionistic.S {a} {a :=> a} {a} }
+    { exact Intuitionistic.K {a} {a :=> a} }
+  }
+  { exact Intuitionistic.K {a} {a} }
+```
+
+`apply` supplies a rule with the terms constructed for its remaining
+explicit arguments; the ordinary indexed term checker validates every
+premise. The `by` block, tactic words, and `{ ... }` focus blocks use
+Praxis's existing tactic syntax and parser. Each focus block constructs
+one argument. Formula parameters make `identity` a uniform theorem schema.
+The constructors are qualified because both calculi have `K`, `S`, and
+`MP`, and outside internal mode a bare `S` is the natural successor.
+
+Internal mode states the same declaration by its object formula:
 
 ```text
 internal Intuitionistic where
@@ -108,19 +142,13 @@ internal Intuitionistic where
 ```
 
 An internal signature states an object formula. Elaboration wraps its final
-result in the selected proof family, so this declares the ordinary function
-`identity : {a : Formula} -> Intuitionistic (a :=> a)`. Formula parameters
-make it a uniform theorem schema. `K`, `S`, and `MP` denote the selected
-family's constructors inside the block; in particular, this `S` is its
-Hilbert axiom, even though the surface language also has natural successor.
-`apply` supplies a rule with the terms constructed for its remaining
-explicit arguments; the ordinary indexed term checker validates every
-premise. The `by` block, tactic words, and `{ ... }` focus blocks use
-Praxis's existing tactic syntax and parser. Each focus block constructs
-one argument. The same construction elaborator is available in ordinary
-value definitions and nested `by` expressions. Internal mode selects the
-proof family and wraps result signatures; construction itself needs no
-internalization. Native proposition goals retain their PRA proof tactics.
+result in the selected proof family, so this declares the same ordinary
+function `identity : {a : Formula} -> Intuitionistic (a :=> a)`. `K`, `S`,
+and `MP` denote the selected family's constructors inside the block; in
+particular, this `S` is its Hilbert axiom, even though the surface language
+also has natural successor. Internal mode selects the proof family and
+wraps result signatures; construction itself needs no internalization.
+Native proposition goals retain their PRA proof tactics.
 
 Internal mode also works inside ordinary namespaces:
 

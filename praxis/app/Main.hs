@@ -10,7 +10,7 @@ import Data.Text.IO qualified as TIO
 import Data.Version (showVersion)
 import Language.Praxis.Package.Build
 import Language.Praxis.Surface.Check
-import Language.Praxis.Surface.Eval (EvalResult (..), evaluateEntryWithNats, renderValue)
+import Language.Praxis.Surface.Eval (EvalResult (..), displayOf, evaluateEntryWithNats, renderValueWith)
 import Language.Praxis.Surface.Prelude
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
 import Numeric.Natural (Natural)
@@ -49,7 +49,7 @@ main = do
       case evaluateEntryWithNats fuel (T.pack entry) arguments checked of
         Left err -> hPutStrLn stderr err *> exitFailure
         Right result -> do
-          TIO.putStrLn (renderValue depth (evalValue result))
+          TIO.putStrLn (renderValueWith (displayOf checked) depth (evalValue result))
           hPutStrLn stderr ("Evaluated " <> show (evalCalls result) <> " distinct calls; " <> show (evalNodes result) <> " shared value nodes.")
 
 commandP :: Parser Command

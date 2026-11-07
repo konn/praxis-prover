@@ -33,6 +33,22 @@ evalTests =
         p <- either assertFailure pure prelude
         let checked = checkSource p "failed.px" (treeSource <> "\nwrong : 0 = 1\nwrong = by rfl\n")
         assertBool "the erroneous module was evaluated" (isLeft (evaluateEntry 10000 "Trees.answer" checked))
+    , testCase "values print operators infix and names unqualified unless they clash" $ do
+        checked <- check displaySource
+        let value name = evalValue <$> either assertFailure pure (evaluateEntry 1000 ("Shown." <> name) checked)
+            shown depth name = renderValueWith (displayOf checked) depth <$> value name
+        shown 12 "nested" >>= (@?= "(A :=> B) :=> A :=> B")
+        shown 12 "lefts" >>= (@?= "A :+ B :+ A")
+        shown 12 "rights" >>= (@?= "A :+ (B :+ A)")
+        shown 12 "tighter" >>= (@?= "A :+ B :=> A")
+        shown 12 "looser" >>= (@?= "A :+ (B :=> A)")
+        shown 12 "wrapped" >>= (@?= "Wrap (A :=> B) 3")
+        shown 12 "clash" >>= (@?= "Pair P.K Q.K")
+        shown 12 "stored" >>= (@?= "(:+:) 3 Leaf Leaf")
+        shown 0 "wrapped" >>= (@?= "Wrap ...")
+        shown 1 "nested" >>= (@?= "(... :=> ...) :=> ... :=> ...")
+        -- Without the module's fixities every operator is the parser's default, left-associative.
+        renderValue 12 <$> value "nested" >>= (@?= "A :=> B :=> (A :=> B)")
     ]
   where
     check source = do
@@ -54,4 +70,33 @@ evalTests =
         , "answer = size (grow 20)"
         , "count : Nat -> Nat"
         , "count n = size (grow n)"
+        ]
+    displaySource =
+      T.unlines
+        [ "module Shown where"
+        , "data F = A | B | F :=> F | F :+ F"
+        , "infixr 5 :=>"
+        , "infixl 6 :+"
+        , "data W = Wrap F Nat"
+        , "data Q = K"
+        , "data P = K | Pair P Q"
+        , "data T where"
+        , "  Leaf : T"
+        , "  (:+:) : {m : Nat} -> T -> T -> T"
+        , "nested : F"
+        , "nested = (A :=> B) :=> A :=> B"
+        , "lefts : F"
+        , "lefts = (A :+ B) :+ A"
+        , "rights : F"
+        , "rights = A :+ (B :+ A)"
+        , "tighter : F"
+        , "tighter = (A :+ B) :=> A"
+        , "looser : F"
+        , "looser = A :+ (B :=> A)"
+        , "wrapped : W"
+        , "wrapped = Wrap (A :=> B) 3"
+        , "clash : P"
+        , "clash = Pair P.K Q.K"
+        , "stored : T"
+        , "stored = (:+:) {3} Leaf Leaf"
         ]

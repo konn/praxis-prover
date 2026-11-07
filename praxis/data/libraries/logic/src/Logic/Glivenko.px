@@ -27,17 +27,18 @@ data Classical (a : Formula) where
   DNE : {a : Formula} -> Classical (((a :=> Bottom) :=> Bottom) :=> a)
   MP : {a b : Formula} -> Classical (a :=> b) -> Classical a -> Classical b
 
--- Internal proof schemata produce ordinary indexed derivation values.
-internal Intuitionistic where
-  identity : {a : Formula} -> a :=> a
-  identity {a} = by
-    apply MP
-    {
-      apply MP
-      { exact S {a} {a :=> a} {a} }
-      { exact K {a} {a :=> a} }
-    }
-    { exact K {a} {a} }
+-- Proof schemata built by construction tactics in an ordinary definition:
+-- apply MP, then construct its two premises in turn. The constructors are
+-- qualified, since both calculi have them and a bare S is the successor.
+identity : {a : Formula} -> Intuitionistic (a :=> a)
+identity {a} = by
+  apply Intuitionistic.MP
+  {
+    apply Intuitionistic.MP
+    { exact Intuitionistic.S {a} {a :=> a} {a} }
+    { exact Intuitionistic.K {a} {a :=> a} }
+  }
+  { exact Intuitionistic.K {a} {a} }
 
 -- The easy direction preserves the conclusion literally.
 embed : Intuitionistic a -> Classical a
