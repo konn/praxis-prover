@@ -4,7 +4,7 @@
 module Language.Praxis.Surface.CheckTest (checkTests) where
 
 import Control.Monad (forM_)
-import Data.List (isPrefixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Multiset qualified as MS
 import Data.Set qualified as Set
@@ -769,6 +769,8 @@ checkTests =
         let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " " <> mangleGlobal ["Abbreviations", f, "#closed"] <> " " | kw <- ["theorem", "rule"]]) (checkedCore c)
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["intro", "intro-unfolded", "intro-twice", "lift", "lift-unfolded"]
         mapM_ (\f -> assertBool ("the index contract of " <> T.unpack f) (("Abbreviations." <> f <> ".#index") `elem` checkedTheorems c)) ["intro", "intro-unfolded", "intro-twice", "lift", "lift-unfolded"]
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["mix", "tl"]
+        mapM_ (\f -> assertBool ("the index contract of " <> T.unpack f) (("Abbreviations." <> f <> ".#index") `elem` checkedTheorems c)) ["mix", "tl"]
         (k, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
         let abbreviations = Map.keys (envAbbreviations (knowEnv k))
         forM_ ["neg", "nn"] $ \f -> assertBool (T.unpack f <> " is an abbreviation") (mangleGlobal ["Abbreviations", f] `elem` abbreviations)
@@ -783,10 +785,14 @@ checkTests =
         p <- either assertFailure pure prelude
         source <- TIO.readFile "test/data/abbreviations.px"
         forM_
-          [ ("a mismatch through an abbreviation", "wrong : Pf a -> Pf (neg a)\nwrong p = dni :@ p\n")
-          , ("an implicit no argument determines", "loose : Pf (nn a) -> Pf (nn b) -> Pf (nn a)\nloose f x = mp :@ f :@ x\n")
+          [ ("a mismatch through an abbreviation", "wrong : Pf a -> Pf (neg a)\nwrong p = dni :@ p\n", "type mismatch")
+          , ("an implicit no argument determines", "loose : Pf (nn a) -> Pf (nn b) -> Pf (nn a)\nloose f x = mp :@ f :@ x\n", "type mismatch")
+          , ("types agreeing once unfolded, over a value the clause does not name", "mixed : Pf (neg (nn a)) -> Pf (nn (neg a))\nmixed p = p\n", "in braces")
+          , ("an implicit which is no value of its type", "three : IxS (Circle Bottom)\nthree = MkS\n", "no value of the type")
           ]
-          $ \(what, bad) -> assertBool (what <> " was accepted") (not (null (errors (checkSource p "bad-abbreviations.px" (source <> bad)))))
+          $ \(what, bad, expected) -> case errors (checkSource p "bad-abbreviations.px" (source <> bad)) of
+            [] -> assertFailure (what <> " was accepted")
+            reported -> assertBool (what <> ": " <> unlines reported) (any (expected `isInfixOf`) reported)
     , testCase "equations of constructors' codes in indices: the same constructor's are taken apart, different ones' refuted, and a name matching solves stands for its solution" $ do
         c <- checkFile "test/data/constructor-indices.px"
         errors c @?= []

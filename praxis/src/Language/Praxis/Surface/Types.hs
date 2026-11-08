@@ -56,6 +56,7 @@ module Language.Praxis.Surface.Types (
   -- * Comparison
   Unfold,
   noUnfold,
+  unfoldDepth,
   Assignment (..),
   emptyAssignment,
   mergeTy,

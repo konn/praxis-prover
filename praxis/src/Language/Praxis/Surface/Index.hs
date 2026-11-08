@@ -35,6 +35,10 @@ module Language.Praxis.Surface.Index (
   unifyAll,
   unifyAllNamed,
   unifyAllRanked,
+  unifyIxRankedWith,
+  unifyIxNamedWith,
+  unifyAllWith,
+  unifyAllRankedWith,
 
   -- * Terms
   ixToExpr,
@@ -131,36 +135,50 @@ unified, the one of the lower rank is solved by the other, and the left one
 of equal ranks.  A variable no rank is given is never solved.
 -}
 unifyIxRanked :: [Text] -> (Key -> Maybe Int) -> Ix -> Ix -> Subst -> Unified
-unifyIxRanked names rank a0 b0 s = go (applyIx s a0) (applyIx s b0)
+unifyIxRanked = unifyIxRankedWith noUnfold
+
+{- |
+'unifyIxRanked', abbreviations unfolded: an abbreviation applied, on either
+side, against what it does not unify with as it stands, is unfolded, and
+unification goes on with its right side, within 'unfoldDepth' steps.
+-}
+unifyIxRankedWith :: Unfold -> [Text] -> (Key -> Maybe Int) -> Ix -> Ix -> Subst -> Unified
+unifyIxRankedWith unfold names rank = from unfoldDepth
   where
     render = renderIx names
-    go a b
-      | a == b = Unified s
-      | Just k <- keyOf a, Just i <- rank k, all (i <=) (keyOf b >>= rank) = bind k b
-      | Just k <- keyOf b, Just _ <- rank k = bind k a
-      | otherwise = case (a, b) of
-          (IxSucc x, IxSucc y) -> unifyIxRanked names rank x y s
-          (IxSucc x, IxNat n)
-            | n > 0 -> unifyIxRanked names rank x (IxNat (n - 1)) s
-            | otherwise -> Clash (render a <> " is a successor, and 0 is not")
-          (IxNat n, IxSucc y)
-            | n > 0 -> unifyIxRanked names rank (IxNat (n - 1)) y s
-            | otherwise -> Clash ("0 is not a successor, and " <> render b <> " is")
-          (IxNat m, IxNat n) -> Clash (show m <> " is not " <> show n)
-          (IxCon c xs, IxCon d ys)
-            | c /= d -> Clash (render a <> " and " <> render b <> " are built by different constructors")
-            | length xs == length ys -> unifyAllRanked names rank (zip xs ys) s
-          (IxCon {}, IxNat _) -> Clash (render a <> " is no numeral")
-          (IxCon {}, IxSucc _) -> Clash (render a <> " is no successor")
-          (IxNat _, IxCon {}) -> Clash (render b <> " is no numeral")
-          (IxSucc _, IxCon {}) -> Clash (render b <> " is no successor")
-          _ -> Stuck (render a <> " and " <> render b <> ": neither is solved by the other")
-    bind k t
-      | k `elem` keysOf t = if occursThroughConstructors k t then Clash (render t <> " would contain itself") else Stuck (render t <> " mentions what it is to solve")
-      | otherwise =
-          let Subst m = s
-              one = Subst (Map.singleton k t)
-           in Unified (Subst (Map.insert k t (Map.map (applyIx one) m)))
+    from fuel a0 b0 s = go (applyIx s a0) (applyIx s b0)
+      where
+        go a b
+          | a == b = Unified s
+          | Just k <- keyOf a, Just i <- rank k, all (i <=) (keyOf b >>= rank) = bind k b
+          | Just k <- keyOf b, Just _ <- rank k = bind k a
+          | otherwise = case (a, b) of
+              (IxSucc x, IxSucc y) -> from fuel x y s
+              (IxSucc x, IxNat n)
+                | n > 0 -> from fuel x (IxNat (n - 1)) s
+                | otherwise -> Clash (render a <> " is a successor, and 0 is not")
+              (IxNat n, IxSucc y)
+                | n > 0 -> from fuel (IxNat (n - 1)) y s
+                | otherwise -> Clash ("0 is not a successor, and " <> render b <> " is")
+              (IxNat m, IxNat n) -> Clash (show m <> " is not " <> show n)
+              (IxCon c xs, IxCon d ys)
+                | c /= d -> Clash (render a <> " and " <> render b <> " are built by different constructors")
+                | length xs == length ys -> pairs fuel (zip xs ys) s
+              (IxCon {}, IxNat _) -> Clash (render a <> " is no numeral")
+              (IxCon {}, IxSucc _) -> Clash (render a <> " is no successor")
+              (IxNat _, IxCon {}) -> Clash (render b <> " is no numeral")
+              (IxSucc _, IxCon {}) -> Clash (render b <> " is no successor")
+              -- An abbreviation applied, against what it does not unify with as it stands: unfolded.
+              (IxFun f xs, _) | fuel > 0, Just a' <- unfold f xs -> from (fuel - 1) (normIx a') b s
+              (_, IxFun g ys) | fuel > 0, Just b' <- unfold g ys -> from (fuel - 1) a (normIx b') s
+              _ -> Stuck (render a <> " and " <> render b <> ": neither is solved by the other")
+        bind k t
+          | k `elem` keysOf t = if occursThroughConstructors k t then Clash (render t <> " would contain itself") else Stuck (render t <> " mentions what it is to solve")
+          | otherwise =
+              let Subst m = s
+                  one = Subst (Map.singleton k t)
+               in Unified (Subst (Map.insert k t (Map.map (applyIx one) m)))
+    pairs fuel ps s0 = foldl (\acc (x, y) -> case acc of Unified s -> from fuel x y s; other -> other) (Unified s0) ps
     -- Only a constructor-only path makes a value its own proper subterm.
     -- A function can decrease its argument: n = S (n - 1) has solutions.
     occursThroughConstructors k = \case
@@ -168,6 +186,22 @@ unifyIxRanked names rank a0 b0 s = go (applyIx s a0) (applyIx s b0)
       IxCon _ xs -> any (occursThroughConstructors k) xs
       IxFun _ _ -> False
       x -> keyOf x == Just k
+
+-- | 'unifyAll', abbreviations unfolded as 'unifyIxRankedWith' unfolds them.
+unifyAllWith :: Unfold -> (Key -> Bool) -> [(Ix, Ix)] -> Subst -> Unified
+unifyAllWith unfold flexible = unifyAllRankedWith unfold [] (\k -> if flexible k then Just 0 else Nothing)
+
+-- | 'unifyIxNamed', abbreviations unfolded as 'unifyIxRankedWith' unfolds them.
+unifyIxNamedWith :: Unfold -> [Text] -> (Key -> Bool) -> Ix -> Ix -> Subst -> Unified
+unifyIxNamedWith unfold names flexible = unifyIxRankedWith unfold names (\k -> if flexible k then Just 0 else Nothing)
+
+-- | 'unifyAllRanked', abbreviations unfolded as 'unifyIxRankedWith' unfolds them.
+unifyAllRankedWith :: Unfold -> [Text] -> (Key -> Maybe Int) -> [(Ix, Ix)] -> Subst -> Unified
+unifyAllRankedWith unfold names rank pairs s0 = foldl step (Unified s0) pairs
+  where
+    step acc (x, y) = case acc of
+      Unified s -> unifyIxRankedWith unfold names rank x y s
+      other -> other
 
 -- | Unify indices pairwise, left to right; the first clash or stuck pair is the answer.
 unifyAll :: (Key -> Bool) -> [(Ix, Ix)] -> Subst -> Unified

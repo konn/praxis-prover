@@ -64,3 +64,65 @@ lift {a} {b} f x = mp :@ f :@ x
 -- ((a :=> b) :=> Bottom) :=> Bottom.
 lift-unfolded : Pf (((a :=> b) :=> Bottom) :=> Bottom) -> Pf (nn a) -> Pf ((b :=> Bottom) :=> Bottom)
 lift-unfolded {a} {b} f x = mp :@ f :@ x
+
+-- The implicit a of count is determined through nn by the type of the
+-- argument, the type expected of the argument having a hole under nn.
+count : {a : Formula} -> Pf (nn a) -> Nat
+count {a} p = 0
+
+counted : Pf ((c :=> Bottom) :=> Bottom) -> Nat
+counted {c} p = count p
+
+-- Types which agree once both are unfolded: the equation of their indices
+-- names a, which the clause binds.
+mix : Pf (neg (nn a)) -> Pf (nn (neg a))
+mix {a} p = p
+
+-- Abbreviations in the kinds of a signature's variables: v is a Vec two from
+-- the field of MkBox and a Vec 2 from Ix2, in either order.
+data Vec (n : Nat) where
+  Nil : Vec 0
+  Cons : {n : Nat} -> Nat -> Vec n -> Vec (S n)
+
+two : Nat
+two = 2
+
+inc : Nat -> Nat
+inc n = S n
+
+data Box = MkBox (Vec two)
+
+data Ix (b : Box) where
+  MkIx : {b : Box} -> Ix b
+
+data Ix2 (v : Vec 2) where
+  MkIx2 : {v : Vec 2} -> Ix2 v
+
+both : Ix (MkBox v) -> Ix2 v -> Nat
+both x y = 0
+
+both-reversed : Ix2 v -> Ix (MkBox v) -> Nat
+both-reversed y x = 0
+
+-- A constructor two data types have, chosen by the type of the index it
+-- stands in: Shape's Circle takes a Nat, Color's a Formula.
+data Color = Red | Circle Formula
+
+data Shape = Square | Circle Nat
+
+data IxS (s : Shape) where
+  MkS : {s : Shape} -> IxS s
+
+data IxC (c : Color) where
+  MkC : {c : Color} -> IxC c
+
+shared : IxS (Circle n) -> IxC (Circle f) -> Nat
+shared s c = 0
+
+shared-used : IxS (Circle 3) -> IxC (Circle Bottom) -> Nat
+shared-used s c = shared s c
+
+-- A pattern on an index an abbreviation names unfolds it: Vec (inc n) is
+-- Vec (S n), which Cons matches.
+tl : {n : Nat} -> Vec (inc n) -> Vec n
+tl {n} (Cons x xs) = xs
