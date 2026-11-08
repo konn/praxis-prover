@@ -39,8 +39,8 @@ identity {a} = by
   apply (:@)
   {
     apply (:@)
-    { exact Intuitionistic.S {a} {a :=> a} {a} }
-    { exact Intuitionistic.K {a} {a :=> a} }
+    { exact Intuitionistic.S }
+    { exact Intuitionistic.K }
   }
   { exact Intuitionistic.K {a} {a} }
 
