@@ -239,7 +239,11 @@ ctorIndexEquations indexFns c = case ctorSignature c of
           IxFun f xs -> CSym f <$> traverse index xs
           IxSchema name -> Just (CStatic name)
           IxPartial name arity prefix xs -> (\captures -> CIndexedPartial name captures arity prefix) <$> traverse index xs
-          IxVar _ -> Nothing
+          IxLocal {} -> Nothing
+          IxMeta {} -> Nothing
+          IxFree _ -> Nothing
+          IxDict _ -> Nothing
+          IxMethod _ -> Nothing
           IxHole -> Nothing
      in [ (l, r)
         | (e, TeleEntry _ (TData dn _ ixs@(_ : _)) _) <- zip [0 ..] tele

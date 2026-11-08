@@ -38,6 +38,7 @@ module Language.Praxis.Surface.Syntax (
   dropProofs,
   mapGlobals,
   mapTypeGlobals,
+  mapIndices,
   globalsOf,
 
   -- * Patterns
@@ -59,21 +60,12 @@ import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.Surface.Syntax.Raw (Located, Quantifier (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Ix (..), Ty, mapIx)
+import Language.Praxis.Surface.Types (Hint (..), Ix (..), Ty, mapIx)
 import Numeric.Natural (Natural)
+import Text.Read (readMaybe)
 import Text.Show (showListWith)
 
 -- * Irrelevant data
-
--- | A name kept for display only: any two are equal.
-newtype Hint = Hint {hintText :: Text}
-  deriving newtype (Show)
-
-instance Eq Hint where
-  _ == _ = True
-
-instance Ord Hint where
-  compare _ _ = EQ
 
 -- | A value kept for reports only, such as a source span: any two are equal.
 newtype Irrelevant a = Irrelevant {relevant :: a}
@@ -384,7 +376,7 @@ mapTypeGlobals f = mapIx (mapIndexGlobals f)
 mapIndexGlobals :: (Ref -> Ref) -> Ix -> Ix
 mapIndexGlobals f = go
   where
-    go (IxVar name) | Just position <- T.stripPrefix "#d" name = IxVar ("#d" <> refName (f (Ref RefValueParam position)))
+    go (IxDict i) = maybe (IxDict i) IxDict (readMaybe (T.unpack (refName (f (Ref RefValueParam (T.pack (show i)))))))
     go (IxSchema name) = IxSchema (refName (f (Ref RefStatic name)))
     go (IxSucc x) = IxSucc (go x)
     go (IxCon name xs) = IxCon (refName (f (Ref RefConstructor name))) (map go xs)
@@ -416,6 +408,41 @@ mapGlobals f = go
       Pi h i d b -> Pi h i (go d) (hoistScope go b)
       Arrow a b -> Arrow (go a) (go b)
       Quant q h bound ty b -> Quant q h (fmap (fmap go) bound) (fmap go ty) (hoistScope go b)
+      Rel r a b -> Rel r (go a) (go b)
+      Conn c a b -> Conn c (go a) (go b)
+      Not a -> Not (go a)
+      Top -> Top
+      Bottom -> Bottom
+      Universe -> Universe
+      Hole -> Hole
+      ProofArg p r -> ProofArg (go p) r
+      Absurd r -> Absurd r
+
+-- | Every index in the types an expression is annotated with rewritten by the function given, under binders too: how a telescope's variables are opened in them.
+mapIndices :: (Ix -> Ix) -> Expr a -> Expr a
+mapIndices f = go
+  where
+    ty = mapIx f
+    go :: Expr x -> Expr x
+    go = \case
+      Var a -> Var a
+      Global r -> Global r
+      Nat n -> Nat n
+      App g x -> App (go g) (go x)
+      At sp e -> At sp (go e)
+      Typed t ts is e -> Typed (ty t) (map ty ts) [(i, f x) | (i, x) <- is] (go e)
+      Dictionary t e -> Dictionary (ty t) (go e)
+      Transport t e ps -> Transport (ty t) (go e) (map go ps)
+      SchemaParameter t r e -> SchemaParameter (ty t) r (go e)
+      SchemaClosure t e -> SchemaClosure (ty t) (go e)
+      SchemaPacked hs b e -> SchemaPacked hs (hoistScope go b) (go e)
+      PredicatePacked hs b es -> PredicatePacked hs (hoistScope go b) (map go es)
+      Lam hs b -> Lam hs (hoistScope go b)
+      Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]
+      If c t e -> If (go c) (go t) (go e)
+      Pi h i d b -> Pi h i (go d) (hoistScope go b)
+      Arrow a b -> Arrow (go a) (go b)
+      Quant q h bound t b -> Quant q h (fmap (fmap go) bound) (fmap go t) (hoistScope go b)
       Rel r a b -> Rel r (go a) (go b)
       Conn c a b -> Conn c (go a) (go b)
       Not a -> Not (go a)

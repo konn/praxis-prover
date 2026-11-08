@@ -72,9 +72,9 @@ function env fd = T.unlines (signature : concatMap clause (fdClauses fd))
           values = ["{" <> n <> maybe "" ((" = " <>) . P.patternText 0) (lookup i (zip (funRuntime info) runtime)) <> "}" | (i, (n, _)) <- zip [0 ..] (schemeValues scheme)]
           proofs = [(pos, "[proof " <> proofBinder pos <> "]") | (pos, _) <- funProofs info]
           lhs = T.unwords (name : map ("@" <>) (P.typeNames sc) <> values <> P.interleave proofs (map (P.patternText 11) explicit) <> ["[dict " <> d <> "]" | (d, _) <- dicts])
-          context = sc {P.variableNames = map fst (fcVars fc)}
+          context = sc {P.variableNames = openNames (fcVars fc)}
           body = Core.pretty env context (demangle . thmCore . tdInfo) (fcTerm fc)
-          bindings = [n <> " : " <> P.typeText env context 0 t | (n, t) <- fcVars fc]
+          bindings = [n <> " : " <> P.typeText env context 0 t | (n, t) <- openTelescope (fcVars fc)]
        in [lhs <> " ="]
             <> ["  -- " <> T.intercalate "; " bindings | not (null bindings)]
             <> map ("  " <>) (T.lines body)

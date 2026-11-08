@@ -90,7 +90,11 @@ typeText env sc = go
 indexText :: Scope -> Int -> Ix -> Text
 indexText sc p = \case
   IxParam i -> nameAt "i" (indexNames sc) i
-  IxVar n -> demangle n
+  IxLocal _ (Hint h) -> h
+  IxMeta _ (Hint h) -> h
+  IxFree n -> demangle n
+  IxDict i -> "#d" <> T.pack (show i)
+  IxMethod q -> reference (Ref RefFunction q)
   IxNat n -> T.pack (show n)
   IxHole -> "_"
   IxSucc x -> application p "S" [indexText sc 11 x]

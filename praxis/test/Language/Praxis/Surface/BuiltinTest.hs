@@ -63,7 +63,7 @@ builtinTests =
     , testCase "finite methods belong to the same registered class" $
         rejected "exact dependent method signature" (validate BuiltinFiniteCode (changeMethod BuiltinFiniteCode (\m -> m {methodClass = [Ident "OtherFinite"]}) fixture))
     , testCase "both directions depend on this dictionary's cardinality" $ do
-        let otherCard = IxVar "#method:Other.card"
+        let otherCard = IxMethod "Other.card"
         rejected "exact dependent method signature" (validate BuiltinFiniteDecode (changeMethod BuiltinFiniteDecode (\m -> m {methodScheme = (methodScheme m) {schemeType = TArrow (fin otherCard) parameter}}) fixture))
         rejected "exact dependent method signature" (validate BuiltinFiniteCode (changeMethod BuiltinFiniteCode (\m -> m {methodScheme = (methodScheme m) {schemeType = TArrow parameter (fin otherCard)}}) fixture))
     , testCase "the retraction law uses the registered decoder and encoder" $ do
@@ -122,7 +122,7 @@ vec :: Ix -> Ty
 vec n = TData (renderQualName (target BuiltinVec)) [parameter] [n]
 
 cardIndex :: Ix
-cardIndex = IxVar ("#method:" <> renderQualName (target BuiltinFiniteCard))
+cardIndex = IxMethod (renderQualName (target BuiltinFiniteCard))
 
 scoped :: Expr Int -> Scope Int Expr Void
 scoped = toScope . fmap B

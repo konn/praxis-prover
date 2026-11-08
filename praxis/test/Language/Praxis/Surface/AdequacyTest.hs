@@ -79,7 +79,7 @@ import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Term qualified as Term
-import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), normIx)
+import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), binderTy, normIx, openTelescope)
 import Numeric.Natural (Natural)
 import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, elements, expectFailure, forAll, ioProperty, label, property, scale, sized, (===))
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -772,7 +772,7 @@ the same on both sides, at well-typed values, its value parameters first.
 -}
 propStatement :: Loaded -> TheoremDef -> Property
 propStatement ld td
-  | emptyTelescope ld (map snd (tdValues td <> tdBinders td)) = label "empty domain by constructor indices" True
+  | emptyTelescope ld (map snd (tdValues td) <> map binderTy (tdBinders td)) = label "empty domain by constructor indices" True
   | otherwise = propertyOf (theoremStatement (ldMembership ld) td)
   where
     propertyOf result = case result of
@@ -786,7 +786,7 @@ propStatement ld td
                 _ -> False
               (memberships, rest) = partition (isMembership ld) hyps
               (indexEqs, props) = partition isIndexEquation rest
-              entries = tdValues td <> tdBinders td
+              entries = tdValues td <> openTelescope (tdBinders td)
            in withWitness ("no statement values for " <> T.unpack (renderQualName (thmQual (tdInfo td)))) (genTele ld Map.empty (map snd entries)) $ \values ->
                 let vs = Map.elems values
                     (as, c) = implications (instantiate (Var . (vs !!)) (fmap absurd (tdProp td)))
@@ -853,6 +853,6 @@ membershipTruth ld name value = do
   text <- either assertFailure pure (theoremStatement (ldMembership ld) td)
   (hyps, _) <- either (assertFailure . errorBundlePretty) pure (parse sequentP "" text)
   let memberships = filter (isMembership ld) hyps
-  case (tdValues td <> tdBinders td, memberships) of
+  case (tdValues td <> openTelescope (tdBinders td), memberships) of
     ([(n, _)], _ : _) -> pure (all (holds ld (Map.singleton (mangleVariable n) (encode value))) memberships)
     _ -> assertFailure "a unary polymorphic statement lost its membership premise"

@@ -34,8 +34,8 @@ coreTests =
         assertBool "unknown index" (isLeft (Core.elaborate emptyEnv [] [TData "Vec" [TNat] [IxHole]] (Var 0)))
     , testCase "index transport validates all equalities before retaining their obligations" $ do
         let vec ix = TData "Vec" [TNat] [ix]
-            vars = [("n", TNat), ("m", TNat), ("xs", vec (IxVar "n"))]
-            target = vec (IxVar "m")
+            vars = [namedBinder "n" TNat, namedBinder "m" TNat, namedBinder "xs" (vec (IxLocal 0 (Hint "n")))]
+            target = vec (IxLocal 1 (Hint "m"))
             raw = R.Located R.noSpan (R.EProof (R.RBy []))
             proof p = ProofArg p (Irrelevant raw)
             transport ps = Transport target (Var 2) ps
@@ -43,7 +43,7 @@ coreTests =
             check = Core.elaborateNamed emptyEnv [] vars
         assertBool "missing equality" (isLeft (check (transport [])))
         assertBool "wrong equality" (isLeft (check (transport [proof (Rel RelEq (Var 0) (Var 0))])))
-        assertBool "different type structure" (isLeft (check (Transport (TData "Other" [TNat] [IxVar "m"]) (Var 2) [proof equality])))
+        assertBool "different type structure" (isLeft (check (Transport (TData "Other" [TNat] [IxLocal 1 (Hint "m")]) (Var 2) [proof equality])))
         body <- either assertFailure pure (check (transport [proof equality]))
         Core.bodyType body @?= target
         Core.computation body @?= Term.Variable 2
@@ -56,10 +56,10 @@ coreTests =
             ref = Ref RefStatic "f_1"
             env = emptyEnv {envSchemas = [("f", ref, ty)]}
             parameter r i = SchemaParameter ty r (Var i)
-            check = Core.elaborateNamed env [] [("f", ty), ("g", ty)]
+            check = Core.elaborateNamed env [] [namedBinder "f" ty, namedBinder "g" ty]
         assertBool "a bare function variable is no runtime function code" (isLeft (check (Var 0)))
         assertBool "an annotation cannot erase static identity" (isLeft (check (Typed ty [] [] (Var 0))))
-        assertBool "a natural is no callback environment" (isLeft (Core.elaborateNamed env [] [("f", TNat)] (parameter ref 0)))
+        assertBool "a natural is no callback environment" (isLeft (Core.elaborateNamed env [] [namedBinder "f" TNat] (parameter ref 0)))
         assertBool "forged static identity" (isLeft (check (parameter (Ref RefStatic "f_2") 0)))
         assertBool "swapped closure environment" (isLeft (check (parameter ref 1)))
         body <- either assertFailure pure (check (Typed TNat [] [] (App (parameter ref 0) (Nat 3))))
@@ -72,7 +72,7 @@ coreTests =
             ctor = Ref RefConstructor (ctorCore (head (dataCtors box)))
             callback = SchemaParameter callbackTy ref (Var 0)
             forged = Typed (TData "Box" [callbackTy] []) [] [] (App (Global ctor) callback)
-        assertBool "function-valued field" (isLeft (Core.elaborateNamed env [] [("f", callbackTy)] forged))
+        assertBool "function-valued field" (isLeft (Core.elaborateNamed env [] [namedBinder "f" callbackTy] forged))
     , testCase "internal packed callbacks cannot bypass the typed source boundary" $ do
         let packed = SchemaPacked [Hint "env", Hint "arg"] (toScope (Var (B 1))) (Nat 0)
             check = Core.elaborate emptyEnv [] []

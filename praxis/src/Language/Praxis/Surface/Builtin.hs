@@ -253,7 +253,7 @@ validateBuiltin registry env role target = do
 
 -- | The class elaborator uses this stable name in dependent method signatures.
 cardIndex :: QualName -> Ix
-cardIndex name = IxVar ("#method:" <> renderQualName name)
+cardIndex name = IxMethod (renderQualName name)
 
 open :: Scope Int Expr Void -> Expr Int
 open = instantiate Var . fmap absurd

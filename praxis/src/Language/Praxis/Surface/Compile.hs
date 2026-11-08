@@ -64,7 +64,7 @@ import Language.Praxis.Surface.Match
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (segmentRaw)
 import Language.Praxis.Surface.Term qualified as Term
-import Language.Praxis.Surface.Types (Ty (TArrow, TNat))
+import Language.Praxis.Surface.Types (Ty (TArrow, TNat), openNames)
 
 -- | A function in the core: its definition, and its lemmas with their declarations, in order.
 data Compiled = Compiled
@@ -638,7 +638,7 @@ compileFunction env fd = do
         ]
 
     -- The clause's variables as core variables, by their names.
-    varOf fc i = CVar (mangleVariable (fst (fcVars fc !! i)))
+    varOf fc i = CVar (mangleVariable (openNames (fcVars fc) !! i))
     argVar ps fc i = case [j | (j, Arg a) <- zip [0 ..] ps, a == i] of
       j : _ -> varOf fc j
       []

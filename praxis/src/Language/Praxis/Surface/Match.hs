@@ -80,14 +80,17 @@ possibleShapes args runtime selected = case unifyAll (const True) equations empt
   Clash _ -> False
   _ -> True
   where
-    prefix i = "#case" <> T.pack (show i) <> "_"
+    -- The variables to solve: one for each argument's value, and for each field and each implicit argument of the constructor it is matched by.
+    width = 1 + maximum (0 : [length (constructorTele (ctorSignature c)) | (_, Constructor c) <- selected])
+    meta :: Int -> Int -> Text -> Ix
+    meta i j = IxMeta (i * width + j) . Hint
     field :: Int -> Int -> Ix
-    field i j = IxVar (prefix i <> "field" <> T.pack (show j))
+    field i j = meta i (1 + j) ("field" <> T.pack (show j))
     value i = case lookup i selected of
       Just Zero -> IxNat 0
       Just Successor -> IxSucc (field i 0)
       Just (Constructor c) -> IxCon (ctorCore c) [field i j | j <- [0 .. length (ctorFields c) - 1]]
-      Nothing -> IxVar (prefix i <> "value")
+      Nothing -> meta i 0 "value"
     equations =
       [(IxParam p, value i) | (i, p) <- zip [0 ..] runtime]
         <> concat
@@ -99,7 +102,7 @@ possibleShapes args runtime selected = case unifyAll (const True) equations empt
                   [ case teRole entry of
                       Explicit f -> field i f
                       Stored f -> field i f
-                      Recovered _ _ -> IxVar (prefix i <> "index" <> T.pack (show j))
+                      Recovered _ _ -> meta i (1 + j) ("index" <> T.pack (show j))
                   | (j, entry) <- zip [0 :: Int ..] (constructorTele signature)
                   ]
           ]

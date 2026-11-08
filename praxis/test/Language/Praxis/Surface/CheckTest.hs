@@ -29,7 +29,7 @@ import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..), RelOp (..))
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..), segmentText)
-import Language.Praxis.Surface.Types (Ix (..), Ty (..))
+import Language.Praxis.Surface.Types (Ix (..), Ty (..), binderTy, namedBinder)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -694,7 +694,7 @@ checkTests =
             (_, items) = elabModule fx emptyEnv renamed
         case reverse [td | ITheorem td <- items] of
           td : _ -> do
-            let colliding = td {tdBinders = [("x", ty) | (_, ty) <- tdBinders td]}
+            let colliding = td {tdBinders = [namedBinder "x" (binderTy b) | b <- tdBinders td]}
             theoremStatement Map.empty colliding @?= Left "a theorem's value binders must have distinct names"
           [] -> assertFailure "expected the ordinary theorem at the end of the fixture"
     , testCase "induction eigenvariables stay apart from surface binders" $ do
@@ -857,7 +857,7 @@ checkTests =
         -- The elements below b, a closure capturing b; and the lists of them.
         let below = predicateOver "x" (CSym "lt" [CVar "x", CVar "b"])
             lists = Pred listIs [predicateParam below]
-            g = Goal [("H1", HMember below "a"), ("H2", HMember lists "xs")] Top [] [] [] [] [] (initialSourceBindings []) mempty
+            g = Goal [("H1", HMember below "a"), ("H2", HMember lists "xs")] Top [] [] [] [] [] (initialSourceBindings []) mempty []
             hyps = membershipText below (CVar "a") <> ", " <> membershipText lists (CVar "xs")
             prove name t = do
               tactic <- either assertFailure pure (membershipProof k g lists t)

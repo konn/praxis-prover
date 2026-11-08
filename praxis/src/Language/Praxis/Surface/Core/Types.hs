@@ -34,7 +34,14 @@ data Type
 
 data Index
   = ParameterIndex Nat
-  | VariableIndex Symbol
+  | -- | a variable of the clause's telescope, by level
+    LocalIndex Nat
+  | -- | an index matching left unknown, which the index function of a field recovers
+    MetaIndex Nat
+  | -- | a free variable of an opened binder, by name
+    FreeIndex Symbol
+  | -- | the value of the enclosing dictionary at a position
+    DictionaryIndex Nat
   | NumberIndex Nat
   | SuccessorIndex Index
   | ConstructorIndex Symbol [Index]
@@ -54,7 +61,10 @@ data SType (t :: Type) where
 
 data SIndex (i :: Index) where
   SParameterIndex :: (KnownNat n) => Proxy n -> SIndex ('ParameterIndex n)
-  SVariableIndex :: (KnownSymbol n) => Proxy n -> SIndex ('VariableIndex n)
+  SLocalIndex :: (KnownNat n) => Proxy n -> SIndex ('LocalIndex n)
+  SMetaIndex :: (KnownNat n) => Proxy n -> SIndex ('MetaIndex n)
+  SFreeIndex :: (KnownSymbol n) => Proxy n -> SIndex ('FreeIndex n)
+  SDictionaryIndex :: (KnownNat n) => Proxy n -> SIndex ('DictionaryIndex n)
   SNumberIndex :: (KnownNat n) => Proxy n -> SIndex ('NumberIndex n)
   SSuccessorIndex :: SIndex n -> SIndex ('SuccessorIndex n)
   SConstructorIndex :: (KnownSymbol n) => Proxy n -> List SIndex xs -> SIndex ('ConstructorIndex n xs)
@@ -120,8 +130,21 @@ reflectIndex = go . S.normIx
       | n < 0 = Left "a negative index parameter at the explicit core boundary"
       | otherwise = case someNatVal (fromIntegral n) of
           SomeNat p -> Right (SomeIndex (SParameterIndex p))
-    go (S.IxVar name) = case someSymbolVal (T.unpack name) of
-      SomeSymbol p -> Right (SomeIndex (SVariableIndex p))
+    go (S.IxLocal k _)
+      | k < 0 = Left "a negative local index at the explicit core boundary"
+      | otherwise = case someNatVal (fromIntegral k) of
+          SomeNat p -> Right (SomeIndex (SLocalIndex p))
+    go (S.IxMeta m _)
+      | m < 0 = Left "a negative index variable at the explicit core boundary"
+      | otherwise = case someNatVal (fromIntegral m) of
+          SomeNat p -> Right (SomeIndex (SMetaIndex p))
+    go (S.IxFree name) = case someSymbolVal (T.unpack name) of
+      SomeSymbol p -> Right (SomeIndex (SFreeIndex p))
+    go (S.IxDict i)
+      | i < 0 = Left "a negative dictionary index at the explicit core boundary"
+      | otherwise = case someNatVal (fromIntegral i) of
+          SomeNat p -> Right (SomeIndex (SDictionaryIndex p))
+    go (S.IxMethod _) = Left "an unresolved dependent member at the explicit core boundary"
     go (S.IxNat n) = case someNatVal n of
       SomeNat p -> Right (SomeIndex (SNumberIndex p))
     go (S.IxSucc i) = do
@@ -154,7 +177,10 @@ forgetType = \case
 forgetIndex :: SIndex i -> S.Ix
 forgetIndex = \case
   SParameterIndex p -> S.IxParam (fromIntegral (natVal p))
-  SVariableIndex p -> S.IxVar (T.pack (symbolVal p))
+  SLocalIndex p -> S.IxLocal (fromIntegral (natVal p)) (S.Hint "")
+  SMetaIndex p -> S.IxMeta (fromIntegral (natVal p)) (S.Hint "")
+  SFreeIndex p -> S.IxFree (T.pack (symbolVal p))
+  SDictionaryIndex p -> S.IxDict (fromIntegral (natVal p))
   SNumberIndex p -> S.IxNat (natVal p)
   SSuccessorIndex i -> S.IxSucc (forgetIndex i)
   SConstructorIndex p xs -> S.IxCon (T.pack (symbolVal p)) (listMap forgetIndex xs)
@@ -189,7 +215,10 @@ sameType _ _ = Nothing
 
 sameIndex :: SIndex a -> SIndex b -> Maybe (a :~: b)
 sameIndex (SParameterIndex p) (SParameterIndex q) = do Refl <- sameNat p q; pure Refl
-sameIndex (SVariableIndex p) (SVariableIndex q) = do Refl <- sameSymbol p q; pure Refl
+sameIndex (SLocalIndex p) (SLocalIndex q) = do Refl <- sameNat p q; pure Refl
+sameIndex (SMetaIndex p) (SMetaIndex q) = do Refl <- sameNat p q; pure Refl
+sameIndex (SFreeIndex p) (SFreeIndex q) = do Refl <- sameSymbol p q; pure Refl
+sameIndex (SDictionaryIndex p) (SDictionaryIndex q) = do Refl <- sameNat p q; pure Refl
 sameIndex (SNumberIndex p) (SNumberIndex q) = do Refl <- sameNat p q; pure Refl
 sameIndex (SSuccessorIndex p) (SSuccessorIndex q) = do Refl <- sameIndex p q; pure Refl
 sameIndex (SConstructorIndex p ps) (SConstructorIndex q qs) = do

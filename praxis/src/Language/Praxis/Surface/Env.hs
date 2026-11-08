@@ -94,6 +94,15 @@ module Language.Praxis.Surface.Env (
   constructorsNamed,
   dataOfCtor,
   indexFunctionCores,
+  Local (..),
+  Ctx,
+  localIx,
+  lookupLocal,
+  localAtLevel,
+  standingFor,
+  nextLevel,
+  telescopeLocal,
+  telescopeCtx,
   indexTermIn,
   indexTermInWithDependencies,
   normalizeIndex,
@@ -108,7 +117,7 @@ import Bound (Scope)
 import Control.Applicative ((<|>))
 import Control.Monad (forM)
 import Data.IntMap.Strict qualified as IM
-import Data.List (isPrefixOf, nub)
+import Data.List (find, isPrefixOf, nub)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
@@ -124,39 +133,105 @@ import Language.Praxis.Surface.SourceView (QuantifierViews)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..))
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Assignment (..), Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope (..), Unfold, emptyAssignment, emptyScope, ixVars, mapIx, normIx, renderTyWithOrder, substScheme, tyIndices, unfoldAll)
+import Language.Praxis.Surface.Types (Assignment (..), Binder (..), Hint (..), Ix (..), Kind, Parameter (..), Scheme (..), Telescope, Ty (..), TyScope (..), Unfold, emptyAssignment, emptyScope, ixMethods, mapIx, normIx, renderTyWithOrder, substScheme, tyIndices, unfoldAll)
 
 -- * Globals
 
-{- | An index as a term in a named value context. An implicit index can also
-be recovered by the certified index projection of a value that carries it.
+-- * Variables in scope
+
+{- |
+A variable in scope while a source term is elaborated: the name the source
+writes for it, if any — none for a value bound without a name, as an
+implicit a clause takes without naming it; its de Bruijn level, its
+position among the value binders in scope, the outermost 0; the hint it is
+displayed by; the term variable it is; its type; and the index it stands
+for — itself, 'IxLocal' at its level, in a clause; a value parameter of the
+signature, 'IxParam', in a statement's context; a free variable, 'IxFree',
+in the tactic engine's named world.  Nothing refers to it by its name but
+the source: an index refers to it by its level, and is resolved to the
+variable by that.
 -}
-indexTermIn :: Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a)
+data Local a = Local
+  { localName :: !(Maybe Text)
+  , localLevel :: !Int
+  , localHint :: !Hint
+  , localVar :: a
+  , localTy :: !Ty
+  , localIndex :: !Ix
+  }
+  deriving stock (Show, Functor, Foldable, Traversable)
+
+-- | The variables in scope, the innermost first where names shadow.
+type Ctx a = [Local a]
+
+-- | The index a variable of a clause's telescope stands for: itself, at its level.
+localIx :: Int -> Hint -> Ix
+localIx = IxLocal
+
+-- | The variable a name is written for, the innermost where several have it.
+lookupLocal :: Text -> Ctx a -> Maybe (Local a)
+lookupLocal n = find ((== Just n) . localName)
+
+-- | The variable of a level.
+localAtLevel :: Int -> Ctx a -> Maybe (Local a)
+localAtLevel k = find ((== k) . localLevel)
+
+{- |
+The variable standing for an index, where one in scope does: by the index
+it stands for — a level, a parameter — never by its name; except that a free
+variable, 'IxFree', is a name, the engine's or an ascription's, and stands
+for the variable written by it.
+-}
+standingFor :: Ix -> Ctx a -> Maybe (Local a)
+standingFor x = find stands
+  where
+    -- A variable bound by level is never found by a name: a free variable of that name is another, outside it.
+    stands l =
+      localIndex l == x || case (x, localIndex l) of
+        (IxFree _, IxLocal {}) -> False
+        (IxFree n, _) -> localName l == Just n
+        _ -> False
+
+-- | The level of the next binder under a context: one past the highest in it.
+nextLevel :: Ctx a -> Int
+nextLevel ctx = case map localLevel ctx of
+  [] -> 0
+  levels -> maximum levels + 1
+
+-- | A variable of a telescope: the binder at a level, as the term variable given.
+telescopeLocal :: Int -> Binder -> a -> Local a
+telescopeLocal k (Binder name hint ty) v = Local name k hint v ty (IxLocal k hint)
+
+-- | The context of a telescope: its binders at their levels, each the term variable given for it.
+telescopeCtx :: Telescope -> [a] -> Ctx a
+telescopeCtx binders vs = [telescopeLocal k b v | (k, (b, v)) <- zip [0 ..] (zip binders vs)]
+
+{- | An index as a term in a value context. An implicit index can also be
+recovered by the certified index projection of a value that carries it.
+-}
+indexTermIn :: Env -> Ctx a -> Ix -> Maybe (Expr a)
 indexTermIn env ctx = fmap fst . scopedIndexTerm (\index -> (normIx index, Set.empty)) env ctx
 
 -- | Recover an index together with the declarations used to convert its type.
-indexTermInWithDependencies :: Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a, Set Text)
+indexTermInWithDependencies :: Env -> Ctx a -> Ix -> Maybe (Expr a, Set Text)
 indexTermInWithDependencies env = scopedIndexTerm (normalizeIndex env) env
 
-scopedIndexTerm :: (Ix -> (Ix, Set Text)) -> Env -> [(Text, (a, Ty))] -> Ix -> Maybe (Expr a, Set Text)
+scopedIndexTerm :: (Ix -> (Ix, Set Text)) -> Env -> Ctx a -> Ix -> Maybe (Expr a, Set Text)
 scopedIndexTerm normalize env ctx index = do
   scoped <- ixToExprWith (fmap Var . variable) (fmap Var . parameter) index
   pure (scoped >>= fst, foldMap snd scoped)
   where
-    local name = (\(value, _) -> (Var value, Set.empty)) <$> lookup name ctx
-    variable name = local name <|> dictionaryValue name <|> recovered (IxVar name)
-    dictionaryValue name = do
-      position <- T.stripPrefix "#d" name
-      if T.null position || not (T.all (`elem` ("0123456789" :: String)) position)
-        then Nothing
-        else Just (Global (Ref RefValueParam position), Set.empty)
-    parameter i =
-      (listToMaybe [name | (name, IxParam j) <- tsValues (envScope env), i == j] >>= local)
-        <|> recovered (IxParam i)
+    standing x = (\l -> (Var (localVar l), Set.empty)) <$> standingFor x ctx
+    variable x = standing x <|> dictionaryValue x <|> recovered x
+    dictionaryValue = \case
+      IxDict i -> Just (Global (Ref RefValueParam (T.pack (show i))), Set.empty)
+      _ -> Nothing
+    parameter i = standing (IxParam i) <|> recovered (IxParam i)
     recovered wanted =
       listToMaybe
-        [ (App (Global (Ref RefFunction fn)) (Var value), fromActual <> fromWanted)
-        | (_, (value, TData dn _ indices)) <- ctx
+        [ (App (Global (Ref RefFunction fn)) (Var (localVar l)), fromActual <> fromWanted)
+        | l <- ctx
+        , TData dn _ indices <- [localTy l]
         , Just fns <- [indexFunctionCores env dn]
         , (ix, fn) <- zip indices fns
         , let (actual, fromActual) = normalize ix
@@ -552,11 +627,11 @@ data MethodInfo = MethodInfo
 
 -- | A dependent member's stable name before selecting a dictionary.
 methodIndex :: QualName -> Ix
-methodIndex q = IxVar ("#method:" <> renderQualName q)
+methodIndex q = IxMethod (renderQualName q)
 
 -- | A runtime dictionary value as an index; its name survives ordinary index lowering.
 dictionaryIndex :: Int -> Ix
-dictionaryIndex i = IxVar ("#d" <> T.pack (show i))
+dictionaryIndex = IxDict
 
 {- | Instantiate every dependency using the same dictionary as the method.
 Missing dependencies are errors, never unconstrained index holes.
@@ -818,8 +893,8 @@ addClass env name supers methods = (env', info)
     info = ClassInfo q supers (members [] methods) []
     members _ [] = []
     members previous ((m, sch, arity) : rest) =
-      let used = concatMap ixVars (tyIndices (schemeType sch))
-          dependencies = [(methodQual prior, schemeType (methodScheme prior)) | prior <- previous, methodArity prior == 0, IxVar indexName <- [methodIndex (methodQual prior)], indexName `elem` used]
+      let used = concatMap ixMethods (tyIndices (schemeType sch))
+          dependencies = [(methodQual prior, schemeType (methodScheme prior)) | prior <- previous, methodArity prior == 0, renderQualName (methodQual prior) `elem` used]
           member = MethodInfo (q <> [m]) q sch arity dependencies
        in member : members (previous <> [member]) rest
     env' =

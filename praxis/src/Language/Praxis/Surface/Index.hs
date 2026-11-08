@@ -24,6 +24,8 @@ module Language.Praxis.Surface.Index (
   Subst,
   emptySubst,
   substKeys,
+  keyOf,
+  keysOf,
   applyIx,
   applyTy,
 
@@ -54,8 +56,12 @@ import Language.Praxis.Surface.Types
 
 -- * Substitutions
 
--- | A variable of an index: a value parameter of the enclosing signature, by position, or a variable, by name.
-data Key = KParam !Int | KVar !Text
+{- |
+A variable of an index: a value parameter of the enclosing signature, by
+position; a variable bound in the enclosing telescope, by level; a variable
+unification may solve, by identity; or a free variable, by name.
+-}
+data Key = KParam !Int | KLocal !Int | KMeta !Int | KFree !Text
   deriving stock (Show, Eq, Ord)
 
 -- | Indices for variables, kept idempotent: no solution mentions a variable solved.
@@ -74,8 +80,7 @@ applyIx :: Subst -> Ix -> Ix
 applyIx (Subst m) = normIx . go
   where
     go = \case
-      x@(IxParam i) -> Map.findWithDefault x (KParam i) m
-      x@(IxVar v) -> Map.findWithDefault x (KVar v) m
+      x | Just k <- keyOf x -> Map.findWithDefault x k m
       IxSucc x -> IxSucc (go x)
       IxCon c xs -> IxCon c (map go xs)
       IxFun f xs -> IxFun f (map go xs)
@@ -86,22 +91,18 @@ applyIx (Subst m) = normIx . go
 applyTy :: Subst -> Ty -> Ty
 applyTy s = mapIx (applyIx s)
 
+-- | The variable an index is, if it is one.
 keyOf :: Ix -> Maybe Key
 keyOf = \case
   IxParam i -> Just (KParam i)
-  IxVar v -> Just (KVar v)
+  IxLocal k _ -> Just (KLocal k)
+  IxMeta m _ -> Just (KMeta m)
+  IxFree v -> Just (KFree v)
   _ -> Nothing
 
 -- | The variables an index mentions.
 keysOf :: Ix -> [Key]
-keysOf = \case
-  IxParam i -> [KParam i]
-  IxVar v -> [KVar v]
-  IxSucc x -> keysOf x
-  IxCon _ xs -> concatMap keysOf xs
-  IxFun _ xs -> concatMap keysOf xs
-  IxPartial _ _ _ xs -> concatMap keysOf xs
-  _ -> []
+keysOf x = [k | leaf <- ixLeaves x, Just k <- [keyOf leaf]]
 
 -- * Unification
 
@@ -221,21 +222,26 @@ unifyAllRanked names rank pairs s0 = foldl step (Unified s0) pairs
 -- * Terms
 
 {- |
-The term an index stands for, its variables by the function given, and a
+The term an index stands for, its variables — bound, to be solved, free, a
+dictionary's value or a dependent member — by the function given, and a
 value parameter by none: a value parameter of a signature is implicit, and no
 value a function is given.  Nothing when it mentions one, or a hole.
 -}
-ixToExpr :: (Text -> Maybe (Expr a)) -> Ix -> Maybe (Expr a)
+ixToExpr :: (Ix -> Maybe (Expr a)) -> Ix -> Maybe (Expr a)
 ixToExpr var = ixToExprWith var (const Nothing)
 
 -- | 'ixToExpr', a value parameter by the function given too: where the parameter's value is in scope, as a variable.
-ixToExprWith :: (Text -> Maybe (Expr a)) -> (Int -> Maybe (Expr a)) -> Ix -> Maybe (Expr a)
+ixToExprWith :: (Ix -> Maybe (Expr a)) -> (Int -> Maybe (Expr a)) -> Ix -> Maybe (Expr a)
 ixToExprWith var param = go
   where
     go = \case
       IxNat n -> Just (Nat n)
       IxSucc x -> App (Global (Ref RefBuiltin "S")) <$> go x
-      IxVar v -> var v
+      x@IxLocal {} -> var x
+      x@IxMeta {} -> var x
+      x@IxFree {} -> var x
+      x@IxDict {} -> var x
+      x@IxMethod {} -> var x
       IxCon c xs -> apps (Global (Ref RefConstructor c)) <$> traverse go xs
       IxFun f xs -> apps (Global (Ref (if f `elem` builtins then RefBuiltin else RefFunction) f)) <$> traverse go xs
       IxSchema name -> Just (Global (Ref RefStatic name))

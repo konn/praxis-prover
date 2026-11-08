@@ -25,6 +25,9 @@ a scheme are found by matching its type, one-sided, against the types its
 arguments and the context determine.
 -}
 module Language.Praxis.Surface.Types (
+  -- * Irrelevant data
+  Hint (..),
+
   -- * Kinds and types
   Kind (..),
   Parameter (..),
@@ -45,11 +48,26 @@ module Language.Praxis.Surface.Types (
   determined,
   erase,
 
+  -- * Telescopes
+  Binder (..),
+  Telescope,
+  namedBinder,
+  hiddenBinder,
+  openNames,
+  openIx,
+  openTelescope,
+
   -- * Indices
   normIx,
   hasHole,
-  ixVars,
+  ixLeaves,
+  ixFrees,
+  ixLocals,
+  ixMetas,
+  ixMethods,
+  ixDicts,
   mapIx,
+  mapIxLeaves,
   tyIndices,
   instValues,
 
@@ -77,9 +95,23 @@ module Language.Praxis.Surface.Types (
 import Control.Monad (foldM, zipWithM)
 import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IM
+import Data.List (find)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Numeric.Natural (Natural)
+
+-- * Irrelevant data
+
+-- | A name kept for display only: any two are equal.
+newtype Hint = Hint {hintText :: Text}
+  deriving newtype (Show)
+
+instance Eq Hint where
+  _ == _ = True
+
+instance Ord Hint where
+  compare _ _ = EQ
 
 -- * Kinds and types
 
@@ -113,14 +145,30 @@ data Ty
 {- |
 An index: a first-order term standing in a type.  A value parameter of the
 enclosing signature, by its position among the signature's value parameters,
-as a type parameter is among its type parameters; a variable in scope, by
-name; a hole, an index nothing has determined; a numeral; the successor; a
-constructor, by its core name, applied; a function, by its core name —
-@add@, @sub@, @mul@ and @pow@ for the builtins — applied.
+as a type parameter is among its type parameters; a variable bound in the
+enclosing telescope, by its de Bruijn level — its position among the value
+binders in scope, the outermost 0 — with the name its binder was written by
+as a hint, for display only; a variable unification may solve, by an
+identity fresh within the clause, the name of the entry it was made for its
+hint; a free variable, by name — a binder opened into the tactic engine's
+named world, or a name an ascription leaves unbound; the value of the
+enclosing dictionary at a position; a dependent member of a class, by its
+qualified name, before a dictionary is selected; a hole, an index nothing
+has determined; a numeral; the successor; a constructor, by its core name,
+applied; a function, by its core name — @add@, @sub@, @mul@ and @pow@ for
+the builtins — applied.
+
+A bound variable is never referred to by name: the hint is equal to any
+other, so two indices are equal exactly when they refer to the same
+positions.
 -}
 data Ix
   = IxParam !Int
-  | IxVar !Text
+  | IxLocal !Int !Hint
+  | IxMeta !Int !Hint
+  | IxFree !Text
+  | IxDict !Int
+  | IxMethod !Text
   | IxHole
   | IxNat !Natural
   | IxSucc !Ix
@@ -165,6 +213,69 @@ data TyScope = TyScope
 -- | No names.
 emptyScope :: TyScope
 emptyScope = TyScope [] [] []
+
+-- * Telescopes
+
+{- |
+A binder of a telescope: the name the source wrote for it, if any — what a
+term written under it may refer to it by — the hint it is displayed by, and
+its type, whose indices refer to the binders before it by 'IxLocal' level.
+A binder written by no name — an implicit value a clause takes without
+naming it, an implicit argument of a constructor its pattern leaves out — has
+the name of the parameter it stands for as its hint.
+-}
+data Binder = Binder
+  { binderName :: !(Maybe Text)
+  , binderHint :: !Hint
+  , binderTy :: !Ty
+  }
+  deriving stock (Show, Eq)
+
+-- | The binders in scope, outermost first: the k-th is the variable of level k.
+type Telescope = [Binder]
+
+-- | A binder written by a name.
+namedBinder :: Text -> Ty -> Binder
+namedBinder n = Binder (Just n) (Hint n)
+
+-- | A binder no name is written for, displayed by the hint given.
+hiddenBinder :: Text -> Ty -> Binder
+hiddenBinder h = Binder Nothing (Hint h)
+
+{- |
+Distinct names for the binders of a telescope, opening it into a named
+world — the tactic engine's, or the core text's: a binder keeps the name
+written for it, which the source keeps distinct within a telescope; one
+written by no name takes its hint, primed until it differs from every name
+written and every name taken before it.
+-}
+openNames :: Telescope -> [Text]
+openNames binders = go [] binders
+  where
+    written = [n | Binder (Just n) _ _ <- binders]
+    go _ [] = []
+    go taken (Binder (Just n) _ _ : rest) = n : go (n : taken) rest
+    go taken (Binder Nothing (Hint h) _ : rest) =
+      let name = fromMaybe h (find (\c -> c `notElem` written && c `notElem` taken) (iterate (<> "'") h))
+       in name : go (name : taken) rest
+
+-- | An index with the bound variables of a telescope opened: each by the name given for its level.
+openIx :: [Text] -> Ix -> Ix
+openIx names = go
+  where
+    go = \case
+      IxLocal k h -> maybe (IxLocal k h) IxFree (listToMaybe (drop k names))
+      IxSucc x -> IxSucc (go x)
+      IxCon c xs -> IxCon c (map go xs)
+      IxFun f xs -> IxFun f (map go xs)
+      IxPartial f arity prefix xs -> IxPartial f arity prefix (map go xs)
+      x -> x
+
+-- | A telescope opened by 'openNames': its binders by those names, the indices of their types opened too.
+openTelescope :: Telescope -> [(Text, Ty)]
+openTelescope binders = [(n, mapIx (openIx names) (binderTy b)) | (n, b) <- zip names binders]
+  where
+    names = openNames binders
 
 -- | The parameters a type mentions, by index.
 tyParams :: Ty -> [Int]
@@ -250,8 +361,11 @@ renderIxAt values = go
     go :: Int -> Ix -> String
     go d = \case
       IxParam i -> if i < length values then T.unpack (values !! i) else "#" <> show i
-      -- A variable matching introduced, #n@line:col, or one an ascription quantifies, @n, by its name.
-      IxVar v -> T.unpack (T.takeWhile (/= '@') (T.dropWhile (`elem` ("#@" :: String)) v))
+      IxLocal _ (Hint h) -> T.unpack h
+      IxMeta _ (Hint h) -> T.unpack h
+      IxFree v -> T.unpack v
+      IxDict i -> "#d" <> show i
+      IxMethod q -> short q
       IxHole -> "_"
       IxNat n -> show n
       IxSucc x -> paren (d > 1) ("S " <> go 2 x)
@@ -314,15 +428,45 @@ succIx = \case
   IxNat n -> IxNat (n + 1)
   x -> IxSucc x
 
--- | The variables an index mentions, by name.
-ixVars :: Ix -> [Text]
-ixVars = \case
-  IxVar v -> [v]
-  IxSucc x -> ixVars x
-  IxCon _ xs -> concatMap ixVars xs
-  IxFun _ xs -> concatMap ixVars xs
-  IxPartial _ _ _ xs -> concatMap ixVars xs
-  _ -> []
+-- | The atoms an index is built of, left to right: everything under the successor, constructors, functions and partial schemas.
+ixLeaves :: Ix -> [Ix]
+ixLeaves = \case
+  IxSucc x -> ixLeaves x
+  IxCon _ xs -> concatMap ixLeaves xs
+  IxFun _ xs -> concatMap ixLeaves xs
+  IxPartial _ _ _ xs -> concatMap ixLeaves xs
+  x -> [x]
+
+-- | The free variables an index mentions, by name.
+ixFrees :: Ix -> [Text]
+ixFrees x = [v | IxFree v <- ixLeaves x]
+
+-- | The bound variables an index mentions, by level.
+ixLocals :: Ix -> [Int]
+ixLocals x = [k | IxLocal k _ <- ixLeaves x]
+
+-- | The variables unification may solve an index mentions, by identity.
+ixMetas :: Ix -> [Int]
+ixMetas x = [m | IxMeta m _ <- ixLeaves x]
+
+-- | The dependent members an index mentions, by qualified name.
+ixMethods :: Ix -> [Text]
+ixMethods x = [q | IxMethod q <- ixLeaves x]
+
+-- | The dictionary values an index mentions, by position.
+ixDicts :: Ix -> [Int]
+ixDicts x = [i | IxDict i <- ixLeaves x]
+
+-- | An index with the function given applied at its leaves: under the successor, constructors, functions and partial schemas.
+mapIxLeaves :: (Ix -> Ix) -> Ix -> Ix
+mapIxLeaves f = go
+  where
+    go = \case
+      IxSucc x -> IxSucc (go x)
+      IxCon c xs -> IxCon c (map go xs)
+      IxFun g xs -> IxFun g (map go xs)
+      IxPartial g arity prefix xs -> IxPartial g arity prefix (map go xs)
+      x -> f x
 
 -- | Every index of a type rewritten by the function given, the indices of its arguments' too.
 mapIx :: (Ix -> Ix) -> Ty -> Ty

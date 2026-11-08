@@ -30,7 +30,7 @@ import Data.Foldable (toList)
 import Data.Functor.Identity (Identity (..))
 import Data.IntMap.Strict qualified as IM
 import Data.Map.Strict qualified as Map
-import Data.Maybe (listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
@@ -99,12 +99,26 @@ irrelevant type arguments are instantiated at Nat; value indices must be
 determined. This instantiation is recorded in the core signature.
 -}
 elaborate :: Env -> [Slot] -> [Ty.Ty] -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
-elaborate env slots tys = elaborateNamed env slots [("v" <> T.pack (show i), ty) | (i, ty) <- zip [0 :: Int ..] tys]
+elaborate env slots tys = elaborateNamed env slots [Ty.hiddenBinder ("v" <> T.pack (show i)) ty | (i, ty) <- zip [0 :: Int ..] tys]
 
--- | The named context also identifies the terms denoted by source type indices.
-elaborateNamed :: Env -> [Slot] -> [(Text, Ty.Ty)] -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
-elaborateNamed env slots variables expression = do
-  Context ctx <- context (map snd variables)
+{- | Check a body over a telescope: the clause's variables, outermost first,
+the k-th the variable of level k, which the indices of the types refer to
+by 'Ty.IxLocal'.  The telescope identifies the terms denoted by source type
+indices by position; its hints are for display only.
+-}
+elaborateNamed :: Env -> [Slot] -> Ty.Telescope -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
+elaborateNamed env slots telescope = elaborateScoped env slots (zip [0 ..] telescope)
+
+{- | A variable context as the body's positions see it: at each position, the
+level and the binder of the variable there.  At the top the positions are
+the levels; under a callback lambda the lambda's parameters come first,
+their levels past the enclosing ones, as 'S.SchemaClosure' flattens them.
+-}
+type Scoped = [(Int, Ty.Binder)]
+
+elaborateScoped :: Env -> [Slot] -> Scoped -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
+elaborateScoped env slots variables expression = do
+  Context ctx <- context (map (Ty.binderTy . snd) variables)
   SomeValue ty value <- infer ctx expression
   pure (Body ctx ty value id)
   where
@@ -143,7 +157,8 @@ elaborateNamed env slots variables expression = do
         _ -> Left "a callback parameter must keep its original environment variable"
       SomeVariable actual _ <- variable ctx i
       unless (forgetType ty == forgetType actual) $ Left "a callback environment has the wrong source signature"
-      unless (any (\(name, known, signature) -> known == ref && name == fst (variables !! i) && complete signature == forgetType ty) (envSchemas env)) $
+      -- The schema parameters are registered by the names the source writes for them: the variable holding the environment must be the one written by the name the reference is registered under.
+      unless (any (\(name, known, signature) -> known == ref && Ty.binderName (snd (variables !! i)) == Just name && complete signature == forgetType ty) (envSchemas env)) $
         Left "an unknown callback parameter at the explicit core boundary"
       pure (SomeValue ty (Callback ty (Tm.Parameter ref (Tm.Variable i)) Set.empty))
     infer _ S.SchemaPacked {} = Left "an internal packed callback cannot be supplied as a source term"
@@ -156,9 +171,11 @@ elaborateNamed env slots variables expression = do
         _ -> Left "a callback closure must contain a lambda"
       let count = length domains
       unless (length hints == count) $ Left "a callback lambda has the wrong arity"
-      let binders = zip (map S.hintText hints) domains
+      -- The lambda's parameters at the positions in front, their levels past the enclosing variables'.
+      let next = length variables
+          binders = [(next + i, Ty.hiddenBinder (S.hintText hint) domain) | (i, (hint, domain)) <- zip [0 ..] (zip hints domains)]
           opened = fmap (\case B i -> i; F i -> count + i) (fromScope scope)
-      body <- elaborateNamed env slots (binders <> variables) opened
+      body <- elaborateScoped env slots (binders <> variables) opened
       unless (null (obligations body)) $ Left "proof obligations inside a callback lambda are not supported"
       unless (bodyType body == complete result) $ Left "a callback lambda returns the wrong type"
       let closed = fmap (\i -> if i < count then B i else F (i - count)) (computation body)
@@ -182,7 +199,7 @@ elaborateNamed env slots variables expression = do
         | otherwise -> Left "callbacks take and return first-order values"
     arrows (Ty.TArrow a b) = let (rest, result) = arrows b in (a : rest, result)
     arrows t = ([], t)
-    indexTerm ix = maybe (Left "an index transport has no scoped index term") Right (indexTermInWithDependencies env [(name, (i, ty)) | (i, (name, ty)) <- zip [0 ..] variables] ix)
+    indexTerm ix = maybe (Left "an index transport has no scoped index term") Right (indexTermInWithDependencies env (scopedCtx variables) ix)
     transportProof e = case S.stripLocations e of
       S.ProofArg prop (S.Irrelevant raw)
         | all (\i -> i >= 0 && i < length variables) (toList prop) -> Right (prop, raw)
@@ -323,7 +340,7 @@ validateGlobal env slots ref proofCount explicitIndices actualValues actual resu
 -- Dictionary entries retain their runtime index captures in the current
 -- value context. Check every captured value and dependent result against
 -- the selected implementation before discarding its source annotations.
-validateDictionary :: Env -> [Slot] -> [(Text, Ty.Ty)] -> Ty.Ty -> S.Expr Int -> Either String (Set Text)
+validateDictionary :: Env -> [Slot] -> Scoped -> Ty.Ty -> S.Expr Int -> Either String (Set Text)
 validateDictionary env slots variables expected expression = case S.spine expression of
   (S.Global ref, captures)
     | Just _ <- lookup ref places -> do
@@ -358,7 +375,7 @@ validateDictionary env slots variables expected expression = case S.spine expres
             runtimeDependencies <-
               sequence
                 [ do
-                    body <- elaborateNamed env slots variables value
+                    body <- elaborateScoped env slots variables value
                     let required = complete (Ty.substScheme n assignment (snd (Ty.schemeValues scheme !! i)))
                     unless (null (obligations body) && normalizedType (bodyType body) == normalizedType required) $ Left "a dictionary runtime capture has the wrong type"
                     pure (indexDependencies body <> snd (normalizeTypeIndices env (bodyType body)) <> snd (normalizeTypeIndices env required))
@@ -386,12 +403,11 @@ annotation alone never chooses a different cardinality for a dictionary.
 -}
 instantiateDictionary :: [Slot] -> [Maybe Ty.Ix] -> [Ty.Ty] -> Either String [Ty.Ty]
 instantiateDictionary slots values types = do
-  let used = [i | name <- concatMap (concatMap Ty.ixVars . Ty.tyIndices) types, Just i <- [T.stripPrefix "#d" name >>= readMaybe . T.unpack]]
+  let used = concatMap (concatMap Ty.ixDicts . Ty.tyIndices) types
       positions = [position | (position, slot) <- zip [0 ..] slots, slotArity slot == 0]
       at i = listToMaybe (drop i positions) >>= (\position -> listToMaybe (drop position values)) >>= id
   replacements <- traverse (\i -> maybe (Left "a dependent dictionary value has no checked index term") (Right . (i,)) (at i)) used
-  let rewrite original@(Ty.IxVar name)
-        | Just i <- T.stripPrefix "#d" name >>= readMaybe . T.unpack = maybe original id (lookup i replacements)
+  let rewrite original@(Ty.IxDict i) = fromMaybe original (lookup i replacements)
       rewrite (Ty.IxSucc x) = Ty.IxSucc (rewrite x)
       rewrite (Ty.IxCon name xs) = Ty.IxCon name (map rewrite xs)
       rewrite (Ty.IxFun name xs) = Ty.IxFun name (map rewrite xs)
@@ -404,26 +420,26 @@ projection of a context variable denotes the index recorded in its checked
 type; this uses the datatype's registered projection, never an annotation
 placed on the expression being validated.
 -}
-expressionIndex :: Env -> [(Text, Ty.Ty)] -> S.Expr Int -> Maybe Ty.Ix
+expressionIndex :: Env -> Scoped -> S.Expr Int -> Maybe Ty.Ix
 expressionIndex env variables = go
   where
     go (S.At _ value) = go value
     go (S.Typed _ _ _ value) = go value
     go (S.Dictionary _ value) = go value
     go (S.Var position)
-      | position >= 0 = Ty.IxVar . fst <$> listToMaybe (drop position variables)
+      | position >= 0 = (\(level, binder) -> Ty.IxLocal level (Ty.binderHint binder)) <$> listToMaybe (drop position variables)
       | otherwise = Nothing
     go (S.Nat n) = Just (Ty.IxNat n)
     go expression
       | (S.Global (S.Ref S.RefFunction name), [child]) <- S.spine expression
       , S.Var position <- S.stripLocations child
       , position >= 0
-      , Just (_, Ty.TData datatype _ indices) <- listToMaybe (drop position variables)
+      , Just (_, Ty.Binder _ _ (Ty.TData datatype _ indices)) <- listToMaybe (drop position variables)
       , Just projections <- indexFunctionCores env datatype
       , Just index <- lookup name (zip projections indices) =
           Just index
     go expression = case S.spine expression of
-      (S.Global (S.Ref S.RefValueParam name), []) -> Just (Ty.IxVar ("#d" <> name))
+      (S.Global (S.Ref S.RefValueParam name), []) -> Ty.IxDict <$> readMaybe (T.unpack name)
       (S.Global (S.Ref S.RefStatic name), []) -> Just (Ty.IxSchema name)
       (S.Global (S.Ref (S.RefPartial arity) name), captures) -> Ty.IxPartial name arity 0 <$> traverse go captures
       (S.Global (S.Ref (S.RefIndexedPartial arity prefix) name), captures) -> Ty.IxPartial name arity prefix <$> traverse go captures
@@ -432,6 +448,10 @@ expressionIndex env variables = go
         | kind `elem` [S.RefBuiltin, S.RefFunction, S.RefConstructor] ->
             (if kind == S.RefConstructor then Ty.IxCon else Ty.IxFun) name <$> traverse go arguments
       _ -> Nothing
+
+-- | The variables of a body's positions as a context: each at its level, the position its term variable.
+scopedCtx :: Scoped -> Ctx Int
+scopedCtx variables = [telescopeLocal level binder position | (position, (level, binder)) <- zip [0 ..] variables]
 
 complete :: Ty.Ty -> Ty.Ty
 complete = \case
