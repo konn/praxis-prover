@@ -805,7 +805,8 @@ checkTests =
           $ \(what, bad, expected) -> case errors (checkSource p "bad-abbreviations.px" (source <> bad)) of
             [] -> assertFailure (what <> " was accepted")
             reported -> assertBool (what <> ": " <> unlines reported) (any (expected `isInfixOf`) reported)
-    , localOption (mkTimeout 20000000) $ testCase "indices differing under many nested abbreviations are compared once unfolded, not unfolded at every level: the mismatch is found at once" $ do
+    , -- Found at once: 3.7 s here, 10-19 s on the shared CI runners, whose speed varies; an exponential unfolding would take far longer than the minute allowed.
+      localOption (mkTimeout 60000000) $ testCase "indices differing under many nested abbreviations are compared once unfolded, not unfolded at every level: the mismatch is found at once" $ do
         p <- either assertFailure pure prelude
         source <- TIO.readFile "test/data/abbreviations.px"
         let nested v = T.replicate 18 "dup (" <> v <> T.replicate 18 ")"
