@@ -80,29 +80,27 @@ possibleShapes args runtime selected = case unifyAll (const True) equations empt
   Clash _ -> False
   _ -> True
   where
-    -- The variables to solve: one for each argument's value, and for each field and each implicit argument of the constructor it is matched by.
-    width = 1 + maximum (0 : [length (constructorTele (ctorSignature c)) | (_, Constructor c) <- selected])
+    -- The variables to solve, for each argument i, apart from every other argument's: its value, at 0; the predecessor
+    -- of a successor, at 1; and one for each entry of the telescope of the constructor it is matched by, implicit
+    -- arguments and fields alike, at 1 + the entry's position.  A field of the code is the entry stored at it.
+    width = 2 + maximum (0 : [length (constructorTele (ctorSignature c)) | (_, Constructor c) <- selected])
     meta :: Int -> Int -> Text -> Ix
     meta i j = IxMeta (i * width + j) . Hint
-    field :: Int -> Int -> Ix
-    field i j = meta i (1 + j) ("field" <> T.pack (show j))
+    entries :: Int -> CtorInfo -> [Ix]
+    entries i c = [meta i (1 + j) (teName entry) | (j, entry) <- zip [0 ..] (constructorTele (ctorSignature c))]
+    field :: Int -> CtorInfo -> Int -> Ix
+    field i c f = case [x | (x, entry) <- zip (entries i c) (constructorTele (ctorSignature c)), teRole entry `elem` [Explicit f, Stored f]] of
+      x : _ -> x
+      [] -> IxHole
     value i = case lookup i selected of
       Just Zero -> IxNat 0
-      Just Successor -> IxSucc (field i 0)
-      Just (Constructor c) -> IxCon (ctorCore c) [field i j | j <- [0 .. length (ctorFields c) - 1]]
+      Just Successor -> IxSucc (meta i 1 "predecessor")
+      Just (Constructor c) -> IxCon (ctorCore c) [field i c f | f <- [0 .. length (ctorFields c) - 1]]
       Nothing -> meta i 0 "value"
     equations =
       [(IxParam p, value i) | (i, p) <- zip [0 ..] runtime]
         <> concat
-          [ zip indices (map (instValues entries) (constructorResult signature))
+          [ zip indices (map (instValues (entries i c)) (constructorResult (ctorSignature c)))
           | (i, Constructor c) <- selected
           , TData _ _ indices <- [args !! i]
-          , let signature = ctorSignature c
-                entries =
-                  [ case teRole entry of
-                      Explicit f -> field i f
-                      Stored f -> field i f
-                      Recovered _ _ -> meta i (1 + j) ("index" <> T.pack (show j))
-                  | (j, entry) <- zip [0 :: Int ..] (constructorTele signature)
-                  ]
           ]

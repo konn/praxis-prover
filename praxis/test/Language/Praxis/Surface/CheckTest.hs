@@ -334,6 +334,19 @@ checkTests =
           , "data DataDump.Void : Type where"
           ]
           $ \declaration -> assertBool (T.unpack declaration) (declaration `T.isInfixOf` output)
+    , testCase "variables are positions, names hints: a hidden implicit is displayed apart from a written name of the same hint, a lambda's parameter shadows a clause's in braces, and an obligation sees the clause's names" $ do
+        hidden <- checkFile "test/data/hidden-shadow.px"
+        errors hidden @?= []
+        (_, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal hidden)
+        assertBool "the hidden implicit is shown by a primed hint beside the written m" ("(HiddenShadow.Fin.fzero m') m =" `T.isInfixOf` T.unlines (surfaceCore core))
+        checkedTheorems hidden @?= ["HiddenShadow.pick-id"]
+        lambda <- checkFile "test/data/lambda-shadow.px"
+        errors lambda @?= []
+        obligations <- checkFile "test/data/obligation-names.px"
+        errors obligations @?= []
+    , testCase "coverage over several arguments keeps a constructor's recovered implicit apart from its fields" $ do
+        c <- checkFile "test/data/coverage-meta.px"
+        assertBool ("the missing combination is reported: " <> show (errors c)) (any ("miss a possible combination of constructors" `T.isInfixOf`) (map T.pack (errors c)))
     , testCase "core dumps expose resolved dictionaries and impossible branches" $ do
         c <- checkFile "test/data/constrained.px"
         errors c @?= []

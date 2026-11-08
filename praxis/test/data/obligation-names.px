@@ -1,0 +1,25 @@
+module ObligationNames where
+
+data Vec (n : Nat) where
+  Nil : Vec 0
+  Cons : {n : Nat} -> Nat -> Vec n -> Vec (S n)
+
+size : {k : Nat} -> Vec k -> Nat
+size {k} v = k
+
+data Two where
+  MkTwo : (k : Nat) -> Nat -> 0 < k -> Two
+
+zero-lt-succ : (m : Nat) -> 0 < S m
+zero-lt-succ m = rfl
+
+-- The implicit n is taken at runtime, for size, and bound without a name, displayed by the
+-- signature's n; the clause writes n for its Nat argument: in the proof, as in the body, n is
+-- the written one.
+f : {n : Nat} -> Vec n -> Nat -> Two
+f xs n = MkTwo (S n) (size xs) (by exact zero-lt-succ n)
+
+-- The name a pattern gives a recovered implicit argument is in scope in the proof as in the body.
+g : Vec n -> Two
+g Nil = MkTwo 1 0 rfl
+g (Cons {m} x xs) = MkTwo (S m) 0 (by exact zero-lt-succ m)

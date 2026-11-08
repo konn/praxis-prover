@@ -1,0 +1,15 @@
+module HiddenShadow where
+
+data Fin (n : Nat) where
+  fzero : {m : Nat} -> Fin (S m)
+  fsucc : {m : Nat} -> Fin m -> Fin (S m)
+
+pick : Fin n -> Nat -> Nat
+pick fzero m = m
+pick (fsucc i) m = m
+
+-- The stored implicit of fzero, bound without a name, is displayed by its parameter's name m,
+-- which the clause also writes for its second argument: in the proof, m is the written one.
+pick-id : (i : Fin n) -> (m : Nat) -> pick i m = m
+pick-id fzero m = by rfl
+pick-id (fsucc i) m = by rfl

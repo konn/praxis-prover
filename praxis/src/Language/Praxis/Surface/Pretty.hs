@@ -90,7 +90,10 @@ typeText env sc = go
 indexText :: Scope -> Int -> Ix -> Text
 indexText sc p = \case
   IxParam i -> nameAt "i" (indexNames sc) i
-  IxLocal _ (Hint h) -> h
+  -- A variable of the telescope by the name the scope gives its level, else by its hint.
+  IxLocal k (Hint h) -> case drop k (variableNames sc) of
+    n : _ | k >= 0 -> n
+    _ -> h
   IxMeta _ (Hint h) -> h
   IxFree n -> demangle n
   IxDict i -> "#d" <> T.pack (show i)

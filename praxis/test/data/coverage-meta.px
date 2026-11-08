@@ -1,0 +1,13 @@
+module CoverageMeta where
+
+data Vec (n : Nat) where
+  Nil : Vec 0
+  Cons : {n : Nat} -> Nat -> Vec n -> Vec (S n)
+
+-- n is recovered from the vector, m is the first field: their variables must stay apart while
+-- the uncovered combinations are examined.
+data T (n : Nat) (m : Nat) where
+  Mk : {n : Nat} -> (m : Nat) -> Vec n -> T n m
+
+h : T 0 1 -> Nat -> Nat
+h (Mk m v) 0 = 0

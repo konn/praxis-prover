@@ -2282,12 +2282,14 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       (zip [0 ..] (zip (patternIxs 0 ipats) implicit'))
   (epats, evars, eproofs, ealiases, refinedM) <- patternsFrom env ivars ialiases m0 {mSubst = s1} (zip args (map Written explicitTerms))
   let refined = mSubst refinedM
-      pats = ipats <> epats
       vars = ivars <> evars
+      -- Each variable's pattern hinted by the name the telescope is opened by, which every named world calls it.
+      pats = openedPatterns vars (ipats <> epats)
       aliases = ialiases <> ealiases
       -- The proofs the patterns bind, of the preconditions of the constructors matched.
       boundProofs = concat (iproofs <> eproofs)
-  case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- writtenNames vars <> catMaybes proofNames <> [h | (Just h, _) <- boundProofs]]), k > 1] of
+  -- The names written are distinct: the variables', the proofs' and those given implicit arguments.
+  case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- writtenNames vars <> map fst aliases <> catMaybes proofNames <> [h | (Just h, _) <- boundProofs]]), k > 1] of
     n : _ -> failAt (location lhs) ("the name " <> T.unpack n <> " is bound twice")
     [] -> pure ()
   -- What matching concluded of the signature's value parameters holds in the body.
@@ -2361,7 +2363,8 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
             (slots, _) = theoremPlacesRequiring env needed (logicalFunSlots info) statement openedTypes
             premises = premisesFor env (classesOfSlots env slots) slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments openedTypes]
             thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map mangleVariable openedNames) openedTypes slots (map pdPremise premises) Nothing [] [] (funQuantifierViews info <> SourceView.quantifierViews q (envBuiltins env) (envScope envBody) raw) Nothing
-            pc = ProofClause [PVar (binderHint b) | b <- vars] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] [] []
+            -- Its one clause: the variables by the names the engine opens them by, and the names the clause gives recovered implicit arguments.
+            pc = ProofClause [PVar (Hint n) | n <- openedNames] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] [] [(n, applyIx refined x) | (n, x) <- aliases]
          in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) needed (envBuiltins env) []
   let numbered = State.evalState (Core.traverseObligations (\o -> State.state (\i -> (obligation i o, i + 1))) prepared) (0 :: Int)
   pure (FunClause pats vars numbered (R.spanning (location lhs) rsp))
@@ -2410,6 +2413,25 @@ patternLevels level = \case
   p : ps -> level : patternLevels (snd (patternIxFrom level p)) ps
 
 {- |
+The patterns of a clause, each variable's hint the name the telescope is
+opened by ('openNames'): a written name as it is, a variable bound without
+a name by its hint, primed where that is a name written.  The engine, the
+compiler and the printers then call a variable by one name, and no hidden
+variable passes for a written one.
+-}
+openedPatterns :: Telescope -> [Pattern] -> [Pattern]
+openedPatterns binders = go 0
+  where
+    names = openNames binders
+    go _ [] = []
+    go level (p : ps) = let (p', next) = hinted level p in p' : go next ps
+    hinted level = \case
+      PVar h -> (PVar (maybe h Hint (listToMaybe (drop level names))), level + 1)
+      PSucc p -> let (p', next) = hinted level p in (PSucc p', next)
+      PCon r subs -> let (subs', next) = foldl (\(acc, lvl) p -> let (p', lvl') = hinted lvl p in (acc <> [p'], lvl')) ([], level) subs in (PCon r subs', next)
+      p -> (p, level)
+
+{- |
 A clause of a proof: in braces, a pattern for each of the theorem's implicit
 parameters, in order; a pattern for each value it quantifies over; then names
 for the leading hypotheses of its proposition, as a function's clause names
@@ -2441,15 +2463,16 @@ elabProofClause fx env slots binderTys hypotheses (R.Clause lhs0 rhs) = do
         (Nothing, p) -> Nothing <$ named "an implicit type is named by a variable or _: a type is not matched on" p
   hypNamesGiven <- forM (drop nb explicit) (named "a hypothesis is named by a variable or _: a proposition has no constructors")
   -- The implicit values are matched before the binders: what matching one concludes holds of the binders' types, whose indices mention it.
-  (allPats, vars, allProofs, aliases, _) <- patterns env ([(t, Written p) | (_, t, p) <- valueArgs] <> zip binderTys (map Written (take nb explicit)))
-  let (ipats, pats) = splitAt (length valueArgs) allPats
+  (allPats0, vars, allProofs, aliases, _) <- patterns env ([(t, Written p) | (_, t, p) <- valueArgs] <> zip binderTys (map Written (take nb explicit)))
+  let allPats = openedPatterns vars allPats0
+      (ipats, pats) = splitAt (length valueArgs) allPats
       (iproofs, pproofs) = splitAt (length valueArgs) allProofs
       nvalues = maybe 0 (length . filter isJust) slots
       valueIdx = [j | (j, _, _) <- valueArgs]
       valuePats = [fromMaybe PWild (lookup i (zip valueIdx ipats)) | i <- [0 .. nvalues - 1]]
       -- The names of the proofs each pattern binds, by column: implicit values, then binders.
       proofNames = [fromMaybe [] (lookup i (zip valueIdx (map (map fst) iproofs))) | i <- [0 .. nvalues - 1]] <> map (map fst) pproofs
-  case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- writtenNames vars <> catMaybes hypNamesGiven <> [h | ps <- allProofs, (Just h, _) <- ps]]), k > 1] of
+  case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- writtenNames vars <> map fst aliases <> catMaybes hypNamesGiven <> [h | ps <- allProofs, (Just h, _) <- ps]]), k > 1] of
     n : _ -> failAt (location lhs) ("the name " <> T.unpack n <> " is bound twice")
     [] -> pure ()
   -- A clause with an absurd pattern has no right side: no case of it is to be proved.
@@ -3136,7 +3159,17 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       -- The lambda's parameters, variables of the levels after those in scope, which shadow what their names stood for.
       let next = nextLevel ctx
           local = [Local (Just name) (next + i) (Hint name) (B i) ty (IxLocal (next + i) (Hint name)) | (i, (name, ty)) <- zip [0 ..] (zip names domains)] <> map (fmap F) ctx
-          scoped = env {envSchemas = [entry | entry@(name, _, _) <- envSchemas env, name `notElem` names]}
+          -- The names bound stand for the lambda's parameters in indices and ascriptions too, shadowing what they stood for.
+          sc = envScope env
+          scoped =
+            env
+              { envSchemas = [entry | entry@(name, _, _) <- envSchemas env, name `notElem` names]
+              , envScope =
+                  sc
+                    { tsValues = [(name, IxLocal (next + i) (Hint name)) | (i, name) <- zip [0 ..] names] <> [(v, x) | (v, x) <- tsValues sc, v `notElem` names]
+                    , tsValueTys = zip names domains <> [(v, t) | (v, t) <- tsValueTys sc, v `notElem` names]
+                    }
+              }
       -- Evidence under a lambda needs its own quantified obligation. Until
       -- that is supported, reject it instead of erasing or mis-scoping it.
       (body', actual) <- elabTerm NoProofArguments scoped givens local body result

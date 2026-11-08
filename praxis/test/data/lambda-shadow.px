@@ -1,0 +1,14 @@
+module LambdaShadow where
+
+data Wrap (n : Nat) where
+  W : (k : Nat) -> Wrap k
+
+size : {k : Nat} -> Wrap k -> Nat
+size {k} w = k
+
+twice : (Nat -> Nat) -> Nat -> Nat
+twice f x = f (f x)
+
+-- Under the lambda, n is the lambda's parameter in the brace as in the term.
+shadow : Nat -> Nat
+shadow n = twice (\n -> size {n} (W n)) n
