@@ -30,7 +30,7 @@ infixl 9 :@
 -- dni: against Pf (_ :=> nn a), the second part of its conclusion unfolds
 -- nn a.  The use is transported to the type expected by a certified equation.
 dni : {a : Formula} -> Pf (a :=> (a :=> Bottom) :=> Bottom)
-dni {a} = Ax
+dni = Ax
 
 intro : Pf a -> Pf (nn a)
 intro p = dni :@ p
@@ -38,7 +38,7 @@ intro p = dni :@ p
 -- The other way round: the abbreviation in the head's type, the type expected
 -- unfolded.
 dni-folded : {a : Formula} -> Pf (a :=> nn a)
-dni-folded {a} = Ax
+dni-folded = Ax
 
 intro-unfolded : Pf a -> Pf ((a :=> Bottom) :=> Bottom)
 intro-unfolded p = dni-folded :@ p
@@ -46,7 +46,7 @@ intro-unfolded p = dni-folded :@ p
 -- Different abbreviations on the two sides, each unfolded as far as it must
 -- be for them to meet.
 dni-twice : {a : Formula} -> Pf (a :=> neg (neg a))
-dni-twice {a} = Ax
+dni-twice = Ax
 
 intro-twice : Pf a -> Pf (nn a)
 intro-twice p = dni-twice :@ p
@@ -55,28 +55,28 @@ intro-twice p = dni-twice :@ p
 -- once that is checked, so the application of mp is put off and checked
 -- again after f.
 mp : {a b : Formula} -> Pf (nn (a :=> b) :=> nn a :=> nn b)
-mp {a} {b} = Ax
+mp = Ax
 
 lift : Pf (nn (a :=> b)) -> Pf (nn a) -> Pf (nn b)
-lift {a} {b} f x = mp :@ f :@ x
+lift f x = mp :@ f :@ x
 
 -- The same with the types unfolded: nn (a :=> b) is matched against
 -- ((a :=> b) :=> Bottom) :=> Bottom.
 lift-unfolded : Pf (((a :=> b) :=> Bottom) :=> Bottom) -> Pf (nn a) -> Pf ((b :=> Bottom) :=> Bottom)
-lift-unfolded {a} {b} f x = mp :@ f :@ x
+lift-unfolded f x = mp :@ f :@ x
 
 -- The implicit a of count is determined through nn by the type of the
 -- argument, the type expected of the argument having a hole under nn.
 count : {a : Formula} -> Pf (nn a) -> Nat
-count {a} p = 0
+count p = 0
 
 counted : Pf ((c :=> Bottom) :=> Bottom) -> Nat
-counted {c} p = count p
+counted p = count p
 
 -- Types which agree once both are unfolded: the equation of their indices
--- names a, which the clause binds.
+-- names a, which the clause takes at runtime without naming it.
 mix : Pf (neg (nn a)) -> Pf (nn (neg a))
-mix {a} p = p
+mix p = p
 
 -- Abbreviations in the kinds of a signature's variables: v is a Vec two from
 -- the field of MkBox and a Vec 2 from Ix2, in either order.
@@ -125,15 +125,15 @@ shared-used s c = shared s c
 -- A pattern on an index an abbreviation names unfolds it: Vec (inc n) is
 -- Vec (S n), which Cons matches.
 tl : {n : Nat} -> Vec (inc n) -> Vec n
-tl {n} (Cons x xs) = xs
+tl (Cons x xs) = xs
 
 -- Abbreviations under the arithmetic of Nat: inc n + inc n is S n + S n once
 -- inc is unfolded, both in a type expected and in inferring n.
 widen : {n : Nat} -> Vec (inc n + inc n) -> Vec (S n + S n)
-widen {n} xs = xs
+widen xs = xs
 
 count-widen : {n : Nat} -> Vec (inc n + inc n) -> Nat
-count-widen {n} xs = 0
+count-widen xs = 0
 
 use-widen : {n : Nat} -> Vec (S n + S n) -> Nat
-use-widen {n} xs = count-widen xs
+use-widen xs = count-widen xs

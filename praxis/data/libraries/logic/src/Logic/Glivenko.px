@@ -35,7 +35,7 @@ infixl 9 :@
 -- by the expected type; K and S are qualified, since both calculi have them
 -- and a bare S is the successor.
 identity : {a : Formula} -> Intuitionistic (a :=> a)
-identity {a} = by
+identity = by
   apply (:@)
   {
     apply (:@)
@@ -86,34 +86,34 @@ hypothesis (There m) = Unused (Hyp m)
 
 -- Modus ponens, its premises marked: unused when both are.
 apply-unused : {b a : Formula} -> {g : Context} -> {c : Formula} -> Open g (c :=> b) -> Use g a c -> Use g a b
-apply-unused {b} f (Unused x) = Unused (f :@ x)
-apply-unused {b} f Var = Apply (Unused f) Var
-apply-unused {b} f (Apply y z) = Apply (Unused f) (Apply y z)
+apply-unused f (Unused x) = Unused (f :@ x)
+apply-unused f Var = Apply (Unused f) Var
+apply-unused f (Apply y z) = Apply (Unused f) (Apply y z)
 
 apply-use : {b : Formula} -> {g : Context} -> {a c : Formula} -> Use g a (c :=> b) -> Use g a c -> Use g a b
-apply-use {b} (Unused f) u = apply-unused f u
-apply-use {b} Var u = Apply Var u
-apply-use {b} (Apply f x) u = Apply (Apply f x) u
+apply-use (Unused f) u = apply-unused f u
+apply-use Var u = Apply Var u
+apply-use (Apply f x) u = Apply (Apply f x) u
 
 annotate : {g : Context} -> {a b : Formula} -> Open (g :> a) b -> Use g a b
-annotate {g} {a} (Hyp m) = hypothesis m
-annotate {g} {a} (Lift p) = Unused (Lift p)
-annotate {g} {a} (f :@ x) = apply-use (annotate f) (annotate x)
+annotate (Hyp m) = hypothesis m
+annotate (Lift p) = Unused (Lift p)
+annotate (f :@ x) = apply-use (annotate f) (annotate x)
 
 s-step : {g : Context} -> {a b c : Formula} -> Open g (a :=> c :=> b) -> Open g (a :=> c) -> Open g (a :=> b)
-s-step {g} {a} {b} {c} af ax = Lift Intuitionistic.S :@ af :@ ax
+s-step af ax = Lift Intuitionistic.S :@ af :@ ax
 
 -- An application f x whose argument uses the hypothesis a: f itself when x
 -- is a, as eta reduction gives; S otherwise.
 combine-unused : {g : Context} -> {a b c : Formula} -> Open g (c :=> b) -> Use g a c -> Open g (a :=> c :=> b) -> Open g (a :=> c) -> Open g (a :=> b)
-combine-unused {g} {a} {b} {c} f (Unused y) af ax = s-step af ax
-combine-unused {g} {a} {b} {c} f Var af ax = f
-combine-unused {g} {a} {b} {c} f (Apply y z) af ax = s-step af ax
+combine-unused f (Unused y) af ax = s-step af ax
+combine-unused f Var af ax = f
+combine-unused f (Apply y z) af ax = s-step af ax
 
 combine : {g : Context} -> {a b c : Formula} -> Use g a (c :=> b) -> Use g a c -> Open g (a :=> c :=> b) -> Open g (a :=> c) -> Open g (a :=> b)
-combine {g} {a} {b} {c} (Unused f) x af ax = combine-unused f x af ax
-combine {g} {a} {b} {c} Var x af ax = s-step af ax
-combine {g} {a} {b} {c} (Apply y z) x af ax = s-step af ax
+combine (Unused f) x af ax = combine-unused f x af ax
+combine Var x af ax = s-step af ax
+combine (Apply y z) x af ax = s-step af ax
 
 -- K for a part not using the hypothesis, the identity for the hypothesis,
 -- and for an application, eta or S over the abstracted premises.
@@ -124,7 +124,7 @@ abstract (Apply f x) = combine f x (abstract f) (abstract x)
 
 -- The deduction theorem: discharge the newest hypothesis.
 deduction : {g : Context} -> {a b : Formula} -> Open (g :> a) b -> Open g (a :=> b)
-deduction {g} {a} d = abstract (annotate d)
+deduction d = abstract (annotate d)
 
 no-member : Member a Empty -> Intuitionistic a
 no-member ()
@@ -141,18 +141,18 @@ close (f :@ x) = close f :@ close x
 
 -- \x. \n. n x
 double-negation-intro : {a : Formula} -> Intuitionistic (a :=> (a :=> Bottom) :=> Bottom)
-double-negation-intro {a} = close (deduction (deduction (Hyp Here :@ Hyp (There Here))))
+double-negation-intro = close (deduction (deduction (Hyp Here :@ Hyp (There Here))))
 
 -- \f. \p. \nb. f (\g. p (\x. nb (g x)))
 double-negation-mp : {a : Formula} -> {b : Formula} -> Intuitionistic ((((a :=> b) :=> Bottom) :=> Bottom) :=> ((a :=> Bottom) :=> Bottom) :=> (b :=> Bottom) :=> Bottom)
-double-negation-mp {a} {b} = close (deduction (deduction (deduction (
+double-negation-mp = close (deduction (deduction (deduction (
   Hyp (There (There Here)) :@ deduction (
     Hyp (There (There Here)) :@ deduction (
       Hyp (There (There Here)) :@ (Hyp (There Here) :@ Hyp Here)))))))
 
 -- \h. h (\n. Explosion (n (\x. h (\m. x))))
 double-negation-dne : {a : Formula} -> Intuitionistic (((((a :=> Bottom) :=> Bottom) :=> a) :=> Bottom) :=> Bottom)
-double-negation-dne {a} = close (deduction (
+double-negation-dne = close (deduction (
   Hyp Here :@ deduction (
     Lift Intuitionistic.Explosion :@ (Hyp Here :@ deduction (
       Hyp (There (There Here)) :@ deduction (Hyp (There Here)))))))
@@ -165,7 +165,7 @@ bottom-out = close (deduction (Hyp Here :@ deduction (Hyp Here)))
 -- the classical DNE, closed, to an intuitionistic part, so its abstraction
 -- is S (K DNE) of that part's, built in the classical calculus.
 peirce : {a : Formula} -> {b : Formula} -> Classical (((a :=> b) :=> a) :=> a)
-peirce {a} {b} =
+peirce =
   Classical.S {(a :=> b) :=> a} {(a :=> Bottom) :=> Bottom} {a}
     :@ (Classical.K {((a :=> Bottom) :=> Bottom) :=> a} {(a :=> b) :=> a} :@ Classical.DNE {a})
     :@ embed (close (deduction (deduction (
@@ -196,7 +196,7 @@ contradiction p = bottom-out :@ glivenko p
 -- The converse direction of theoremhood: IPC proves not-not A only if CPC
 -- proves A. This is another proof transformation, not a reflection principle.
 recover : {a : Formula} -> Intuitionistic (nn a) -> Classical a
-recover {a} p = Classical.DNE :@ embed p
+recover p = Classical.DNE :@ embed p
 
 -- Observable computations for the talk demo. These count unfolded proof
 -- nodes; the evaluator can share identical subderivations internally.

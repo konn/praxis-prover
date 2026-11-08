@@ -233,6 +233,15 @@ which a type expected of it may determine.
 data Failure
   = Refused !ElabError
   | Undetermined !ElabError
+  | -- | refused for want of a term standing for value parameters of the enclosing signature, by position: the function takes them at runtime, and its clauses are checked again
+    Unnamed !ElabError ![Int]
+
+-- | The error a failure reports.
+failureError :: Failure -> ElabError
+failureError = \case
+  Refused err -> err
+  Undetermined err -> err
+  Unnamed err _ -> err
 
 {- | Type checking without unification variables, retaining dependencies
 separately from its desugared syntax. A failed attempt discards its log.
@@ -250,10 +259,6 @@ runTC action = do
 -- | Run a caller responsible for retaining or validating every dependency.
 runTCWithRequirements :: TC a -> Either ElabError (a, Requirements)
 runTCWithRequirements = first failureError . runWriterT
-  where
-    failureError = \case
-      Refused err -> err
-      Undetermined err -> err
 
 requireDependency :: Span -> Dependency -> TC ()
 requireDependency span' = tell . requirement span'
@@ -266,6 +271,21 @@ requireIndexResult sp why = maybe (failAt sp why) (\(value, used) -> requireInde
 
 throwTC :: Failure -> TC a
 throwTC = WriterT . Left
+
+-- | The variables and value parameters an index mentions, each as it stands.
+indexLeaves :: Ix -> [Ix]
+indexLeaves = \case
+  v@(IxVar _) -> [v]
+  v@(IxParam _) -> [v]
+  IxSucc x -> indexLeaves x
+  IxCon _ xs -> concatMap indexLeaves xs
+  IxFun _ xs -> concatMap indexLeaves xs
+  IxPartial _ _ _ xs -> concatMap indexLeaves xs
+  _ -> []
+
+-- | The value parameters of the enclosing signature which indices mention and no term in the context stands for, by position.
+unnamedParameters :: Env -> Ctx a -> [Ix] -> [Int]
+unnamedParameters env ctx indices = nub [j | ix <- indices, IxParam j <- indexLeaves ix, Nothing <- [indexTermIn env ctx (IxParam j)]]
 
 failAt :: Span -> String -> TC a
 failAt sp msg = throwTC (Refused (ElabError sp msg))
@@ -1837,15 +1857,28 @@ elabDecl fx env sp name ty0 clauses = do
       let (resultArgs, result) = arrows resultTy
           args = domainTys <> resultArgs
           proofs = zip proofPositions props
-          runtime = [0 .. boundImplicits - 1]
-          runtimeTys = [snd (values !! i) | i <- runtime]
           scheme = Scheme params values fty
           views = declarationViews env (qualify env [name]) scope ty clauses
-          (env1, info1) = rememberFunction full signatureRequirements views (setFunProofs proofs (setFunRuntime runtime (addFunction env name scheme (length args) full)))
       unless (firstOrder result && all argumentType args) $ Left (ElabError (location body) "a function returns a first-order value; its arguments are values or fixed function schemas over values")
-      forM_ (zip runtime runtimeTys) \(i, t) ->
-        when (t == THole) $ Left (ElabError sp ("the type of the implicit value " <> T.unpack (fst (values !! i)) <> " is not known; write it, {" <> T.unpack (fst (values !! i)) <> " : T}"))
-      (fcs1, clauseRequirements) <- runTCWithRequirements (traverse (elabFunClause fx env1 {envScope = scope} info1 runtimeTys args result) clauses)
+      -- The implicit values it takes at runtime, before its arguments, by position up to the last: those
+      -- its clauses bind, and those their bodies use as values, bound without a name; the clauses are
+      -- checked again with each found so.  Each is a value of a known type.
+      let withRuntime count = do
+            let runtime = [0 .. count - 1]
+                runtimeTys = [snd (values !! i) | i <- runtime]
+                (env1, info1) = rememberFunction full signatureRequirements views (setFunProofs proofs (setFunRuntime runtime (addFunction env name scheme (length args) full)))
+            forM_ (zip runtime runtimeTys) \(i, t) ->
+              when (t == THole) $ Left (ElabError sp ("the type of the implicit value " <> T.unpack (fst (values !! i)) <> " is not known; write it, {" <> T.unpack (fst (values !! i)) <> " : T}"))
+            case runWriterT (traverse (elabFunClause fx env1 {envScope = scope} info1 runtimeTys args result) clauses) of
+              Left (Unnamed _ positions)
+                | not (null positions)
+                , next <- maximum positions + 1
+                , next > count
+                , next <= length values ->
+                    withRuntime next
+              Left failure -> Left (failureError failure)
+              Right (fcs1, clauseRequirements) -> Right (runtime, runtimeTys, env1, info1, fcs1, clauseRequirements)
+      (runtime, runtimeTys, env1, info1, fcs1, clauseRequirements) <- withRuntime boundImplicits
       -- The function takes the places of its dictionary its clauses use; each proof its clauses give is an obligation.
       let needed = signatureRequirements <> clauseRequirements
           (used, fcs) = pruneDictionary env1 info1 fcs1
@@ -2221,11 +2254,16 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
     Located _ R.EWildcard -> pure Nothing
     Located psp _ -> failAt psp "a proof is matched by a name or by _: a proposition has no constructors"
-  -- The implicit values it takes at runtime, each matched by a pattern, or by none; what one
-  -- matches on holds of the value parameter it is, where the explicit patterns are matched.
-  let defaultImplicit i = case envClassDefaults env of
-        _ : _ | i < length (schemeValues (funScheme info)) -> R.EName (QName [] (Ident (fst (schemeValues (funScheme info) !! i))))
-        _ -> R.EWildcard
+  -- The implicit values it takes at runtime, each matched by a pattern, or else bound to a name of its
+  -- own, which the clause cannot write, so that the body may use the value where a type names it; in an
+  -- instance, to the name its signature gives it.  What a pattern matches on holds of the value
+  -- parameter it is, where the explicit patterns are matched.
+  let (lhsLine, lhsColumn) = R.spanStart (location lhs)
+      defaultImplicit i
+        | i < length (schemeValues (funScheme info)) =
+            let own = fst (schemeValues (funScheme info) !! i)
+             in R.EName (QName [] (Ident (if null (envClassDefaults env) then "\183" <> own <> "@" <> T.pack (show lhsLine) <> ":" <> T.pack (show lhsColumn) else own)))
+        | otherwise = R.EWildcard
       implicit' = implicit <> [Located (location lhs) (defaultImplicit i) | i <- [length implicit .. length runtimeTys - 1]]
   (ipats, ivars, iproofs, s0) <- patterns env (zip runtimeTys implicit')
   s1 <-
@@ -2825,7 +2863,7 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
     Right result@((value, actual), needed)
       | Just _ <- mergeTy expected actual -> Right result
       -- Agreeing with the type expected only once abbreviations are unfolded: transported, or refused where no proof is collected.
-      | otherwise -> first (Refused . ElabError sp) (transported value actual needed)
+      | otherwise -> transported value actual needed
     -- Refused as it stands: inferred with the type expected erased, then transported to it.  What is
     -- not determined yet stays so: erasing the type expected determines nothing more.
     Left (Refused original)
@@ -2843,15 +2881,15 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
     filled from the type found, and, where indices still differ, a transport by their equations,
     where the proofs are collected and nothing says the indices differ. -}
     transported value actual needed = do
-      target <- maybe (Left disagreement) Right (completeTypes actual expected)
-      pairs <- maybe (Left disagreement) Right (transportIndices actual target)
+      target <- maybe (Left (Refused disagreement)) Right (completeTypes actual expected)
+      pairs <- maybe (Left (Refused disagreement)) Right (transportIndices actual target)
       case pairs of
         [] -> Right ((value, target), needed)
         _ -> do
           hypotheses <- case proofArguments of
             CollectProofArguments hs -> Right hs
-            _ -> Left disagreement
-          unless (not (null hypotheses) || all possible pairs) (Left disagreement)
+            _ -> Left (Refused disagreement)
+          unless (not (null hypotheses) || all possible pairs) (Left (Refused disagreement))
           converted <-
             maybe (Left (unstatable pairs)) Right $
               traverse
@@ -2865,19 +2903,15 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
               prerequisites = foldMap (requirement sp . CertifiedDeclaration) (Set.toList (foldMap snd converted))
           Right ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | (prop, _) <- converted]), target), needed <> prerequisites)
       where
-        disagreement = mismatch env expected actual
-        -- The equations of the indices mention values no term in scope stands for: the clause has to name them.
+        disagreement = ElabError sp (mismatch env expected actual)
+        -- The equations of the indices mention values no term in scope stands for: the clause has to name them, or take them at runtime where they are the signature's.
         unstatable pairs =
-          let missing = nub [renderIx (valueNamesOf env) v | (x, y) <- pairs, v <- leavesOf x <> leavesOf y, Nothing <- [indexTermIn env ctx v]]
-           in disagreement <> ", which agree once their functions are unfolded, but the equation of their indices mentions " <> intercalate ", " missing <> ", which no variable in scope stands for: a clause names the implicit values its body uses, in braces"
-    leavesOf = \case
-      v@(IxVar _) -> [v]
-      v@(IxParam _) -> [v]
-      IxSucc x -> leavesOf x
-      IxCon _ xs -> concatMap leavesOf xs
-      IxFun _ xs -> concatMap leavesOf xs
-      IxPartial _ _ _ xs -> concatMap leavesOf xs
-      _ -> []
+          let indices = concat [[x, y] | (x, y) <- pairs]
+              missing = nub [renderIx (valueNamesOf env) v | v <- concatMap indexLeaves indices, Nothing <- [indexTermIn env ctx v]]
+              message = ElabError sp (mismatch env expected actual <> ", which agree once their functions are unfolded, but the equation of their indices mentions " <> intercalate ", " missing <> ", which no variable in scope stands for: a clause names the implicit values its body uses, in braces")
+           in case unnamedParameters env ctx indices of
+                [] -> Refused message
+                positions -> Unnamed message positions
     -- Indices which may be equal: not numerals, constructors or the successor against different ones
     -- once abbreviations are unfolded, nor a variable against a term it is a proper part of.
     possible (x, y) = not (clash (unfoldIndices env x) (unfoldIndices env y))
@@ -3181,13 +3215,18 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     -- generated index projection. The membership/index contracts justify it.
     -- Materialized indices cross the same explicit typing boundary as source
     -- arguments. Annotate each nested computation from its declaration, not
-    -- just the outer value supplied to an indexed instance.
     -- An index found for a value the head takes at runtime, which is no term here: put off while a
-    -- hole is in it, which an argument beside it may fill; refused once it is whole, saying why.
+    -- hole is in it, which an argument beside it may fill; refused once it is whole, saying why, and
+    -- where the signature's value parameters are what no term stands for, naming them for the clause
+    -- to take at runtime.
     unavailable :: Span -> String -> Ty -> Ix -> TC b
     unavailable hsp what kind ix
       | hasHole ix = undetermined hsp (what <> " is not determined here: " <> shownIx ix)
-      | Nothing <- runWriterT (rawValueIndex ix) = failAt hsp (what <> " is " <> shownIx ix <> ", which no variable in scope stands for: a clause names the implicit values its body uses, in braces")
+      | Nothing <- runWriterT (rawValueIndex ix) =
+          let message = what <> " is " <> shownIx ix <> ", which no variable in scope stands for"
+           in case unnamedParameters env ctx [ix] of
+                [] -> failAt hsp message
+                positions -> throwTC (Unnamed (ElabError hsp (message <> ": a clause names the implicit values its body uses, in braces")) positions)
       | otherwise = failAt hsp (what <> " is " <> shownIx ix <> ", which is no value of the type " <> renderType env (tsTypes (envScope env)) (valueNamesOf env) kind)
       where
         shownIx = renderIx (valueNamesOf env)

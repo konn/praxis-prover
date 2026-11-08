@@ -399,8 +399,8 @@ data FunInfo = FunInfo
   , funQuantifierViews :: !QuantifierViews
   , funRuntime :: ![Int]
   {- ^ the value parameters it takes at runtime, by position, before its
-  arguments: the implicit values its clauses bind, which an application
-  finds from the types and passes
+  arguments: the implicit values its clauses bind, or their bodies use as
+  values, which an application finds from the types and passes
   -}
   , funProjection :: !(Maybe Int)
   -- ^ a completed typed clause directly returns this operational argument

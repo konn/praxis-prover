@@ -787,7 +787,6 @@ checkTests =
         forM_
           [ ("a mismatch through an abbreviation", "wrong : Pf a -> Pf (neg a)\nwrong p = dni :@ p\n", "type mismatch")
           , ("an implicit no argument determines", "loose : Pf (nn a) -> Pf (nn b) -> Pf (nn a)\nloose f x = mp :@ f :@ x\n", "type mismatch")
-          , ("types agreeing once unfolded, over a value the clause does not name", "mixed : Pf (neg (nn a)) -> Pf (nn (neg a))\nmixed p = p\n", "in braces")
           , ("an implicit which is no value of its type", "three : IxS (Circle Bottom)\nthree = MkS\n", "no value of the type")
           ]
           $ \(what, bad, expected) -> case errors (checkSource p "bad-abbreviations.px" (source <> bad)) of
