@@ -19,6 +19,16 @@ type variable, a value, a variable, or a word of the tactic language, which
 is a word only in tactic position — and a definition to go to, in the
 document or in the module it imports.
 
+Documents are checked in the background: a change starts a check 300 ms
+after the last one, a check still running when the document changes again is
+abandoned, and the requests about the document — hover, semantic tokens, go
+to definition — are answered meanwhile from what the last check found. A
+`.px` document checked again reuses the modules checked before it, the
+libraries before its own and the modules it imports, while their sources are
+unchanged, so an edit costs the check of the document's own module; the
+documents open in the editor stand for the files at their paths, and saving
+one checks again the others open which read it, or whose check had failed.
+
 A `.pra` document is read over the `builtin` signature, with the lemmas of the
 library of praxis-copra, `src-pra/lemmas.pra`, and the unfolding
 lemmas of `builtin` in scope and each declaration a lemma for those after it,

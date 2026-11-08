@@ -43,12 +43,21 @@ module Language.Praxis.Package.Build (
   checkProjectFrom,
   checkFile,
   checkFileFrom,
+  checkFileCached,
+  Prefix (..),
+  ModuleKey,
+  prefixPaths,
+  Reuse (..),
+  Planned (..),
+  planComponents,
+  checkPlanned,
 ) where
 
-import Control.Monad (filterM, foldM, forM, unless)
+import Control.Monad (filterM, forM, unless)
 import Data.Bifunctor (first)
 import Data.Char (isAlphaNum)
 import Data.List (find, isPrefixOf, nub, partition, sortOn)
+import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
@@ -301,20 +310,29 @@ data Parsed = Parsed
   }
 
 {- |
-Check the libraries given, in the order given, each module after those it
-imports: the results, one per module, and the build after all of them.  A
-target, a library and a module of it, restricts the last library to that
-module and what it imports, directly or through others.
+A module laid out for checking: its library; the modules of that library
+importing one another, directly or through others, which cannot be
+imported; and the module parsed.
 -}
-checkComponents :: Prelude -> Reader -> Loaded -> [Component] -> Maybe QualName -> IO ([ModuleResult], Build)
-checkComponents p = checkComponentsFrom (initialBuild p)
+data Planned = Planned
+  { plComponent :: !Component
+  , plCyclic :: ![QualName]
+  , plParsed :: !Parsed
+  }
 
--- | Check components from a supplied build, including its output-retention setting.
-checkComponentsFrom :: Build -> Reader -> Loaded -> [Component] -> Maybe QualName -> IO ([ModuleResult], Build)
-checkComponentsFrom initial reader loaded comps target = go initial Map.empty [] (zip [1 :: Int ..] comps)
+{- |
+Lay out the libraries given for checking, in the order given: every module
+of each parsed and its imports resolved, the modules of a library each
+after those it imports within it, the ones importing one another last.  A
+target, a library and a module of it, restricts the last library to that
+module and what it imports, directly or through others; the target is then
+the last module laid out.  Nothing is checked yet.
+-}
+planComponents :: Reader -> Loaded -> [Component] -> Maybe QualName -> IO [Planned]
+planComponents reader loaded comps target = go Map.empty [] (zip [1 :: Int ..] comps)
   where
-    go build _ results [] = pure (reverse results, build)
-    go build known results ((i, c) : rest) = do
+    go _ planned [] = pure (concat (reverse planned))
+    go known planned ((i, c) : rest) = do
       files <- discoverModules c
       let deps = either (const []) id (dependenciesOf loaded c)
           known' = Map.insert (componentId c) (map mfName files) known
@@ -326,8 +344,8 @@ checkComponentsFrom initial reader loaded comps target = go initial Map.empty []
             Just t | i == length comps -> closure (Map.fromList [(mfName (pdFile pd), [n | (_, Right (R.Component l : n)) <- pdImports pd, l == componentId c]) | pd <- parsed]) t
             _ -> own
           selected = [pd | pd <- parsed, mfName (pdFile pd) `elem` restricted]
-      (results', build') <- checkOrdered c build selected
-      go build' known' (reverse results' <> results) rest
+          (ordered, cyclic) = orderImports c selected
+      go known' ([Planned c (map (mfName . pdFile) cyclic) pd | pd <- ordered <> cyclic] : planned) rest
 
     -- The modules a target imports within the library, directly or through others, and itself.
     closure graph t = Set.toList (reach Set.empty [t])
@@ -367,8 +385,8 @@ checkComponentsFrom initial reader loaded comps target = go initial Map.empty []
             [] -> Left ("no module " <> render q <> " in the library " <> T.unpack (componentPath c) <> (if null deps then ", which has no dependencies" else ", nor in its dependencies " <> T.unpack (T.intercalate ", " (map componentId deps))))
             ds -> Left ("ambiguous: the module " <> render q <> " is exposed by " <> T.unpack (T.intercalate " and " (map componentId ds)) <> "; write import \"" <> T.unpack (T.intercalate "\" or \"" (map componentId ds)) <> "\" " <> render q)
 
-    -- The modules of a library in the order of their imports within it; those importing one another are refused, at their imports.
-    checkOrdered c build parsed = do
+    -- The modules of a library in the order of their imports within it, and those importing one another, directly or through others, which are refused at their imports.
+    orderImports c parsed =
       let byName = Map.fromList [(mfName (pdFile pd), pd) | pd <- parsed]
           within pd = [n | (_, Right (R.Component l : n)) <- pdImports pd, l == componentId c, Map.member n byName]
           order done pending
@@ -376,18 +394,23 @@ checkComponentsFrom initial reader loaded comps target = go initial Map.empty []
             | otherwise =
                 let (ready, blocked) = partition (\pd -> all (`elem` map (mfName . pdFile) done) (within pd)) pending
                  in if null ready then (reverse done, blocked) else order (reverse ready <> done) blocked
-          (ordered, cyclic) = order [] parsed
-          cycleNames = map (mfName . pdFile) cyclic
-      foldM (step c cycleNames) ([], build) (ordered <> cyclic)
+       in order [] parsed
 
-    step c cycleNames (results, build) pd = do
+{- |
+Check modules laid out, from the build given: the results, one per module
+in the order laid out, and the build after them.
+-}
+checkPlanned :: Build -> [Planned] -> ([ModuleResult], Build)
+checkPlanned initial planned = let (results, build) = foldl step ([], initial) planned in (reverse results, build)
+  where
+    step (results, build) (Planned c cycleNames pd) =
       let name = R.Component (componentId c) : mfName (pdFile pd)
           cycleMessage = "the modules " <> T.unpack (T.intercalate ", " (map (T.intercalate "." . map segmentText) cycleNames)) <> " import one another, directly or through others"
           cyclic = [R.Component (componentId c) : n | n <- cycleNames]
           imports = Map.fromList [(written, exportsFor build cyclic cycleMessage target') | (written, target') <- pdImports pd]
           (checked, build') = checkModule (\_ _ -> []) build imports (Just name) (mfPath (pdFile pd)) (pdSource pd)
           checked' = checked {checkedReports = maybe [] pure (pdHeaderReport pd) <> checkedReports checked}
-      pure (ModuleResult c (mfName (pdFile pd)) (mfPath (pdFile pd)) checked' : results, build')
+       in (ModuleResult c (mfName (pdFile pd)) (mfPath (pdFile pd)) checked' : results, build')
 
     -- What an import takes: the exports of the module it names, once checked; a module of a cycle, or one not checked, cannot be imported.
     exportsFor build cyclic cycleMessage = \case
@@ -397,6 +420,19 @@ checkComponentsFrom initial reader loaded comps target = go initial Map.empty []
         | otherwise -> case Map.lookup full (buildExports build) of
             Just e -> Right e
             Nothing -> Left ("the module " <> T.unpack (T.intercalate "." (map segmentText (drop 1 full))) <> " was not checked before this one: it did not parse")
+
+{- |
+Check the libraries given, in the order given, each module after those it
+imports: the results, one per module, and the build after all of them.  A
+target, a library and a module of it, restricts the last library to that
+module and what it imports, directly or through others.
+-}
+checkComponents :: Prelude -> Reader -> Loaded -> [Component] -> Maybe QualName -> IO ([ModuleResult], Build)
+checkComponents p = checkComponentsFrom (initialBuild p)
+
+-- | Check components from a supplied build, including its output-retention setting.
+checkComponentsFrom :: Build -> Reader -> Loaded -> [Component] -> Maybe QualName -> IO ([ModuleResult], Build)
+checkComponentsFrom initial reader loaded comps target = checkPlanned initial <$> planComponents reader loaded comps target
 
 -- | Check every library of the project at a path, in order: the results, or why the project could not be loaded.
 checkProject :: Prelude -> FilePath -> IO (Either String [ModuleResult])
@@ -421,16 +457,69 @@ checkFile p = checkFileFrom (initialBuild p)
 
 -- | Check a package file from a supplied build and its output-retention setting.
 checkFileFrom :: Build -> FilePath -> Text -> IO (Maybe (Either String [ModuleResult]))
-checkFileFrom initial path text = do
+checkFileFrom initial path text = fmap (fmap (\(results, _, _) -> results)) <$> checkFileCached initial (Map.singleton path text) Nothing path
+
+{- |
+What checking a module laid out reads of it, by which a prefix is told to
+stand: its library, the cycle it is in, its name and its path, its source,
+its imports resolved, and the report on its header.
+-}
+type ModuleKey = (Text, [QualName], QualName, FilePath, Text, [((Maybe Text, QualName), Either String QualName)], Maybe Report)
+
+moduleKey :: Planned -> ModuleKey
+moduleKey (Planned c cyclic pd) = (componentId c, cyclic, mfName (pdFile pd), mfPath (pdFile pd), pdSource pd, pdImports pd, pdHeaderReport pd)
+
+{- |
+What a check of a file in its package reuses when the file is checked
+again: the modules checked before the file's — every module of the
+libraries before its own, and those its module imports, directly or
+through others — each as checking read it, 'ModuleKey', with their results
+and the build after them.  While those stand, so does the build, and only
+the file's module is checked again.
+-}
+data Prefix = Prefix
+  { prefixModules :: ![ModuleKey]
+  , prefixResults :: ![ModuleResult]
+  , prefixBuild :: !Build
+  }
+
+-- | The files of the modules before the one a prefix was built for.
+prefixPaths :: Prefix -> [FilePath]
+prefixPaths p = [path | (_, _, _, path, _, _, _) <- prefixModules p]
+
+-- | Whether a check of a file reused the prefix it was given, or built one afresh.
+data Reuse = Reused | Rebuilt
+  deriving stock (Show, Eq)
+
+{- |
+Check a file as 'checkFileFrom' does, the texts given standing for the
+files at their paths — the documents open in an editor, the file's own
+among them — and the modules before the file's taken from the prefix given
+where their sources are unchanged: the results, the file's last; the prefix
+for the next check; and whether the one given served.
+-}
+checkFileCached :: Build -> Map FilePath Text -> Maybe Prefix -> FilePath -> IO (Maybe (Either String ([ModuleResult], Prefix, Reuse)))
+checkFileCached initial texts cache path = do
   located <- locate path
   case located of
     Nothing -> pure Nothing
     Just (loaded, c, name) -> case componentsInOrder loaded of
       Left err -> pure (Just (Left err))
       Right comps -> do
-        canonical <- canonicalizePath path
+        canonical <- Map.fromList <$> mapM (\(f, t) -> (,t) <$> canonicalizePath f) (Map.toList texts)
         let upTo = takeWhile ((/= componentId c) . componentId) comps <> [c]
             reader f = do
               f' <- canonicalizePath f
-              if f' == canonical then pure text else readFileUtf8 f
-        Just . Right . fst <$> checkComponentsFrom initial reader loaded upTo (Just name)
+              maybe (readFileUtf8 f) pure (Map.lookup f' canonical)
+        planned <- planComponents reader loaded upTo (Just name)
+        let isTarget pl = componentId (plComponent pl) == componentId c && mfName (pdFile (plParsed pl)) == name
+            -- The file's module is the last laid out, the rest before it; among modules importing one another it may not be, and then nothing is reused.
+            (before, targets) = case reverse planned of
+              pl : rest | isTarget pl -> (reverse rest, [pl])
+              _ -> (planned, [])
+            sources = map moduleKey before
+            (prefix, reuse) = case cache of
+              Just p | prefixModules p == sources -> (p, Reused)
+              _ -> let (results, build) = checkPlanned initial before in (Prefix sources results build, Rebuilt)
+            (results', _) = checkPlanned (prefixBuild prefix) targets
+        pure (Just (Right (prefixResults prefix <> results', prefix, reuse)))

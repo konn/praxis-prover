@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Background checking: a document is checked 300 ms after its last change,
+  off the message loop, a check overtaken by the next change abandoned, and
+  hover, semantic tokens and go to definition answered meanwhile from the
+  last check. A `.px` document checked again reuses the build of the modules
+  before it — the libraries before its own and the modules it imports — while
+  their sources are unchanged (`checkFileCached`); the documents open stand
+  for the files at their paths, and saving one checks again the others open
+  which read it, or whose check had failed.
 - Semantic tokens (`textDocument/semanticTokens/full`): in a `.px` document
   every name is a token of what it is — a data type, a constructor, a
   function or theorem, a class, a method, a module or instance, a type

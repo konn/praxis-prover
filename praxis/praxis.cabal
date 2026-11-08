@@ -184,6 +184,8 @@ test-suite praxis-test
     QuickCheck,
     bound,
     containers,
+    directory,
+    filepath,
     megaparsec,
     praxis,
     praxis-copra,

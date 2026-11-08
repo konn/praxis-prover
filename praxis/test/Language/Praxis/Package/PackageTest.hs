@@ -7,19 +7,23 @@ one another, across libraries and packages.
 -}
 module Language.Praxis.Package.PackageTest (packageTests) where
 
+import Control.Monad (forM_, when)
 import Data.List (isInfixOf, sort)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Language.Praxis.Package.Build
 import Language.Praxis.Package.Manifest
 import Language.Praxis.Package.Version
-import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..))
+import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..), initialBuild)
 import Language.Praxis.Surface.Env (QualName)
 import Language.Praxis.Surface.Prelude (prelude)
 import Language.Praxis.Surface.Rename (Renamed (..))
 import Language.Praxis.Surface.Syntax.Raw (Segment (Ident, Op), Span (..), segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive)
+import System.FilePath ((</>))
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -177,6 +181,47 @@ buildTests =
         -- A file outside any package is nobody's.
         alone <- checkFile p "test/data/list.px" "module Data.List where"
         assertBool "no package encloses test/data" (maybe True (const False) alone)
+    , testCase "a file checked again reuses the modules before it, the libraries before its own and those it imports, while their sources stand: its own change does not rebuild them, a change of an import open in the editor does" $ do
+        p <- either assertFailure pure prelude
+        let path = "test/data/project/packages/app/src/Main.px"
+            dep = "test/data/project/packages/lists/src/Data/List.px"
+            run texts cache = maybe (assertFailure "no package encloses the file") (either assertFailure pure) =<< checkFileCached (initialBuild p) texts cache path
+        text <- TIO.readFile path
+        (results, prefix, reuse) <- run (Map.singleton path text) Nothing
+        reuse @?= Rebuilt
+        map (renderName . mrModule) results @?= ["Data.List", "Data.List", "Data.List.Extra", "Main"]
+        map (renderName . mrModule) (prefixResults prefix) @?= ["Data.List", "Data.List", "Data.List.Extra"]
+        (results', prefix', reuse') <- run (Map.singleton path (text <> "\n-- edited\n")) (Just prefix)
+        reuse' @?= Reused
+        errorsOf results' @?= []
+        map (renderName . mrModule) results' @?= ["Data.List", "Data.List", "Data.List.Extra", "Main"]
+        depText <- TIO.readFile dep
+        (results'', _, reuse'') <- run (Map.fromList [(path, text), (dep, depText <> "\nbroken : Nat -> Nat\nbroken n = no-such-name n\n")]) (Just prefix')
+        reuse'' @?= Rebuilt
+        assertBool "the edited import's error is reported" (not (null (errorsOf results'')))
+    , testCase "a prefix is told to stand by what checking its modules read, their manifests included: a dependency dropped from a manifest with every source unchanged rebuilds it" $ do
+        p <- either assertFailure pure prelude
+        tmp <- getTemporaryDirectory
+        let root = tmp </> "praxis-prefix-manifest-test"
+        already <- doesDirectoryExist root
+        when already (removeDirectoryRecursive root)
+        copyTree "test/data/project" root
+        let path = root </> "packages" </> "app" </> "src" </> "Main.px"
+            run cache = do
+              text <- TIO.readFile path
+              maybe (assertFailure "no package encloses the file") (either assertFailure pure) =<< checkFileCached (initialBuild p) (Map.singleton path text) cache path
+        (results, prefix, reuse) <- run Nothing
+        reuse @?= Rebuilt
+        errorsOf results @?= []
+        (_, prefix', reuse') <- run (Just prefix)
+        reuse' @?= Reused
+        -- A manifest changed, no source: the sublibrary lists:extra no longer depends on lists, so its import of Data.List fails, and the modules before Main are checked again.
+        let manifest = root </> "packages" </> "lists" </> "package.toml"
+        TIO.readFile manifest >>= TIO.writeFile manifest . T.replace "dependencies = [\"lists\"]\n" ""
+        (results'', _, reuse'') <- run (Just prefix')
+        reuse'' @?= Rebuilt
+        assertBool "the import the dependency dropped resolved is reported" (not (null (errorsOf results'')))
+        removeDirectoryRecursive root
     , testCase "the renamer records the module headers, and what the names of imports, openings and directives resolve to" $ do
         p <- either assertFailure pure prelude
         results <- either assertFailure pure =<< checkProject p "test/data/project"
@@ -233,3 +278,14 @@ buildTests =
     head' = \case
       x : _ -> x
       [] -> error "no results"
+
+-- | A directory copied with everything under it.
+copyTree :: FilePath -> FilePath -> IO ()
+copyTree from to = do
+  createDirectoryIfMissing True to
+  entries <- listDirectory from
+  forM_ entries \entry -> do
+    let source = from </> entry
+        target = to </> entry
+    isDir <- doesDirectoryExist source
+    if isDir then copyTree source target else copyFile source target

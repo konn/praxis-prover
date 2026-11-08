@@ -46,10 +46,13 @@ module Language.Praxis.LSP (
   semanticTokensOf,
 ) where
 
-import Control.Exception (IOException, displayException, try)
+import Control.Concurrent (ThreadId, forkIO, killThread, myThreadId, threadDelay)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar)
+import Control.Exception (IOException, SomeAsyncException, displayException, evaluate, fromException, mask_, throwIO, try)
+import Control.Monad (filterM, forM_)
 import Control.Monad.IO.Class (liftIO)
 import Data.Char (isSpace)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -58,11 +61,11 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
-import Language.LSP.Diagnostics (partitionBySource)
+import Language.LSP.Diagnostics (DiagnosticsBySource, partitionBySource)
 import Language.LSP.Protocol.Message
 import Language.LSP.Protocol.Types
 import Language.LSP.Server
-import Language.LSP.VFS (virtualFileText, virtualFileVersion)
+import Language.LSP.VFS (VFS (..), virtualFileText, virtualFileVersion)
 import Language.Praxis.LSP.Core (indexPra, indexPrf)
 import Language.Praxis.LSP.Index (Index (..), Target (..), Token (..), referencesAt)
 import Language.Praxis.LSP.Position (Lines, fromPosition, lineAt, linesOf, toPosition, toRange)
@@ -75,11 +78,11 @@ import Language.Praxis.PRA.Syntax.Parser (syntaxErrorPosition)
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
-import Language.Praxis.Package.Build (ModuleResult (..), checkFile, componentId, locate, readFileUtf8)
+import Language.Praxis.Package.Build (ModuleResult (..), Prefix, checkFileCached, componentId, locate, prefixPaths, readFileUtf8)
 import Language.Praxis.Surface.Check qualified as Surface
 import Language.Praxis.Surface.Engine (Knowledge (..))
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (Prelude (..), prelude, preludeLemmas)
+import Language.Praxis.Surface.Prelude (Prelude, prelude, preludeLemmas)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..), Span (..))
 import System.Directory (canonicalizePath)
 import System.Exit (ExitCode (..))
@@ -93,24 +96,34 @@ data Entry = Entry
   , entryDocument :: !Document
   }
 
-type Cache = IORef (Map NormalizedUri Entry)
+{- |
+The state of the server: what it found in each document open, which the
+requests about the document are answered from; the check of each document
+pending or running, which the next change of the document abandons; and
+what the check of each document reuses from the one before it.
+-}
+data Server = Server
+  { serverEntries :: !(IORef (Map NormalizedUri Entry))
+  , serverChecks :: !(MVar (Map NormalizedUri ThreadId))
+  , serverPrefixes :: !(IORef (Map NormalizedUri Prefix))
+  }
 
 -- | Serve over standard input and output, until the client says goodbye.
 runPraxisServer :: IO ExitCode
 runPraxisServer = do
-  cache <- newIORef Map.empty
-  code <- runServer (definition cache)
+  server <- Server <$> newIORef Map.empty <*> newMVar Map.empty <*> newIORef Map.empty
+  code <- runServer (definition server)
   pure (if code == 0 then ExitSuccess else ExitFailure code)
 
-definition :: Cache -> ServerDefinition ()
-definition cache =
+definition :: Server -> ServerDefinition ()
+definition server =
   ServerDefinition
     { defaultConfig = ()
     , configSection = "praxis"
     , parseConfig = \_ _ -> Right ()
     , onConfigChange = \_ -> pure ()
     , doInitialize = \env _ -> pure (Right env)
-    , staticHandlers = \_ -> handlers cache
+    , staticHandlers = \_ -> handlers server
     , interpretHandler = \env -> Iso (runLspT env) liftIO
     , options = defaultOptions {optTextDocumentSync = Just syncOptions}
     }
@@ -124,20 +137,29 @@ definition cache =
         , _save = Just (InR (SaveOptions (Just False)))
         }
 
-handlers :: Cache -> Handlers (LspM ())
-handlers cache =
+handlers :: Server -> Handlers (LspM ())
+handlers server =
   mconcat
     [ notificationHandler SMethod_Initialized \_ -> pure ()
     , -- The library reads the configuration itself; these notifications need no answer.
       notificationHandler SMethod_WorkspaceDidChangeConfiguration \_ -> pure ()
     , notificationHandler SMethod_SetTrace \_ -> pure ()
     , notificationHandler SMethod_WorkspaceDidChangeWatchedFiles \_ -> pure ()
-    , notificationHandler SMethod_TextDocumentDidOpen \msg -> publish cache (toNormalizedUri msg._params._textDocument._uri)
-    , notificationHandler SMethod_TextDocumentDidChange \msg -> publish cache (toNormalizedUri msg._params._textDocument._uri)
-    , notificationHandler SMethod_TextDocumentDidSave \msg -> publish cache (toNormalizedUri msg._params._textDocument._uri)
+    , notificationHandler SMethod_TextDocumentDidOpen \msg -> schedule server 0 (toNormalizedUri msg._params._textDocument._uri)
+    , notificationHandler SMethod_TextDocumentDidChange \msg -> schedule server changeDelay (toNormalizedUri msg._params._textDocument._uri)
+    , -- A document saved is checked at once, and so are the other documents open which read it, or whose last check found an error the save may resolve.
+      notificationHandler SMethod_TextDocumentDidSave \msg -> do
+        let uri = toNormalizedUri msg._params._textDocument._uri
+        schedule server 0 uri
+        open <- Map.keys . _vfsMap <$> getVirtualFiles
+        affected <- liftIO (dependents server uri (filter (/= uri) open))
+        mapM_ (schedule server 0) affected
     , notificationHandler SMethod_TextDocumentDidClose \msg -> do
         let uri = toNormalizedUri msg._params._textDocument._uri
-        liftIO (modifyIORef' cache (Map.delete uri))
+        liftIO do
+          abandon server uri
+          atomicModifyIORef' (serverEntries server) (\m -> (Map.delete uri m, ()))
+          atomicModifyIORef' (serverPrefixes server) (\m -> (Map.delete uri m, ()))
         publishDiagnostics 100 uri Nothing (partitionBySource [])
     , requestHandler SMethod_TextDocumentHover \req responder -> do
         let uri = toNormalizedUri req._params._textDocument._uri
@@ -151,12 +173,12 @@ handlers cache =
         responder (Right (maybe (InR Null) InL answer))
     , requestHandler SMethod_TextDocumentSemanticTokensFull \req responder -> do
         let uri = toNormalizedUri req._params._textDocument._uri
-        entry <- liftIO (Map.lookup uri <$> readIORef cache)
+        entry <- liftIO (Map.lookup uri <$> readIORef (serverEntries server))
         responder (Right (maybe (InR Null) (\e -> either (const (InR Null)) InL (semanticTokensOf (entryText e) (entryDocument e))) entry))
     , requestHandler SMethod_TextDocumentDefinition \req responder -> do
         let uri = toNormalizedUri req._params._textDocument._uri
             path = uriToFilePath (fromNormalizedUri uri)
-        entry <- liftIO (Map.lookup uri <$> readIORef cache)
+        entry <- liftIO (Map.lookup uri <$> readIORef (serverEntries server))
         found <- case entry of
           Nothing -> pure []
           Just e -> mapM (locationOf uri path (entryText e)) (definitionsAt (entryText e) (entryDocument e) req._params._position)
@@ -177,21 +199,107 @@ locationOf uri path text (Target target sp)
           pure (linesOf (either (\e -> const "" (e :: IOException)) id read'))
       pure (Location targetUri (toRange ls sp))
 
--- | Analyse a document, keep what was found, and publish its diagnostics, clearing those published before.
-publish :: Cache -> NormalizedUri -> LspM () ()
-publish cache uri = do
+{- |
+How long the server waits after a change before checking the document, in
+microseconds: a pause in typing shorter than this starts no check, and a
+check started is abandoned by the next change.
+-}
+changeDelay :: Int
+changeDelay = 300000
+
+{- |
+Check a document in the background, after the pause given, and publish what
+was found, clearing what was published before.  A check of the same document
+pending or running is abandoned first, the document having changed since.
+Meanwhile the requests about the document are answered from what was found
+last.  The documents open stand for the files at their paths, for the modules
+the document imports.
+-}
+schedule :: Server -> Int -> NormalizedUri -> LspM () ()
+schedule server delay uri = do
   file <- getVirtualFile uri
+  open <- Map.keys . _vfsMap <$> getVirtualFiles
+  others <- mapM (\u -> fmap (u,) <$> getVirtualFile u) open
+  env <- getLspEnv
   let path = uriToFilePath (fromNormalizedUri uri)
   case (file, languageOf =<< path) of
     (Just f, Just lang) -> do
-      let text = virtualFileText f
-      previous <- liftIO (Map.lookup uri <$> readIORef cache)
-      doc <- liftIO (analyseDocument lang (fromMaybe "<document>" path) text)
-      -- A document which does not parse keeps the index of the text before it, rather than losing its colours as it is typed.
-      let doc' = if docParsed doc then doc else doc {docIndex = maybe (docIndex doc) (docIndex . entryDocument) previous}
-      liftIO (modifyIORef' cache (Map.insert uri (Entry text doc')))
-      publishDiagnostics 100 uri (Just (virtualFileVersion f)) (partitionBySource (map (diagnostic (linesOf text)) (docReports doc)))
+      let texts = Map.fromList [(p, virtualFileText v) | Just (u, v) <- others, Just p <- [uriToFilePath (fromNormalizedUri u)], languageOf p == Just Px]
+      liftIO $ modifyMVar_ (serverChecks server) \checks -> do
+        mapM_ killThread (Map.lookup uri checks)
+        worker <- forkIO (check server env delay uri (fromMaybe "<document>" path) lang (virtualFileText f) (virtualFileVersion f) texts)
+        pure (Map.insert uri worker checks)
     _ -> pure ()
+
+-- | Abandon the check of a document pending or running, if any.
+abandon :: Server -> NormalizedUri -> IO ()
+abandon server uri = modifyMVar_ (serverChecks server) \checks -> do
+  mapM_ killThread (Map.lookup uri checks)
+  pure (Map.delete uri checks)
+
+{- |
+The documents open whose check a document saved may change: the @.px@
+documents whose last check read the file saved, it being among the modules
+before theirs, and those whose last check reported an error, which the file
+saved may resolve, as a module they import appearing does.
+-}
+dependents :: Server -> NormalizedUri -> [NormalizedUri] -> IO [NormalizedUri]
+dependents server saved open = case uriToFilePath (fromNormalizedUri saved) of
+  Just path | languageOf path == Just Px -> do
+    canonical <- canonicalizePath path
+    entries <- readIORef (serverEntries server)
+    prefixes <- readIORef (serverPrefixes server)
+    filterM
+      ( \u -> case uriToFilePath (fromNormalizedUri u) of
+          Just p | languageOf p == Just Px -> do
+            read' <- maybe (pure False) (fmap (elem canonical) . mapM canonicalizePath . prefixPaths) (Map.lookup u prefixes)
+            let failing = maybe False (any ((== DiagnosticSeverity_Error) . reportSeverity) . docReports . entryDocument) (Map.lookup u entries)
+            pure (read' || failing)
+          _ -> pure False
+      )
+      open
+  _ -> pure []
+
+{- |
+Reports as the diagnostics of the praxis source, the source present even
+with none: publishing the same version of a document again replaces its
+diagnostics by source, and a source absent would leave those before.
+-}
+diagnosticsBySource :: Lines -> [Report] -> DiagnosticsBySource
+diagnosticsBySource ls reports = Map.insertWith (<>) (Just "praxis") mempty (partitionBySource (map (diagnostic ls) reports))
+
+{- |
+A check: after the pause, the analysis, forced where abandoning it costs
+nothing; then, all at once, what was found kept and published, so that an
+abandoned check leaves nothing half done.  A failure of the checker is
+reported as a diagnostic rather than lost.
+-}
+check :: Server -> LanguageContextEnv () -> Int -> NormalizedUri -> FilePath -> Language -> Text -> Int32 -> Map FilePath Text -> IO ()
+check server env delay uri path lang text version texts = do
+  threadDelay delay
+  previous <- Map.lookup uri <$> readIORef (serverEntries server)
+  prefix <- Map.lookup uri <$> readIORef (serverPrefixes server)
+  found <- try (analysed prefix)
+  (doc, prefix') <- case found of
+    Right result -> pure result
+    Left e
+      | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+      | otherwise -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack ("the checker failed: " <> displayException e)) Nothing] mempty False, Nothing)
+  -- A document which does not parse keeps the index of the text before it, rather than losing its colours as it is typed.
+  let doc' = if docParsed doc then doc else doc {docIndex = maybe (docIndex doc) (docIndex . entryDocument) previous}
+  mask_ do
+    atomicModifyIORef' (serverEntries server) (\m -> (Map.insert uri (Entry text doc') m, ()))
+    forM_ prefix' \p -> atomicModifyIORef' (serverPrefixes server) (\m -> (Map.insert uri p m, ()))
+    runLspT env (publishDiagnostics 100 uri (Just version) (diagnosticsBySource (linesOf text) (docReports doc)))
+  me <- myThreadId
+  modifyMVar_ (serverChecks server) (pure . Map.update (\t -> if t == me then Nothing else Just t) uri)
+  where
+    analysed prefix = do
+      (doc, prefix') <- analyseDocumentWith texts prefix lang path text
+      mapM_ evaluate (docReports doc)
+      mapM_ evaluate (indexTokens (docIndex doc))
+      mapM_ evaluate (indexReferences (docIndex doc))
+      pure (doc, prefix')
 
 -- | A report as a diagnostic, spanning from its position to its end, or else to the end of the line.
 diagnostic :: Lines -> Report -> Diagnostic
@@ -267,10 +375,19 @@ analyseIn lang path text = docReports <$> analyseDocument lang path text
 
 -- | Everything found in a document at a path: its reports, as 'analyseIn' finds them, and its index.
 analyseDocument :: Language -> FilePath -> Text -> IO Document
-analyseDocument lang path text = case lang of
-  Pra -> pure (Document (analysePra text) (indexPra path (linesOf text) libraryNames) True)
-  Prf -> pure (Document (analysePrf text) (indexPrf path (linesOf text)) True)
-  Px -> analysePxIn path text
+analyseDocument lang path text = fst <$> analyseDocumentWith (Map.singleton path text) Nothing lang path text
+
+{- |
+'analyseDocument', the texts given standing for the files at their paths,
+and a @.px@ document checked from the prefix given, as 'checkFileCached'
+checks it: what was found, and the prefix for the next check of the
+document, where there is one.
+-}
+analyseDocumentWith :: Map FilePath Text -> Maybe Prefix -> Language -> FilePath -> Text -> IO (Document, Maybe Prefix)
+analyseDocumentWith texts prefix lang path text = case lang of
+  Pra -> pure (Document (analysePra text) (indexPra path (linesOf text) libraryNames) True, Nothing)
+  Prf -> pure (Document (analysePrf text) (indexPrf path (linesOf text)) True, Nothing)
+  Px -> analysePxIn texts prefix path text
 
 -- | The names of the lemmas in scope in a @.pra@ document before any declaration.
 libraryNames :: Set Text
@@ -493,19 +610,22 @@ analysePx path text = case surfacePrelude of
 
 {- |
 A module of the surface language at a path: checked as a module of the
-package enclosing it, with what it imports, the reports being the
-document's own and the definitions of every module checked before it in
-its index; or on its own, when no package encloses it.
+package enclosing it, with what it imports, the texts given standing for
+the files at their paths, and the modules before it taken from the prefix
+given where their sources stand; the reports being the document's own, and
+the definitions of every module checked before it in its index.  Or on its
+own, when no package encloses it.  With the document, the prefix for its
+next check.
 -}
-analysePxIn :: FilePath -> Text -> IO Document
-analysePxIn path text = case surfacePrelude of
-  Left err -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err)) Nothing] mempty False)
+analysePxIn :: Map FilePath Text -> Maybe Prefix -> FilePath -> Text -> IO (Document, Maybe Prefix)
+analysePxIn texts prefix path text = case surfacePrelude of
+  Left err -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err)) Nothing] mempty False, Nothing)
   Right p -> do
-    inPackage <- checkFile p path text
+    inPackage <- checkFileCached (editorBuild p) (Map.insert path text texts) prefix path
     case inPackage of
-      Nothing -> pure (analysePx path text)
-      Just (Left err) -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack err) Nothing] mempty False)
-      Just (Right results) -> do
+      Nothing -> pure (analysePx path text, Nothing)
+      Just (Left err) -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack err) Nothing] mempty False, Nothing)
+      Just (Right (results, prefix', _)) -> do
         located <- locate path
         canonical <- canonicalizePath path
         paths <- mapM (canonicalizePath . mrPath) results
@@ -520,9 +640,16 @@ analysePxIn path text = case surfacePrelude of
                 , p' /= canonical
                 , Just rn <- [Surface.checkedRenamed (mrChecked r)]
                 ]
-        pure case mine of
-          r : _ -> documentOf p path text others (mrChecked r)
-          [] -> Document [] mempty False
+        pure
+          ( case mine of
+              r : _ -> documentOf p path text others (mrChecked r)
+              [] -> Document [] mempty False
+          , Just prefix'
+          )
+
+-- | The build a document's check starts from: the prelude's, keeping no generated text, which nothing in the editor reads.
+editorBuild :: Prelude -> Surface.Build
+editorBuild p = (Surface.initialBuild p) {Surface.buildRetainGeneratedText = False}
 
 -- * Navigation
 
