@@ -101,20 +101,23 @@ determined. This instantiation is recorded in the core signature.
 elaborate :: Env -> [Slot] -> [Ty.Ty] -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
 elaborate env slots tys = elaborateNamed env slots [Ty.hiddenBinder ("v" <> T.pack (show i)) ty | (i, ty) <- zip [0 :: Int ..] tys]
 
-{- | Check a body over a telescope: the clause's variables, outermost first,
-the k-th the variable of level k, which the indices of the types refer to
-by 'Ty.IxLocal'.  The telescope identifies the terms denoted by source type
+{- | Check a closed body over the telescope binding it: the clause's variables,
+outermost first, which the indices of the types refer to by 'Ty.IxBound' —
+the clause being one binder group, the k-th variable is @IxBound 0 k@ at the
+top of the body.  The telescope identifies the terms denoted by source type
 indices by position; its hints are for display only.
 -}
 elaborateNamed :: Env -> [Slot] -> Ty.Telescope -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
-elaborateNamed env slots telescope = elaborateScoped env slots (zip [0 ..] telescope)
+elaborateNamed env slots telescope = elaborateScoped env slots [(Ty.IxBound 0 k, b) | (k, b) <- zip [0 ..] telescope]
 
 {- | A variable context as the body's positions see it: at each position, the
-level and the binder of the variable there.  At the top the positions are
-the levels; under a callback lambda the lambda's parameters come first,
-their levels past the enclosing ones, as 'S.SchemaClosure' flattens them.
+bound occurrence referring to the variable there from where the body is, and
+its binder, the type as seen from there too.  At the top the positions are
+the clause's; under a callback lambda the lambda's parameters come first, as
+'S.SchemaClosure' flattens them, and the enclosing variables are one binder
+group further out.
 -}
-type Scoped = [(Int, Ty.Binder)]
+type Scoped = [(Ty.Ix, Ty.Binder)]
 
 elaborateScoped :: Env -> [Slot] -> Scoped -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
 elaborateScoped env slots variables expression = do
@@ -157,8 +160,15 @@ elaborateScoped env slots variables expression = do
         _ -> Left "a callback parameter must keep its original environment variable"
       SomeVariable actual _ <- variable ctx i
       unless (forgetType ty == forgetType actual) $ Left "a callback environment has the wrong source signature"
-      -- The schema parameters are registered by the names the source writes for them: the variable holding the environment must be the one written by the name the reference is registered under.
-      unless (any (\(name, known, signature) -> known == ref && Ty.binderName (snd (variables !! i)) == Just name && complete signature == forgetType ty) (envSchemas env)) $
+      -- The schema parameters are registered by the names the source writes for them, with their signatures as the
+      -- clause's telescope states them: the variable holding the environment must be the one written by the name the
+      -- reference is registered under, of that signature seen from here — under as many lambdas as its reference counts.
+      let (reference, binder) = variables !! i
+          depth = case reference of
+            Ty.IxBound d _ -> d
+            _ -> 0
+          seen signature = iterate (Ty.mapIx Ty.liftIx) signature !! depth
+      unless (any (\(name, known, signature) -> known == ref && Ty.writtenName binder == Just name && complete (seen signature) == forgetType ty) (envSchemas env)) $
         Left "an unknown callback parameter at the explicit core boundary"
       pure (SomeValue ty (Callback ty (Tm.Parameter ref (Tm.Variable i)) Set.empty))
     infer _ S.SchemaPacked {} = Left "an internal packed callback cannot be supplied as a source term"
@@ -171,13 +181,16 @@ elaborateScoped env slots variables expression = do
         _ -> Left "a callback closure must contain a lambda"
       let count = length domains
       unless (length hints == count) $ Left "a callback lambda has the wrong arity"
-      -- The lambda's parameters at the positions in front, their levels past the enclosing variables'.
-      let next = length variables
-          binders = [(next + i, Ty.hiddenBinder (S.hintText hint) domain) | (i, (hint, domain)) <- zip [0 ..] (zip hints domains)]
+      -- Under the lambda, its parameters are the innermost binder group, at the positions in front, and the
+      -- enclosing variables are one group further out, their types seen from under it.
+      let under = Ty.mapIx Ty.liftIx
+          binders = [(Ty.IxBound 0 i, Ty.hiddenBinder (S.hintText hint) (under domain)) | (i, (hint, domain)) <- zip [0 ..] (zip hints domains)]
+          outer = [(Ty.liftIx ref, b {Ty.binderTy = under (Ty.binderTy b)}) | (ref, b) <- variables]
           opened = fmap (\case B i -> i; F i -> count + i) (fromScope scope)
-      body <- elaborateScoped env slots (binders <> variables) opened
+      body <- elaborateScoped env slots (binders <> outer) opened
       unless (null (obligations body)) $ Left "proof obligations inside a callback lambda are not supported"
-      unless (bodyType body == complete result) $ Left "a callback lambda returns the wrong type"
+      -- The result as seen from under the lambda: the enclosing variables are one binder group further out there.
+      unless (bodyType body == complete (under result)) $ Left "a callback lambda returns the wrong type"
       let closed = fmap (\i -> if i < count then B i else F (i - count)) (computation body)
       pure (SomeValue ty (Callback ty (Tm.Closure count closed) (indexDependencies body)))
     infer _ (S.Nat n) = Right (SomeValue SNatural (Literal n))
@@ -427,7 +440,7 @@ expressionIndex env variables = go
     go (S.Typed _ _ _ value) = go value
     go (S.Dictionary _ value) = go value
     go (S.Var position)
-      | position >= 0 = (\(level, binder) -> Ty.IxLocal level (Ty.binderHint binder)) <$> listToMaybe (drop position variables)
+      | position >= 0 = fst <$> listToMaybe (drop position variables)
       | otherwise = Nothing
     go (S.Nat n) = Just (Ty.IxNat n)
     go expression
@@ -449,9 +462,9 @@ expressionIndex env variables = go
             (if kind == S.RefConstructor then Ty.IxCon else Ty.IxFun) name <$> traverse go arguments
       _ -> Nothing
 
--- | The variables of a body's positions as a context: each at its level, the position its term variable.
+-- | The variables of a body's positions as a context: each standing for the bound occurrence referring to it, the position its term variable.
 scopedCtx :: Scoped -> Ctx Int
-scopedCtx variables = [telescopeLocal level binder position | (position, (level, binder)) <- zip [0 ..] variables]
+scopedCtx variables = [Local (Ty.writtenName b) (Ty.binderHint b) position (Ty.binderTy b) ref | (position, (ref, b)) <- zip [0 ..] variables]
 
 complete :: Ty.Ty -> Ty.Ty
 complete = \case

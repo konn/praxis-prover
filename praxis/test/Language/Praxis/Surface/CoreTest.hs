@@ -34,8 +34,8 @@ coreTests =
         assertBool "unknown index" (isLeft (Core.elaborate emptyEnv [] [TData "Vec" [TNat] [IxHole]] (Var 0)))
     , testCase "index transport validates all equalities before retaining their obligations" $ do
         let vec ix = TData "Vec" [TNat] [ix]
-            vars = [namedBinder "n" TNat, namedBinder "m" TNat, namedBinder "xs" (vec (IxLocal 0 (Hint "n")))]
-            target = vec (IxLocal 1 (Hint "m"))
+            vars = [namedBinder "n" TNat, namedBinder "m" TNat, namedBinder "xs" (vec (IxBound 0 0))]
+            target = vec (IxBound 0 1)
             raw = R.Located R.noSpan (R.EProof (R.RBy []))
             proof p = ProofArg p (Irrelevant raw)
             transport ps = Transport target (Var 2) ps
@@ -43,7 +43,7 @@ coreTests =
             check = Core.elaborateNamed emptyEnv [] vars
         assertBool "missing equality" (isLeft (check (transport [])))
         assertBool "wrong equality" (isLeft (check (transport [proof (Rel RelEq (Var 0) (Var 0))])))
-        assertBool "different type structure" (isLeft (check (Transport (TData "Other" [TNat] [IxLocal 1 (Hint "m")]) (Var 2) [proof equality])))
+        assertBool "different type structure" (isLeft (check (Transport (TData "Other" [TNat] [IxBound 0 1]) (Var 2) [proof equality])))
         body <- either assertFailure pure (check (transport [proof equality]))
         Core.bodyType body @?= target
         Core.computation body @?= Term.Variable 2

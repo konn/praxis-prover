@@ -34,11 +34,11 @@ data Type
 
 data Index
   = ParameterIndex Nat
-  | -- | a variable of the clause's telescope, by level
-    LocalIndex Nat
+  | -- | a variable bound by a binder enclosing the type, by how many binder groups out and its position
+    BoundIndex Nat Nat
   | -- | an index matching left unknown, which the index function of a field recovers
     MetaIndex Nat
-  | -- | a free variable of an opened binder, by name
+  | -- | a free variable of the named world, by name
     FreeIndex Symbol
   | -- | the value of the enclosing dictionary at a position
     DictionaryIndex Nat
@@ -61,7 +61,7 @@ data SType (t :: Type) where
 
 data SIndex (i :: Index) where
   SParameterIndex :: (KnownNat n) => Proxy n -> SIndex ('ParameterIndex n)
-  SLocalIndex :: (KnownNat n) => Proxy n -> SIndex ('LocalIndex n)
+  SBoundIndex :: (KnownNat d, KnownNat n) => Proxy d -> Proxy n -> SIndex ('BoundIndex d n)
   SMetaIndex :: (KnownNat n) => Proxy n -> SIndex ('MetaIndex n)
   SFreeIndex :: (KnownSymbol n) => Proxy n -> SIndex ('FreeIndex n)
   SDictionaryIndex :: (KnownNat n) => Proxy n -> SIndex ('DictionaryIndex n)
@@ -130,16 +130,17 @@ reflectIndex = go . S.normIx
       | n < 0 = Left "a negative index parameter at the explicit core boundary"
       | otherwise = case someNatVal (fromIntegral n) of
           SomeNat p -> Right (SomeIndex (SParameterIndex p))
-    go (S.IxLocal k _)
-      | k < 0 = Left "a negative local index at the explicit core boundary"
-      | otherwise = case someNatVal (fromIntegral k) of
-          SomeNat p -> Right (SomeIndex (SLocalIndex p))
+    go (S.IxBound d j)
+      | d < 0 || j < 0 = Left "a negative bound index at the explicit core boundary"
+      | otherwise = case (someNatVal (fromIntegral d), someNatVal (fromIntegral j)) of
+          (SomeNat pd, SomeNat pj) -> Right (SomeIndex (SBoundIndex pd pj))
     go (S.IxMeta m _)
       | m < 0 = Left "a negative index variable at the explicit core boundary"
       | otherwise = case someNatVal (fromIntegral m) of
           SomeNat p -> Right (SomeIndex (SMetaIndex p))
-    go (S.IxFree name) = case someSymbolVal (T.unpack name) of
+    go (S.IxFree (S.Named name)) = case someSymbolVal (T.unpack name) of
       SomeSymbol p -> Right (SomeIndex (SFreeIndex p))
+    go (S.IxFree (S.Fresh _ _)) = Left "an open variable at the explicit core boundary: a clause is closed before it is checked"
     go (S.IxDict i)
       | i < 0 = Left "a negative dictionary index at the explicit core boundary"
       | otherwise = case someNatVal (fromIntegral i) of
@@ -177,9 +178,9 @@ forgetType = \case
 forgetIndex :: SIndex i -> S.Ix
 forgetIndex = \case
   SParameterIndex p -> S.IxParam (fromIntegral (natVal p))
-  SLocalIndex p -> S.IxLocal (fromIntegral (natVal p)) (S.Hint "")
+  SBoundIndex d j -> S.IxBound (fromIntegral (natVal d)) (fromIntegral (natVal j))
   SMetaIndex p -> S.IxMeta (fromIntegral (natVal p)) (S.Hint "")
-  SFreeIndex p -> S.IxFree (T.pack (symbolVal p))
+  SFreeIndex p -> S.IxFree (S.Named (T.pack (symbolVal p)))
   SDictionaryIndex p -> S.IxDict (fromIntegral (natVal p))
   SNumberIndex p -> S.IxNat (natVal p)
   SSuccessorIndex i -> S.IxSucc (forgetIndex i)
@@ -215,7 +216,7 @@ sameType _ _ = Nothing
 
 sameIndex :: SIndex a -> SIndex b -> Maybe (a :~: b)
 sameIndex (SParameterIndex p) (SParameterIndex q) = do Refl <- sameNat p q; pure Refl
-sameIndex (SLocalIndex p) (SLocalIndex q) = do Refl <- sameNat p q; pure Refl
+sameIndex (SBoundIndex d p) (SBoundIndex e q) = do Refl <- sameNat d e; Refl <- sameNat p q; pure Refl
 sameIndex (SMetaIndex p) (SMetaIndex q) = do Refl <- sameNat p q; pure Refl
 sameIndex (SFreeIndex p) (SFreeIndex q) = do Refl <- sameSymbol p q; pure Refl
 sameIndex (SDictionaryIndex p) (SDictionaryIndex q) = do Refl <- sameNat p q; pure Refl

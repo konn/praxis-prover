@@ -239,7 +239,7 @@ ctorIndexEquations indexFns c = case ctorSignature c of
           IxFun f xs -> CSym f <$> traverse index xs
           IxSchema name -> Just (CStatic name)
           IxPartial name arity prefix xs -> (\captures -> CIndexedPartial name captures arity prefix) <$> traverse index xs
-          IxLocal {} -> Nothing
+          IxBound {} -> Nothing
           IxMeta {} -> Nothing
           IxFree _ -> Nothing
           IxDict _ -> Nothing

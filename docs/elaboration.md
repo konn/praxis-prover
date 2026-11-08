@@ -1097,15 +1097,22 @@ asked of members.
     rule. A law is likewise the theorem proving it at an instance, or a
     premise of a rule.
 11. Binding is locally nameless at every level, the types' included. A
-    bound occurrence is a number — a de Bruijn index in a `Scope`, a de
-    Bruijn level `IxLocal` in an index — and the binder's name is a hint
-    irrelevant to equality. A clause's variables, a theorem's binders and a
-    proof clause's variables are a telescope of binders, each with the name
+    bound occurrence is a number — a de Bruijn index in a `Scope`, and in
+    an index `IxBound d j`, the j-th variable of the binder group d groups
+    out — and the binder's name is a hint irrelevant to equality. A
+    clause's variables, a theorem's binders and a proof clause's variables
+    are a telescope of binders, one binder group, each with the name
     written for it, if any, and nothing resolves a variable by that name
-    but the source: an index names its variable by level, a variable to be
-    solved by a fresh identity (`IxMeta`), a dictionary value or a dependent
-    member by position or qualified name. Names are the meta-language of
-    the source — what a clause writes, the parameter a brace selects, the
-    hypotheses a tactic names — and the tactic engine's named world, which a
-    telescope enters only through `openNames`, every binder given a distinct
-    name. No identity is ever encoded in the shape of a name.
+    but the source. The checker never looks under a binder without opening
+    it: the binder's variables become fresh atoms (`IxFree (Fresh …)`),
+    the body is closed over them again when the clause, the statement or
+    the quantified proposition is stored (`openIxAt`/`closeIxAt`,
+    `openIndices`/`closeIndices`), and no index is ever shifted. A variable
+    to be solved is a fresh identity (`IxMeta`), a dictionary value or a
+    dependent member a position or a qualified name. Names are the
+    meta-language of the source — what a clause writes, the parameter a
+    brace selects, the hypotheses a tactic names — and of the tactic
+    engine's and the kernel's named world, which a telescope enters only
+    by being opened into names (`openNames`, `IxFree (Named …)`), every
+    binder given a distinct one; renaming is of free variables only. No
+    identity is ever encoded in the shape of a name.

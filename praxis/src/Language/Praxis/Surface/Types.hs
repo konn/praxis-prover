@@ -27,6 +27,11 @@ arguments and the context determine.
 module Language.Praxis.Surface.Types (
   -- * Irrelevant data
   Hint (..),
+  Irrelevant (..),
+
+  -- * Atoms
+  Atom (..),
+  atomHint,
 
   -- * Kinds and types
   Kind (..),
@@ -52,9 +57,14 @@ module Language.Praxis.Surface.Types (
   Binder (..),
   Telescope,
   namedBinder,
+  writtenName,
   hiddenBinder,
+  openIxAt,
+  openIxWith,
+  closeIxAt,
+  closeIxWith,
+  liftIx,
   openNames,
-  openIx,
   openTelescope,
 
   -- * Indices
@@ -62,7 +72,8 @@ module Language.Praxis.Surface.Types (
   hasHole,
   ixLeaves,
   ixFrees,
-  ixLocals,
+  freeNames,
+  ixBounds,
   ixMetas,
   ixMethods,
   ixDicts,
@@ -95,7 +106,7 @@ module Language.Praxis.Surface.Types (
 import Control.Monad (foldM, zipWithM)
 import Data.IntMap.Strict (IntMap)
 import Data.IntMap.Strict qualified as IM
-import Data.List (find)
+import Data.List (elemIndex, find)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -112,6 +123,38 @@ instance Eq Hint where
 
 instance Ord Hint where
   compare _ _ = EQ
+
+-- | A value kept for reports and for the source's own reference only, such as a source span or the name a binder was written by: any two are equal.
+newtype Irrelevant a = Irrelevant {relevant :: a}
+  deriving newtype (Show)
+
+instance Eq (Irrelevant a) where
+  _ == _ = True
+
+instance Ord (Irrelevant a) where
+  compare _ _ = EQ
+
+-- * Atoms
+
+{- |
+A free variable: what a binder is opened into.  While the checker works
+under a binder, the binder's variables are atoms made fresh for it, each by
+an identity, displayed by the name the binder was written by; in the tactic
+engine's named world, and the kernel's, a free variable is a name, chosen
+apart from the others in scope when the binder is opened there.  Only free
+variables are ever renamed: a bound occurrence is a position, and comes and
+goes by opening and closing.
+-}
+data Atom
+  = Fresh !Int !Hint
+  | Named !Text
+  deriving stock (Show, Eq, Ord)
+
+-- | What an atom is displayed by.
+atomHint :: Atom -> Text
+atomHint = \case
+  Fresh _ (Hint h) -> h
+  Named n -> n
 
 -- * Kinds and types
 
@@ -145,28 +188,30 @@ data Ty
 {- |
 An index: a first-order term standing in a type.  A value parameter of the
 enclosing signature, by its position among the signature's value parameters,
-as a type parameter is among its type parameters; a variable bound in the
-enclosing telescope, by its de Bruijn level — its position among the value
-binders in scope, the outermost 0 — with the name its binder was written by
-as a hint, for display only; a variable unification may solve, by an
-identity fresh within the clause, the name of the entry it was made for its
-hint; a free variable, by name — a binder opened into the tactic engine's
-named world, or a name an ascription leaves unbound; the value of the
-enclosing dictionary at a position; a dependent member of a class, by its
-qualified name, before a dictionary is selected; a hole, an index nothing
-has determined; a numeral; the successor; a constructor, by its core name,
-applied; a function, by its core name — @add@, @sub@, @mul@ and @pow@ for
-the builtins — applied.
+as a type parameter is among its type parameters; a variable bound by a
+binder enclosing the index, by de Bruijn index — how many binder groups out
+its binder is, and its position in that group — which stands only under its
+binder: the checker opens a binder before it looks under it, so no index is
+ever shifted, and names nothing by position but what a binder of the term
+itself binds; a free variable, an atom a binder was opened into — fresh,
+while the checker works under it, or named, in the tactic engine's world and
+the kernel's, or a name an ascription leaves unbound; a variable unification
+may solve, by an identity fresh within the clause, the name of the entry it
+was made for its hint; the value of the enclosing dictionary at a position;
+a dependent member of a class, by its qualified name, before a dictionary is
+selected; a hole, an index nothing has determined; a numeral; the successor;
+a constructor, by its core name, applied; a function, by its core name —
+@add@, @sub@, @mul@ and @pow@ for the builtins — applied.
 
-A bound variable is never referred to by name: the hint is equal to any
-other, so two indices are equal exactly when they refer to the same
-positions.
+A bound variable is never referred to by name, and a hint is equal to any
+other: two indices are equal exactly when they refer to the same positions
+and the same atoms.
 -}
 data Ix
   = IxParam !Int
-  | IxLocal !Int !Hint
+  | IxBound !Int !Int
+  | IxFree !Atom
   | IxMeta !Int !Hint
-  | IxFree !Text
   | IxDict !Int
   | IxMethod !Text
   | IxHole
@@ -218,62 +263,98 @@ emptyScope = TyScope [] [] []
 
 {- |
 A binder of a telescope: the name the source wrote for it, if any — what a
-term written under it may refer to it by — the hint it is displayed by, and
-its type, whose indices refer to the binders before it by 'IxLocal' level.
-A binder written by no name — an implicit value a clause takes without
-naming it, an implicit argument of a constructor its pattern leaves out — has
-the name of the parameter it stands for as its hint.
+term written under it may refer to it by, and nothing else, so it is
+irrelevant to equality as the hint is — the hint it is displayed by, and
+its type, whose indices refer to the binders before it by 'IxBound' index,
+the telescope being one binder group.  Two telescopes are equal when their
+types are: a binder is a position.  A binder written by no name — an
+implicit value a clause takes without naming it, an implicit argument of a
+constructor its pattern leaves out — has the name of the parameter it stands
+for as its hint.
 -}
 data Binder = Binder
-  { binderName :: !(Maybe Text)
+  { binderName :: !(Irrelevant (Maybe Text))
   , binderHint :: !Hint
   , binderTy :: !Ty
   }
   deriving stock (Show, Eq)
 
--- | The binders in scope, outermost first: the k-th is the variable of level k.
+-- | The binders in scope, outermost first, one binder group: under it, the k-th is  0 k@.
 type Telescope = [Binder]
 
 -- | A binder written by a name.
 namedBinder :: Text -> Ty -> Binder
-namedBinder n = Binder (Just n) (Hint n)
+namedBinder n = Binder (Irrelevant (Just n)) (Hint n)
 
 -- | A binder no name is written for, displayed by the hint given.
 hiddenBinder :: Text -> Ty -> Binder
-hiddenBinder h = Binder Nothing (Hint h)
+hiddenBinder h = Binder (Irrelevant Nothing) (Hint h)
+
+-- | The name a binder was written by, if any.
+writtenName :: Binder -> Maybe Text
+writtenName = relevant . binderName
 
 {- |
-Distinct names for the binders of a telescope, opening it into a named
-world — the tactic engine's, or the core text's: a binder keeps the name
-written for it, which the source keeps distinct within a telescope; one
-written by no name takes its hint, primed until it differs from every name
-written and every name taken before it.
+The binder group at the depth given opened: its variables the atoms given,
+by position; a reference to a group further out one group nearer, the one
+opened being gone.  At depth 0 the innermost group is opened; the depth
+counts the groups between the index and the binder, as 'closeIxAt' counts
+them when it closes under them.
+-}
+openIxAt :: Int -> [Atom] -> Ix -> Ix
+openIxAt depth atoms = mapIxLeaves \case
+  IxBound d j
+    | d == depth -> maybe (IxBound d j) IxFree (listToMaybe (drop j atoms))
+    | d > depth -> IxBound (d - 1) j
+  x -> x
+
+-- | The innermost binder group of an index opened by the atoms given.
+openIxWith :: [Atom] -> Ix -> Ix
+openIxWith = openIxAt 0
+
+{- |
+An index closed over the atoms given, as the variables of a binder group at
+the depth given, by position: the atoms become bound occurrences, and a
+reference to a group at that depth or further out moves one group further,
+the new one standing between.
+-}
+closeIxAt :: Int -> [Atom] -> Ix -> Ix
+closeIxAt depth atoms = mapIxLeaves \case
+  IxFree a | Just j <- elemIndex a atoms -> IxBound depth j
+  IxBound d j | d >= depth -> IxBound (d + 1) j
+  x -> x
+
+-- | An index closed over the atoms given as the innermost binder group.
+closeIxWith :: [Atom] -> Ix -> Ix
+closeIxWith = closeIxAt 0
+
+-- | An index as seen one binder group further in: every bound occurrence one group further out.
+liftIx :: Ix -> Ix
+liftIx = mapIxLeaves \case
+  IxBound d j -> IxBound (d + 1) j
+  x -> x
+
+{- |
+The names the binders of a telescope are opened into in a named world — the
+tactic engine's, or the core text's: renaming is of free variables, and this
+chooses them apart.  A binder keeps the name written for it, which the
+source keeps distinct within a telescope; one written by no name takes its
+hint, primed until it differs from every name written and every name taken
+before it.
 -}
 openNames :: Telescope -> [Text]
 openNames binders = go [] binders
   where
-    written = [n | Binder (Just n) _ _ <- binders]
+    written = [n | Binder (Irrelevant (Just n)) _ _ <- binders]
     go _ [] = []
-    go taken (Binder (Just n) _ _ : rest) = n : go (n : taken) rest
-    go taken (Binder Nothing (Hint h) _ : rest) =
+    go taken (Binder (Irrelevant (Just n)) _ _ : rest) = n : go (n : taken) rest
+    go taken (Binder (Irrelevant Nothing) (Hint h) _ : rest) =
       let name = fromMaybe h (find (\c -> c `notElem` written && c `notElem` taken) (iterate (<> "'") h))
        in name : go (name : taken) rest
 
--- | An index with the bound variables of a telescope opened: each by the name given for its level.
-openIx :: [Text] -> Ix -> Ix
-openIx names = go
-  where
-    go = \case
-      IxLocal k h -> maybe (IxLocal k h) IxFree (listToMaybe (drop k names))
-      IxSucc x -> IxSucc (go x)
-      IxCon c xs -> IxCon c (map go xs)
-      IxFun f xs -> IxFun f (map go xs)
-      IxPartial f arity prefix xs -> IxPartial f arity prefix (map go xs)
-      x -> x
-
--- | A telescope opened by 'openNames': its binders by those names, the indices of their types opened too.
+-- | A telescope opened into a named world by 'openNames': its binders by those names, the indices of their types opened to them.
 openTelescope :: Telescope -> [(Text, Ty)]
-openTelescope binders = [(n, mapIx (openIx names) (binderTy b)) | (n, b) <- zip names binders]
+openTelescope binders = [(n, mapIx (openIxWith (map Named names)) (binderTy b)) | (n, b) <- zip names binders]
   where
     names = openNames binders
 
@@ -361,9 +442,10 @@ renderIxAt values = go
     go :: Int -> Ix -> String
     go d = \case
       IxParam i -> if i < length values then T.unpack (values !! i) else "#" <> show i
-      IxLocal _ (Hint h) -> T.unpack h
+      IxBound 0 j -> "#" <> show j
+      IxBound depth j -> "#" <> show depth <> "." <> show j
+      IxFree a -> T.unpack (atomHint a)
       IxMeta _ (Hint h) -> T.unpack h
-      IxFree v -> T.unpack v
       IxDict i -> "#d" <> show i
       IxMethod q -> short q
       IxHole -> "_"
@@ -437,13 +519,17 @@ ixLeaves = \case
   IxPartial _ _ _ xs -> concatMap ixLeaves xs
   x -> [x]
 
--- | The free variables an index mentions, by name.
-ixFrees :: Ix -> [Text]
-ixFrees x = [v | IxFree v <- ixLeaves x]
+-- | The free variables an index mentions.
+ixFrees :: Ix -> [Atom]
+ixFrees x = [a | IxFree a <- ixLeaves x]
 
--- | The bound variables an index mentions, by level.
-ixLocals :: Ix -> [Int]
-ixLocals x = [k | IxLocal k _ <- ixLeaves x]
+-- | The names of the free variables an index mentions in a named world.
+freeNames :: Ix -> [Text]
+freeNames x = [n | IxFree (Named n) <- ixLeaves x]
+
+-- | The bound variables an index mentions, each by how many binder groups out its binder is and its position in it.
+ixBounds :: Ix -> [(Int, Int)]
+ixBounds x = [(d, j) | IxBound d j <- ixLeaves x]
 
 -- | The variables unification may solve an index mentions, by identity.
 ixMetas :: Ix -> [Int]

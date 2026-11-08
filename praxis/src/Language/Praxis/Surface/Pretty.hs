@@ -25,7 +25,7 @@ import Data.Text qualified as T
 import Language.Praxis.Surface.Env (Env, dataParameterOrder)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Syntax
-import Language.Praxis.Surface.Types (Ix (..), Ty (..), orderArguments)
+import Language.Praxis.Surface.Types (Ix (..), Ty (..), atomHint, orderArguments)
 
 data Scope = Scope
   { typeNames :: [Text]
@@ -90,12 +90,11 @@ typeText env sc = go
 indexText :: Scope -> Int -> Ix -> Text
 indexText sc p = \case
   IxParam i -> nameAt "i" (indexNames sc) i
-  -- A variable of the telescope by the name the scope gives its level, else by its hint.
-  IxLocal k (Hint h) -> case drop k (variableNames sc) of
-    n : _ | k >= 0 -> n
-    _ -> h
+  -- A variable of the telescope the scope names, by that name; another bound variable by its position.
+  IxBound 0 j | n : _ <- drop j (variableNames sc), j >= 0 -> n
+  IxBound d j -> "#" <> T.pack (show d) <> "." <> T.pack (show j)
   IxMeta _ (Hint h) -> h
-  IxFree n -> demangle n
+  IxFree a -> demangle (atomHint a)
   IxDict i -> "#d" <> T.pack (show i)
   IxMethod q -> reference (Ref RefFunction q)
   IxNat n -> T.pack (show n)

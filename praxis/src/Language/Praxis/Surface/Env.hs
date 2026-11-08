@@ -96,13 +96,12 @@ module Language.Praxis.Surface.Env (
   indexFunctionCores,
   Local (..),
   Ctx,
-  localIx,
   lookupLocal,
-  localAtLevel,
   standingFor,
-  nextLevel,
-  telescopeLocal,
-  telescopeCtx,
+  openedLocal,
+  openedCtx,
+  freshAtom,
+  freshAtoms,
   indexTermIn,
   indexTermInWithDependencies,
   normalizeIndex,
@@ -133,7 +132,7 @@ import Language.Praxis.Surface.SourceView (QuantifierViews)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..))
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Assignment (..), Binder (..), Hint (..), Ix (..), Kind, Parameter (..), Scheme (..), Telescope, Ty (..), TyScope (..), Unfold, emptyAssignment, emptyScope, ixMethods, mapIx, normIx, renderTyWithOrder, substScheme, tyIndices, unfoldAll)
+import Language.Praxis.Surface.Types (Assignment (..), Atom (..), Binder (..), Hint (..), Irrelevant (..), Ix (..), Kind, Parameter (..), Scheme (..), Telescope, Ty (..), TyScope (..), Unfold, emptyAssignment, emptyScope, ixMethods, mapIx, normIx, openIxWith, renderTyWithOrder, substScheme, tyIndices, unfoldAll)
 
 -- * Globals
 
@@ -142,18 +141,16 @@ import Language.Praxis.Surface.Types (Assignment (..), Binder (..), Hint (..), I
 {- |
 A variable in scope while a source term is elaborated: the name the source
 writes for it, if any — none for a value bound without a name, as an
-implicit a clause takes without naming it; its de Bruijn level, its
-position among the value binders in scope, the outermost 0; the hint it is
-displayed by; the term variable it is; its type; and the index it stands
-for — itself, 'IxLocal' at its level, in a clause; a value parameter of the
-signature, 'IxParam', in a statement's context; a free variable, 'IxFree',
-in the tactic engine's named world.  Nothing refers to it by its name but
-the source: an index refers to it by its level, and is resolved to the
-variable by that.
+implicit a clause takes without naming it; the hint it is displayed by; the
+term variable it is; its type; and the index it stands for — the atom its
+binder was opened into, 'IxFree', in a clause or under a quantifier; a value
+parameter of the signature, 'IxParam', in a statement's context; a name, in
+the tactic engine's named world.  Nothing refers to it by its name but the
+source: an index refers to it by its atom, and is resolved to the variable
+by that.
 -}
 data Local a = Local
   { localName :: !(Maybe Text)
-  , localLevel :: !Int
   , localHint :: !Hint
   , localVar :: a
   , localTy :: !Ty
@@ -164,47 +161,41 @@ data Local a = Local
 -- | The variables in scope, the innermost first where names shadow.
 type Ctx a = [Local a]
 
--- | The index a variable of a clause's telescope stands for: itself, at its level.
-localIx :: Int -> Hint -> Ix
-localIx = IxLocal
-
 -- | The variable a name is written for, the innermost where several have it.
 lookupLocal :: Text -> Ctx a -> Maybe (Local a)
 lookupLocal n = find ((== Just n) . localName)
 
--- | The variable of a level.
-localAtLevel :: Int -> Ctx a -> Maybe (Local a)
-localAtLevel k = find ((== k) . localLevel)
-
 {- |
 The variable standing for an index, where one in scope does: by the index
-it stands for — a level, a parameter — never by its name; except that a free
-variable, 'IxFree', is a name, the engine's or an ascription's, and stands
-for the variable written by it.
+it stands for — an atom, a parameter — never by its name; except in the
+tactic engine's named world, where a free variable is a name, and the
+variable written by it may stand for a parameter of the theorem.  A variable
+opened into a fresh atom is never found by a name.
 -}
 standingFor :: Ix -> Ctx a -> Maybe (Local a)
 standingFor x = find stands
   where
-    -- A variable bound by level is never found by a name: a free variable of that name is another, outside it.
     stands l =
       localIndex l == x || case (x, localIndex l) of
-        (IxFree _, IxLocal {}) -> False
-        (IxFree n, _) -> localName l == Just n
+        (IxFree (Named n), IxParam _) -> localName l == Just n
+        (IxFree (Named n), IxFree (Named _)) -> localName l == Just n
         _ -> False
 
--- | The level of the next binder under a context: one past the highest in it.
-nextLevel :: Ctx a -> Int
-nextLevel ctx = case map localLevel ctx of
-  [] -> 0
-  levels -> maximum levels + 1
+-- | A variable of a telescope opened into atoms: its binder, the type seen through the atoms of the binders before it, as the atom and the term variable given.
+openedLocal :: [Atom] -> Atom -> Binder -> a -> Local a
+openedLocal atoms atom (Binder name hint ty) v = Local (relevant name) hint v (mapIx (openIxWith atoms) ty) (IxFree atom)
 
--- | A variable of a telescope: the binder at a level, as the term variable given.
-telescopeLocal :: Int -> Binder -> a -> Local a
-telescopeLocal k (Binder name hint ty) v = Local name k hint v ty (IxLocal k hint)
+-- | The context of a telescope opened into the atoms given, each variable the term variable given for it.
+openedCtx :: [Atom] -> Telescope -> [a] -> Ctx a
+openedCtx atoms binders vs = [openedLocal atoms atom b v | (atom, (b, v)) <- zip atoms (zip binders vs)]
 
--- | The context of a telescope: its binders at their levels, each the term variable given for it.
-telescopeCtx :: Telescope -> [a] -> Ctx a
-telescopeCtx binders vs = [telescopeLocal k b v | (k, (b, v)) <- zip [0 ..] (zip binders vs)]
+-- | An atom fresh under the environment, for a binder opened there, displayed by the hint given; and the environment after it.
+freshAtom :: Hint -> Env -> (Atom, Env)
+freshAtom hint env = (Fresh (envFresh env) hint, env {envFresh = envFresh env + 1})
+
+-- | Atoms fresh under the environment, one for each hint given, in order; and the environment after them.
+freshAtoms :: [Hint] -> Env -> ([Atom], Env)
+freshAtoms hints env = (zipWith Fresh [envFresh env ..] hints, env {envFresh = envFresh env + length hints})
 
 {- | An index as a term in a value context. An implicit index can also be
 recovered by the certified index projection of a value that carries it.
@@ -781,11 +772,13 @@ data Env = Env
   -- ^ local fixed callbacks: source binder, schema reference and source signature
   , envScope :: !TyScope
   -- ^ what the names of a type written in a term stand for: the enclosing signature's parameters
+  , envFresh :: !Int
+  -- ^ the identity of the next atom a binder opened under this environment gets
   }
 
 -- | No module, and nothing known: what a build starts from.
 emptyEnv :: Env
-emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty [] [] [] emptyScope
+emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty [] [] [] emptyScope 0
 
 {- |
 The environment a module of the name given is elaborated in, with the

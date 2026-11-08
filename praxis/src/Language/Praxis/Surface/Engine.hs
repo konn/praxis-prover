@@ -106,7 +106,7 @@ import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span, segmentRaw)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Term qualified as Term
-import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), firstOrder, mergeTy, normIx, openTelescope, renderTy)
+import Language.Praxis.Surface.Types (Atom (..), Ix (..), Scheme (..), Ty (..), firstOrder, freeNames, mergeTy, normIx, openIxWith, openTelescope, renderTy)
 import Language.Praxis.Surface.Types qualified as Types
 import Text.Read (readMaybe)
 
@@ -369,9 +369,9 @@ statementGoal membership td = do
     hypNames = [(nm, hname (length members + length indexHyps + j)) | (j, nm) <- zip [1 ..] (tdHypNames td)]
 
 statementInstance :: TheoremDef -> Expr Text
-statementInstance td = mapIndices (Types.openIx (map fst (tdValues td) <> opened)) (instantiate argument (fmap absurd (tdProp td)))
+statementInstance td = openIndices (map Named opened) (instantiate argument (fmap absurd (tdProp td)))
   where
-    -- The statement's binders, opened by name: in its types, the variables of the levels after the value parameters' are those names.
+    -- The statement's binders, opened by name: its types refer to them by position, and are opened into those names.
     opened = Types.openNames (tdBinders td)
     binders = map mangleVariable opened
     values = map (mangleVariable . fst) (tdValues td)
@@ -436,7 +436,7 @@ renderPremises includeResultMembership predicate binders valueTerm pds = travers
       domains <- schemaContractWith False predicate valueTerm callback lawType
       let name = (case pdPremise pd of PLaw {} -> "law_"; _ -> "closed_") <> T.pack (show k)
           locals = scLocals domains
-          body = mapIndices (Types.openIx locals) (instantiate (Var . (locals !!)) (fmap absurd (pdProp pd)))
+          body = openIndices (map Named locals) (instantiate (Var . (locals !!)) (fmap absurd (pdProp pd)))
       hyps <- traverse hypText (scHyps domains)
       c <- formula body
       let binder = "(" <> fromText name <> (if null locals then "" else " ∀ " <> unwordsB (map fromText locals)) <> " : " <> intercalateB ", " hyps <> " |- " <> c <> ")"
@@ -810,7 +810,7 @@ proveTheorem k td = do
   (tactic, aux) <- case tdClauses td of
     [pc]
       | all isVariable (pcValuePats pc <> pcPatterns pc) -> do
-          let (intro, named) = nameByClause td pc (rename [(b, n) | (b, PVar (Hint n)) <- zip (Types.openNames (tdBinders td)) (pcPatterns pc)] marked)
+          let (intro, named) = nameByClause td pc (rename [(b, n) | (b, PVar (Hint n)) <- zip (Types.openNames (tdBinders td)) (clauseBinderPatterns pc)] marked)
           out <- proveRhs k info (counter 0) named (pcRhs pc)
           pure (intro <> outTactic out, outAux out)
     pcs -> byClauses k info marked td pcs
@@ -1345,9 +1345,10 @@ ixCTWith variable param = go
   where
     go = \case
       IxParam i -> param i
-      IxFree v -> variable v
+      IxFree (Named v) -> variable v
       IxDict i -> variable (dictionaryVariable i)
-      IxLocal {} -> CVar "?"
+      IxFree (Fresh _ _) -> CVar "?"
+      IxBound {} -> CVar "?"
       IxMeta {} -> CVar "?"
       IxMethod _ -> CVar "?"
       IxHole -> CVar "?"
@@ -1368,17 +1369,16 @@ dictionaryPosition name = T.stripPrefix "#d" name >>= readMaybe . T.unpack
 
 -- | The index a name of the engine's world is: a dictionary value, or a free variable.
 namedIndex :: Text -> Ix
-namedIndex name = maybe (IxFree name) IxDict (dictionaryPosition name)
+namedIndex name = maybe (IxFree (Named name)) IxDict (dictionaryPosition name)
 
 -- | The names an index mentions in the engine's world: its free variables, and the dictionary values by 'dictionaryVariable'.
 indexNames :: Ix -> [Text]
-indexNames x = Types.ixFrees x <> map dictionaryVariable (Types.ixDicts x)
+indexNames x = freeNames x <> map dictionaryVariable (Types.ixDicts x)
 
 {- |
 The engine's variables as a context: each by the name it has here, standing
 for the free variable of that name, as the types of the goal's variables
-refer to one another.  The levels are the positions, which nothing here
-refers to: every binder was opened on the way in.
+refer to one another: every binder was opened on the way in.
 -}
 namedCtx :: [(Text, (Text, Ty))] -> Ctx Text
 namedCtx = namedCtxWith []
@@ -1389,7 +1389,7 @@ order, standing for those parameters, 'IxParam', as the statement's types
 refer to them: a value parameter is opened by its own name.
 -}
 namedCtxWith :: [Text] -> [(Text, (Text, Ty))] -> Ctx Text
-namedCtxWith values vars = [Local (Just name) level (Types.Hint name) core ty (maybe (IxFree name) IxParam (elemIndex name values)) | (level, (name, (core, ty))) <- zip [0 ..] vars]
+namedCtxWith values vars = [Local (Just name) (Types.Hint name) core ty (maybe (IxFree (Named name)) IxParam (elemIndex name values)) | (name, (core, ty)) <- vars]
 
 {- | The indices a function's arguments must have, as the propositions of its lemmas' hypotheses, over its arguments' core variables.
 | Preconditions as hypotheses, retaining their full logical shape.
@@ -2303,11 +2303,11 @@ nameByClause td pc g0 =
       { goalNames = [(s, h) | (s, h) <- goalNames g2, not ("#hyp-" `T.isPrefixOf` s)] <> given
       , goalVars = [(name, (core, fromMaybe ty (lookup name (openTelescope (pcVars pc))))) | (name, (core, ty)) <- goalVars g2]
       , -- The names the clause gives implicit arguments its patterns do not bind, over the clause's variables by their names here.
-        goalAliases = [(n, Types.openIx (Types.openNames (pcVars pc)) ix) | (n, ix) <- pcAliases pc] <> goalAliases g2
+        goalAliases = [(n, openIxWith (map Named (Types.openNames (pcVars pc))) ix) | (n, ix) <- pcAliases pc] <> goalAliases g2
       }
   )
   where
-    g1 = rename [(v, n) | ((v, _), PVar (Hint n)) <- zip (tdValues td) (pcValuePats pc)] g0
+    g1 = rename [(v, n) | ((v, _), PVar (Hint n)) <- zip (tdValues td) (clauseValuePatterns pc)] g0
     count = hypothesisCount td
     nameOf j = case drop (j - 1) (pcHypNames pc) of
       m : _ -> m
@@ -2741,12 +2741,12 @@ evidence k info g le = case spineOf le of
                   avoid = schemaAvoid g <> map fst (Types.tsValues original) <> concatMap (foldr (:) [] . fst . snd) sourceValues
                   fresh i = head [name | name <- iterate (<> "'") ("#finite-inference-" <> T.pack (show i)), name `notElem` avoid]
                   entries = [(name, (fresh i, value, ty)) | (i, (name, (value, ty))) <- zip [0 :: Int ..] sourceValues]
-                  bindings = [(name, IxFree core) | (name, (core, _, _)) <- entries]
+                  bindings = [(name, IxFree (Named core)) | (name, (core, _, _)) <- entries]
                   scope = original {Types.tsValues = bindings <> filter ((`notElem` map fst bindings) . fst) (Types.tsValues original), Types.tsValueTys = [(name, ty) | (name, (_, _, ty)) <- entries] <> filter ((`notElem` map fst bindings) . fst) (Types.tsValueTys original)}
                   env = (knowEnv k) {envScope = scope, envTypeBindings = qvTypeBindings view, envBuiltins = Required.builtinScope (qvBuiltins view) (envBuiltins (knowEnv k))}
                   context = namedCtxWith (thmValues t) [(name, (core, ty)) | (name, (core, _, ty)) <- entries]
                   replacement name = listToMaybe [value | (_, (core, value, _)) <- entries, core == name]
-                  actualIndex index@(IxFree name) = maybe index (either (const index) id . expressionIndex) (replacement name)
+                  actualIndex index@(IxFree (Named name)) = maybe index (either (const index) id . expressionIndex) (replacement name)
                   actualIndex (IxSucc index) = IxSucc (actualIndex index)
                   actualIndex (IxCon name indices) = IxCon name (map actualIndex indices)
                   actualIndex (IxFun name indices) = IxFun name (map actualIndex indices)
@@ -3146,7 +3146,7 @@ finiteView k info g expression = case stripLocations expression of
               , finiteOrdinal = finiteOrdinal original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
               , finiteSelect = finiteSelect original >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvDomainBinders source) value)
               }
-          (inside, context') = enterQuantifier env bodyContext (qvBinder source) ty
+          (inside, context', atom) = enterQuantifier env bodyContext (qvBinder source) ty
           alias = "#quantifier-domain"
           bodyEnv = inside {envTypeBindings = (alias, maybe actualType localTy (lookupLocal (unLocated (qvBinder source)) context')) : envTypeBindings inside}
           written = case unLocated (qvBody source) of
@@ -3155,7 +3155,8 @@ finiteView k info g expression = case stripLocations expression of
                   (qvBody source) {unLocated = R.EQuant q (binder {R.binderType = Just (Located (qvSpan source) (R.EName (QName [] (Ident alias))))} : rest) Nothing rhs}
             _ -> qvBody source
       resolved <- either (\err -> let (sp, why) = renderFixityError err in Left (EngineError sp why)) Right (resolveExpr (knowFixities k) written)
-      originalBody <- checkedElaboration k g bodyEnv (elabProp bodyEnv (goalDict g) context' resolved)
+      -- The body closed over the quantified value's atom, as the lowered proposition's is.
+      originalBody <- closeIndices [atom] <$> checkedElaboration k g bodyEnv (elabProp bodyEnv (goalDict g) context' resolved)
       let rawBody = originalBody >>= \case B () -> Var (B ()); F value -> fmap F (replace (qvBodyBinders source) value)
       let decoded = rawBody >>= \case B () -> finiteDecode domain; F value -> Var (F value)
           actual = Bound.fromScope body
@@ -3352,7 +3353,7 @@ goalEnv k info g = env {envSchemas = schemas, envScope = scope {Types.tsValues =
     -- when it has no runtime binder. Keep its source name available in proofs.
     values =
       goalAliases g
-        <> [(name, IxFree name) | name <- nub (concatMap (concatMap Types.ixFrees . Types.tyIndices . snd . snd) (goalVars g))]
+        <> [(name, IxFree (Named name)) | name <- nub (concatMap (concatMap freeNames . Types.tyIndices . snd . snd) (goalVars g))]
         <> zip (thmValues info) (map IxParam [0 ..])
     schemas =
       [ (name, Ref RefStatic ref, ty)
@@ -4549,6 +4550,21 @@ introduce names g =
       names' = [(fromMaybe n (lookup n (zip ihs extra)), h) | (n, h) <- goalNames g]
    in g {goalVars = vars', goalNames = names'}
 
+{- |
+The patterns of a theorem's clause as the engine, a named world, sees them:
+those over its implicit values, then those over its binders, each variable
+hinted by the name the clause's variables are opened into
+('openedPatterns'); and the two parts apart.
+-}
+clausePatterns :: ProofClause -> [Pattern]
+clausePatterns pc = openedPatterns (pcVars pc) (pcValuePats pc <> pcPatterns pc)
+
+clauseValuePatterns :: ProofClause -> [Pattern]
+clauseValuePatterns pc = take (length (pcValuePats pc)) (clausePatterns pc)
+
+clauseBinderPatterns :: ProofClause -> [Pattern]
+clauseBinderPatterns pc = drop (length (pcValuePats pc)) (clausePatterns pc)
+
 -- * Calculations
 
 calcProof :: Knowledge -> TheoremInfo -> Counter -> Goal -> Span -> R.Calc -> Either EngineError Out
@@ -5529,7 +5545,7 @@ byClauses k info g td pcs
       pure (outTactic out, outAux out)
   where
     quantified = tdValues td <> openTelescope (tdBinders td)
-    patternsOf pc = pcValuePats pc <> pcPatterns pc
+    patternsOf = clausePatterns
     columns = nub [i | pc <- pcs, (i, p) <- zip [0 ..] (patternsOf pc), matchesOn p]
     matchesOn = \case
       PCon {} -> True
@@ -5591,7 +5607,7 @@ byClausesSingle k info g td pcs = do
   where
     -- The values the statement is over, its implicit ones first: the columns of a clause's patterns.
     quantified = tdValues td <> openTelescope (tdBinders td)
-    patternsOf pc = pcValuePats pc <> pcPatterns pc
+    patternsOf = clausePatterns
     -- A pattern cases are told apart by: a constructor, 0, or a successor; or an absurd one, which no case fits, each refuted.
     matchesOn = \case
       PCon {} -> True

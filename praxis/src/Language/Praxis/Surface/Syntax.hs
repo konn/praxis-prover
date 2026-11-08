@@ -39,6 +39,10 @@ module Language.Praxis.Surface.Syntax (
   mapGlobals,
   mapTypeGlobals,
   mapIndices,
+  mapIndicesAt,
+  openIndices,
+  closeIndices,
+  openedPatterns,
   globalsOf,
 
   -- * Patterns
@@ -55,24 +59,16 @@ import Bound.Scope (hoistScope)
 import Control.Monad (ap)
 import Data.Functor.Classes (Eq1 (..), Show1 (..), eq1, showsPrec1)
 import Data.List (elemIndex)
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
 import Language.Praxis.Surface.Syntax.Raw (Located, Quantifier (..), Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Hint (..), Ix (..), Ty, mapIx)
+import Language.Praxis.Surface.Types (Atom (..), Hint (..), Irrelevant (..), Ix (..), Telescope, Ty, closeIxAt, mapIx, openIxAt, openNames)
 import Numeric.Natural (Natural)
 import Text.Read (readMaybe)
 import Text.Show (showListWith)
-
--- * Irrelevant data
-
--- | A value kept for reports only, such as a source span: any two are equal.
-newtype Irrelevant a = Irrelevant {relevant :: a}
-  deriving newtype (Show)
-
-instance Eq (Irrelevant a) where
-  _ == _ = True
 
 -- * Global references
 
@@ -418,40 +414,78 @@ mapGlobals f = go
       ProofArg p r -> ProofArg (go p) r
       Absurd r -> Absurd r
 
--- | Every index in the types an expression is annotated with rewritten by the function given, under binders too: how a telescope's variables are opened in them.
+-- | Every index in the types an expression is annotated with rewritten by the function given, under binders too.
 mapIndices :: (Ix -> Ix) -> Expr a -> Expr a
-mapIndices f = go
+mapIndices f = mapIndicesAt (const f)
+
+{- |
+Every index in the types an expression is annotated with rewritten by the
+function given at the depth it stands at: how many binder groups of the
+expression — λ, case alternative, Π, quantifier, packed callback — are
+between it and the top.  How the variables of an enclosing binder are
+opened in them ('openIndices') and closed again ('closeIndices').
+-}
+mapIndicesAt :: (Int -> Ix -> Ix) -> Expr a -> Expr a
+mapIndicesAt f = go 0
   where
-    ty = mapIx f
-    go :: Expr x -> Expr x
-    go = \case
+    go :: Int -> Expr x -> Expr x
+    go d = \case
       Var a -> Var a
       Global r -> Global r
       Nat n -> Nat n
-      App g x -> App (go g) (go x)
-      At sp e -> At sp (go e)
-      Typed t ts is e -> Typed (ty t) (map ty ts) [(i, f x) | (i, x) <- is] (go e)
-      Dictionary t e -> Dictionary (ty t) (go e)
-      Transport t e ps -> Transport (ty t) (go e) (map go ps)
-      SchemaParameter t r e -> SchemaParameter (ty t) r (go e)
-      SchemaClosure t e -> SchemaClosure (ty t) (go e)
-      SchemaPacked hs b e -> SchemaPacked hs (hoistScope go b) (go e)
-      PredicatePacked hs b es -> PredicatePacked hs (hoistScope go b) (map go es)
-      Lam hs b -> Lam hs (hoistScope go b)
-      Case s alts -> Case (go s) [(p, hoistScope go b) | (p, b) <- alts]
-      If c t e -> If (go c) (go t) (go e)
-      Pi h i d b -> Pi h i (go d) (hoistScope go b)
-      Arrow a b -> Arrow (go a) (go b)
-      Quant q h bound t b -> Quant q h (fmap (fmap go) bound) (fmap go t) (hoistScope go b)
-      Rel r a b -> Rel r (go a) (go b)
-      Conn c a b -> Conn c (go a) (go b)
-      Not a -> Not (go a)
+      App g x -> App (go d g) (go d x)
+      At sp e -> At sp (go d e)
+      Typed t ts is e -> Typed (ty d t) (map (ty d) ts) [(i, f d x) | (i, x) <- is] (go d e)
+      Dictionary t e -> Dictionary (ty d t) (go d e)
+      Transport t e ps -> Transport (ty d t) (go d e) (map (go d) ps)
+      SchemaParameter t r e -> SchemaParameter (ty d t) r (go d e)
+      SchemaClosure t e -> SchemaClosure (ty d t) (go d e)
+      SchemaPacked hs b e -> SchemaPacked hs (hoistScope (go (d + 1)) b) (go d e)
+      PredicatePacked hs b es -> PredicatePacked hs (hoistScope (go (d + 1)) b) (map (go d) es)
+      Lam hs b -> Lam hs (hoistScope (go (d + 1)) b)
+      Case s alts -> Case (go d s) [(p, hoistScope (go (d + 1)) b) | (p, b) <- alts]
+      If c t e -> If (go d c) (go d t) (go d e)
+      Pi h i dom b -> Pi h i (go d dom) (hoistScope (go (d + 1)) b)
+      Arrow a b -> Arrow (go d a) (go d b)
+      Quant q h bound t b -> Quant q h (fmap (fmap (go d)) bound) (fmap (go d) t) (hoistScope (go (d + 1)) b)
+      Rel r a b -> Rel r (go d a) (go d b)
+      Conn c a b -> Conn c (go d a) (go d b)
+      Not a -> Not (go d a)
       Top -> Top
       Bottom -> Bottom
       Universe -> Universe
       Hole -> Hole
-      ProofArg p r -> ProofArg (go p) r
+      ProofArg p r -> ProofArg (go d p) r
       Absurd r -> Absurd r
+    ty d = mapIx (f d)
+
+-- | The variables of the binder group enclosing an expression opened into the atoms given, in its types: 'openIxAt' at every depth.
+openIndices :: [Atom] -> Expr a -> Expr a
+openIndices atoms = mapIndicesAt (\d -> openIxAt d atoms)
+
+-- | An expression's types closed over the atoms given, as the variables of a binder group enclosing it: 'closeIxAt' at every depth.
+closeIndices :: [Atom] -> Expr a -> Expr a
+closeIndices atoms = mapIndicesAt (\d -> closeIxAt d atoms)
+
+{- |
+The patterns of a clause as a named world sees them when the clause is
+opened there: each variable hinted by the name 'openNames' opens it into, so
+that the engine, the compiler and the printers call a variable by one name,
+and no variable bound without a name passes for a written one.  A hint is
+display only; this is the renaming of the free variables the clause is
+opened into, shown at the binders.
+-}
+openedPatterns :: Telescope -> [Pattern] -> [Pattern]
+openedPatterns binders = go 0
+  where
+    names = openNames binders
+    go _ [] = []
+    go k (p : ps) = let (p', next) = hinted k p in p' : go next ps
+    hinted k = \case
+      PVar h -> (PVar (maybe h Hint (listToMaybe (drop k names))), k + 1)
+      PSucc p -> let (p', next) = hinted k p in (PSucc p', next)
+      PCon r subs -> let (subs', next) = foldl (\(acc, j) p -> let (p', j') = hinted j p in (acc <> [p'], j')) ([], k) subs in (PCon r subs', next)
+      p -> (p, k)
 
 -- | The global references of an expression, under binders too.
 globalsOf :: Expr a -> [Ref]

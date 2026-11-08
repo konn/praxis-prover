@@ -58,10 +58,11 @@ import Language.Praxis.Surface.Types
 
 {- |
 A variable of an index: a value parameter of the enclosing signature, by
-position; a variable bound in the enclosing telescope, by level; a variable
-unification may solve, by identity; or a free variable, by name.
+position; a bound occurrence, by how many binder groups out its binder is
+and its position in it; a variable unification may solve, by identity; or a
+free variable, an atom.
 -}
-data Key = KParam !Int | KLocal !Int | KMeta !Int | KFree !Text
+data Key = KParam !Int | KBound !Int !Int | KMeta !Int | KFree !Atom
   deriving stock (Show, Eq, Ord)
 
 -- | Indices for variables, kept idempotent: no solution mentions a variable solved.
@@ -95,9 +96,9 @@ applyTy s = mapIx (applyIx s)
 keyOf :: Ix -> Maybe Key
 keyOf = \case
   IxParam i -> Just (KParam i)
-  IxLocal k _ -> Just (KLocal k)
+  IxBound d j -> Just (KBound d j)
   IxMeta m _ -> Just (KMeta m)
-  IxFree v -> Just (KFree v)
+  IxFree a -> Just (KFree a)
   _ -> Nothing
 
 -- | The variables an index mentions.
@@ -237,7 +238,7 @@ ixToExprWith var param = go
     go = \case
       IxNat n -> Just (Nat n)
       IxSucc x -> App (Global (Ref RefBuiltin "S")) <$> go x
-      x@IxLocal {} -> var x
+      x@IxBound {} -> var x
       x@IxMeta {} -> var x
       x@IxFree {} -> var x
       x@IxDict {} -> var x

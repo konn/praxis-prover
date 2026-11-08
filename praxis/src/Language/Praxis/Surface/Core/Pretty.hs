@@ -68,7 +68,7 @@ function env fd = T.unlines (signature : concatMap clause (fdClauses fd))
       | otherwise = foldr TArrow TNat (replicate (slotArity slot) TNat)
     signature = name <> " : " <> T.intercalate " -> " (typeBinders <> valueBinders <> P.interleave proofTypes (map (P.typeText env sc 1) (drop (length (funRuntime info)) (fdArgs fd))) <> ["[dict " <> d <> " : " <> ty t <> "]" | (d, t) <- dicts] <> [ty (fdResult fd)])
     clause fc =
-      let (runtime, explicit) = splitAt (length (funRuntime info)) (fcPatterns fc)
+      let (runtime, explicit) = splitAt (length (funRuntime info)) (openedPatterns (fcVars fc) (fcPatterns fc))
           values = ["{" <> n <> maybe "" ((" = " <>) . P.patternText 0) (lookup i (zip (funRuntime info) runtime)) <> "}" | (i, (n, _)) <- zip [0 ..] (schemeValues scheme)]
           proofs = [(pos, "[proof " <> proofBinder pos <> "]") | (pos, _) <- funProofs info]
           lhs = T.unwords (name : map ("@" <>) (P.typeNames sc) <> values <> P.interleave proofs (map (P.patternText 11) explicit) <> ["[dict " <> d <> "]" | (d, _) <- dicts])

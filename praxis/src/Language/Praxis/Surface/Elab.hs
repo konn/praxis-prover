@@ -151,7 +151,7 @@ data FunDef = FunDef
 {- |
 A clause: a pattern per argument, and the body over the pattern variables,
 numbered from the left.  The variables are a telescope: the k-th is the
-variable of level k, which the indices of the types refer to by 'IxLocal';
+variable the indices of the types refer to by @IxBound 0 k@, the clause being
 its name, where the clause writes one, is what the source referred to it
 by, and its hint what it is displayed by, neither its identity.
 -}
@@ -175,7 +175,7 @@ data TheoremDef = TheoremDef
   { tdInfo :: !TheoremInfo
   , tdParams :: ![(Text, Kind)]
   , tdBinders :: !Telescope
-  -- ^ the values quantified over, in order: the binders of levels past the value parameters', by which the statement's indices refer to them
+  -- ^ the values quantified over, in order: one binder group, by whose positions the statement's indices refer to them
   , tdProp :: !(Scope Int Expr Void)
   -- ^ the proposition, over the binders
   , tdClauses :: ![ProofClause]
@@ -798,7 +798,7 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
   checkedProofs <- forM proofParts \(a, t) -> do
     let available = nImplicit + length [() | (_, field) <- take a explicitParts, not (isProp field)]
         proofScope = scopeFields {tsValues = [(v, i) | (v, i@(IxParam pos)) <- tsValues scopeFields, pos < available]}
-        ctx = [Local (Just v) pos (Hint v) pos ty (IxParam pos) | (v, IxParam pos) <- tsValues proofScope, Just ty <- [lookup v (tsValueTys proofScope)]]
+        ctx = [Local (Just v) (Hint v) pos ty (IxParam pos) | (v, IxParam pos) <- tsValues proofScope, Just ty <- [lookup v (tsValueTys proofScope)]]
     (p, needed) <- runTCWithRequirements (elabProp env {envScope = proofScope} [] ctx t)
     -- The membership predicate checks it as it checks an equation of indices, by the code of the proposition: a
     -- decidable one, every quantifier in it bounded.
@@ -934,7 +934,7 @@ indexFunction env info fns p f sp = do
           _ -> Left (ElabError sp "internal: an index of a constructor's result which is no pattern")
     bare <- term (constructorResult g !! p)
     let exprIndex e = case spine e of
-          (Var i, []) -> fromMaybe (IxLocal i (Hint (fields !! i))) (listToMaybe [IxParam k | (k, entry) <- zip [0 ..] tele, teRole entry `elem` [Explicit i, Stored i]])
+          (Var i, []) -> fromMaybe (IxBound 0 i) (listToMaybe [IxParam k | (k, entry) <- zip [0 ..] tele, teRole entry `elem` [Explicit i, Stored i]])
           (Nat n, []) -> IxNat n
           (Global (Ref RefBuiltin "S"), [x]) -> IxSucc (exprIndex x)
           (Global r, as) -> (if refKind r == RefConstructor then IxCon else IxFun) (refName r) (map exprIndex as)
@@ -1042,8 +1042,10 @@ elabClass fx env cd = do
       bty <- elabTypeIn env1 classScope t
       unless (firstOrder bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " is of a function type: a law quantifies over values, which are first-order"))
       pure (n, bty)
-    (prop, needed) <- runTCWithRequirements (elabProp env1 {envScope = classScope} slots (telescopeCtx (map (uncurry namedBinder) binderTys) [0 ..]) body)
-    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B prop)) slots a (withoutOwnClass info needed) (envBuiltins env) (SourceView.quantifierViews (classQual info <> [m]) (envBuiltins env) classScope ty) body)
+    -- The law's values opened into fresh atoms for its statement, which is closed over them again.
+    let (atoms, env2) = freshAtoms [Hint n | (n, _) <- binderTys] env1
+    (prop, needed) <- runTCWithRequirements (elabProp env2 {envScope = classScope} slots (openedCtx atoms (map (uncurry namedBinder) binderTys) [0 ..]) body)
+    pure (LawInfo (classQual info <> [m]) (classQual info) binderTys (toScope (fmap B (closeIndices atoms prop))) slots a (withoutOwnClass info needed) (envBuiltins env) (SourceView.quantifierViews (classQual info <> [m]) (envBuiltins env) classScope ty) body)
   pure (addLaws (classQual info) laws env1)
   where
     withoutOwnClass cls = foldMap (\entry -> if requirementDependency entry == AdmittedClass (evidenceQName (classQual cls)) then mempty else requirement (requirementSpan entry) (requirementDependency entry)) . requirements
@@ -1152,8 +1154,8 @@ elabInstance fx env sp idl = do
                     -- only the head values used by code or retained obligations.
                     usedValue i fc = case elemIndex i (funRuntime f) of
                       Just position -> case listToMaybe (drop position (fcPatterns fc)) of
-                        -- The variable the pattern is, by its level: the body uses the value where it mentions that.
-                        Just (PVar _) -> maybe True (`elem` toList (fcBody fc)) (listToMaybe (drop position (patternLevels 0 (fcPatterns fc))))
+                        -- The variable the pattern is, by its position: the body uses the value where it mentions that.
+                        Just (PVar _) -> maybe True (`elem` toList (fcBody fc)) (listToMaybe (drop position (patternOffsets 0 (fcPatterns fc))))
                         Just PWild -> False
                         Just _ -> True
                         Nothing -> True
@@ -1230,9 +1232,10 @@ elabInstance fx env sp idl = do
         pure (i, index)
       let specialize = mapIx (rewriteDictionaryIndices (`lookup` bindings)) . atInstance headTy (length vars)
           binderTys = [namedBinder n (specialize t) | (n, t) <- lawBinders l]
-          ctx0 = statementCtx values binderTys
+          (atoms, opened) = freshAtoms [binderHint b | b <- binderTys] e
+          ctx0 = statementCtx atoms values binderTys
           typeBindings = [(lawTypeParameter l, headTy)]
-          scoped = e {envScope = headScope, envClassDefaults = [(lawClass l, headTy)], envTypeBindings = typeBindings, envBuiltins = lawBuiltinScope l}
+          scoped = opened {envScope = headScope, envClassDefaults = [(lawClass l, headTy)], envTypeBindings = typeBindings, envBuiltins = lawBuiltinScope l}
       when (null mine) $ Left (ElabError sp ("no proof of the law " <> T.unpack (segmentText lawSeg)))
       (prop0, statementRequirements) <- runTCWithRequirements $ do
         requireDependency sp (AdmittedClass (evidenceQName (lawClass l)))
@@ -1245,7 +1248,7 @@ elabInstance fx env sp idl = do
           prop = keepPlaces full' kept prop0
           premises = premisesFor e given kept
           q = iq <> [lawSeg]
-          statement = toScope (fmap B prop)
+          statement = toScope (fmap B (closeIndices atoms prop))
           (e1, info0) = addTheorem e q (map mangleVariable (openNames binderTys)) (map snd (openTelescope binderTys)) kept (map pdPremise premises) (if null values then Just statement else Nothing)
           indexHyps = [(i, fn, index) | (i, Binder _ _ (TData dn _ indices)) <- zip [0 ..] binderTys, (fn, index) <- zip (indexFnsOf e dn) indices]
           views =
@@ -1811,8 +1814,10 @@ elabDecl fx env sp name ty0 clauses = do
         unless (argumentType bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " must be a value or a fixed function schema over first-order values"))
         pure (namedBinder n bty)
       given <- constraintClasses env paramNames constraints
-      let ctx0 = statementCtx values binderTys
-      (prop0, statementRequirements) <- runTCWithRequirements (tell contextRequirements >> elabPropWithProofArguments env {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
+      -- The binders opened into fresh atoms for the statement, which is closed over them again, a scope over its values and binders.
+      let (atoms, opened) = freshAtoms [binderHint b | b <- binderTys] env
+          ctx0 = statementCtx atoms values binderTys
+      (prop0, statementRequirements) <- runTCWithRequirements (tell contextRequirements >> elabPropWithProofArguments opened {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
       let (full', kept) = theoremPlacesRequiring env statementRequirements full prop0 (map binderTy binderTys <> lawPremiseTypes env given full)
@@ -1821,11 +1826,11 @@ elabDecl fx env sp name ty0 clauses = do
           q = qualify env [name]
       (clean, _) <- first (ElabError sp) (Term.prepareProposition prop)
       -- The theorem's binders are its variables, opened by their names, which the signature keeps distinct.
-      let (env0, info0) = addTheorem env q (map mangleVariable (openNames binderTys)) (map snd (openTelescope binderTys)) kept (map pdPremise premises) (if null values then Just (toScope (fmap B clean)) else Nothing)
+      let (env0, info0) = addTheorem env q (map mangleVariable (openNames binderTys)) (map snd (openTelescope binderTys)) kept (map pdPremise premises) (if null values then Just (toScope (fmap B (closeIndices atoms clean))) else Nothing)
           -- The indices of its binders' types, which its statement states of them.
           indexHyps = [(k, fn, x) | (k, Binder _ _ (TData dn _ xs@(_ : _))) <- zip [0 ..] binderTys, (fn, x) <- zip (indexFnsOf env dn) xs]
           views = declarationViews env q scope ty clauses
-          (env', info) = rememberTheoremViews views (setTheoremIndices indexHyps (map fst values) (if null values then Nothing else Just (toScope (fmap B clean))) (env0, info0))
+          (env', info) = rememberTheoremViews views (setTheoremIndices indexHyps (map fst values) (if null values then Nothing else Just (toScope (fmap B (closeIndices atoms clean)))) (env0, info0))
       -- The implicit parameters a clause may give in braces, in the order the signature has them:
       -- each a value, by its position and its type, matched on as a binder is; or a type, whose name does not matter.
       let declared = map fst implicits
@@ -1838,13 +1843,13 @@ elabDecl fx env sp name ty0 clauses = do
       case [pcSpan pc | length pcs > 1, pc <- pcs, PAbsurd `elem` (pcValuePats pc <> pcPatterns pc)] of
         asp : _ -> Left (ElabError asp "an absurd clause is its theorem's only clause, for now")
         [] -> pure ()
-      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B prop)) pcs sp kept premises values [] (statementRequirements <> patternRequirements) (envBuiltins env) indexHyps))
+      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B (closeIndices atoms prop))) pcs sp kept premises values [] (statementRequirements <> patternRequirements) (envBuiltins env) indexHyps))
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       -- Its domains, as written: types, and propositions, the preconditions its proofs are of.
       let (domains, resultE) = rawArrows body
           proofPositions = [i | (i, d) <- zip [0 ..] domains, isProp d]
-          valueCtx = statementCtx values []
+          valueCtx = statementCtx [] values []
       domainTys <- forM [d | d <- domains, not (isProp d)] (elabTypeIn env scope)
       resultTy <- elabTypeIn env scope resultE
       (props, signatureRequirements) <- runTCWithRequirements $ do
@@ -1930,7 +1935,7 @@ argumentType t =
 -- | Explicit schema parameters have stable names independent of clause patterns.
 localSchemas :: Telescope -> [(Text, Ref, Ty)]
 localSchemas binders =
-  [(name, Ref RefStatic (schemaName serial), ty) | (serial, Binder (Just name) _ ty) <- zip [1 ..] [binder | binder@(Binder _ _ TArrow {}) <- binders]]
+  [(name, Ref RefStatic (schemaName serial), ty) | (serial, Binder (Irrelevant (Just name)) _ ty) <- zip [1 ..] [binder | binder@(Binder _ _ TArrow {}) <- binders]]
 
 -- | Constraints in front of a type, @C a => …@: the constraints, and the type under them.
 constraintsOf :: Located R.Expr -> ([R.TyConstraint], Located R.Expr)
@@ -2279,12 +2284,14 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
             Stuck why -> failAt (sourceSpan a) ("cannot match on this value: " <> why)
       )
       (mSubst m0)
-      (zip [0 ..] (zip (patternIxs 0 ipats) implicit'))
+      (zip [0 ..] (zip (patternIxs (map fst ivars) ipats) implicit'))
   (epats, evars, eproofs, ealiases, refinedM) <- patternsFrom env ivars ialiases m0 {mSubst = s1} (zip args (map Written explicitTerms))
   let refined = mSubst refinedM
-      vars = ivars <> evars
-      -- Each variable's pattern hinted by the name the telescope is opened by, which every named world calls it.
-      pats = openedPatterns vars (ipats <> epats)
+      -- The variables bound, each by the atom its binder was opened into, its type open over the atoms before it.
+      opened = ivars <> evars
+      atoms = map fst opened
+      vars = map snd opened
+      pats = ipats <> epats
       aliases = ialiases <> ealiases
       -- The proofs the patterns bind, of the preconditions of the constructors matched.
       boundProofs = concat (iproofs <> eproofs)
@@ -2294,21 +2301,26 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     [] -> pure ()
   -- What matching concluded of the signature's value parameters holds in the body.
   let scope = envScope env
-      levels = patternLevels 0 pats
+      offsets = patternOffsets 0 pats
       -- A name the clause writes stands for the index its variable was solved by, where matching solved it, as a name
       -- given to an implicit argument of a constructor stands for the index of that argument.
-      bodyValues = [(n, applyIx refined (IxLocal k h)) | (k, Binder (Just n) h _) <- zip [0 ..] vars] <> [(n, applyIx refined x) | (n, x) <- aliases]
+      bodyValues = [(n, applyIx refined (IxFree atom)) | (atom, Binder (Irrelevant (Just n)) _ _) <- opened] <> [(n, applyIx refined x) | (n, x) <- aliases]
       schemas =
         [ (name, Ref RefStatic (schemaName serial), applyTy refined ty)
         | (serial, (position, _)) <- zip [1 ..] (schemaArguments (runtimeTys <> args))
         , PVar _ <- [pats !! position]
-        , Just (Binder (Just name) _ ty) <- [listToMaybe (drop (levels !! position) vars)]
+        , Just (Binder (Irrelevant (Just name)) _ ty) <- [listToMaybe (drop (offsets !! position) vars)]
         ]
-      envBody = env {envScope = scope {tsValues = bodyValues <> [(v, applyIx refined x) | (v, x) <- tsValues scope, v `notElem` map fst bodyValues]}, envSchemas = schemas}
-      namedContext = telescopeCtx vars [0 ..] :: Ctx Int
-      openedNames = openNames vars
+      envBody = env {envScope = scope {tsValues = bodyValues <> [(v, applyIx refined x) | (v, x) <- tsValues scope, v `notElem` map fst bodyValues]}, envSchemas = schemas, envFresh = mFresh refinedM}
+      -- The variables in scope in the body, each standing for its atom.
+      namedContext = [Local (writtenName b) (binderHint b) i (binderTy b) (IxFree atom) | (i, (atom, b)) <- zip [0 ..] opened] :: Ctx Int
+      -- The telescope the clause keeps: its variables' types closed over their atoms, the k-th variable @IxBound 0 k@.
+      closed = [b {binderTy = mapIx (closeIxWith atoms) (binderTy b)} | b <- vars]
+      -- The schema parameters as the checker sees them, their signatures closed as the telescope's types are.
+      closedSchemas = [(n, r, mapIx (closeIxWith atoms) t) | (n, r, t) <- schemas]
+      openedNames = openNames closed
       -- The variables' types as the kernel sees them, their variables by those names: what an obligation, a theorem over the variables, states them as.
-      openedTypes = map snd (openTelescope vars)
+      openedTypes = map snd (openTelescope closed)
       valueExpr i = indexTermInWithDependencies envBody namedContext (applyIx refined (IxParam i))
       ownProp prop = do
         values <- traverse (\i -> (i,) <$> valueExpr i) (nub [i | B i <- toList (fromScope prop)])
@@ -2330,15 +2342,15 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
     _ | PAbsurd `elem` pats -> failAt rsp "a clause with an absurd pattern, (), has no right side: nothing matches it"
     R.RExpr e -> do
       e' <- liftE (resolved fx e)
-      fst <$> elabTerm (CollectProofArguments [(name, fmap (\i -> IxLocal i (binderHint (vars !! i))) prop) | (name, prop) <- own]) envBody (logicalFunSlots info) namedContext e' (applyTy refined result)
+      fst <$> elabTerm (CollectProofArguments [(name, fmap (\i -> IxFree (atoms !! i)) prop) | (name, prop) <- own]) envBody (logicalFunSlots info) namedContext e' (applyTy refined result)
     R.RBy _ ->
-      fst <$> elabTerm (CollectProofArguments [(name, fmap (\i -> IxLocal i (binderHint (vars !! i))) prop) | (name, prop) <- own]) envBody (logicalFunSlots info) namedContext (Located rsp (R.EProof rhs)) (applyTy refined result)
+      fst <$> elabTerm (CollectProofArguments [(name, fmap (\i -> IxFree (atoms !! i)) prop) | (name, prop) <- own]) envBody (logicalFunSlots info) namedContext (Located rsp (R.EProof rhs)) (applyTy refined result)
     _ -> failAt rsp "a function's clause constructs a value; calc requires a proposition goal"
   prepared <-
     either (failAt rsp) pure $
       if PAbsurd `elem` pats
         then Core.emptyBranch (applyTy refined result)
-        else Core.elaborateNamed envBody (funSlots info) vars body
+        else Core.elaborateNamed envBody {envSchemas = closedSchemas} (funSlots info) closed (closeIndices atoms body)
   let coreRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (Core.indexDependencies prepared))
       indexFacts =
         [ (Rel RelEq projection term, used)
@@ -2357,21 +2369,22 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
   let obligation serial (prop, raw) =
         let (l, col) = R.spanStart (location raw)
             q = funQual info <> [Ident ("#obligation-L" <> T.pack (show l) <> "C" <> T.pack (show col) <> "-" <> T.pack (show serial))]
-            indices = map fst indexFacts
-            statement = foldr Arrow (foldr (Arrow . snd) prop own) indices
+            -- The facts and preconditions, stated over the atoms, closed over the variables as the checker's proposition is.
+            indices = map (closeIndices atoms . fst) indexFacts
+            statement = foldr Arrow (foldr (Arrow . closeIndices atoms . snd) prop own) indices
             needed = funRequirements info <> bodyRequirements <> coreRequirements <> contextRequirements <> indexRequirements
             (slots, _) = theoremPlacesRequiring env needed (logicalFunSlots info) statement openedTypes
             premises = premisesFor env (classesOfSlots env slots) slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments openedTypes]
             thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map mangleVariable openedNames) openedTypes slots (map pdPremise premises) Nothing [] [] (funQuantifierViews info <> SourceView.quantifierViews q (envBuiltins env) (envScope envBody) raw) Nothing
-            -- Its one clause: the variables by the names the engine opens them by, and the names the clause gives recovered implicit arguments.
-            pc = ProofClause [PVar (Hint n) | n <- openedNames] vars (Located (location raw) (R.RExpr raw)) (location raw) [] [] [] [(n, applyIx refined x) | (n, x) <- aliases]
-         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] vars (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) needed (envBuiltins env) []
+            -- Its one clause: a variable for each of the clause's, and the names the clause gives recovered implicit arguments, closed over the variables.
+            pc = ProofClause [PVar (binderHint b) | b <- closed] closed (Located (location raw) (R.RExpr raw)) (location raw) [] [] [] [(n, closeIxWith atoms (applyIx refined x)) | (n, x) <- aliases]
+         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] closed (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) needed (envBuiltins env) []
   let numbered = State.evalState (Core.traverseObligations (\o -> State.state (\i -> (obligation i o, i + 1))) prepared) (0 :: Int)
-  pure (FunClause pats vars numbered (R.spanning (location lhs) rsp))
+  pure (FunClause pats closed numbered (R.spanning (location lhs) rsp))
 
 -- | The names a telescope's binders are written by.
 writtenNames :: Telescope -> [Text]
-writtenNames binders = [n | Binder (Just n) _ _ <- binders]
+writtenNames = mapMaybe writtenName
 
 -- | The value parameters an index mentions, by position.
 paramsOf :: Ix -> [Int]
@@ -2385,51 +2398,33 @@ paramsOf = \case
 
 {- |
 The index a pattern stands for, where it stands for one, its variables the
-clause's from the level given — the k-th variable of the clause, counted
-from the left, is the variable of level k — and the level after its
-variables.
+atoms given in order — those the clause's variables were opened into, from
+the first the pattern binds — and the atoms after its variables.
 -}
-patternIxFrom :: Int -> Pattern -> (Maybe Ix, Int)
-patternIxFrom level = \case
-  PNat n -> (Just (IxNat n), level)
-  PSucc p -> let (x, next) = patternIxFrom level p in (IxSucc <$> x, next)
-  PVar h -> (Just (IxLocal level h), level + 1)
-  PWild -> (Nothing, level)
-  PAbsurd -> (Nothing, level)
+patternIxFrom :: [Atom] -> Pattern -> (Maybe Ix, [Atom])
+patternIxFrom atoms = \case
+  PNat n -> (Just (IxNat n), atoms)
+  PSucc p -> let (x, rest) = patternIxFrom atoms p in (IxSucc <$> x, rest)
+  PVar _ -> case atoms of
+    a : rest -> (Just (IxFree a), rest)
+    [] -> (Nothing, [])
+  PWild -> (Nothing, atoms)
+  PAbsurd -> (Nothing, atoms)
   PCon (Ref _ c) subs ->
-    let (xs, next) = foldl (\(acc, lvl) p -> let (x, lvl') = patternIxFrom lvl p in (acc <> [x], lvl')) ([], level) subs
-     in (IxCon c <$> sequence xs, next)
+    let (xs, rest) = foldl (\(acc, as) p -> let (x, as') = patternIxFrom as p in (acc <> [x], as')) ([], atoms) subs
+     in (IxCon c <$> sequence xs, rest)
 
--- | The indices patterns stand for, side by side from the level given.
-patternIxs :: Int -> [Pattern] -> [Maybe Ix]
-patternIxs level = \case
+-- | The indices patterns stand for, side by side, their variables the atoms given in order.
+patternIxs :: [Atom] -> [Pattern] -> [Maybe Ix]
+patternIxs atoms = \case
   [] -> []
-  p : ps -> let (x, next) = patternIxFrom level p in x : patternIxs next ps
+  p : ps -> let (x, rest) = patternIxFrom atoms p in x : patternIxs rest ps
 
--- | The level of the first variable of each pattern, side by side from the level given.
-patternLevels :: Int -> [Pattern] -> [Int]
-patternLevels level = \case
+-- | The position of the first variable of each pattern among the variables of all of them, from the position given.
+patternOffsets :: Int -> [Pattern] -> [Int]
+patternOffsets offset = \case
   [] -> []
-  p : ps -> level : patternLevels (snd (patternIxFrom level p)) ps
-
-{- |
-The patterns of a clause, each variable's hint the name the telescope is
-opened by ('openNames'): a written name as it is, a variable bound without
-a name by its hint, primed where that is a name written.  The engine, the
-compiler and the printers then call a variable by one name, and no hidden
-variable passes for a written one.
--}
-openedPatterns :: Telescope -> [Pattern] -> [Pattern]
-openedPatterns binders = go 0
-  where
-    names = openNames binders
-    go _ [] = []
-    go level (p : ps) = let (p', next) = hinted level p in p' : go next ps
-    hinted level = \case
-      PVar h -> (PVar (maybe h Hint (listToMaybe (drop level names))), level + 1)
-      PSucc p -> let (p', next) = hinted level p in (PSucc p', next)
-      PCon r subs -> let (subs', next) = foldl (\(acc, lvl) p -> let (p', lvl') = hinted lvl p in (acc <> [p'], lvl')) ([], level) subs in (PCon r subs', next)
-      p -> (p, level)
+  p : ps -> offset : patternOffsets (offset + patternVariables p) ps
 
 {- |
 A clause of a proof: in braces, a pattern for each of the theorem's implicit
@@ -2463,8 +2458,11 @@ elabProofClause fx env slots binderTys hypotheses (R.Clause lhs0 rhs) = do
         (Nothing, p) -> Nothing <$ named "an implicit type is named by a variable or _: a type is not matched on" p
   hypNamesGiven <- forM (drop nb explicit) (named "a hypothesis is named by a variable or _: a proposition has no constructors")
   -- The implicit values are matched before the binders: what matching one concludes holds of the binders' types, whose indices mention it.
-  (allPats0, vars, allProofs, aliases, _) <- patterns env ([(t, Written p) | (_, t, p) <- valueArgs] <> zip binderTys (map Written (take nb explicit)))
-  let allPats = openedPatterns vars allPats0
+  (allPats, opened, allProofs, aliases0, _) <- patterns env ([(t, Written p) | (_, t, p) <- valueArgs] <> zip binderTys (map Written (take nb explicit)))
+  -- The clause keeps its variables closed over the atoms they were opened into, and what it names over them too.
+  let atoms = map fst opened
+      vars = [b {binderTy = mapIx (closeIxWith atoms) (binderTy b)} | (_, b) <- opened]
+      aliases = [(n, closeIxWith atoms x) | (n, x) <- aliases0]
       (ipats, pats) = splitAt (length valueArgs) allPats
       (iproofs, pproofs) = splitAt (length valueArgs) allProofs
       nvalues = maybe 0 (length . filter isJust) slots
@@ -2522,27 +2520,28 @@ sourceSpan = \case
   Hidden _ sp -> sp
 
 {- |
-What matching patterns has come to: what is known of the indices; the level
-of the next variable bound, the variables of a clause being numbered from
-the left; and the identity of the next variable made to be solved, for the
-implicit arguments of a constructor matched.
+What matching patterns has come to: what is known of the indices, and the
+identity of the next variable made — the atom a variable a pattern binds is
+opened into, or a variable to be solved for an implicit argument of a
+constructor matched — fresh under the environment the patterns are matched
+in.
 -}
 data Matching = Matching
   { mSubst :: !Subst
-  , mLevel :: !Int
-  , mMeta :: !Int
+  , mFresh :: !Int
   }
 
 {- |
 Patterns against the types of the arguments: the patterns; the variables
-they bind, left to right, a telescope whose written names are distinct; the
-proofs each pattern binds; the names given to implicit arguments of
+they bind, left to right, each by the atom it is opened into, a telescope
+whose written names are distinct and whose types are open over the atoms;
+the proofs each pattern binds; the names given to implicit arguments of
 constructors which bind no variable, each standing for the index of its
 argument; and what matching the constructors of data types in the GADT
 style concluded of the indices, the variables' types at it.
 -}
-patterns :: Env -> [(Ty, PatSource)] -> TC ([Pattern], Telescope, [[BoundProof]], [(Text, Ix)], Matching)
-patterns env = patternsFrom env [] [] (Matching emptySubst 0 0)
+patterns :: Env -> [(Ty, PatSource)] -> TC ([Pattern], [(Atom, Binder)], [[BoundProof]], [(Text, Ix)], Matching)
+patterns env = patternsFrom env [] [] (Matching emptySubst (envFresh env))
 
 {- |
 A proof of a constructor a pattern binds: the name it gives it, if any, and
@@ -2553,7 +2552,7 @@ signature, or one left to be solved, which nothing in the clause stands for.
 type BoundProof = (Maybe Text, Expr Ix)
 
 -- | 'patterns', from the variables bound and the names given before, and what is known of the indices already; the variables the patterns bind are those after the ones given.
-patternsFrom :: Env -> Telescope -> [(Text, Ix)] -> Matching -> [(Ty, PatSource)] -> TC ([Pattern], Telescope, [[BoundProof]], [(Text, Ix)], Matching)
+patternsFrom :: Env -> [(Atom, Binder)] -> [(Text, Ix)] -> Matching -> [(Ty, PatSource)] -> TC ([Pattern], [(Atom, Binder)], [[BoundProof]], [(Text, Ix)], Matching)
 patternsFrom env bound0 aliases0 m0 pts = do
   (results, m, _, _) <-
     foldM
@@ -2563,9 +2562,9 @@ patternsFrom env bound0 aliases0 m0 pts = do
       )
       ([], m0, bound0, aliases0)
       pts
-  let vars = [b {binderTy = applyTy (mSubst m) (binderTy b)} | (_, vs, _, _) <- results, b <- vs]
+  let vars = [(a, b {binderTy = applyTy (mSubst m) (binderTy b)}) | (_, vs, _, _) <- results, (a, b) <- vs]
       aliases = [(n, applyIx (mSubst m) x) | (_, _, _, as) <- results, (n, x) <- as]
-  case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- writtenNames vars]), k > 1] of
+  case [n | (n, k) <- Map.toList (Map.fromListWith (+) [(n, 1 :: Int) | n <- writtenNames (map snd vars)]), k > 1] of
     n : _ -> failAt (spanOf pts) ("the variable " <> T.unpack n <> " is bound twice")
     [] -> pure ([p | (p, _, _, _) <- results], vars, [ps | (_, _, ps, _) <- results], aliases, m)
   where
@@ -2580,7 +2579,7 @@ flexibleKey :: Key -> Bool
 flexibleKey = \case
   KParam _ -> True
   KMeta _ -> True
-  KLocal _ -> False
+  KBound {} -> False
   KFree _ -> False
 
 {- |
@@ -2595,20 +2594,21 @@ stays in the telescope, its type refined, and stands for what solved it.
 rankIn :: Key -> Maybe Int
 rankIn k
   | flexibleKey k = Just 0
-  | KLocal _ <- k = Just 1
+  | KFree (Fresh _ _) <- k = Just 1
   | otherwise = Nothing
 
 {- |
-A pattern against the type expected, the variables it binds, from the level
-after those bound so far, and what it concludes of the indices.  A
+A pattern against the type expected, the variables it binds, each opened
+into an atom fresh after those made so far, and what it concludes of the
+indices.  A
 constructor of a data type in the GADT style matches where its result's
 indices unify with those expected, its implicit arguments variables to
 solve: a clash is a pattern which never matches there, and an index a
 function computes, which unification cannot see into, is refused.
 -}
-elabPattern :: Env -> Telescope -> [(Text, Ix)] -> Matching -> Ty -> PatSource -> TC (Pattern, Telescope, [BoundProof], [(Text, Ix)], Matching)
+elabPattern :: Env -> [(Atom, Binder)] -> [(Text, Ix)] -> Matching -> Ty -> PatSource -> TC (Pattern, [(Atom, Binder)], [BoundProof], [(Text, Ix)], Matching)
 elabPattern env bound aliases m expected = \case
-  Hidden hint _ -> pure (PVar hint, [Binder Nothing hint expected], [], [], m {mLevel = mLevel m + 1})
+  Hidden hint _ -> pure (PVar hint, [(Fresh (mFresh m) hint, Binder (Irrelevant Nothing) hint expected)], [], [], m {mFresh = mFresh m + 1})
   Written le@(Located sp e) -> case e of
     R.EParen x -> elabPattern env bound aliases m expected (Written x)
     R.EWildcard -> pure (PWild, [], [], [], m)
@@ -2653,12 +2653,12 @@ elabPattern env bound aliases m expected = \case
       _ -> failAt sp "a pattern: a variable, _, a numeral, or a constructor applied to patterns"
   where
     s = mSubst m
-    -- A variable the pattern names, at the next level.
-    variable n = pure (PVar (Hint n), [namedBinder n expected], [], [], m {mLevel = mLevel m + 1})
+    -- A variable the pattern names, opened into the next atom.
+    variable n = pure (PVar (Hint n), [(Fresh (mFresh m) (Hint n), namedBinder n expected)], [], [], m {mFresh = mFresh m + 1})
     -- The variables to solve for the entries of a constructor's telescope, from the next identity.
-    ghostsOf tele = [IxMeta (mMeta m + i) (Hint (teName en)) | (i, en) <- zip [0 ..] tele]
-    -- What the names bound so far stand for: the variables, each itself, and the names given to implicit arguments.
-    known = [(n, IxLocal k h) | (k, Binder (Just n) h _) <- zip [0 ..] bound] <> aliases
+    ghostsOf tele = [IxMeta (mFresh m + i) (Hint (teName en)) | (i, en) <- zip [0 ..] tele]
+    -- What the names bound so far stand for: the variables, each its atom, and the names given to implicit arguments.
+    known = [(n, IxFree atom) | (atom, Binder (Irrelevant (Just n)) _ _) <- bound] <> aliases
     constructor le csp q args =
       ctorFor csp q >>= \case
         Just ci -> constructorWith le csp ci args
@@ -2685,7 +2685,7 @@ elabPattern env bound aliases m expected = \case
           ghosts = ghostsOf tele
           ghostOf pos = ghosts !! pos
           inst = instValues ghosts
-          m1 = m {mMeta = mMeta m + length tele}
+          m1 = m {mFresh = mFresh m + length tele}
           expectedIdx = case expected of
             TData _ _ xs -> xs
             _ -> []
@@ -2750,9 +2750,8 @@ elabPattern env bound aliases m expected = \case
           ( \(acc, mm) (pos, _, f, a) -> do
               let boundNow = bound <> concatMap (\(_, vs, _) -> vs) acc
                   aliasesNow = aliases <> newAliases <> concatMap (\(_, _, as) -> as) acc
-                  start = mLevel mm
               (p, vs, _, as, mm') <- elabPattern env boundNow aliasesNow mm (applyTy (mSubst mm) f) a >>= nested (sourceSpan a)
-              mm'' <- case fst (patternIxFrom start p) of
+              mm'' <- case fst (patternIxFrom (map fst vs) p) of
                 Nothing -> pure mm'
                 Just x -> case unifyIxRankedWith (unfolder env) (valueNamesOf env) rankIn (applyIx (mSubst mm') (ghostOf pos)) x (mSubst mm') of
                   Unified u -> pure mm' {mSubst = u}
@@ -2813,23 +2812,21 @@ mismatch env expected found = "type mismatch: " <> shown expected <> " and " <> 
 
 {- |
 The context of a statement: its value parameters, each standing for itself,
-a parameter of the signature, then its binders, the variables of the levels
-after them — the positions of the variables of the statement.
+a parameter of the signature, then its binders, opened into the atoms given
+— the term variables the positions of the variables of the statement.
 -}
-statementCtx :: [(Text, Ty)] -> Telescope -> Ctx Int
-statementCtx values binders =
-  [Local (Just n) i (Hint n) i t (IxParam i) | (i, (n, t)) <- zip [0 ..] values]
-    <> [telescopeLocal k b k | (k, b) <- zip [length values ..] binders]
+statementCtx :: [Atom] -> [(Text, Ty)] -> Telescope -> Ctx Int
+statementCtx atoms values binders =
+  [Local (Just n) (Hint n) i t (IxParam i) | (i, (n, t)) <- zip [0 ..] values]
+    <> openedCtx atoms binders [length values ..]
 
--- | A variable bound under the context, by the name given, at the next level.
-extendCtx :: Text -> Ty -> Ctx a -> Ctx (Var () a)
-extendCtx n t ctx = bindLocal (Just n) (Hint n) t ctx
+-- | A variable bound under the context, by the name given, opened into the atom given.
+extendCtx :: Text -> Atom -> Ty -> Ctx a -> Ctx (Var () a)
+extendCtx n = bindLocal (Just n)
 
--- | A variable bound under the context at the next level: the name the source writes for it, if any, and its hint.
-bindLocal :: Maybe Text -> Hint -> Ty -> Ctx a -> Ctx (Var () a)
-bindLocal name hint t ctx = Local name level hint (B ()) t (IxLocal level hint) : map (fmap F) ctx
-  where
-    level = nextLevel ctx
+-- | A variable bound under the context, opened into the atom given: the name the source writes for it, if any, displayed by the atom's hint.
+bindLocal :: Maybe Text -> Atom -> Ty -> Ctx a -> Ctx (Var () a)
+bindLocal name atom t ctx = Local name (Hint (atomHint atom)) (B ()) t (IxFree atom) : map (fmap F) ctx
 
 -- | The names written for the variables in scope, each standing for the index its variable is: what a brace or an index written under them may mean.
 ctxValues :: Ctx a -> [(Text, Ix)]
@@ -3042,7 +3039,7 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
         | rigid b -> within b a
         | otherwise -> False
     rigid = \case
-      IxLocal {} -> True
+      IxBound {} -> True
       IxMeta {} -> True
       IxFree _ -> True
       IxParam _ -> True
@@ -3156,17 +3153,17 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
             _ -> (fresh, foldl (\f name -> Located sp (R.EApp f (Located sp (R.EName (QName [] (Ident name)))))) le fresh)
       unless (length names == length domains) $ failAt sp ("this function schema takes " <> show (length domains) <> " arguments, but the lambda binds " <> show (length names))
       unless (length names == length (nub names)) $ failAt sp "a lambda binds the same name twice"
-      -- The lambda's parameters, variables of the levels after those in scope, which shadow what their names stood for.
-      let next = nextLevel ctx
-          local = [Local (Just name) (next + i) (Hint name) (B i) ty (IxLocal (next + i) (Hint name)) | (i, (name, ty)) <- zip [0 ..] (zip names domains)] <> map (fmap F) ctx
+      -- The lambda's parameters, opened into fresh atoms, which shadow what their names stood for.
+      let (atoms, env') = freshAtoms (map Hint names) env
+          local = [Local (Just name) (Hint name) (B i) ty (IxFree atom) | (i, (atom, (name, ty))) <- zip [0 ..] (zip atoms (zip names domains))] <> map (fmap F) ctx
           -- The names bound stand for the lambda's parameters in indices and ascriptions too, shadowing what they stood for.
           sc = envScope env
           scoped =
-            env
+            env'
               { envSchemas = [entry | entry@(name, _, _) <- envSchemas env, name `notElem` names]
               , envScope =
                   sc
-                    { tsValues = [(name, IxLocal (next + i) (Hint name)) | (i, name) <- zip [0 ..] names] <> [(v, x) | (v, x) <- tsValues sc, v `notElem` names]
+                    { tsValues = [(name, IxFree atom) | (atom, name) <- zip atoms names] <> [(v, x) | (v, x) <- tsValues sc, v `notElem` names]
                     , tsValueTys = zip names domains <> [(v, t) | (v, t) <- tsValueTys sc, v `notElem` names]
                     }
               }
@@ -3175,7 +3172,8 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       (body', actual) <- elabTerm NoProofArguments scoped givens local body result
       unless (firstOrder actual) $ failAt sp "a function schema returns a first-order value"
       let ty = foldr TArrow actual domains
-      pure (At (Irrelevant sp) (SchemaClosure ty (Lam (map Hint names) (toScope body'))), ty)
+      -- The body closed over the parameters' atoms: the lambda is their binder group.
+      pure (At (Irrelevant sp) (SchemaClosure ty (Lam (map Hint names) (toScope (closeIndices atoms body')))), ty)
     {- A type ascribed, @(e : T)@, in the scope of the enclosing signature: a
     value its indices mention which nothing binds stands for any value, so
     that the ascription holds of every value it may take.  What is no type is
@@ -3183,7 +3181,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     ascribed r =
       let sc = envScope env
           free = [v | (v, _) <- typeIndexNames env r, v `notElem` map fst (tsValues sc)]
-       in elabTypeIn env sc {tsValues = tsValues sc <> [(v, IxFree v) | v <- nub free]} r
+       in elabTypeIn env sc {tsValues = tsValues sc <> [(v, IxFree (Named v)) | v <- nub free]} r
     application hd imps args = do
       h <- headOf expected hd
       let n = ahParams h
@@ -3722,23 +3720,27 @@ quantifierType env ctx ty = liftE (elabTypeIn env scope ty)
         }
 
 {- |
-A value quantified over, bound under the context: the variable of the next
-level, which the source name now stands for, in terms as in indices,
-shadowing what it stood for before — a value, or a type parameter.  The
-variables outside refer to one another by level, so nothing of theirs is
-renamed.
+A value quantified over, bound under the context: opened into an atom fresh
+under the environment, which the source name now stands for, in terms as in
+indices, shadowing what it stood for before — a value, or a type parameter.
+The variables outside are atoms of their own, so nothing of theirs is
+renamed; the proposition under the quantifier is closed over the atom when
+it is built ('closeIndices').  The environment after the atom, the context
+under the quantifier, and the atom.
 -}
-enterQuantifier :: Env -> Ctx a -> Located Text -> Ty -> (Env, Ctx (Var () a))
+enterQuantifier :: Env -> Ctx a -> Located Text -> Ty -> (Env, Ctx (Var () a), Atom)
 enterQuantifier env ctx (Located _ source) ty =
-  ( env
+  ( env'
       { envScope = scope'
       , envTypeBindings = [(name, value) | (name, value) <- envTypeBindings env, name /= source]
       }
-  , bindLocal (Just source) (Hint source) ty ctx
+  , bindLocal (Just source) atom ty ctx
+  , atom
   )
   where
+    (atom, env') = freshAtom (Hint source) env
     scope = envScope env
-    index = IxLocal (nextLevel ctx) (Hint source)
+    index = IxFree atom
     scope' =
       scope
         { tsTypes = [if name == source then "#shadowed:" <> T.pack (show i) else name | (i, name) <- zip [0 :: Int ..] (tsTypes scope)]
@@ -3765,9 +3767,9 @@ numericQuantifier proofArguments env givens ctx quantifier relation bound binder
     namesAt current context limit names rest = case names of
       [] -> groups current context limit rest
       name : more -> do
-        let (inside, context') = enterQuantifier current context name TNat
+        let (inside, context', atom) = enterQuantifier current context name TNat
         inner <- namesAt inside context' (fmap F limit) more rest
-        pure (At (Irrelevant (location name)) (Quant quantifier (Hint (unLocated name)) (Just (relation, limit)) Nothing (toScope inner)))
+        pure (At (Irrelevant (location name)) (Quant quantifier (Hint (unLocated name)) (Just (relation, limit)) Nothing (toScope (closeIndices [atom] inner))))
 
 {- | Each finite binder is an ordinary numeric quantifier over its bounded decoder.
 Later binder groups are elaborated under the earlier source values, then the
@@ -3792,11 +3794,11 @@ finiteQuantifier proofArguments env givens ctx quantifier binders body = groups 
         domain <- finiteDomain current givens context (location name) ty
         let limit = finiteBound domain
             decode = finiteDecode domain
-        let (inside, context') = enterQuantifier current context name ty
+        let (inside, context', atom) = enterQuantifier current context name ty
             frozenType = maybe ty localTy (lookupLocal (unLocated name) context')
         inner <- namesAt inside context' frozenType more rest
         let decoded = inner >>= \case B () -> decode; F value -> Var (F value)
-        pure (At (Irrelevant (location name)) (Quant quantifier (Hint (unLocated name)) (Just (Below, limit)) Nothing (toScope decoded)))
+        pure (At (Irrelevant (location name)) (Quant quantifier (Hint (unLocated name)) (Just (Below, limit)) Nothing (toScope (closeIndices [atom] decoded))))
 
 {- | A plan retained outside Expr, available to source-aware proof tactics.
 The bound variable of finiteDecode is a numeric ordinal; the bound

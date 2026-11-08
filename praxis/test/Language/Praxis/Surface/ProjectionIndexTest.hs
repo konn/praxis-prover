@@ -32,27 +32,27 @@ projectionIndexTests =
         let (initial, function) = setFunRuntime [0] (addFunction emptyEnv (Ident "card") (Scheme [] [("n", TNat)] TNat) 0 [])
             name = funCore function
             env = initial {envGlobals = Map.insert (funQual function) (GFun function {funProjection = Just 0}) (envGlobals initial)}
-        normalizeIndex env (IxFun name [IxFree "n"]) @?= (IxFree "n", Set.singleton name)
+        normalizeIndex env (IxFun name [IxFree (Named "n")]) @?= (IxFree (Named "n"), Set.singleton name)
         normalizeIndex env (IxFun name []) @?= (IxFun name [], Set.empty)
         normalizeIndex env (IxFun name [IxNat 1, IxNat 2]) @?= (IxFun name [IxNat 1, IxNat 2], Set.empty)
-        normalizeIndex env (IxPartial name 1 1 [IxFree "n"]) @?= (IxPartial name 1 1 [IxFree "n"], Set.empty)
+        normalizeIndex env (IxPartial name 1 1 [IxFree (Named "n")]) @?= (IxPartial name 1 1 [IxFree (Named "n")], Set.empty)
     , testCase "the explicit core retains conversion prerequisites and rejects a wrong index" $ do
         let (initial, card) = setFunRuntime [0] (addFunction emptyEnv (Ident "card") (Scheme [] [("n", TNat)] TNat) 0 [])
             withCard = initial {envGlobals = Map.insert (funQual card) (GFun card {funProjection = Just 0}) (envGlobals initial)}
             (withBox, _) = addIndexedData withCard (Ident "Box") [] [TNat] [DataBinder "n" False (IndexParameter 0)] [[Ident "project"]] []
             (withProjection, project) = addFunction withBox (Ident "project") (Scheme [] [("n", TNat)] (TArrow (box (IxParam 0)) TNat)) 1 []
             (env, make) = setFunRuntime [0] (addFunction withProjection (Ident "make") (Scheme [] [("n", TNat)] (box (IxParam 0))) 0 [])
-            actual = box (IxFun (funCore card) [IxFree "n"])
+            actual = box (IxFun (funCore card) [IxFree (Named "n")])
             recovered = Typed TNat [] [] (App (Global (Ref RefFunction (funCore project))) (Typed actual [] [] (Var 0)))
             call index = Typed (box index) [] [(0, index)] (App (Global (Ref RefFunction (funCore make))) recovered)
             check = Core.elaborateNamed env [] [namedBinder "value" actual]
-        body <- either assertFailure pure (check (call (IxFree "n")))
+        body <- either assertFailure pure (check (call (IxFree (Named "n"))))
         Core.indexDependencies body @?= Set.singleton (funCore card)
         Core.indexDependencies (Core.mapComputation id (Core.mapObligations id body)) @?= Core.indexDependencies body
         assertBool "a projection authorized a different index" (isLeft (check (call (IxNat 7))))
-        (_, needed) <- maybe (assertFailure "index recovery failed") pure (indexTermInWithDependencies env (telescopeCtx [namedBinder "value" actual] [0 :: Int]) (IxFree "n"))
+        (_, needed) <- maybe (assertFailure "index recovery failed") pure (indexTermInWithDependencies env (openedCtx [Named "value"] [namedBinder "value" actual] [0 :: Int]) (IxFree (Named "n")))
         needed @?= Set.singleton (funCore card)
-        indexTermIn env (telescopeCtx [namedBinder "value" actual] [0 :: Int]) (IxFree "n") @?= Nothing
+        indexTermIn env (openedCtx [Named "value"] [namedBinder "value" actual] [0 :: Int]) (IxFree (Named "n")) @?= Nothing
     , testCase "projection metadata counts runtime prefixes and wildcards" $ do
         (env, _) <- success (T.unlines ["pick : {n : Nat} -> Nat -> Nat -> Nat", "pick {n} _ x = x", "step : Nat -> Nat", "step x = S x", "proof-id : {n : Nat} -> Nat -> n = n -> Nat", "proof-id {n} x h = x", "callback : (Nat -> Nat) -> Nat -> Nat", "callback f x = x"])
         pick <- functionNamed env "pick"
