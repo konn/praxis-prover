@@ -138,12 +138,12 @@ unifyIxRanked :: [Text] -> (Key -> Maybe Int) -> Ix -> Ix -> Subst -> Unified
 unifyIxRanked = unifyIxRankedWith noUnfold
 
 {- |
-'unifyIxRanked', abbreviations unfolded: an abbreviation applied, on either
-side, against what it does not unify with as it stands, is unfolded, and
-unification goes on with its right side, within 'unfoldDepth' steps.
+'unifyIxRanked', abbreviations unfolded: where two indices do not unify as
+they stand, both are unfolded as far as they go, once, and unified as they
+are then.
 -}
 unifyIxRankedWith :: Unfold -> [Text] -> (Key -> Maybe Int) -> Ix -> Ix -> Subst -> Unified
-unifyIxRankedWith unfold names rank = from unfoldDepth
+unifyIxRankedWith unfold names rank = from unfoldRounds
   where
     render = renderIx names
     from fuel a0 b0 s = go (applyIx s a0) (applyIx s b0)
@@ -168,9 +168,8 @@ unifyIxRankedWith unfold names rank = from unfoldDepth
               (IxCon {}, IxSucc _) -> Clash (render a <> " is no successor")
               (IxNat _, IxCon {}) -> Clash (render b <> " is no numeral")
               (IxSucc _, IxCon {}) -> Clash (render b <> " is no successor")
-              -- An abbreviation applied, against what it does not unify with as it stands: unfolded.
-              (IxFun f xs, _) | fuel > 0, Just a' <- unfold f xs -> from (fuel - 1) (normIx a') b s
-              (_, IxFun g ys) | fuel > 0, Just b' <- unfold g ys -> from (fuel - 1) a (normIx b') s
+              -- Differing as they stand: both unfolded as far as they go, and unified as they are then.
+              _ | fuel > 0, (a', b') <- (unfoldedBy unfold a, unfoldedBy unfold b), a' /= a || b' /= b -> from (fuel - 1) a' b' s
               _ -> Stuck (render a <> " and " <> render b <> ": neither is solved by the other")
         bind k t
           | k `elem` keysOf t = if occursThroughConstructors k t then Clash (render t <> " would contain itself") else Stuck (render t <> " mentions what it is to solve")

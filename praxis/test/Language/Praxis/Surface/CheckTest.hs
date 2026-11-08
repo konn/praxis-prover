@@ -769,8 +769,8 @@ checkTests =
         let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " " <> mangleGlobal ["Abbreviations", f, "#closed"] <> " " | kw <- ["theorem", "rule"]]) (checkedCore c)
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["intro", "intro-unfolded", "intro-twice", "lift", "lift-unfolded"]
         mapM_ (\f -> assertBool ("the index contract of " <> T.unpack f) (("Abbreviations." <> f <> ".#index") `elem` checkedTheorems c)) ["intro", "intro-unfolded", "intro-twice", "lift", "lift-unfolded"]
-        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["mix", "tl"]
-        mapM_ (\f -> assertBool ("the index contract of " <> T.unpack f) (("Abbreviations." <> f <> ".#index") `elem` checkedTheorems c)) ["mix", "tl"]
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["mix", "tl", "widen"]
+        mapM_ (\f -> assertBool ("the index contract of " <> T.unpack f) (("Abbreviations." <> f <> ".#index") `elem` checkedTheorems c)) ["mix", "tl", "widen"]
         (k, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
         let abbreviations = Map.keys (envAbbreviations (knowEnv k))
         forM_ ["neg", "nn"] $ \f -> assertBool (T.unpack f <> " is an abbreviation") (mangleGlobal ["Abbreviations", f] `elem` abbreviations)
@@ -793,6 +793,14 @@ checkTests =
           $ \(what, bad, expected) -> case errors (checkSource p "bad-abbreviations.px" (source <> bad)) of
             [] -> assertFailure (what <> " was accepted")
             reported -> assertBool (what <> ": " <> unlines reported) (any (expected `isInfixOf`) reported)
+    , localOption (mkTimeout 20000000) $ testCase "indices differing under many nested abbreviations are compared once unfolded, not unfolded at every level: the mismatch is found at once" $ do
+        p <- either assertFailure pure prelude
+        source <- TIO.readFile "test/data/abbreviations.px"
+        let nested v = T.replicate 18 "dup (" <> v <> T.replicate 18 ")"
+            deep = "dup : Formula -> Formula\ndup a = a :=> a\n\ndeep : Pf (" <> nested "a" <> ") -> Pf (" <> nested "b" <> ")\ndeep {a} {b} p = p\n"
+        case errors (checkSource p "deep-abbreviations.px" (source <> deep)) of
+          [] -> assertFailure "a mismatch under nested abbreviations was accepted"
+          _ : _ -> pure ()
     , testCase "equations of constructors' codes in indices: the same constructor's are taken apart, different ones' refuted, and a name matching solves stands for its solution" $ do
         c <- checkFile "test/data/constructor-indices.px"
         errors c @?= []

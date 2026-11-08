@@ -126,3 +126,14 @@ shared-used s c = shared s c
 -- Vec (S n), which Cons matches.
 tl : {n : Nat} -> Vec (inc n) -> Vec n
 tl {n} (Cons x xs) = xs
+
+-- Abbreviations under the arithmetic of Nat: inc n + inc n is S n + S n once
+-- inc is unfolded, both in a type expected and in inferring n.
+widen : {n : Nat} -> Vec (inc n + inc n) -> Vec (S n + S n)
+widen {n} xs = xs
+
+count-widen : {n : Nat} -> Vec (inc n + inc n) -> Nat
+count-widen {n} xs = 0
+
+use-widen : {n : Nat} -> Vec (S n + S n) -> Nat
+use-widen {n} xs = count-widen xs

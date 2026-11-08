@@ -124,7 +124,7 @@ import Language.Praxis.Surface.SourceView (QuantifierViews)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..))
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Assignment (..), Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope (..), Unfold, emptyAssignment, emptyScope, ixVars, mapIx, normIx, renderTyWithOrder, substScheme, tyIndices, unfoldDepth)
+import Language.Praxis.Surface.Types (Assignment (..), Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope (..), Unfold, emptyAssignment, emptyScope, ixVars, mapIx, normIx, renderTyWithOrder, substScheme, tyIndices, unfoldAll)
 
 -- * Globals
 
@@ -234,22 +234,11 @@ unfolder :: Env -> Unfold
 unfolder env name xs = fst <$> unfoldIndex env (IxFun name xs)
 
 {- |
-An index with every abbreviation in it unfolded as far as it goes, within a
-budget of steps: what two indices equal modulo abbreviations both come to.
+An index with every abbreviation in it unfolded as far as it goes: what two
+indices equal modulo abbreviations both come to.
 -}
 unfoldIndices :: Env -> Ix -> Ix
-unfoldIndices env = go unfoldDepth
-  where
-    go :: Int -> Ix -> Ix
-    go budget ix
-      | budget <= 0 = ix
-      | otherwise = case ix of
-          IxFun _ _ | Just (ix', _) <- unfoldIndex env ix -> go (budget - 1) ix'
-          IxSucc x -> IxSucc (go budget x)
-          IxCon c xs -> IxCon c (map (go budget) xs)
-          IxFun f xs -> IxFun f (map (go budget) xs)
-          IxPartial f arity prefix xs -> IxPartial f arity prefix (map (go budget) xs)
-          _ -> ix
+unfoldIndices env = unfoldAll (unfolder env)
 
 {- |
 A qualified name as its segments: the library the module belongs to, when

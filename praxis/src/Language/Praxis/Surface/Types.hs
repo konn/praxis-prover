@@ -57,6 +57,9 @@ module Language.Praxis.Surface.Types (
   Unfold,
   noUnfold,
   unfoldDepth,
+  unfoldRounds,
+  unfoldAll,
+  unfoldedBy,
   Assignment (..),
   emptyAssignment,
   mergeTy,
@@ -399,6 +402,38 @@ another in a circle do not unfold without end.
 unfoldDepth :: Int
 unfoldDepth = 64
 
+{- |
+How many times a comparison of indices unfolds both as far as they go and
+compares them again: once suffices unless the budget of 'unfoldAll' is
+exhausted, as it is by the methods of an instance defining one another in a
+circle; a few more rounds then end it.
+-}
+unfoldRounds :: Int
+unfoldRounds = 4
+
+{- |
+An index with every abbreviation in it unfolded as far as it goes, within
+'unfoldDepth' steps down each path: what two indices equal modulo
+abbreviations both come to.
+-}
+unfoldAll :: Unfold -> Ix -> Ix
+unfoldAll unfold = go unfoldDepth
+  where
+    go :: Int -> Ix -> Ix
+    go budget ix
+      | budget <= 0 = ix
+      | otherwise = case ix of
+          IxFun f xs | Just ix' <- unfold f xs -> go (budget - 1) ix'
+          IxSucc x -> IxSucc (go budget x)
+          IxCon c xs -> IxCon c (map (go budget) xs)
+          IxFun f xs -> IxFun f (map (go budget) xs)
+          IxPartial f arity prefix xs -> IxPartial f arity prefix (map (go budget) xs)
+          _ -> ix
+
+-- | An index unfolded as far as it goes, in normal form: the arithmetic of @Nat@ then sees the successors unfolding exposes.
+unfoldedBy :: Unfold -> Ix -> Ix
+unfoldedBy unfold = normIx . unfoldAll unfold
+
 -- | Whether an index has a hole somewhere in it.
 hasHole :: Ix -> Bool
 hasHole = \case
@@ -441,29 +476,28 @@ mergeIx :: Ix -> Ix -> Maybe Ix
 mergeIx = mergeIxWith noUnfold
 
 {- |
-'mergeIx', abbreviations unfolded where the indices differ as they stand: an
-abbreviation applied, on either side, against what it does not agree with,
-is unfolded, and the two compared on.  Where they agree only so, the index
-is as the first has it, unless that has a hole the other fills, so that a
-type expected keeps its form: @nn a@ with @(a :=> Bottom) :=> Bottom@ is
-@nn a@.
+'mergeIx', abbreviations unfolded where the indices differ as they stand:
+the two are unfolded as far as they go, once, and compared as they are
+then, so that two abbreviations applied to the same arguments cost no more
+than their unfolding.  Where they agree only so, the index is as the first
+has it, unless that has a hole the other fills, so that a type expected
+keeps its form: @nn a@ with @(a :=> Bottom) :=> Bottom@ is @nn a@.
 -}
 mergeIxWith :: Unfold -> Ix -> Ix -> Maybe Ix
-mergeIxWith unfold a b = go unfoldDepth (normIx a) (normIx b)
+mergeIxWith unfold a b = go unfoldRounds (normIx a) (normIx b)
   where
-    go fuel x y = case (x, y) of
+    go rounds x y = case (x, y) of
       (IxHole, _) -> Just y
       (_, IxHole) -> Just x
-      (IxSucc x', IxSucc y') -> succIx <$> go fuel x' y'
-      (IxSucc x', IxNat k) | k > 0 -> succIx <$> go fuel x' (IxNat (k - 1))
-      (IxNat k, IxSucc y') | k > 0 -> succIx <$> go fuel (IxNat (k - 1)) y'
-      (IxCon c xs, IxCon c' ys) | c == c', length xs == length ys -> IxCon c <$> zipWithM (go fuel) xs ys
-      (IxFun f xs, IxFun f' ys) | f == f', length xs == length ys, Just zs <- zipWithM (go fuel) xs ys -> Just (IxFun f zs)
-      (IxPartial f n k xs, IxPartial g m l ys) | f == g, n == m, k == l, length xs == length ys -> IxPartial f n k <$> zipWithM (go fuel) xs ys
+      (IxSucc x', IxSucc y') -> succIx <$> go rounds x' y'
+      (IxSucc x', IxNat k) | k > 0 -> succIx <$> go rounds x' (IxNat (k - 1))
+      (IxNat k, IxSucc y') | k > 0 -> succIx <$> go rounds (IxNat (k - 1)) y'
+      (IxCon c xs, IxCon c' ys) | c == c', length xs == length ys -> IxCon c <$> zipWithM (go rounds) xs ys
+      (IxFun f xs, IxFun f' ys) | f == f', length xs == length ys, Just zs <- zipWithM (go rounds) xs ys -> Just (IxFun f zs)
+      (IxPartial f n k xs, IxPartial g m l ys) | f == g, n == m, k == l, length xs == length ys -> IxPartial f n k <$> zipWithM (go rounds) xs ys
       _ | x == y -> Just x
-      _ | fuel <= 0 -> Nothing
-      (IxFun f xs, _) | Just x' <- unfold f xs -> keep x <$> go (fuel - 1) (normIx x') y
-      (_, IxFun g ys) | Just y' <- unfold g ys -> keep x <$> go (fuel - 1) x (normIx y')
+      -- Differing as they stand: both unfolded as far as they go, and compared as they are then.
+      _ | rounds > 0, (x', y') <- (unfoldedBy unfold x, unfoldedBy unfold y), x' /= x || y' /= y -> keep x <$> go (rounds - 1) x' y'
       _ -> Nothing
     keep x merged = if hasHole x then merged else x
 
@@ -521,29 +555,27 @@ matchIx :: Int -> Ix -> Ix -> Assignment -> Maybe Assignment
 matchIx = matchIxWith noUnfold
 
 {- |
-'matchIx', abbreviations unfolded where the indices differ as they stand: an
-abbreviation applied, on either side, against what it does not match, is
-unfolded, and matching goes on with its right side.  A parameter takes what
-the other index has where it stands, as it stands.
+'matchIx', abbreviations unfolded where the indices differ as they stand:
+both are unfolded as far as they go, once, and matched as they are then.  A
+parameter takes what the other index has where it stands, as it stands.
 -}
 matchIxWith :: Unfold -> Int -> Ix -> Ix -> Assignment -> Maybe Assignment
-matchIxWith unfold m p0 t0 s = go unfoldDepth (normIx p0) (normIx t0) s
+matchIxWith unfold m p0 t0 s = go unfoldRounds (normIx p0) (normIx t0) s
   where
-    go fuel p t acc = case (p, t) of
+    go rounds p t acc = case (p, t) of
       (_, IxHole) -> Just acc
       (IxParam i, _) | i < m -> case IM.lookup i (asValues acc) of
         Nothing -> Just acc {asValues = IM.insert i t (asValues acc)}
         Just u -> (\v -> acc {asValues = IM.insert i v (asValues acc)}) <$> mergeIxWith unfold u t
-      (IxSucc p', IxSucc t') -> go fuel p' t' acc
-      (IxSucc p', IxNat k) | k > 0 -> go fuel p' (IxNat (k - 1)) acc
-      (IxNat k, IxSucc t') | k > 0 -> go fuel (IxNat (k - 1)) t' acc
-      (IxCon c ps, IxCon c' ts) | c == c', length ps == length ts -> foldM (\a (x, y) -> go fuel x y a) acc (zip ps ts)
-      (IxFun f ps, IxFun f' ts) | f == f', length ps == length ts, Just acc' <- foldM (\a (x, y) -> go fuel x y a) acc (zip ps ts) -> Just acc'
-      (IxPartial f n k ps, IxPartial g o l ts) | f == g, n == o, k == l, length ps == length ts -> foldM (\a (x, y) -> go fuel x y a) acc (zip ps ts)
+      (IxSucc p', IxSucc t') -> go rounds p' t' acc
+      (IxSucc p', IxNat k) | k > 0 -> go rounds p' (IxNat (k - 1)) acc
+      (IxNat k, IxSucc t') | k > 0 -> go rounds (IxNat (k - 1)) t' acc
+      (IxCon c ps, IxCon c' ts) | c == c', length ps == length ts -> foldM (\a (x, y) -> go rounds x y a) acc (zip ps ts)
+      (IxFun f ps, IxFun f' ts) | f == f', length ps == length ts, Just acc' <- foldM (\a (x, y) -> go rounds x y a) acc (zip ps ts) -> Just acc'
+      (IxPartial f n k ps, IxPartial g o l ts) | f == g, n == o, k == l, length ps == length ts -> foldM (\a (x, y) -> go rounds x y a) acc (zip ps ts)
       _ | p == t -> Just acc
-      _ | fuel <= 0 -> Nothing
-      (IxFun f ps, _) | Just p' <- unfold f ps -> go (fuel - 1) (normIx p') t acc
-      (_, IxFun g ts) | Just t' <- unfold g ts -> go (fuel - 1) p (normIx t') acc
+      -- Differing as they stand: both unfolded as far as they go, and matched as they are then.
+      _ | rounds > 0, (p', t') <- (unfoldedBy unfold p, unfoldedBy unfold t), p' /= p || t' /= t -> go (rounds - 1) p' t' acc
       _ -> Nothing
 
 {- |
