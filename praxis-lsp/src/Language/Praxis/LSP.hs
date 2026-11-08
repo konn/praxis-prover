@@ -78,15 +78,15 @@ import Language.Praxis.PRA.Syntax.Parser (syntaxErrorPosition)
 import Language.Praxis.PRA.Tactic
 import Language.Praxis.PRA.Tactic.Parser
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, checkDecl, renderSchemaTacticError, schemaScope)
-import Language.Praxis.Package.Build (ModuleResult (..), Prefix, checkFileCached, componentId, locate, prefixPaths, readFileUtf8)
+import Language.Praxis.Package.Build (ModuleResult (..), Prefix, Progress, checkFileCachedWith, componentId, locate, prefixPaths, quietly, readFileUtf8)
 import Language.Praxis.Surface.Check qualified as Surface
 import Language.Praxis.Surface.Engine (Knowledge (..))
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude, prelude, preludeLemmas)
-import Language.Praxis.Surface.Syntax.Raw (Segment (..), Span (..))
+import Language.Praxis.Surface.Syntax.Raw (Segment (..), Span (..), segmentText)
 import System.Directory (canonicalizePath)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeExtension)
+import System.FilePath (takeExtension, takeFileName)
 
 -- * The server
 
@@ -279,7 +279,7 @@ check server env delay uri path lang text version texts = do
   threadDelay delay
   previous <- Map.lookup uri <$> readIORef (serverEntries server)
   prefix <- Map.lookup uri <$> readIORef (serverPrefixes server)
-  found <- try (analysed prefix)
+  found <- try (runLspT env (withProgress ("praxis: " <> T.pack (takeFileName path)) Nothing NotCancellable \update -> liftIO (analysed (reporter update) prefix)))
   (doc, prefix') <- case found of
     Right result -> pure result
     Left e
@@ -294,8 +294,13 @@ check server env delay uri path lang text version texts = do
   me <- myThreadId
   modifyMVar_ (serverChecks server) (pure . Map.update (\t -> if t == me then Nothing else Just t) uri)
   where
-    analysed prefix = do
-      (doc, prefix') <- analyseDocumentWith texts prefix lang path text
+    -- How far the check is, for the client's progress indicator: the module being checked and its number, and the share done where there are several.
+    reporter update done total name =
+      let shown = T.intercalate "." (map segmentText name) <> (if total > 1 then " (" <> T.pack (show (done + 1)) <> "/" <> T.pack (show total) <> ")" else "")
+          share = if total > 1 then Just (fromIntegral ((done * 100) `div` total)) else Nothing
+       in runLspT env (update (ProgressAmount share (Just shown)))
+    analysed progress prefix = do
+      (doc, prefix') <- analyseDocumentWith progress texts prefix lang path text
       mapM_ evaluate (docReports doc)
       mapM_ evaluate (indexTokens (docIndex doc))
       mapM_ evaluate (indexReferences (docIndex doc))
@@ -375,7 +380,7 @@ analyseIn lang path text = docReports <$> analyseDocument lang path text
 
 -- | Everything found in a document at a path: its reports, as 'analyseIn' finds them, and its index.
 analyseDocument :: Language -> FilePath -> Text -> IO Document
-analyseDocument lang path text = fst <$> analyseDocumentWith (Map.singleton path text) Nothing lang path text
+analyseDocument lang path text = fst <$> analyseDocumentWith quietly (Map.singleton path text) Nothing lang path text
 
 {- |
 'analyseDocument', the texts given standing for the files at their paths,
@@ -383,11 +388,11 @@ and a @.px@ document checked from the prefix given, as 'checkFileCached'
 checks it: what was found, and the prefix for the next check of the
 document, where there is one.
 -}
-analyseDocumentWith :: Map FilePath Text -> Maybe Prefix -> Language -> FilePath -> Text -> IO (Document, Maybe Prefix)
-analyseDocumentWith texts prefix lang path text = case lang of
+analyseDocumentWith :: Progress -> Map FilePath Text -> Maybe Prefix -> Language -> FilePath -> Text -> IO (Document, Maybe Prefix)
+analyseDocumentWith progress texts prefix lang path text = case lang of
   Pra -> pure (Document (analysePra text) (indexPra path (linesOf text) libraryNames) True, Nothing)
   Prf -> pure (Document (analysePrf text) (indexPrf path (linesOf text)) True, Nothing)
-  Px -> analysePxIn texts prefix path text
+  Px -> analysePxIn progress texts prefix path text
 
 -- | The names of the lemmas in scope in a @.pra@ document before any declaration.
 libraryNames :: Set Text
@@ -617,11 +622,11 @@ the definitions of every module checked before it in its index.  Or on its
 own, when no package encloses it.  With the document, the prefix for its
 next check.
 -}
-analysePxIn :: Map FilePath Text -> Maybe Prefix -> FilePath -> Text -> IO (Document, Maybe Prefix)
-analysePxIn texts prefix path text = case surfacePrelude of
+analysePxIn :: Progress -> Map FilePath Text -> Maybe Prefix -> FilePath -> Text -> IO (Document, Maybe Prefix)
+analysePxIn progress texts prefix path text = case surfacePrelude of
   Left err -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err)) Nothing] mempty False, Nothing)
   Right p -> do
-    inPackage <- checkFileCached (editorBuild p) (Map.insert path text texts) prefix path
+    inPackage <- checkFileCachedWith progress (editorBuild p) (Map.insert path text texts) prefix path
     case inPackage of
       Nothing -> pure (analysePx path text, Nothing)
       Just (Left err) -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack err) Nothing] mempty False, Nothing)

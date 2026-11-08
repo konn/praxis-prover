@@ -13,7 +13,10 @@ All notable changes to this project will be documented in this file.
   before it — the libraries before its own and the modules it imports — while
   their sources are unchanged (`checkFileCached`); the documents open stand
   for the files at their paths, and saving one checks again the others open
-  which read it, or whose check had failed.
+  which read it, or whose check had failed. The check is reported as work in
+  progress (`window/workDoneProgress`): the module being checked, and how
+  many of the modules before the document are done where they are checked
+  again.
 - Semantic tokens (`textDocument/semanticTokens/full`): in a `.px` document
   every name is a token of what it is — a data type, a constructor, a
   function or theorem, a class, a method, a module or instance, a type

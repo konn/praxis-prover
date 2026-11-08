@@ -28,6 +28,9 @@ libraries before its own and the modules it imports, while their sources are
 unchanged, so an edit costs the check of the document's own module; the
 documents open in the editor stand for the files at their paths, and saving
 one checks again the others open which read it, or whose check had failed.
+While a document is checked the client shows the check in progress, with the
+module being checked and, where the modules before the document are checked
+again, how many of them are done.
 
 A `.pra` document is read over the `builtin` signature, with the lemmas of the
 library of praxis-copra, `src-pra/lemmas.pra`, and the unfolding

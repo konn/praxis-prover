@@ -44,6 +44,10 @@ module Language.Praxis.Package.Build (
   checkFile,
   checkFileFrom,
   checkFileCached,
+  checkFileCachedWith,
+  Progress,
+  quietly,
+  checkPlannedWith,
   Prefix (..),
   ModuleKey,
   prefixPaths,
@@ -53,6 +57,7 @@ module Language.Praxis.Package.Build (
   checkPlanned,
 ) where
 
+import Control.Exception (evaluate)
 import Control.Monad (filterM, forM, unless)
 import Data.Bifunctor (first)
 import Data.Char (isAlphaNum)
@@ -434,6 +439,33 @@ checkComponents p = checkComponentsFrom (initialBuild p)
 checkComponentsFrom :: Build -> Reader -> Loaded -> [Component] -> Maybe QualName -> IO ([ModuleResult], Build)
 checkComponentsFrom initial reader loaded comps target = checkPlanned initial <$> planComponents reader loaded comps target
 
+{- |
+What a check says of its progress: before each module, how many modules are
+checked already, how many there are in all, and the name of the one next.
+-}
+type Progress = Int -> Int -> QualName -> IO ()
+
+-- | A check saying nothing of its progress.
+quietly :: Progress
+quietly _ _ _ = pure ()
+
+{- |
+Check modules laid out as 'checkPlanned' does, one after another, saying
+before each how far the check is: the modules done among the total given,
+counting from the number given, and the module's name.  Each module's build
+is forced before the next is announced, so that what is said is true.
+-}
+checkPlannedWith :: Progress -> Int -> Int -> Build -> [Planned] -> IO ([ModuleResult], Build)
+checkPlannedWith progress total = go
+  where
+    go _ build [] = pure ([], build)
+    go done build (pl : rest) = do
+      progress done total (mfName (pdFile (plParsed pl)))
+      let (results, build') = checkPlanned build [pl]
+      _ <- evaluate build'
+      (results', build'') <- go (done + 1) build' rest
+      pure (results <> results', build'')
+
 -- | Check every library of the project at a path, in order: the results, or why the project could not be loaded.
 checkProject :: Prelude -> FilePath -> IO (Either String [ModuleResult])
 checkProject p = checkProjectFrom (initialBuild p)
@@ -499,7 +531,11 @@ where their sources are unchanged: the results, the file's last; the prefix
 for the next check; and whether the one given served.
 -}
 checkFileCached :: Build -> Map FilePath Text -> Maybe Prefix -> FilePath -> IO (Maybe (Either String ([ModuleResult], Prefix, Reuse)))
-checkFileCached initial texts cache path = do
+checkFileCached = checkFileCachedWith quietly
+
+-- | 'checkFileCached', saying how far the check is before each module checked: those of the prefix where it is built afresh, then the file's.
+checkFileCachedWith :: Progress -> Build -> Map FilePath Text -> Maybe Prefix -> FilePath -> IO (Maybe (Either String ([ModuleResult], Prefix, Reuse)))
+checkFileCachedWith progress initial texts cache path = do
   located <- locate path
   case located of
     Nothing -> pure Nothing
@@ -518,8 +554,11 @@ checkFileCached initial texts cache path = do
               pl : rest | isTarget pl -> (reverse rest, [pl])
               _ -> (planned, [])
             sources = map moduleKey before
-            (prefix, reuse) = case cache of
-              Just p | prefixModules p == sources -> (p, Reused)
-              _ -> let (results, build) = checkPlanned initial before in (Prefix sources results build, Rebuilt)
-            (results', _) = checkPlanned (prefixBuild prefix) targets
+            total = length planned
+        (prefix, reuse) <- case cache of
+          Just p | prefixModules p == sources -> pure (p, Reused)
+          _ -> do
+            (results, build) <- checkPlannedWith progress total 0 initial before
+            pure (Prefix sources results build, Rebuilt)
+        (results', _) <- checkPlannedWith progress total (length before) (prefixBuild prefix) targets
         pure (Just (Right (prefixResults prefix <> results', prefix, reuse)))
