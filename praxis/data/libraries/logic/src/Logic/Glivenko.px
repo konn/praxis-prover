@@ -46,9 +46,9 @@ identity {a} = by
 
 -- The easy direction preserves the conclusion literally.
 embed : Intuitionistic a -> Classical a
-embed (Intuitionistic.K {a} {b}) = Classical.K {a} {b}
-embed (Intuitionistic.S {a} {b} {c}) = Classical.S {a} {b} {c}
-embed (Intuitionistic.Explosion {a}) = Classical.Explosion {a}
+embed Intuitionistic.K = Classical.K
+embed Intuitionistic.S = Classical.S
+embed Intuitionistic.Explosion = Classical.Explosion
 embed (f :@ x) = embed f :@ embed x
 
 -- Bracket abstraction: the deduction theorem for the Hilbert calculus, as a
@@ -81,14 +81,14 @@ data Use (g : Context) (a : Formula) (b : Formula) where
   Apply : {g : Context} -> {a b c : Formula} -> Use g a (c :=> b) -> Use g a c -> Use g a b
 
 hypothesis : {g : Context} -> {a b : Formula} -> Member b (g :> a) -> Use g a b
-hypothesis {g} {a} Here = Var
-hypothesis {g} {a} (There m) = Unused (Hyp m)
+hypothesis Here = Var
+hypothesis (There m) = Unused (Hyp m)
 
 -- Modus ponens, its premises marked: unused when both are.
 apply-unused : {b a : Formula} -> {g : Context} -> {c : Formula} -> Open g (c :=> b) -> Use g a c -> Use g a b
-apply-unused {b} {a} f (Unused x) = Unused (f :@ x)
-apply-unused {b} {a} f Var = Apply (Unused f) Var
-apply-unused {b} {a} f (Apply y z) = Apply (Unused f) (Apply y z)
+apply-unused {b} f (Unused x) = Unused (f :@ x)
+apply-unused {b} f Var = Apply (Unused f) Var
+apply-unused {b} f (Apply y z) = Apply (Unused f) (Apply y z)
 
 apply-use : {b : Formula} -> {g : Context} -> {a c : Formula} -> Use g a (c :=> b) -> Use g a c -> Use g a b
 apply-use {b} (Unused f) u = apply-unused f u
@@ -101,30 +101,30 @@ annotate {g} {a} (Lift p) = Unused (Lift p)
 annotate {g} {a} (f :@ x) = apply-use (annotate f) (annotate x)
 
 s-step : {g : Context} -> {a b c : Formula} -> Open g (a :=> c :=> b) -> Open g (a :=> c) -> Open g (a :=> b)
-s-step {g} {a} {b} {c} af ax = Lift (Intuitionistic.S {a} {c} {b}) :@ af :@ ax
+s-step {g} {a} {b} {c} af ax = Lift Intuitionistic.S :@ af :@ ax
 
 -- An application f x whose argument uses the hypothesis a: f itself when x
 -- is a, as eta reduction gives; S otherwise.
 combine-unused : {g : Context} -> {a b c : Formula} -> Open g (c :=> b) -> Use g a c -> Open g (a :=> c :=> b) -> Open g (a :=> c) -> Open g (a :=> b)
-combine-unused {g} {a} {b} {c} f (Unused y) af ax = s-step {g} {a} {b} {c} af ax
+combine-unused {g} {a} {b} {c} f (Unused y) af ax = s-step af ax
 combine-unused {g} {a} {b} {c} f Var af ax = f
-combine-unused {g} {a} {b} {c} f (Apply y z) af ax = s-step {g} {a} {b} {c} af ax
+combine-unused {g} {a} {b} {c} f (Apply y z) af ax = s-step af ax
 
 combine : {g : Context} -> {a b c : Formula} -> Use g a (c :=> b) -> Use g a c -> Open g (a :=> c :=> b) -> Open g (a :=> c) -> Open g (a :=> b)
-combine {g} {a} {b} {c} (Unused f) x af ax = combine-unused {g} {a} {b} {c} f x af ax
-combine {g} {a} {b} {c} Var x af ax = s-step {g} {a} {b} {c} af ax
-combine {g} {a} {b} {c} (Apply y z) x af ax = s-step {g} {a} {b} {c} af ax
+combine {g} {a} {b} {c} (Unused f) x af ax = combine-unused f x af ax
+combine {g} {a} {b} {c} Var x af ax = s-step af ax
+combine {g} {a} {b} {c} (Apply y z) x af ax = s-step af ax
 
 -- K for a part not using the hypothesis, the identity for the hypothesis,
 -- and for an application, eta or S over the abstracted premises.
 abstract : Use g a b -> Open g (a :=> b)
-abstract (Unused {g} {a} {b} d) = Lift (Intuitionistic.K {b} {a}) :@ d
-abstract (Var {g} {a}) = Lift (identity {a})
-abstract (Apply {g} {a} {b} {c} f x) = combine {g} {a} {b} {c} f x (abstract f) (abstract x)
+abstract (Unused d) = Lift Intuitionistic.K :@ d
+abstract Var = Lift identity
+abstract (Apply f x) = combine f x (abstract f) (abstract x)
 
 -- The deduction theorem: discharge the newest hypothesis.
 deduction : {g : Context} -> {a b : Formula} -> Open (g :> a) b -> Open g (a :=> b)
-deduction {g} {a} d = abstract (annotate {g} {a} d)
+deduction {g} {a} d = abstract (annotate d)
 
 no-member : Member a Empty -> Intuitionistic a
 no-member ()
@@ -154,7 +154,7 @@ double-negation-mp {a} {b} = close (deduction (deduction (deduction (
 double-negation-dne : {a : Formula} -> Intuitionistic (((((a :=> Bottom) :=> Bottom) :=> a) :=> Bottom) :=> Bottom)
 double-negation-dne {a} = close (deduction (
   Hyp Here :@ deduction (
-    Lift (Intuitionistic.Explosion {a}) :@ (Hyp Here :@ deduction (
+    Lift Intuitionistic.Explosion :@ (Hyp Here :@ deduction (
       Hyp (There (There Here)) :@ deduction (Hyp (There Here)))))))
 
 -- \n. n (\z. z)
@@ -170,7 +170,7 @@ peirce {a} {b} =
     :@ (Classical.K {((a :=> Bottom) :=> Bottom) :=> a} {(a :=> b) :=> a} :@ Classical.DNE {a})
     :@ embed (close (deduction (deduction (
       Hyp Here :@ (Hyp (There Here) :@ deduction (
-        Lift (Intuitionistic.Explosion {b}) :@ (Hyp (There Here) :@ Hyp Here)))))))
+        Lift Intuitionistic.Explosion :@ (Hyp (There Here) :@ Hyp Here)))))))
 
 -- The namespace is independent of the selected theory. Leaving the block
 -- exposes ClassicalExamples.peirce-law as a Classical derivation schema.
@@ -183,11 +183,11 @@ module ClassicalExamples where
 -- Glivenko's algorithm: its result-membership and result-index contracts
 -- are generated and certified in PRA, uniformly over the input derivation.
 glivenko : Classical a -> Intuitionistic (nn a)
-glivenko (Classical.K {a} {b}) = double-negation-intro {a :=> b :=> a} :@ Intuitionistic.K {a} {b}
-glivenko (Classical.S {a} {b} {c}) = double-negation-intro {(a :=> b :=> c) :=> (a :=> b) :=> a :=> c} :@ Intuitionistic.S {a} {b} {c}
-glivenko (Classical.Explosion {a}) = double-negation-intro {Bottom :=> a} :@ Intuitionistic.Explosion {a}
-glivenko (Classical.DNE {a}) = double-negation-dne {a}
-glivenko ((:@) {a} {b} f x) = double-negation-mp {a} {b} :@ glivenko f :@ glivenko x
+glivenko Classical.K = double-negation-intro :@ Intuitionistic.K
+glivenko Classical.S = double-negation-intro :@ Intuitionistic.S
+glivenko Classical.Explosion = double-negation-intro :@ Intuitionistic.Explosion
+glivenko Classical.DNE = double-negation-dne
+glivenko (f :@ x) = double-negation-mp :@ glivenko f :@ glivenko x
 
 -- The finite witness transformation underlying Con(IPC) -> Con(CPC).
 contradiction : Classical Bottom -> Intuitionistic Bottom
@@ -196,7 +196,7 @@ contradiction p = bottom-out :@ glivenko p
 -- The converse direction of theoremhood: IPC proves not-not A only if CPC
 -- proves A. This is another proof transformation, not a reflection principle.
 recover : {a : Formula} -> Intuitionistic (nn a) -> Classical a
-recover {a} p = Classical.DNE {a} :@ embed p
+recover {a} p = Classical.DNE :@ embed p
 
 -- Observable computations for the talk demo. These count unfolded proof
 -- nodes; the evaluator can share identical subderivations internally.
@@ -217,9 +217,9 @@ intuitionistic-size (f :@ x) = S (intuitionistic-size f + intuitionistic-size x)
 -- size: a calculation for modus ponens, the induction hypotheses at the premises.
 embed-size : (p : Intuitionistic a)
   -> classical-size (embed p) ≡ intuitionistic-size p
-embed-size (Intuitionistic.K {a} {b}) = rfl
-embed-size (Intuitionistic.S {a} {b} {c}) = rfl
-embed-size (Intuitionistic.Explosion {a}) = rfl
+embed-size Intuitionistic.K = rfl
+embed-size Intuitionistic.S = rfl
+embed-size Intuitionistic.Explosion = rfl
 embed-size (f :@ x) = calc
   classical-size (embed (f :@ x))
   = classical-size (embed f :@ embed x)
@@ -251,7 +251,7 @@ data Demo = Result Formula Nat Nat
 
 -- Result <actual output conclusion> <input proof size> <output proof size>.
 summary : Translation -> Demo
-summary (Translated {a} input output) = Result (conclusion output) (classical-size input) (intuitionistic-size output)
+summary (Translated input output) = Result (conclusion output) (classical-size input) (intuitionistic-size output)
 
 demo : Nat -> Nat -> Demo
 demo p q = summary (demo-proofs p q)

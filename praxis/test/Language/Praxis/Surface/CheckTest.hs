@@ -20,9 +20,10 @@ import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, pre
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Encode (natInductionLemma)
 import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, initialSourceBindings, membershipProof, theoremStatement)
-import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), Env, FunInfo (..), Global (..), TeleEntry (..), constructorsNamed, emptyEnv, resolve)
+import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), Env (..), FunInfo (..), Global (..), TeleEntry (..), constructorsNamed, emptyEnv, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Index (Unified (..), emptySubst, unifyIx)
+import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Rename (renameModule)
@@ -762,6 +763,30 @@ checkTests =
         let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " u_ImplicitPatterns_s" <> f <> "_s_x23_closed " | kw <- ["theorem", "rule"]]) (checkedCore c)
         mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["embed", "copy"]
         assertBool "embed-size did not certify" ("ImplicitPatterns.embed-size" `elem` checkedTheorems c)
+    , testCase "abbreviations unfold in inference: an implicit determined through nn by the type expected, by the head's own type, or by an argument beside it once that is checked; each use transported by a certified equation; a mismatch through nn still refused" $ do
+        c <- checkFile "test/data/abbreviations.px"
+        errors c @?= []
+        let closed f = any (\l -> any (`T.isPrefixOf` l) [kw <> " " <> mangleGlobal ["Abbreviations", f, "#closed"] <> " " | kw <- ["theorem", "rule"]]) (checkedCore c)
+        mapM_ (\f -> assertBool ("the closure of " <> T.unpack f) (closed f)) ["intro", "intro-unfolded", "intro-twice", "lift", "lift-unfolded"]
+        mapM_ (\f -> assertBool ("the index contract of " <> T.unpack f) (("Abbreviations." <> f <> ".#index") `elem` checkedTheorems c)) ["intro", "intro-unfolded", "intro-twice", "lift", "lift-unfolded"]
+        (k, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
+        let abbreviations = Map.keys (envAbbreviations (knowEnv k))
+        forM_ ["neg", "nn"] $ \f -> assertBool (T.unpack f <> " is an abbreviation") (mangleGlobal ["Abbreviations", f] `elem` abbreviations)
+        assertBool "a function by cases is no abbreviation" (mangleGlobal ["Abbreviations", "size"] `notElem` abbreviations)
+        forM_ ["intro", "intro-unfolded", "lift-unfolded"] $ \f -> case Map.lookup (mangleGlobal ["Abbreviations", f]) (coreBodies core) of
+          Just [body] -> assertBool (T.unpack f <> " is not transported in the typed core") ("transport" `T.isInfixOf` SurfaceCore.dump body)
+          _ -> assertFailure (T.unpack f <> " has no single body")
+        -- lift's implicits are met as they stand once f is checked: nothing to transport.
+        case Map.lookup (mangleGlobal ["Abbreviations", "lift"]) (coreBodies core) of
+          Just [body] -> assertBool "lift is transported needlessly" (not ("transport" `T.isInfixOf` SurfaceCore.dump body))
+          _ -> assertFailure "lift has no single body"
+        p <- either assertFailure pure prelude
+        source <- TIO.readFile "test/data/abbreviations.px"
+        forM_
+          [ ("a mismatch through an abbreviation", "wrong : Pf a -> Pf (neg a)\nwrong p = dni :@ p\n")
+          , ("an implicit no argument determines", "loose : Pf (nn a) -> Pf (nn b) -> Pf (nn a)\nloose f x = mp :@ f :@ x\n")
+          ]
+          $ \(what, bad) -> assertBool (what <> " was accepted") (not (null (errors (checkSource p "bad-abbreviations.px" (source <> bad)))))
     , testCase "equations of constructors' codes in indices: the same constructor's are taken apart, different ones' refuted, and a name matching solves stands for its solution" $ do
         c <- checkFile "test/data/constructor-indices.px"
         errors c @?= []

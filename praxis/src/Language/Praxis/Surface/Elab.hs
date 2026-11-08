@@ -82,7 +82,7 @@ module Language.Praxis.Surface.Elab (
 
 import Bound (Scope, Var (..), fromScope, instantiate, toScope)
 import Control.Applicative ((<|>))
-import Control.Monad (foldM, forM, forM_, join, unless, when, zipWithM)
+import Control.Monad (foldM, forM, forM_, guard, join, unless, when, zipWithM)
 import Control.Monad.State.Strict qualified as State
 import Control.Monad.Writer.Strict (WriterT (..), listen, tell)
 import Data.Bifunctor (first)
@@ -818,8 +818,10 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
 
 {- |
 The names an index mentions which nothing in scope resolves, each with the
-type of the index it stands at: @Nat@ under the successor and arithmetic, a
-hole under a constructor.
+type of what it stands for, where that is known: the type of the index
+itself, standing alone; @Nat@ under the successor and arithmetic; under a
+constructor, the type of the field, and under a function, of the domain,
+where that is a closed type; a hole otherwise.
 -}
 indexNames :: Env -> Located R.Expr -> Ty -> [(Text, Ty)]
 indexNames env a ty = case unLocated a of
@@ -827,7 +829,7 @@ indexNames env a ty = case unLocated a of
   R.ENat _ -> []
   R.EInfix (Located _ op) l r
     | R.operatorName op `elem` arithmeticOps -> indexNames env l TNat <> indexNames env r TNat
-    | otherwise -> indexNames env l THole <> indexNames env r THole
+    | otherwise -> applied (R.operatorName op) [l, r]
   R.EName (QName [] (Ident x))
     | x `notElem` ["S", "suc"]
     , null (resolve env (QName [] (Ident x)))
@@ -835,7 +837,28 @@ indexNames env a ty = case unLocated a of
         [(x, ty)]
   _ -> case rawSpine a of
     (Located _ (R.EName (QName [] (Ident s))), [b]) | s `elem` ["S", "suc"] -> indexNames env b TNat
+    (Located _ (R.EName q), args) -> applied q args
     (_, args) -> concatMap (\b -> indexNames env b THole) args
+  where
+    -- The arguments of a constructor or a function applied, each at the type it stands at: the
+    -- explicit fields of the constructor, that of the type the index is of where several have the
+    -- name; the domains of the function, where it takes no implicit value at runtime.
+    applied q args = concat (zipWith (indexNames env) args (argumentTypes q <> repeat THole))
+    argumentTypes q = case (functions, constructors) of
+      ([f], []) | null (funRuntime f) -> map closedKind (fst (arrows (schemeType (funScheme f))))
+      ([], cs) | [fields] <- nub (map fieldTypes (chosen cs)) -> fields
+      _ -> []
+      where
+        globals =
+          resolve env q <> case q of
+            QName [] s -> map GCtor (constructorsNamed env s)
+            _ -> []
+        functions = nubBy (\f g -> funQual f == funQual g) [f | GFun f <- globals]
+        constructors = nubBy (\c d -> ctorQual c == ctorQual d) [c | GCtor c <- globals]
+        chosen cs = case ty of
+          TData dn _ _ | byType@(_ : _) <- [c | c <- cs, renderQualName (ctorData c) == dn] -> byType
+          _ -> cs
+        fieldTypes c = [closedKind t | TeleEntry _ t (Explicit _) <- constructorTele (ctorSignature c)]
 
 -- | The names the indices of a type mention which nothing in scope resolves, each with the type of the index it stands at.
 typeIndexNames :: Env -> Located R.Expr -> [(Text, Ty)]
@@ -1277,9 +1300,13 @@ arrows = \case
 
 -- | Register a function's unfolding lemmas, one per clause, as members of its namespace: @f.unfold-C@, and @f.eq_i@.
 registerUnfoldings :: FunInfo -> [FunClause] -> Env -> Env
-registerUnfoldings info fcs env = foldl register withProjection (zip3 [1 :: Int ..] (unfoldingNames env (map fcPatterns fcs)) fcs)
+registerUnfoldings info fcs env = foldl register known (zip3 [1 :: Int ..] (unfoldingNames env (map fcPatterns fcs)) fcs)
   where
-    withProjection = env {envGlobals = Map.insert (funQual info) (GFun info {funProjection = functionProjection info fcs}) (envGlobals env)}
+    known =
+      env
+        { envGlobals = Map.insert (funQual info) (GFun info {funProjection = functionProjection info fcs}) (envGlobals env)
+        , envAbbreviations = maybe id (Map.insert (funCore info)) (functionAbbreviation info fcs) (envAbbreviations env)
+        }
     register e (i, n, fc) =
       let binders' = map (mangleVariable . fst) (fcVars fc)
           alias = Ident ("eq_" <> T.pack (show i))
@@ -1312,6 +1339,53 @@ functionProjection info [clause]
     variablePattern PWild = True
     variablePattern _ = False
 functionProjection _ _ = Nothing
+
+{- |
+A function's definition as one equation over its arguments, where it is an
+abbreviation: one clause, its patterns variables, its right side a
+first-order term of its variables, constructors, functions and numerals,
+with no case analysis, callback, dictionary, proof or obligation, and no
+call of the function itself.  Comparing indices unfolds it, so that @nn a@
+is @(a :=> Bottom) :=> Bottom@ where @nn a = neg (neg a)@: how many
+arguments its application takes, the implicit values it takes at runtime
+first, as an index of its application has them, and its right side over
+them by position.
+-}
+functionAbbreviation :: FunInfo -> [FunClause] -> Maybe (Int, Ix)
+functionAbbreviation info [clause]
+  | null (funSlots info)
+  , null (funProofs info)
+  , null (Core.obligations (fcTerm clause))
+  , Set.null (Core.indexDependencies (fcTerm clause))
+  , all firstOrder (result : runtime <> arguments)
+  , length arguments == funArity info
+  , length patterns' == length runtime + length arguments
+  , all variablePattern patterns'
+  , Just body <- termIndex (fcBody clause)
+  , funCore info `notElem` functionsIn body =
+      Just (length patterns', body)
+  where
+    (arguments, result) = arrows (schemeType (funScheme info))
+    runtime = [snd (schemeValues (funScheme info) !! i) | i <- funRuntime info]
+    patterns' = fcPatterns clause
+    variablePattern PVar {} = True
+    variablePattern PWild = True
+    variablePattern _ = False
+    -- The position among the patterns of each variable the clause binds, in order.
+    positions = [position | (position, PVar {}) <- zip [0 :: Int ..] patterns']
+    termIndex = \case
+      Term.Variable v -> IxParam <$> listToMaybe (drop v positions)
+      Term.Literal n -> Just (IxNat n)
+      Term.Call (Ref RefBuiltin "S") [x] -> IxSucc <$> termIndex x
+      Term.Call (Ref RefConstructor c) xs -> IxCon c <$> traverse termIndex xs
+      Term.Call (Ref kind f) xs | kind `elem` [RefFunction, RefBuiltin] -> IxFun f <$> traverse termIndex xs
+      _ -> Nothing
+    functionsIn = \case
+      IxFun f xs -> f : concatMap functionsIn xs
+      IxCon _ xs -> concatMap functionsIn xs
+      IxSucc x -> functionsIn x
+      _ -> []
+functionAbbreviation _ _ = Nothing
 
 {- |
 Why a method is not resolved where it is used: the type its class is at is
@@ -2592,7 +2666,7 @@ mismatch :: Env -> Ty -> Ty -> String
 mismatch env expected found = "type mismatch: " <> shown expected <> " and " <> shown found
   where
     sc = envScope env
-    shown = renderType env (tsTypes sc) (map fst (tsValues sc))
+    shown = renderType env (tsTypes sc) (valueNamesOf env)
 
 -- * Terms
 
@@ -2712,40 +2786,61 @@ An application takes the parameters of its head's type from its implicit
 arguments given in braces first, each an index of its parameter's type, then
 from the type expected, then from its arguments, each checked against its
 domain as far as that is known, by matching, one-sided; what none determines
-is a hole.  A method, or a function under constraints, is resolved there, at the
-types its class's parameters are then at: the instance for the head of the
-type, or a place of the dictionary given at a type parameter.  An argument
-whose type must be known to resolve a method or a constructor in it, and is
-not yet, is undetermined: it is checked again once the other arguments have
-determined more of its domain, and the application is undetermined itself
-when none do.
+is a hole.  Indices are matched up to the unfolding of abbreviations, so
+that @nn a@ is @(a :=> Bottom) :=> Bottom@ where @nn a = neg (neg a)@.  A
+method, or a function under constraints, is resolved there, at the types its
+class's parameters are then at: the instance for the head of the type, or a
+place of the dictionary given at a type parameter.  An argument whose type
+must be known to resolve a method or a constructor in it, or to find an
+implicit value it passes, and is not yet, is undetermined: it is checked
+again once the other arguments have determined more of its domain, and the
+application is undetermined itself when none do.
+
+Where the proofs of a function's body are collected, a term whose type
+differs from the one expected in indices alone is transported to it: to the
+type expected, each hole of it filled by what the term's type has there,
+with an equation of indices for each that differs, proved by congruence and
+the unfolding of the functions in it, an obligation of the clause.  So a
+term is used at the type an abbreviation names where its own type unfolds
+it, and at an index a function computes where the indices are equal in the
+core.
 -}
 elabTerm :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
 elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
   case runWriterT (elabTermDirect proofArguments env givens ctx le expected) of
-    Right result -> Right result
+    Right result@((value, actual), needed)
+      | Just _ <- mergeTy expected actual -> Right result
+      -- Agreeing with the type expected only once abbreviations are unfolded: transported, or refused where no proof is collected.
+      | otherwise -> maybe (Left (Refused (ElabError sp (mismatch env expected actual)))) Right (transported value actual needed)
     Left original -> case proofArguments of
-      CollectProofArguments hypotheses
+      CollectProofArguments _
         | expected /= THole
         , Right ((_, inferred), inferenceRequirements) <- runWriterT (elabTermDirect proofArguments env givens ctx le (erase expected))
         , Just hint <- fillTypes inferred expected
         , Right ((value, actual), needed) <- runWriterT (elabTermDirect proofArguments env givens ctx le hint)
-        , Just target <- completeTypes actual expected
-        , Just pairs@(_ : _) <- transportIndices actual target
-        , not (null hypotheses) || all possible pairs
-        , Just converted <-
-            traverse
-              ( \(x, y) -> do
-                  (left, fromLeft) <- indexTermInWithDependencies env ctx x
-                  (right, fromRight) <- indexTermInWithDependencies env ctx y
-                  pure (Rel RelEq left right, fromLeft <> fromRight)
-              )
-              pairs ->
-            let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
-                prerequisites = foldMap (requirement sp . CertifiedDeclaration) (Set.toList (foldMap snd converted))
-             in Right ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | (prop, _) <- converted]), target), inferenceRequirements <> needed <> prerequisites)
+        , Just result <- transported value actual (inferenceRequirements <> needed) ->
+            Right result
       _ -> Left original
   where
+    -- The term at the type expected, from the type found for it, where the proofs are collected and the indices may be equal.
+    transported value actual needed = do
+      hypotheses <- case proofArguments of
+        CollectProofArguments hs -> Just hs
+        _ -> Nothing
+      target <- completeTypes actual expected
+      pairs@(_ : _) <- transportIndices actual target
+      guard (not (null hypotheses) || all possible pairs)
+      converted <-
+        traverse
+          ( \(x, y) -> do
+              (left, fromLeft) <- indexTermInWithDependencies env ctx x
+              (right, fromRight) <- indexTermInWithDependencies env ctx y
+              pure (Rel RelEq left right, fromLeft <> fromRight)
+          )
+          pairs
+      let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
+          prerequisites = foldMap (requirement sp . CertifiedDeclaration) (Set.toList (foldMap snd converted))
+      pure ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | (prop, _) <- converted]), target), needed <> prerequisites)
     -- A proof can determine an index before an ordinary argument determines
     -- its element type. Fill those type holes before collecting the index
     -- equalities, preserving every index of a type inferred for a hole.
@@ -2755,12 +2850,22 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
     fillTypes (TData name ts indices) (TData other us _)
       | name == other, length ts == length us = TData name <$> zipWithM fillTypes ts us <*> pure indices
     fillTypes source _ = Just source
+    -- The type expected, each hole of it filled by what the type found has there, its indices kept where both have one.
     completeTypes source THole = Just source
-    completeTypes (TData name ts _) (TData other us indices)
-      | name == other, length ts == length us = TData name <$> zipWithM completeTypes ts us <*> pure indices
+    completeTypes (TData name ts xs) (TData other us ys)
+      | name == other, length ts == length us = TData name <$> zipWithM completeTypes ts us <*> pure (completeIndices xs ys)
     completeTypes (TParam i ts) (TParam j us)
       | i == j, length ts == length us = TParam i <$> zipWithM completeTypes ts us
     completeTypes source target = mergeTy source target
+    completeIndices xs ys
+      | length xs == length ys = zipWith completeIx xs ys
+      | otherwise = ys
+    completeIx found wanted = case (normIx found, normIx wanted) of
+      (x, IxHole) -> x
+      (IxSucc x, IxSucc y) -> IxSucc (completeIx x y)
+      (IxCon c as, IxCon d bs) | c == d, length as == length bs -> IxCon c (zipWith completeIx as bs)
+      (IxFun f as, IxFun g bs) | f == g, length as == length bs -> IxFun f (zipWith completeIx as bs)
+      (_, y) -> y
 
 elabTermDirect :: ProofArguments -> Env -> [Slot] -> Ctx a -> Located R.Expr -> Ty -> TC (Expr a, Ty)
 elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e of
@@ -2849,7 +2954,13 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         (NoProofArguments, _ : _) -> failAt sp "proof arguments are not supported in this scope: their proof obligations must be checked before erasure"
         _ -> pure ()
       apply <- ahApply h s2
-      t <- agree env sp expected (substScheme n s2 (ahResult h))
+      -- The type found for it; agreeing with the one expected only once abbreviations are unfolded, it stands, and 'elabTerm' transports the term to the type expected by the equations of their indices.
+      let actual = substScheme n s2 (ahResult h)
+      t <- case mergeTy expected actual of
+        Just agreed -> pure agreed
+        Nothing
+          | Just _ <- mergeTyWith (unfolder env) expected actual -> pure actual
+          | otherwise -> failAt sp (mismatch env expected actual)
       unless (firstOrder t) $ failAt sp "a function-valued result is not a first-order value"
       terms <-
         if asTypes s2 == asTypes settled && asValues s2 == asValues settled
@@ -2897,7 +3008,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       -- The implicit arguments given, in braces; then the parameters the type expected fixes, then those the arguments do.
       selectedTypes <- forM (zip (ahTypeImplicits h) typeImplicits) \(i, argument') -> (i,) <$> liftE (elabTypeIn env (envScope env) argument')
       given <- foldM (implicitArg n) emptyAssignment {asTypes = IM.fromList selectedTypes} (zip (ahImplicits h) valueImplicits)
-      s0 <- maybe (failAt sp (mismatch env wanted (substScheme n given (ahResult h)))) pure (matchTy n (ahResult h) wanted given)
+      s0 <- maybe (failAt sp (mismatch env wanted (substScheme n given (ahResult h)))) pure (matchTyWith (unfolder env) n (ahResult h) wanted given)
       pure (foldl (proofHint n args) s0 (ahProofShapes h))
     proofHint n args s (pos, shape)
       | pos < length args
@@ -2913,7 +3024,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       ix <- liftE (elabIx env values x)
       s' <- case ixType env sc ix of
         THole -> pure s
-        t -> maybe (failAt (location x) (mismatch env (substScheme n s kind) t)) pure (matchTy n kind t s)
+        t -> maybe (failAt (location x) (mismatch env (substScheme n s kind) t)) pure (matchTyWith (unfolder env) n kind t s)
       pure s' {asValues = IM.insert key (normIx ix) (asValues s')}
     -- An argument against its domain as far as it is known; put off, with the type tried and why, when undetermined.
     argument deps n (s, done, pending) (i, d, a) = do
@@ -2945,7 +3056,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       where
         dom = substScheme n s d
     -- What an argument's type says of the parameters of its head's type.
-    found n asp d t s = maybe (failAt asp (mismatch env (substScheme n s d) t)) pure (matchTy n d t s)
+    found n asp d t s = maybe (failAt asp (mismatch env (substScheme n s d) t)) pure (matchTyWith (unfolder env) n d t s)
     -- The head of an application: a variable, a builtin, a function, a constructor or a method.
     headOf hint (Located hsp h) = case h of
       R.EName (QName [] (Ident x)) | Just (v, t) <- lookup x ctx -> case t of
@@ -2976,6 +3087,12 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     -- Materialized indices cross the same explicit typing boundary as source
     -- arguments. Annotate each nested computation from its declaration, not
     -- just the outer value supplied to an indexed instance.
+    -- An index found for a value the head takes at runtime, which no term in scope stands for: put off
+    -- while a hole is in it, which an argument beside it may fill; refused once it is whole.
+    unavailable :: Span -> String -> Ix -> TC b
+    unavailable hsp what ix
+      | hasHole ix = undetermined hsp (what <> " is not determined here: " <> renderIx (valueNamesOf env) ix)
+      | otherwise = failAt hsp (what <> " is " <> renderIx (valueNamesOf env) ix <> ", which no variable in scope stands for: a clause names the implicit values its body uses, in braces")
     valueIndex = valueIndexAs THole
     valueIndexAs hint index = fst <$> indexValue hint index
     indexValue hint index = case index of
@@ -3101,10 +3218,15 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                 )
                 s
                 (zip [0 ..] values)
-            -- The implicit values it takes at runtime, as found: terms of what is in scope.
-            passed s = forM (funRuntime f) \i -> case runWriterT (indexMaybe (IM.lookup i (asValues s)) >>= valueIndexAs (substScheme n s (snd (schemeValues (funScheme f) !! i)))) of
-              Just (x, used) -> requireIndexDependencies hsp used *> pure (Typed (substScheme n s (snd (schemeValues (funScheme f) !! i))) [] [] x)
-              Nothing -> failAt hsp ("the implicit value " <> T.unpack (fst (schemeValues (funScheme f) !! i)) <> " of " <> T.unpack (displayQualName (funQual f)) <> " is not determined here, as a value")
+            -- The implicit values it takes at runtime, as found: terms of what is in scope.  One not determined yet puts the application off, for the arguments beside it to determine it.
+            passed s = forM (funRuntime f) \i -> do
+              let (name, kind) = schemeValues (funScheme f) !! i
+                  what = "the implicit value " <> T.unpack name <> " of " <> T.unpack (displayQualName (funQual f))
+              case IM.lookup i (asValues s) of
+                Nothing -> undetermined hsp (what <> " is not determined here")
+                Just ix -> case runWriterT (valueIndexAs (substScheme n s kind) ix) of
+                  Just (x, used) -> requireIndexDependencies hsp used *> pure (Typed (substScheme n s kind) [] [] x)
+                  Nothing -> unavailable hsp what ix
             -- Its preconditions at the parameters found: the propositions its proofs are of.
             proofAt =
               [ ( pos
@@ -3155,11 +3277,14 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                 | (a, prop) <- constructorProofs g
                 ]
           pure $ AppHead (n, length tele) [] True doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- constructorProofs g] pure \s -> do
-            stored <- forM [(k, pos, en) | (pos, en@(TeleEntry _ _ (Stored k))) <- zip [0 ..] tele] \(k, pos, en) ->
-              case runWriterT (indexMaybe (IM.lookup pos (asValues s)) >>= valueIndex) of
-                Just (x, used) -> requireIndexDependencies hsp used *> pure (k, Typed (substScheme (n, length tele) s (teType en)) [] [] x)
-                Nothing -> failAt hsp ("the implicit argument " <> T.unpack (teName en) <> " of " <> cname <> " is not determined here, as a value")
-            -- Its fields, the implicit arguments stored before them; its proofs after, kept for their obligations and erased from the code.
+            stored <- forM [(k, pos, en) | (pos, en@(TeleEntry _ _ (Stored k))) <- zip [0 ..] tele] \(k, pos, en) -> do
+              let what = "the implicit argument " <> T.unpack (teName en) <> " of " <> cname
+              case IM.lookup pos (asValues s) of
+                Nothing -> undetermined hsp (what <> " is not determined here")
+                Just ix -> case runWriterT (valueIndex ix) of
+                  Just (x, used) -> requireIndexDependencies hsp used *> pure (k, Typed (substScheme (n, length tele) s (teType en)) [] [] x)
+                  Nothing -> unavailable hsp what ix
+            -- Its fields, the implicit arguments stored before them; its proofs after, kept for their obligations and erased from the code.  A stored argument not determined yet puts the application off, for the arguments beside it to determine it.
             pure \as ->
               let (values, proofs) = partition (not . isProofArg) as
                in apps ref ([fromMaybe Hole (lookup k (stored <> zip positions values)) | k <- [0 .. length (ctorFields c) - 1]] <> proofs)

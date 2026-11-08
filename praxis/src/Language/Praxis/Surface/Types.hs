@@ -47,19 +47,26 @@ module Language.Praxis.Surface.Types (
 
   -- * Indices
   normIx,
+  hasHole,
   ixVars,
   mapIx,
   tyIndices,
   instValues,
 
   -- * Comparison
+  Unfold,
+  noUnfold,
   Assignment (..),
   emptyAssignment,
   mergeTy,
+  mergeTyWith,
   mergeIx,
+  mergeIxWith,
   transportIndices,
   matchTy,
+  matchTyWith,
   matchIx,
+  matchIxWith,
   substScheme,
 ) where
 
@@ -370,42 +377,94 @@ emptyAssignment :: Assignment
 emptyAssignment = Assignment IM.empty IM.empty
 
 {- |
+How an index of a function applied unfolds, where the function is an
+abbreviation — a definition by one equation over variables, as @nn a = neg
+(neg a)@: its right side at the arguments.  Nothing for any other function,
+or for an abbreviation applied to fewer arguments than it takes.  Comparing
+indices unfolds an abbreviation where the indices differ as they stand, so
+that @nn a@ agrees with @(a :=> Bottom) :=> Bottom@.
+-}
+type Unfold = Text -> [Ix] -> Maybe Ix
+
+-- | Unfold nothing: indices compared as they stand.
+noUnfold :: Unfold
+noUnfold _ _ = Nothing
+
+{- |
+How many abbreviations a comparison of indices unfolds one after another
+down one path: a bound, so that the methods of an instance defining one
+another in a circle do not unfold without end.
+-}
+unfoldDepth :: Int
+unfoldDepth = 64
+
+-- | Whether an index has a hole somewhere in it.
+hasHole :: Ix -> Bool
+hasHole = \case
+  IxHole -> True
+  IxSucc x -> hasHole x
+  IxCon _ xs -> any hasHole xs
+  IxFun _ xs -> any hasHole xs
+  IxPartial _ _ _ xs -> any hasHole xs
+  _ -> False
+
+{- |
 What two types say of one type together: each hole of one filled by what
 the other has there, and indices compared in normal form.  Nothing when they
 disagree.
 -}
 mergeTy :: Ty -> Ty -> Maybe Ty
-mergeTy a b = case (a, b) of
-  (THole, t) -> Just t
-  (t, THole) -> Just t
-  (TParam i ts, TParam j us) | i == j, length ts == length us -> TParam i <$> zipWithM mergeTy ts us
-  (TData m ts xs, TData n us ys) | m == n, length ts == length us -> TData m <$> zipWithM mergeTy ts us <*> mergeIndices xs ys
-  (TNat, TNat) -> Just TNat
-  (TArrow x y, TArrow z w) -> TArrow <$> mergeTy x z <*> mergeTy y w
-  _ -> Nothing
+mergeTy = mergeTyWith noUnfold
+
+-- | 'mergeTy', its indices compared as 'mergeIxWith' compares them, abbreviations unfolded.
+mergeTyWith :: Unfold -> Ty -> Ty -> Maybe Ty
+mergeTyWith unfold = go
   where
+    go a b = case (a, b) of
+      (THole, t) -> Just t
+      (t, THole) -> Just t
+      (TParam i ts, TParam j us) | i == j, length ts == length us -> TParam i <$> zipWithM go ts us
+      (TData m ts xs, TData n us ys) | m == n, length ts == length us -> TData m <$> zipWithM go ts us <*> mergeIndices xs ys
+      (TNat, TNat) -> Just TNat
+      (TArrow x y, TArrow z w) -> TArrow <$> go x z <*> go y w
+      _ -> Nothing
     -- An erased type, of no indices, agrees with any indices.
     mergeIndices xs ys
       | null xs = Just ys
       | null ys = Just xs
-      | length xs == length ys = zipWithM mergeIx xs ys
+      | length xs == length ys = zipWithM (mergeIxWith unfold) xs ys
       | otherwise = Nothing
 
 -- | What two indices say of one together, in normal form: a hole filled, the rest equal.
 mergeIx :: Ix -> Ix -> Maybe Ix
-mergeIx a b = go (normIx a) (normIx b)
+mergeIx = mergeIxWith noUnfold
+
+{- |
+'mergeIx', abbreviations unfolded where the indices differ as they stand: an
+abbreviation applied, on either side, against what it does not agree with,
+is unfolded, and the two compared on.  Where they agree only so, the index
+is as the first has it, unless that has a hole the other fills, so that a
+type expected keeps its form: @nn a@ with @(a :=> Bottom) :=> Bottom@ is
+@nn a@.
+-}
+mergeIxWith :: Unfold -> Ix -> Ix -> Maybe Ix
+mergeIxWith unfold a b = go unfoldDepth (normIx a) (normIx b)
   where
-    go x y = case (x, y) of
+    go fuel x y = case (x, y) of
       (IxHole, _) -> Just y
       (_, IxHole) -> Just x
-      (IxSucc x', IxSucc y') -> succIx <$> go x' y'
-      (IxSucc x', IxNat k) | k > 0 -> succIx <$> go x' (IxNat (k - 1))
-      (IxNat k, IxSucc y') | k > 0 -> succIx <$> go (IxNat (k - 1)) y'
-      (IxCon c xs, IxCon c' ys) | c == c', length xs == length ys -> IxCon c <$> zipWithM go xs ys
-      (IxFun f xs, IxFun f' ys) | f == f', length xs == length ys -> IxFun f <$> zipWithM go xs ys
-      (IxPartial f n k xs, IxPartial g m l ys) | f == g, n == m, k == l, length xs == length ys -> IxPartial f n k <$> zipWithM go xs ys
+      (IxSucc x', IxSucc y') -> succIx <$> go fuel x' y'
+      (IxSucc x', IxNat k) | k > 0 -> succIx <$> go fuel x' (IxNat (k - 1))
+      (IxNat k, IxSucc y') | k > 0 -> succIx <$> go fuel (IxNat (k - 1)) y'
+      (IxCon c xs, IxCon c' ys) | c == c', length xs == length ys -> IxCon c <$> zipWithM (go fuel) xs ys
+      (IxFun f xs, IxFun f' ys) | f == f', length xs == length ys, Just zs <- zipWithM (go fuel) xs ys -> Just (IxFun f zs)
+      (IxPartial f n k xs, IxPartial g m l ys) | f == g, n == m, k == l, length xs == length ys -> IxPartial f n k <$> zipWithM (go fuel) xs ys
       _ | x == y -> Just x
+      _ | fuel <= 0 -> Nothing
+      (IxFun f xs, _) | Just x' <- unfold f xs -> keep x <$> go (fuel - 1) (normIx x') y
+      (_, IxFun g ys) | Just y' <- unfold g ys -> keep x <$> go (fuel - 1) x (normIx y')
       _ -> Nothing
+    keep x merged = if hasHole x then merged else x
 
 {- |
 Match the type of a scheme of @n@ type parameters and @m@ value parameters
@@ -418,31 +477,36 @@ takes that parameter applied to those in front; against anything else it is
 opaque, and determines nothing.  Nothing when the types disagree.
 -}
 matchTy :: (Int, Int) -> Ty -> Ty -> Assignment -> Maybe Assignment
-matchTy nm@(n, m) p t s = case (p, t) of
-  (_, THole) -> Just s
-  (TParam i [], _) | i < n -> case IM.lookup i (asTypes s) of
-    Nothing -> Just s {asTypes = IM.insert i t (asTypes s)}
-    Just u -> (\v -> s {asTypes = IM.insert i v (asTypes s)}) <$> mergeTy u t
-  (TParam i ps, TParam j ts)
-    | i < n
-    , length ts >= length ps ->
-        let (front, rest) = splitAt (length ts - length ps) ts
-         in matchTy nm (TParam i []) (TParam j front) s >>= \s' -> pairs (zip ps rest) s'
-  (TParam i _, _) | i < n -> Just s
-  (TParam i ps, TParam j ts) | i == j, length ps == length ts -> pairs (zip ps ts) s
-  (TData a ps xs, TData b ts ys)
-    | a == b
-    , length ps == length ts ->
-        pairs (zip ps ts) s >>= \s' ->
-          -- An erased type, of no indices, determines none of them.
-          if null xs || null ys
-            then Just s'
-            else if length xs == length ys then foldM (\acc (x, y) -> matchIx m x y acc) s' (zip xs ys) else Nothing
-  (TNat, TNat) -> Just s
-  (TArrow a b, TArrow c d) -> pairs [(a, c), (b, d)] s
-  _ -> Nothing
+matchTy = matchTyWith noUnfold
+
+-- | 'matchTy', its indices matched as 'matchIxWith' matches them, abbreviations unfolded.
+matchTyWith :: Unfold -> (Int, Int) -> Ty -> Ty -> Assignment -> Maybe Assignment
+matchTyWith unfold (n, m) = go
   where
-    pairs xs s0 = foldM (\acc (x, y) -> matchTy nm x y acc) s0 xs
+    go p t s = case (p, t) of
+      (_, THole) -> Just s
+      (TParam i [], _) | i < n -> case IM.lookup i (asTypes s) of
+        Nothing -> Just s {asTypes = IM.insert i t (asTypes s)}
+        Just u -> (\v -> s {asTypes = IM.insert i v (asTypes s)}) <$> mergeTyWith unfold u t
+      (TParam i ps, TParam j ts)
+        | i < n
+        , length ts >= length ps ->
+            let (front, rest) = splitAt (length ts - length ps) ts
+             in go (TParam i []) (TParam j front) s >>= \s' -> pairs (zip ps rest) s'
+      (TParam i _, _) | i < n -> Just s
+      (TParam i ps, TParam j ts) | i == j, length ps == length ts -> pairs (zip ps ts) s
+      (TData a ps xs, TData b ts ys)
+        | a == b
+        , length ps == length ts ->
+            pairs (zip ps ts) s >>= \s' ->
+              -- An erased type, of no indices, determines none of them.
+              if null xs || null ys
+                then Just s'
+                else if length xs == length ys then foldM (\acc (x, y) -> matchIxWith unfold m x y acc) s' (zip xs ys) else Nothing
+      (TNat, TNat) -> Just s
+      (TArrow a b, TArrow c d) -> pairs [(a, c), (b, d)] s
+      _ -> Nothing
+    pairs xs s0 = foldM (\acc (x, y) -> go x y acc) s0 xs
 
 {- |
 Match an index of a scheme of @m@ value parameters against an index, both in
@@ -453,20 +517,32 @@ Nothing when they disagree, as a successor against zero, or a constructor
 against a variable, whose value nothing here knows.
 -}
 matchIx :: Int -> Ix -> Ix -> Assignment -> Maybe Assignment
-matchIx m p0 t0 s = go (normIx p0) (normIx t0) s
+matchIx = matchIxWith noUnfold
+
+{- |
+'matchIx', abbreviations unfolded where the indices differ as they stand: an
+abbreviation applied, on either side, against what it does not match, is
+unfolded, and matching goes on with its right side.  A parameter takes what
+the other index has where it stands, as it stands.
+-}
+matchIxWith :: Unfold -> Int -> Ix -> Ix -> Assignment -> Maybe Assignment
+matchIxWith unfold m p0 t0 s = go unfoldDepth (normIx p0) (normIx t0) s
   where
-    go p t acc = case (p, t) of
+    go fuel p t acc = case (p, t) of
       (_, IxHole) -> Just acc
       (IxParam i, _) | i < m -> case IM.lookup i (asValues acc) of
         Nothing -> Just acc {asValues = IM.insert i t (asValues acc)}
-        Just u -> (\v -> acc {asValues = IM.insert i v (asValues acc)}) <$> mergeIx u t
-      (IxSucc p', IxSucc t') -> go p' t' acc
-      (IxSucc p', IxNat k) | k > 0 -> go p' (IxNat (k - 1)) acc
-      (IxNat k, IxSucc t') | k > 0 -> go (IxNat (k - 1)) t' acc
-      (IxCon c ps, IxCon c' ts) | c == c', length ps == length ts -> foldM (\a (x, y) -> go x y a) acc (zip ps ts)
-      (IxFun f ps, IxFun f' ts) | f == f', length ps == length ts -> foldM (\a (x, y) -> go x y a) acc (zip ps ts)
-      (IxPartial f n k ps, IxPartial g o l ts) | f == g, n == o, k == l, length ps == length ts -> foldM (\a (x, y) -> go x y a) acc (zip ps ts)
+        Just u -> (\v -> acc {asValues = IM.insert i v (asValues acc)}) <$> mergeIxWith unfold u t
+      (IxSucc p', IxSucc t') -> go fuel p' t' acc
+      (IxSucc p', IxNat k) | k > 0 -> go fuel p' (IxNat (k - 1)) acc
+      (IxNat k, IxSucc t') | k > 0 -> go fuel (IxNat (k - 1)) t' acc
+      (IxCon c ps, IxCon c' ts) | c == c', length ps == length ts -> foldM (\a (x, y) -> go fuel x y a) acc (zip ps ts)
+      (IxFun f ps, IxFun f' ts) | f == f', length ps == length ts, Just acc' <- foldM (\a (x, y) -> go fuel x y a) acc (zip ps ts) -> Just acc'
+      (IxPartial f n k ps, IxPartial g o l ts) | f == g, n == o, k == l, length ps == length ts -> foldM (\a (x, y) -> go fuel x y a) acc (zip ps ts)
       _ | p == t -> Just acc
+      _ | fuel <= 0 -> Nothing
+      (IxFun f ps, _) | Just p' <- unfold f ps -> go (fuel - 1) (normIx p') t acc
+      (_, IxFun g ts) | Just t' <- unfold g ts -> go (fuel - 1) p (normIx t') acc
       _ -> Nothing
 
 {- |

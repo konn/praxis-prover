@@ -98,6 +98,8 @@ module Language.Praxis.Surface.Env (
   indexTermInWithDependencies,
   normalizeIndex,
   normalizeTypeIndices,
+  unfoldIndex,
+  unfolder,
   displayName,
 ) where
 
@@ -121,7 +123,7 @@ import Language.Praxis.Surface.SourceView (QuantifierViews)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..))
 import Language.Praxis.Surface.Syntax.Raw (Located, QName (..), Segment (..), segmentRaw, segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
-import Language.Praxis.Surface.Types (Assignment (..), Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope (..), emptyAssignment, emptyScope, ixVars, mapIx, normIx, renderTyWithOrder, substScheme, tyIndices)
+import Language.Praxis.Surface.Types (Assignment (..), Ix (..), Kind, Parameter (..), Scheme (..), Ty (..), TyScope (..), Unfold, emptyAssignment, emptyScope, ixVars, mapIx, normIx, renderTyWithOrder, substScheme, tyIndices)
 
 -- * Globals
 
@@ -202,6 +204,33 @@ normalizeTypeIndices env = go
        in (TArrow a r, fromDomain <> fromResult)
     go ty = (ty, Set.empty)
     types arguments = let (as, uses) = unzip (map go arguments) in (as, Set.unions uses)
+
+{- |
+An index of a function applied, unfolded once at its head, where the
+function is an abbreviation applied in full: its right side at the
+arguments, in normal form, and the abbreviation's core name.
+-}
+unfoldIndex :: Env -> Ix -> Maybe (Ix, Text)
+unfoldIndex env = \case
+  IxFun name xs
+    | Just (count, body) <- Map.lookup name (envAbbreviations env)
+    , length xs == count ->
+        Just (normIx (argumentsIn xs body), name)
+  _ -> Nothing
+  where
+    argumentsIn xs = go
+      where
+        go = \case
+          IxParam i -> fromMaybe IxHole (listToMaybe (drop i xs))
+          IxSucc x -> IxSucc (go x)
+          IxCon c ys -> IxCon c (map go ys)
+          IxFun f ys -> IxFun f (map go ys)
+          IxPartial f arity prefix ys -> IxPartial f arity prefix (map go ys)
+          x -> x
+
+-- | How indices unfold in an environment, for comparing them: 'unfoldIndex' at a function applied.
+unfolder :: Env -> Unfold
+unfolder env name xs = fst <$> unfoldIndex env (IxFun name xs)
 
 {- |
 A qualified name as its segments: the library the module belongs to, when
@@ -651,6 +680,12 @@ data Env = Env
   -- ^ the modules a bare constructor may be found in: the file's, and those it imports
   , envDisplay :: !(Map Text Text)
   -- ^ every core name, with the surface name it stands for
+  , envAbbreviations :: !(Map Text (Int, Ix))
+  {- ^ each abbreviation, a function defined by one equation over variables,
+  by its core name: how many arguments its application takes, the implicit
+  values it takes at runtime first, and its right side over them by position,
+  @IxParam@; comparing indices unfolds it
+  -}
   , envInstances :: !(Map (QualName, Text) InstanceInfo)
   -- ^ each instance, by its class and the head of its type: one for each
   , envBuiltins :: !(Map Text QualName)
@@ -667,7 +702,7 @@ data Env = Env
 
 -- | No module, and nothing known: what a build starts from.
 emptyEnv :: Env
-emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty Map.empty [] [] [] emptyScope
+emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty [] [] [] emptyScope
 
 {- |
 The environment a module of the name given is elaborated in, with the
