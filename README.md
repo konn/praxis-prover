@@ -135,6 +135,10 @@ CoPRA is an internal codename; the user-facing system is Praxis. Praxis Core nam
 Praxis Surface -[elaborate]-> Praxis Core -[compile]-> CoPRA <- checked by the kernel
 ```
 
+## References
+
+- H. Ishii: *[Praxis: A theorem prover for metamathematics based on a very weak theory PRA](https://konn-san.com/t/Praxis-Prover-TPP26.pdf)*. Talk at TPP 2026.
+
 ## Copyright
 
 (c) Hiromi ISHII 2026–present
