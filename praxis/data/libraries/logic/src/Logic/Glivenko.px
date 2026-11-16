@@ -40,9 +40,9 @@ identity = by
   {
     apply (:@)
     { exact Intuitionistic.S }
-    { exact Intuitionistic.K }
+    { exact K }
   }
-  { exact Intuitionistic.K {a} {a} }
+  { exact K {a} {a} }
 
 -- The easy direction preserves the conclusion literally.
 embed : Intuitionistic a -> Classical a
@@ -118,7 +118,7 @@ combine (Apply y z) x af ax = s-step af ax
 -- K for a part not using the hypothesis, the identity for the hypothesis,
 -- and for an application, eta or S over the abstracted premises.
 abstract : Use g a b -> Open g (a :=> b)
-abstract (Unused d) = Lift Intuitionistic.K :@ d
+abstract (Unused d) = Lift K :@ d
 abstract Var = Lift identity
 abstract (Apply f x) = combine f x (abstract f) (abstract x)
 
@@ -154,7 +154,7 @@ double-negation-mp = close (deduction (deduction (deduction (
 double-negation-dne : {a : Formula} -> Intuitionistic (((((a :=> Bottom) :=> Bottom) :=> a) :=> Bottom) :=> Bottom)
 double-negation-dne = close (deduction (
   Hyp Here :@ deduction (
-    Lift Intuitionistic.Explosion :@ (Hyp Here :@ deduction (
+    Lift Explosion :@ (Hyp Here :@ deduction (
       Hyp (There (There Here)) :@ deduction (Hyp (There Here)))))))
 
 -- \n. n (\z. z)
@@ -167,10 +167,10 @@ bottom-out = close (deduction (Hyp Here :@ deduction (Hyp Here)))
 peirce : {a : Formula} -> {b : Formula} -> Classical (((a :=> b) :=> a) :=> a)
 peirce =
   Classical.S {(a :=> b) :=> a} {(a :=> Bottom) :=> Bottom} {a}
-    :@ (Classical.K {((a :=> Bottom) :=> Bottom) :=> a} {(a :=> b) :=> a} :@ Classical.DNE {a})
+    :@ (K {((a :=> Bottom) :=> Bottom) :=> a} {(a :=> b) :=> a} :@ DNE)
     :@ embed (close (deduction (deduction (
       Hyp Here :@ (Hyp (There Here) :@ deduction (
-        Lift Intuitionistic.Explosion :@ (Hyp (There Here) :@ Hyp Here)))))))
+        Lift Explosion :@ (Hyp (There Here) :@ Hyp Here)))))))
 
 -- The namespace is independent of the selected theory. Leaving the block
 -- exposes ClassicalExamples.peirce-law as a Classical derivation schema.
@@ -183,10 +183,10 @@ module ClassicalExamples where
 -- Glivenko's algorithm: its result-membership and result-index contracts
 -- are generated and certified in PRA, uniformly over the input derivation.
 glivenko : Classical a -> Intuitionistic (nn a)
-glivenko Classical.K = double-negation-intro :@ Intuitionistic.K
+glivenko K = double-negation-intro :@ K
 glivenko Classical.S = double-negation-intro :@ Intuitionistic.S
-glivenko Classical.Explosion = double-negation-intro :@ Intuitionistic.Explosion
-glivenko Classical.DNE = double-negation-dne
+glivenko Explosion = double-negation-intro :@ Explosion
+glivenko DNE = double-negation-dne
 glivenko (f :@ x) = double-negation-mp :@ glivenko f :@ glivenko x
 
 -- The finite witness transformation underlying Con(IPC) -> Con(CPC).
@@ -196,30 +196,30 @@ contradiction p = bottom-out :@ glivenko p
 -- The converse direction of theoremhood: IPC proves not-not A only if CPC
 -- proves A. This is another proof transformation, not a reflection principle.
 recover : {a : Formula} -> Intuitionistic (nn a) -> Classical a
-recover p = Classical.DNE :@ embed p
+recover p = DNE :@ embed p
 
 -- Observable computations for the talk demo. These count unfolded proof
 -- nodes; the evaluator can share identical subderivations internally.
 classical-size : Classical a -> Nat
-classical-size (Classical.K {a} {b}) = 1
-classical-size (Classical.S {a} {b} {c}) = 1
-classical-size (Classical.Explosion {a}) = 1
-classical-size (Classical.DNE {a}) = 1
+classical-size K = 1
+classical-size Classical.S = 1
+classical-size Explosion = 1
+classical-size DNE = 1
 classical-size (f :@ x) = S (classical-size f + classical-size x)
 
 intuitionistic-size : Intuitionistic a -> Nat
-intuitionistic-size (Intuitionistic.K {a} {b}) = 1
-intuitionistic-size (Intuitionistic.S {a} {b} {c}) = 1
-intuitionistic-size (Intuitionistic.Explosion {a}) = 1
+intuitionistic-size K = 1
+intuitionistic-size Intuitionistic.S = 1
+intuitionistic-size Explosion = 1
 intuitionistic-size (f :@ x) = S (intuitionistic-size f + intuitionistic-size x)
 
 -- Embedding an intuitionistic proof into the classical calculus preserves its
 -- size: a calculation for modus ponens, the induction hypotheses at the premises.
 embed-size : (p : Intuitionistic a)
   -> classical-size (embed p) ≡ intuitionistic-size p
-embed-size Intuitionistic.K = rfl
+embed-size K = rfl
 embed-size Intuitionistic.S = rfl
-embed-size Intuitionistic.Explosion = rfl
+embed-size Explosion = rfl
 embed-size (f :@ x) = calc
   classical-size (embed (f :@ x))
   = classical-size (embed f :@ embed x)
@@ -231,9 +231,9 @@ embed-size (f :@ x) = calc
   = intuitionistic-size (f :@ x)
 
 conclusion : Intuitionistic a -> Formula
-conclusion (Intuitionistic.K {a} {b}) = a :=> b :=> a
+conclusion (K {a} {b}) = a :=> b :=> a
 conclusion (Intuitionistic.S {a} {b} {c}) = (a :=> b :=> c) :=> (a :=> b) :=> a :=> c
-conclusion (Intuitionistic.Explosion {a}) = Bottom :=> a
+conclusion (Explosion {a}) = Bottom :=> a
 conclusion ((:@) {a} {b} f x) = b
 
 -- Package the original and translated proofs together. Keeping the proof
