@@ -32,14 +32,14 @@ infixl 9 :@
 
 -- Proof schemata built by construction tactics in an ordinary definition:
 -- apply modus ponens, then construct its two premises in turn. (:@) is found
--- by the expected type; K and S are qualified, since both calculi have them
--- and a bare S is the successor.
+-- by the expected type, as are K and S: the same names also belong to the
+-- classical calculus, and S at Nat is arithmetic successor.
 identity : {a : Formula} -> Intuitionistic (a :=> a)
 identity = by
   apply (:@)
   {
     apply (:@)
-    { exact Intuitionistic.S }
+    { exact S }
     { exact K }
   }
   { exact K {a} {a} }
@@ -47,7 +47,7 @@ identity = by
 -- The easy direction preserves the conclusion literally.
 embed : Intuitionistic a -> Classical a
 embed K = K
-embed S = Classical.S
+embed S = S
 embed Explosion = Explosion
 embed (f :@ x) = embed f :@ embed x
 
@@ -101,7 +101,7 @@ annotate (Lift p) = Unused (Lift p)
 annotate (f :@ x) = apply-use (annotate f) (annotate x)
 
 s-step : {g : Context} -> {a b c : Formula} -> Open g (a :=> c :=> b) -> Open g (a :=> c) -> Open g (a :=> b)
-s-step af ax = Lift Intuitionistic.S :@ af :@ ax
+s-step af ax = Lift S :@ af :@ ax
 
 -- An application f x whose argument uses the hypothesis a: f itself when x
 -- is a, as eta reduction gives; S otherwise.
@@ -166,7 +166,7 @@ bottom-out = close (deduction (Hyp Here :@ deduction (Hyp Here)))
 -- is S (K DNE) of that part's, built in the classical calculus.
 peirce : {a : Formula} -> {b : Formula} -> Classical (((a :=> b) :=> a) :=> a)
 peirce =
-  Classical.S {(a :=> b) :=> a} {(a :=> Bottom) :=> Bottom} {a}
+  S {(a :=> b) :=> a} {(a :=> Bottom) :=> Bottom} {a}
     :@ (K {((a :=> Bottom) :=> Bottom) :=> a} {(a :=> b) :=> a} :@ DNE)
     :@ embed (close (deduction (deduction (
       Hyp Here :@ (Hyp (There Here) :@ deduction (
@@ -184,7 +184,7 @@ module ClassicalExamples where
 -- are generated and certified in PRA, uniformly over the input derivation.
 glivenko : Classical a -> Intuitionistic (nn a)
 glivenko K = double-negation-intro :@ K
-glivenko Classical.S = double-negation-intro :@ Intuitionistic.S
+glivenko S = double-negation-intro :@ S
 glivenko Explosion = double-negation-intro :@ Explosion
 glivenko DNE = double-negation-dne
 glivenko (f :@ x) = double-negation-mp :@ glivenko f :@ glivenko x
@@ -202,37 +202,38 @@ recover p = DNE :@ embed p
 -- nodes; the evaluator can share identical subderivations internally.
 classical-size : Classical a -> Nat
 classical-size K = 1
-classical-size Classical.S = 1
+classical-size S = 1
 classical-size Explosion = 1
 classical-size DNE = 1
 classical-size (f :@ x) = S (classical-size f + classical-size x)
 
 intuitionistic-size : Intuitionistic a -> Nat
 intuitionistic-size K = 1
-intuitionistic-size Intuitionistic.S = 1
+intuitionistic-size S = 1
 intuitionistic-size Explosion = 1
 intuitionistic-size (f :@ x) = S (intuitionistic-size f + intuitionistic-size x)
 
 -- Embedding an intuitionistic proof into the classical calculus preserves its
 -- size: a calculation for modus ponens, the induction hypotheses at the premises.
+-- Calc elaborates each term independently, so its overloaded S steps name Nat.
 embed-size : (p : Intuitionistic a)
   -> classical-size (embed p) ≡ intuitionistic-size p
 embed-size K = rfl
-embed-size Intuitionistic.S = rfl
+embed-size S = rfl
 embed-size Explosion = rfl
 embed-size (f :@ x) = calc
   classical-size (embed (f :@ x))
   = classical-size (embed f :@ embed x)
-  = S (classical-size (embed f) + classical-size (embed x))
-  = S (intuitionistic-size f + classical-size (embed x))
+  = (S (classical-size (embed f) + classical-size (embed x)) : Nat)
+  = (S (intuitionistic-size f + classical-size (embed x)) : Nat)
       := cong (embed-size f)
-  = S (intuitionistic-size f + intuitionistic-size x)
+  = (S (intuitionistic-size f + intuitionistic-size x) : Nat)
       := cong (embed-size x)
   = intuitionistic-size (f :@ x)
 
 conclusion : Intuitionistic a -> Formula
 conclusion (K {a} {b}) = a :=> b :=> a
-conclusion (Intuitionistic.S {a} {b} {c}) = (a :=> b :=> c) :=> (a :=> b) :=> a :=> c
+conclusion (S {a} {b} {c}) = (a :=> b :=> c) :=> (a :=> b) :=> a :=> c
 conclusion (Explosion {a}) = Bottom :=> a
 conclusion ((:@) {a} {b} f x) = b
 

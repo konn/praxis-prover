@@ -48,9 +48,9 @@ embed-size (Pf.S {a} {b} {c}) = rfl
 embed-size (f :@ x) = calc
   qsize (embed (f :@ x))
   = qsize (embed f :@ embed x)
-  = S (qsize (embed f) + qsize (embed x))
-  = S (psize f + qsize (embed x)) := cong (embed-size f)
-  = S (psize f + psize x) := cong (embed-size x)
+  = (S (qsize (embed f) + qsize (embed x)) : Nat)
+  = (S (psize f + qsize (embed x)) : Nat) := cong (embed-size f)
+  = (S (psize f + psize x) : Nat) := cong (embed-size x)
   = psize (f :@ x)
 
 data Use (a : Formula) (b : Formula) where

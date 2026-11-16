@@ -144,6 +144,17 @@ qualified name is resolved through its first segments — a namespace in
 scope, an imported module, the module's own name — the rest navigating
 namespaces.
 
+`Nat` and `nat` are fallback names for the natural-number type; declarations,
+imports and openings can shadow them. Likewise, `S` and `suc` follow ordinary
+scope resolution. When a bare successor name is overloaded with user-defined
+constructors, its expected type selects arithmetic successor at `Nat` or the
+constructor of the expected datatype. This applies in expressions, construction
+scripts, patterns and datatype indices. Without a determining type, an overloaded
+expression is ambiguous; qualify the user constructor or supply a type annotation.
+`calc` infers each term independently, so an overloaded arithmetic step can be
+written `(S n : Nat)` even when the surrounding equation already concerns numbers.
+The natural-number representation and arithmetic in the kernel remain primitive.
+
 ## Classes and instances
 
 ```

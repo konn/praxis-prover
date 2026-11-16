@@ -176,6 +176,24 @@ parserTests =
         errors @?= []
         [unLocated target | RDecl _ (Located _ (DBuiltin _ target)) <- rnDecls renamed]
           @?= [QName source (Ident "Finite"), QName source (Op ":<"), QName source (Ident "Finite")]
+    , testCase "import renamings can introduce natural type and successor names" $ do
+        m <- parsed "import Source as F renaming (T to Nat; make to S)\nopen F\nvalue : Nat\nvalue = S\n"
+        let source = [Ident "Source"]
+            exports = ModuleExports source (Map.fromList [(Ident "T", source <> [Ident "T"]), (Ident "make", source <> [Ident "make"])]) Map.empty
+            imports = Map.singleton (Nothing, source) (Right exports)
+            (renamed, errors) = renameModule builtinFixities emptyEnv imports [Ident "Main"] m
+        errors @?= []
+        [q | RDecl _ (Located _ (DSignature _ (Located _ (EName q)))) <- rnDecls renamed] @?= [QName source (Ident "T")]
+        [q | RDecl _ (Located _ (DClause (Clause _ (Located _ (RExpr (Located _ (EName q))))))) <- rnDecls renamed] @?= [QName source (Ident "make")]
+    , testCase "natural type and successor names report ambiguous openings" $ do
+        forM_ ["Nat", "nat", "S", "suc"] $ \name -> do
+          m <- parsed ("open import A\nopen import B\nvalue : " <> name <> "\n")
+          let exports owner = ModuleExports [Ident owner] (Map.singleton (Ident name) [Ident owner, Ident name]) Map.empty
+              imports = Map.fromList [((Nothing, [Ident owner]), Right (exports owner)) | owner <- ["A", "B"]]
+              (_, errors) = renameModule builtinFixities emptyEnv imports [Ident "Main"] m
+          case errors of
+            [ScopeError _ message] -> assertBool message ("ambiguous" `T.isInfixOf` T.pack message)
+            other -> assertFailure (show other)
     , testCase "ambiguous builtin targets fail at the target name" $ do
         m <- parsed "open import A\nopen import B\n{-# BUILTIN FINITE Fin #-}\n"
         let exports name = ModuleExports [Ident name] (Map.singleton (Ident "Fin") [Ident name, Ident "Fin"]) Map.empty

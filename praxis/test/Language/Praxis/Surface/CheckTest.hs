@@ -37,7 +37,97 @@ checkTests :: TestTree
 checkTests =
   testGroup
     "checker"
-    [ testCase "an unvalidated builtin pragma is never silently ignored" $ do
+    [ testCase "successor names overload in terms, patterns and datatype indices" $ do
+        p <- either assertFailure pure prelude
+        let source =
+              T.unlines
+                [ "module Overloaded where"
+                , "data Token = A | B"
+                , "data Box = S Token | suc Token"
+                , "unwrap : Box -> Token"
+                , "unwrap (S x) = x"
+                , "unwrap (suc x) = x"
+                , "boxed : unwrap (S A) = A"
+                , "boxed = rfl"
+                , "boxed-alias : unwrap (suc B) = B"
+                , "boxed-alias = rfl"
+                , "step : Nat -> Nat"
+                , "step n = S (suc n)"
+                , "pred : Nat -> Nat"
+                , "pred 0 = 0"
+                , "pred (S n) = n"
+                , "numeric : pred (step 2) = 3"
+                , "numeric = rfl"
+                , "selected : S A = Box.S A"
+                , "selected = rfl"
+                , "selected-nat : S 0 = 1"
+                , "selected-nat = rfl"
+                , "data Indexed (b : Box) where"
+                , "  Mk : {t : Token} -> Indexed (S t)"
+                , "indexed : Indexed (S A)"
+                , "indexed = Mk"
+                , "indexed-copy : Indexed (S t) -> Indexed (S t)"
+                , "indexed-copy p = p"
+                , "data Numeric (n : Nat) where"
+                , "  MkN : {n : Nat} -> Numeric (suc n)"
+                , "numeric-index : Numeric (suc 0)"
+                , "numeric-index = MkN"
+                , "construct : Box"
+                , "construct = by apply S; exact A"
+                , "constructed : unwrap construct = A"
+                , "constructed = rfl"
+                ]
+            checked = checkSource p "overloaded.px" source
+        errors checked @?= []
+        forM_ ["boxed", "boxed-alias", "numeric", "selected", "selected-nat", "constructed"] $ \name ->
+          assertBool (T.unpack name <> " did not certify") (("Overloaded." <> name) `elem` checkedTheorems checked)
+    , testCase "natural type and constructor names follow declared and opened scope" $ do
+        p <- either assertFailure pure prelude
+        forM_ ["Nat", "nat"] $ \name -> do
+          let source =
+                T.unlines
+                  [ "module Shadow where"
+                  , "module User where"
+                  , "  data " <> name <> " = S | suc"
+                  , "  copy : " <> name <> " -> " <> name
+                  , "  copy S = S"
+                  , "  copy suc = suc"
+                  , "open User"
+                  , "open " <> name
+                  , "value : " <> name
+                  , "value = S"
+                  , "copied : copy value = S"
+                  , "copied = rfl"
+                  , "alias : copy suc = suc"
+                  , "alias = rfl"
+                  ]
+              checked = checkSource p "shadow.px" source
+          errors checked @?= []
+          assertBool "opened constructor did not certify" ("Shadow.copied" `elem` checkedTheorems checked)
+    , testCase "a declared successor name shadows arithmetic, and local binders shadow it" $ do
+        p <- either assertFailure pure prelude
+        let source =
+              T.unlines
+                [ "module ShadowFunction where"
+                , "S : Nat -> Nat"
+                , "S n = n"
+                , "declared : S 2 = 2"
+                , "declared = rfl"
+                , "local : (S : Nat) -> S = S"
+                , "local S = rfl"
+                , "local-value : Nat -> Nat"
+                , "local-value S = S"
+                , "local-checked : local-value 3 = 3"
+                , "local-checked = rfl"
+                ]
+            checked = checkSource p "shadow-function.px" source
+        errors checked @?= []
+        assertBool "declared name did not shadow successor" ("ShadowFunction.declared" `elem` checkedTheorems checked)
+    , testCase "a successor with no determining type is ambiguous with a user constructor" $ do
+        p <- either assertFailure pure prelude
+        let checked = checkSource p "ambiguous-successor.px" "data Box = S Nat\nbad : S 0 = S 0\nbad = rfl\n"
+        assertBool "successor silently won constructor ambiguity" (any (isInfixOf "ambiguous constructor S") (errors checked))
+    , testCase "an unvalidated builtin pragma is never silently ignored" $ do
         p <- either assertFailure pure prelude
         let checked = checkSource p "builtin.px" "data T = C\n{-# BUILTIN NOT_A_ROLE T #-}\n"
         assertBool "the pragma must be rejected" (any (T.isInfixOf "BUILTIN" . T.pack) (errors checked))

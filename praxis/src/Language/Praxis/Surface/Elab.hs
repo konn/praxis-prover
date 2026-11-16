@@ -685,6 +685,14 @@ indexEvidence fx i sig0 = do
 arithmeticOps :: [QName]
 arithmeticOps = [QName [] (Op o) | o <- ["+", "-", "*", "^"]]
 
+{- | A bare successor at Nat, or with no competing user constructor.
+Qualified names have already been selected by ordinary lexical scope.
+-}
+naturalSuccessor :: Env -> Ty -> QName -> Bool
+naturalSuccessor env expected = \case
+  QName [] s@(Ident n) | n `elem` ["S", "suc"] -> expected == TNat || null (constructorsNamed env s)
+  _ -> False
+
 -- | A part of a constructor's signature: an implicit argument, with its type when written, or a field, named or not.
 data SigPart
   = SigImplicit !(Located Text) !(Maybe (Located R.Expr))
@@ -857,7 +865,7 @@ indexNames env a ty = case unLocated a of
     , null (constructorsNamed env (Ident x)) ->
         [(x, ty)]
   _ -> case rawSpine a of
-    (Located _ (R.EName (QName [] (Ident s))), [b]) | s `elem` ["S", "suc"] -> indexNames env b TNat
+    (Located _ (R.EName q), [b]) | naturalSuccessor env ty q -> indexNames env b TNat
     (Located _ (R.EName q), args) -> applied q args
     (_, args) -> concatMap (\b -> indexNames env b THole) args
   where
@@ -1701,7 +1709,7 @@ elabIx env vals kind le@(Located sp e) = case e of
       | otherwise -> case q of
           QName [] (Ident n)
             | Just x <- lookup n vals, null args -> pure x
-            | n `elem` ["S", "suc"], [a] <- args -> IxSucc <$> elabIx env vals TNat a
+            | naturalSuccessor env kind q, [a] <- args -> IxSucc <$> elabIx env vals TNat a
           _ -> applied hsp q args
     _ -> Left (ElabError sp "an index: a value, a numeral, S, or a constructor or a function applied")
   where
@@ -2643,7 +2651,7 @@ elabPattern env bound aliases m expected = \case
                 variable n
         | otherwise -> constructor le hsp q []
       (Located hsp (R.EName q), args)
-        | q `elem` [QName [] (Ident "S"), QName [] (Ident "suc")]
+        | naturalSuccessor env expected q
         , [a] <- args -> do
             unless (null [() | Left _ <- snd (rawArgs le)]) $ failAt hsp "S takes no implicit patterns"
             _ <- agree env hsp expected TNat
@@ -3446,23 +3454,28 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
               (target, fromWanted) = normalizeIndex env wanted
         , actual == target
         ]
-    resolveHead hint hsp q = case builtin q of
-      Just b -> pure b
-      Nothing -> do
-        let terms = [g | g <- resolve env q, isTerm g]
-            candidates = case (q, terms) of
-              (QName [] s, []) -> map GCtor (constructorsNamed env s)
-              _ -> terms
-            byType = case hint of
-              TData dn _ _ -> [g | g@(GCtor c) <- candidates, renderQualName (ctorData c) == dn]
-              _ -> []
-        case (byType, candidates) of
-          (g : _, _) -> typed hsp g
-          ([], [g]) -> typed hsp g
-          ([], []) -> failAt hsp ("not in scope: " <> T.unpack (displayQName q))
-          ([], g : _)
-            | all isCtor candidates -> undetermined hsp ("ambiguous constructor " <> T.unpack (displayQName q))
-            | otherwise -> typed hsp g
+    resolveHead hint hsp q
+      | Just b <- builtin q
+      , q `notElem` [QName [] (Ident "S"), QName [] (Ident "suc")] =
+          pure b
+      | otherwise = do
+          let terms = [g | g <- resolve env q, isTerm g]
+              candidates = case (q, terms) of
+                (QName [] s, []) -> map GCtor (constructorsNamed env s)
+                _ -> terms
+              byType = case hint of
+                TData dn _ _ -> [g | g@(GCtor c) <- candidates, renderQualName (ctorData c) == dn]
+                _ -> []
+          -- Successor participates in constructor overloading: an expected
+          -- datatype selects its constructor, Nat selects arithmetic, and an
+          -- unknown type must wait for a determining argument.
+          case (byType, candidates, builtin q) of
+            (g : _, _, _) -> typed hsp g
+            ([], _, Just b) | hint == TNat || null candidates -> pure b
+            ([], [g], Nothing) -> typed hsp g
+            ([], [], Nothing) -> failAt hsp ("not in scope: " <> T.unpack (displayQName q))
+            ([], g : _, Nothing) | not (all isCtor candidates) -> typed hsp g
+            _ -> undetermined hsp ("ambiguous constructor " <> T.unpack (displayQName q))
     typed hsp = \case
       GFun f -> do
         let valueCount = length (schemeValues (funScheme f))

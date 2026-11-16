@@ -264,7 +264,7 @@ the connectives.
 -}
 builtin :: Segment -> Bool
 builtin = \case
-  Ident x -> x `elem` ["S", "suc", "absurd", "Nat", "nat", "rfl", "refl", "cong"]
+  Ident x -> x `elem` ["absurd", "rfl", "refl", "cong"]
   Op o -> isRelation o || isConnective o || o `elem` ["+", "-", "*", "^", "⊤", "⊥"]
   Component _ -> True
 
@@ -407,11 +407,11 @@ renamePattern cx sc = go
         | otherwise -> ctorOrVar sp x
       EName q -> (\q' -> (Located sp (EName q'), [])) <$> rename cx sc Set.empty sp q
       EApp f x -> do
-        (f', b1) <- go f
+        (f', b1) <- headPattern f
         (x', b2) <- go x
         pure (Located sp (EApp f' x'), b1 <> b2)
       EImplicitApp f x -> do
-        (f', b1) <- go f
+        (f', b1) <- headPattern f
         (x', b2) <- go x
         pure (Located sp (EImplicitApp f' x'), b1 <> b2)
       EInfix (Located osp (Operator q bq)) l r -> do
@@ -420,6 +420,11 @@ renamePattern cx sc = go
         (r', b2) <- go r
         pure (Located sp (EInfix (Located osp (Operator q' bq)) l' r'), b1 <> b2)
       _ -> pure (Located sp e, [])
+    -- An applied head names a constructor; only its arguments bind variables.
+    -- A bare S can still bind a variable when no user constructor has that name.
+    headPattern (Located sp (EName q)) = (\q' -> (Located sp (EName q'), [])) <$> rename cx sc Set.empty sp q
+    headPattern (Located sp (EParen x)) = first (Located sp . EParen) <$> headPattern x
+    headPattern e = go e
     ctorOrVar sp x =
       let bare = Located sp (EName (QName [] (Ident x)))
        in case lookupBare sc (Ident x) of
@@ -705,9 +710,8 @@ renameInstance cx sc idl = do
   context <- forM (instanceContext idl) \(Located ksp c, v) -> (\c' -> (Located ksp c', v)) <$> rename cx sc Set.empty ksp c
   ty <- expression cx sc Set.empty (instanceType idl)
   let shortHead = case rawSpine ty of
-        (Located _ (EName (QName _ b)), _)
-          | b `elem` [Ident "Nat", Ident "nat"] -> "Nat"
-          | otherwise -> segmentText b
+        (Located _ (EName (QName [] b)), _) | b `elem` [Ident "Nat", Ident "nat"] -> "Nat"
+        (Located _ (EName (QName _ b)), _) -> segmentText b
         _ -> "?"
       named = fromMaybe (Located csp (segmentText (qnameBase cls) <> "-" <> shortHead)) (instanceName idl)
       name = Ident (unLocated named)
