@@ -46,9 +46,9 @@ identity = by
 
 -- The easy direction preserves the conclusion literally.
 embed : Intuitionistic a -> Classical a
-embed Intuitionistic.K = Classical.K
-embed Intuitionistic.S = Classical.S
-embed Intuitionistic.Explosion = Classical.Explosion
+embed K = K
+embed S = Classical.S
+embed Explosion = Explosion
 embed (f :@ x) = embed f :@ embed x
 
 -- Bracket abstraction: the deduction theorem for the Hilbert calculus, as a
