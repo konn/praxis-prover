@@ -1,0 +1,59 @@
+module GlivenkoNames where
+
+-- The implication/bottom fragment of propositional logic. Implication is the
+-- right-associative infix constructor :=>, so a :=> b :=> c is a :=> (b :=> c).
+data Formula = Atom Nat | Bottom | Formula :=> Formula
+
+infixr 5 :=>
+
+neg : Formula -> Formula
+neg a = a :=> Bottom
+
+nn : Formula -> Formula
+nn a = neg (neg a)
+
+-- Closed Hilbert derivations. Formula parameters are retained axiom witnesses;
+-- Modus ponens, f :@ x, checks that the conclusions of its two premises agree
+-- on the antecedent.
+data Intuitionistic (a : Formula) where
+  K : {a b : Formula} -> Intuitionistic (a :=> b :=> a)
+  S : {a b c : Formula} -> Intuitionistic ((a :=> b :=> c) :=> (a :=> b) :=> a :=> c)
+  Explosion : {a : Formula} -> Intuitionistic (Bottom :=> a)
+  (:@) : {a b : Formula} -> Intuitionistic (a :=> b) -> Intuitionistic a -> Intuitionistic b
+
+data Classical (a : Formula) where
+  K : {a b : Formula} -> Classical (a :=> b :=> a)
+  S : {a b c : Formula} -> Classical ((a :=> b :=> c) :=> (a :=> b) :=> a :=> c)
+  Explosion : {a : Formula} -> Classical (Bottom :=> a)
+  DNE : {a : Formula} -> Classical (((a :=> Bottom) :=> Bottom) :=> a)
+  (:@) : {a b : Formula} -> Classical (a :=> b) -> Classical a -> Classical b
+
+infixl 9 :@
+
+-- Proof schemata built by construction tactics in an ordinary definition:
+-- apply modus ponens, then construct its two premises in turn. (:@) is found
+-- by the expected type, as are K and S: the same names also belong to the
+-- classical calculus, and S at Nat is arithmetic successor.
+identity : {a : Formula} -> Intuitionistic (a :=> a)
+identity = by
+  apply (:@)
+  {
+    apply (:@)
+    { exact S }
+    { exact K }
+  }
+  { exact K {a} {a} }
+
+-- The easy direction preserves the conclusion literally.
+embed : Intuitionistic a -> Classical a
+embed K = K
+embed S = S
+embed Explosion = Explosion
+embed (f :@ x) = embed f :@ embed x
+
+classical-size : Classical a -> Nat
+classical-size K = 1
+classical-size S = 1
+classical-size Explosion = 1
+classical-size DNE = 1
+classical-size (f :@ x) = S (classical-size f + classical-size x)

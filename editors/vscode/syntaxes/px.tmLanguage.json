@@ -107,15 +107,6 @@
     "builtins": {
       "patterns": [
         {
-          "comment": "The type of numbers, and the successor.",
-          "name": "support.type.builtin.px",
-          "match": "(?<![\\p{L}\\p{N}_'-])(Nat|nat)(?![\\p{L}\\p{N}_'-])"
-        },
-        {
-          "name": "support.function.builtin.px",
-          "match": "(?<![\\p{L}\\p{N}_'-])(S|suc)(?![\\p{L}\\p{N}_'-])"
-        },
-        {
           "comment": "The induction hypotheses the engine names, and the wildcard.",
           "name": "variable.language.px",
           "match": "(?<![\\p{L}\\p{N}_'-])(IH[0-9]*|_)(?![\\p{L}\\p{N}_'-])"

@@ -15,6 +15,10 @@ lemmas of the library; and, in a type, the type variables and the value
 parameters a signature binds implicitly.  The words of the tactics, which are
 words only in tactic position, are read from the source at the position of
 each tactic.
+
+Name choices retained by successful elaboration take precedence over this
+syntactic lookup. In particular, an expected type can choose one of several
+constructors named S, or arithmetic successor, at different source positions.
 -}
 module Language.Praxis.LSP.Surface (
   moduleDefinitions,
@@ -37,6 +41,7 @@ import Language.Praxis.Surface.Env (CtorInfo (..), DataBinder (..), Env, Global 
 import Language.Praxis.Surface.Fixity (isRelation)
 import Language.Praxis.Surface.Rename (RDecl (..), Renamed (..))
 import Language.Praxis.Surface.Shape (opText, rawArgs)
+import Language.Praxis.Surface.SourceView (NameResolutions (..), ResolvedName (..))
 import Language.Praxis.Surface.Syntax.Raw
 import Language.Praxis.Surface.Types (Parameter (..))
 
@@ -96,6 +101,8 @@ data Cx = Cx
   , cxDefs :: !Definitions
   , cxImplicits :: !(Map QualName [SemanticTokenTypes])
   -- ^ for each signature, what the implicit binders in front of it bind, in order: what a clause's patterns in braces stand for
+  , cxNames :: !NameResolutions
+  -- ^ choices made by successful elaboration, including overloaded constructors
   }
 
 {- |
@@ -103,10 +110,10 @@ The index of a module: from its source, its syntax as parsed, as renamed,
 the environment after its elaboration, the names of the lemmas of the
 library, and where every global known is declared.
 -}
-indexModule :: Lines -> Module -> Renamed -> Env -> Set Text -> Definitions -> Index
-indexModule ls raw rn env library defs = Index (normalizeTokens tokens) refs
+indexModule :: Lines -> Module -> Renamed -> Env -> NameResolutions -> Set Text -> Definitions -> Index
+indexModule ls raw rn env names library defs = Index (normalizeTokens tokens) refs
   where
-    cx = Cx ls env library defs implicits
+    cx = Cx ls env library defs implicits names
     implicits =
       Map.fromList
         [ (owner <> [n], implicitKinds ty)
@@ -187,7 +194,7 @@ bareConstructor cx sp s = case constructorsNamed (cxEnv cx) s of
   [] -> Nothing
   cs -> Just (token sp SemanticTokenTypes_EnumMember [] <> reference sp (concatMap (definitionsOf cx . ctorQual) cs))
 
--- | The names never resolved to a global: the successor, the words of proof terms, and the type of numbers.
+-- | Builtin spellings, used when elaboration selects a builtin or no source choice is available.
 builtin :: Span -> Segment -> Maybe Index
 builtin sp = \case
   Ident x
@@ -207,7 +214,20 @@ relation, a value parameter.  Qualified, it is canonical, and each of its
 segments as written names a prefix of it.
 -}
 name :: Cx -> Mode -> Locals -> Span -> QName -> Index
-name cx mode locals sp = \case
+name cx mode locals sp q
+  | Just choices <- Map.lookup sp (resolvedNames (cxNames cx)) = elaboratedName cx locals sp q choices
+  | otherwise = unresolvedName cx mode locals sp q
+
+elaboratedName :: Cx -> Locals -> Span -> QName -> Set ResolvedName -> Index
+elaboratedName cx locals sp q = foldMap selected
+  where
+    selected = \case
+      ResolvedGlobal full -> qualified cx sp full
+      ResolvedBuiltin -> fromMaybe mempty (builtin sp (qnameBase q))
+      ResolvedLocal -> token sp (Map.findWithDefault SemanticTokenTypes_Variable (segmentRaw (qnameBase q)) locals) []
+
+unresolvedName :: Cx -> Mode -> Locals -> Span -> QName -> Index
+unresolvedName cx mode locals sp = \case
   QName [] s -> case s of
     Ident x
       | Just t <- Map.lookup x locals -> token sp t []
@@ -273,6 +293,10 @@ editor.
 -}
 operator :: Cx -> Locals -> Located Operator -> Index
 operator cx locals (Located osp (Operator q backquoted))
+  | Just choices <- Map.lookup osp (resolvedNames (cxNames cx)) =
+      if backquoted
+        then elaboratedName cx locals (unquoted osp) q choices
+        else reference osp (concat [definitionsOf cx full | ResolvedGlobal full <- Set.toList choices])
   | backquoted = name cx TermMode locals (unquoted osp) q
   | otherwise = case q of
       QName [] s -> reference osp (concatMap (definitionsOf cx . ctorQual) (constructorsNamed (cxEnv cx) s))
@@ -362,6 +386,10 @@ successor, and the variables it binds, which are every other name.
 pattern :: Cx -> Locals -> Located Expr -> (Index, Locals)
 pattern cx locals (Located sp e) = case e of
   EParen x -> pattern cx locals x
+  EName (QName [] (Ident x))
+    | localResolution cx sp -> (token sp SemanticTokenTypes_Variable [SemanticTokenModifiers_Declaration], Map.insert x SemanticTokenTypes_Variable locals)
+  EName q
+    | Map.member sp (resolvedNames (cxNames cx)) -> (name cx TermMode locals sp q, locals)
   EName (QName [] s)
     | Just ix <- builtin sp s -> (ix, locals)
     | Just ix <- bareConstructor cx sp s -> (ix, locals)
@@ -381,6 +409,9 @@ pattern cx locals (Located sp e) = case e of
       let (i1, ls1) = pattern cx locals f
           (i2, ls2) = pattern cx ls1 x
        in (i1 <> i2, ls2)
+
+localResolution :: Cx -> Span -> Bool
+localResolution cx sp = Map.lookup sp (resolvedNames (cxNames cx)) == Just (Set.singleton ResolvedLocal)
 
 -- * Declarations
 
@@ -457,7 +488,8 @@ lhsIndex cx owner state@(locals, implicits) (Located sp e) = case e of
   EImplicitApp f x ->
     let (i1, (ls1, imps1)) = lhsIndex cx owner state f
         (i2, ls2) = case (imps1, bareName x) of
-          (kind : _, Just (nsp, v)) | Nothing <- builtin nsp (Ident v), Nothing <- bareConstructor cx nsp (Ident v) -> (token nsp kind [SemanticTokenModifiers_Declaration], Map.insert v kind ls1)
+          (kind : _, Just (nsp, v))
+            | localResolution cx nsp || (builtin nsp (Ident v) == Nothing && bareConstructor cx nsp (Ident v) == Nothing) -> (token nsp kind [SemanticTokenModifiers_Declaration], Map.insert v kind ls1)
           _ -> pattern cx ls1 x
      in (i1 <> i2, (ls2, drop 1 imps1))
   EParen x -> lhsIndex cx owner state x

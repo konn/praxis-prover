@@ -603,7 +603,7 @@ documentOf :: Prelude -> FilePath -> Text -> Map [Segment] Target -> Surface.Che
 documentOf p path text others checked = Document (map surfaceReport (Surface.checkedReports checked)) index (isJust (Surface.checkedRenamed checked))
   where
     index = case (parseModule path text, Surface.checkedRenamed checked, Surface.checkedFinal checked) of
-      (Right raw, Just rn, Just (k, _)) -> indexModule (linesOf text) raw rn (knowEnv k) preludeNames (Map.union (moduleDefinitions path rn) others)
+      (Right raw, Just rn, Just (k, _)) -> indexModule (linesOf text) raw rn (knowEnv k) (Surface.checkedNames checked) preludeNames (Map.union (moduleDefinitions path rn) others)
       _ -> mempty
     preludeNames = Set.fromList (map T.pack (Map.keys (preludeLemmas p)))
 

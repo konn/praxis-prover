@@ -31,6 +31,7 @@ the statement and retain every proof obligation before erasing arguments.
 module Language.Praxis.Surface.Elab (
   -- * Items
   Item (..),
+  itemNameResolutions,
   FunDef (..),
   FunClause (..),
   fcBody,
@@ -134,6 +135,17 @@ data Item
   | -- | a declaration which did not elaborate; the rest go on without it
     IFailed !ElabError
 
+-- | Name choices for the source declaration, excluding imported dependency metadata.
+itemNameResolutions :: Item -> SourceView.NameResolutions
+itemNameResolutions = \case
+  IFun f -> function f
+  IInternalFun _ f -> function f
+  ITheorem t -> theorem t
+  _ -> mempty
+  where
+    function f = foldMap fcNames (fdClauses f) <> foldMap theorem (fdObligations f)
+    theorem t = tdNames t <> foldMap pcNames (tdClauses t)
+
 data FunDef = FunDef
   { fdInfo :: !FunInfo
   , fdArgs :: ![Ty]
@@ -161,6 +173,7 @@ data FunClause = FunClause
   , fcTerm :: !(Core.Body TheoremDef)
   -- ^ the computation and its proof obligations, scoped over the clause variables
   , fcSpan :: !Span
+  , fcNames :: !SourceView.NameResolutions
   }
 
 -- | The proof-free computation over a clause's pattern variables.
@@ -180,6 +193,7 @@ data TheoremDef = TheoremDef
   -- ^ the proposition, over the binders
   , tdClauses :: ![ProofClause]
   , tdSpan :: !Span
+  , tdNames :: !SourceView.NameResolutions
   , tdSlots :: ![Slot]
   {- ^ the dictionary of its constraints: the places its statement uses, and
   the membership predicate of each type parameter one of its values is of
@@ -215,6 +229,7 @@ data ProofClause = ProofClause
   , pcVars :: !Telescope
   , pcRhs :: !(Located R.Rhs)
   , pcSpan :: !Span
+  , pcNames :: !SourceView.NameResolutions
   , pcValuePats :: ![Pattern]
   -- ^ the patterns it gives the theorem's implicit values, in braces, in order; @PWild@ for a value it leaves out
   , pcHypNames :: ![Maybe Text]
@@ -251,10 +266,23 @@ failureError = \case
   Undetermined err -> err
   Unnamed err _ -> err
 
-{- | Type checking without unification variables, retaining dependencies
-separately from its desugared syntax. A failed attempt discards its log.
+-- | Logical dependencies and editor metadata stay separate when either is consumed.
+data ElaborationLog = ElaborationLog
+  { elaborationRequirements :: !Requirements
+  , elaborationNames :: !SourceView.NameResolutions
+  }
+
+instance Semigroup ElaborationLog where
+  ElaborationLog r n <> ElaborationLog r' n' = ElaborationLog (r <> r') (n <> n')
+
+instance Monoid ElaborationLog where
+  mempty = ElaborationLog mempty mempty
+
+{- | Type checking without unification variables, retaining dependencies and
+source name choices separately from its desugared syntax. A failed attempt
+discards both logs.
 -}
-type TC = WriterT Requirements (Either Failure)
+type TC = WriterT ElaborationLog (Either Failure)
 
 -- | Run a caller which cannot retain or validate elaboration dependencies.
 runTC :: TC a -> Either ElabError a
@@ -266,10 +294,23 @@ runTC action = do
 
 -- | Run a caller responsible for retaining or validating every dependency.
 runTCWithRequirements :: TC a -> Either ElabError (a, Requirements)
-runTCWithRequirements = first failureError . runWriterT
+runTCWithRequirements action = do
+  (value, logged) <- first failureError (runWriterT action)
+  pure (value, elaborationRequirements logged)
+
+runTCWithNames :: TC a -> Either ElabError (a, Requirements, SourceView.NameResolutions)
+runTCWithNames action = do
+  (value, logged) <- first failureError (runWriterT action)
+  pure (value, elaborationRequirements logged, elaborationNames logged)
+
+requireAll :: Requirements -> TC ()
+requireAll needed = tell (ElaborationLog needed mempty)
+
+resolvedName :: Span -> SourceView.ResolvedName -> TC ()
+resolvedName sp name = tell (ElaborationLog mempty (SourceView.nameResolution sp name))
 
 requireDependency :: Span -> Dependency -> TC ()
-requireDependency span' = tell . requirement span'
+requireDependency span' = requireAll . requirement span'
 
 requireIndexDependencies :: Span -> Set.Set Text -> TC ()
 requireIndexDependencies sp = mapM_ (requireDependency sp . CertifiedDeclaration) . Set.toList
@@ -976,7 +1017,7 @@ indexFunction env info fns p f sp = do
     (body, _) <- annotate bare
     prepared <- either (Left . ElabError sp) Right (Core.elaborate env [] fieldTypes body)
     withoutProofs <- Core.traverseObligations (const (Left (ElabError sp "internal: index expression has a proof argument"))) prepared
-    pure (FunClause [PCon (Ref RefConstructor (ctorCore c)) (map (PVar . Hint) fields)] (zipWith hiddenBinder fields fieldTypes) withoutProofs sp)
+    pure (FunClause [PCon (Ref RefConstructor (ctorCore c)) (map (PVar . Hint) fields)] (zipWith hiddenBinder fields fieldTypes) withoutProofs sp mempty)
   let needed = foldMap (requirement sp . CertifiedDeclaration) (Set.unions (map (Core.indexDependencies . fcTerm) clauses))
       completed = f {funRequirements = normalizeRequirements (funRequirements f <> needed)}
   pure (FunDef completed [TData self [TParam i [] | i <- [0 .. length (dataParams info) - 1]] []] (erase (dataIndices info !! p)) clauses sp needed (envBuiltins env) [] [] [])
@@ -1247,7 +1288,7 @@ elabInstance fx env sp idl = do
       when (null mine) $ Left (ElabError sp ("no proof of the law " <> T.unpack (segmentText lawSeg)))
       (prop0, statementRequirements) <- runTCWithRequirements $ do
         requireDependency sp (AdmittedClass (evidenceQName (lawClass l)))
-        tell =<< either (\(ElabError esp why) -> failAt esp why) pure (constraintRequirements e vars (R.instanceContext idl))
+        requireAll =<< either (\(ElabError esp why) -> failAt esp why) pure (constraintRequirements e vars (R.instanceContext idl))
         replayRequirements scoped full sp [headTy] (lawRequirements l)
         elabProp scoped full ctx0 (lawBody l)
       -- Keep the indexed head universally quantified, with the same index
@@ -1267,7 +1308,7 @@ elabInstance fx env sp idl = do
           e2 = addNamespaceMember iq lawSeg q indexed
           valueSlots' = map (Just . (\(i, (_, ty)) -> (i, ty))) (zip [0 ..] values)
       (pcs, patternRequirements) <- runTCWithRequirements (traverse (elabProofClause fx e2 {envScope = headScope, envClassDefaults = [(lawClass l, headTy)], envTypeBindings = typeBindings} (Just valueSlots') (map binderTy binderTys) (antecedentCount prop)) mine)
-      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys statement pcs sp kept premises values [] (statementRequirements <> patternRequirements) (envBuiltins e) indexHyps)], Map.insert (lawQual l) info proved)
+      pure (e2, items <> [ITheorem (TheoremDef info [(v, KType) | v <- vars] binderTys statement pcs sp mempty kept premises values [] (statementRequirements <> patternRequirements) (envBuiltins e) indexHyps)], Map.insert (lawQual l) info proved)
 
 {- |
 The places of a dictionary the clauses of a method refer to themselves, and
@@ -1825,7 +1866,7 @@ elabDecl fx env sp name ty0 clauses = do
       -- The binders opened into fresh atoms for the statement, which is closed over them again, a scope over its values and binders.
       let (atoms, opened) = freshAtoms [binderHint b | b <- binderTys] env
           ctx0 = statementCtx atoms values binderTys
-      (prop0, statementRequirements) <- runTCWithRequirements (tell contextRequirements >> elabPropWithProofArguments opened {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
+      (prop0, statementRequirements, statementNames) <- runTCWithNames (requireAll contextRequirements >> elabPropWithProofArguments opened {envScope = scope, envSchemas = localSchemas binderTys} full ctx0 body)
       -- The theorem is over the places of its dictionary its statement uses,
       -- and the membership predicate of each type parameter one of its values is of.
       let (full', kept) = theoremPlacesRequiring env statementRequirements full prop0 (map binderTy binderTys <> lawPremiseTypes env given full)
@@ -1851,7 +1892,7 @@ elabDecl fx env sp name ty0 clauses = do
       case [pcSpan pc | length pcs > 1, pc <- pcs, PAbsurd `elem` (pcValuePats pc <> pcPatterns pc)] of
         asp : _ -> Left (ElabError asp "an absurd clause is its theorem's only clause, for now")
         [] -> pure ()
-      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B (closeIndices atoms prop))) pcs sp kept premises values [] (statementRequirements <> patternRequirements) (envBuiltins env) indexHyps))
+      pure (env', ITheorem (TheoremDef info params binderTys (toScope (fmap B (closeIndices atoms prop))) pcs sp statementNames kept premises values [] (statementRequirements <> patternRequirements) (envBuiltins env) indexHyps))
     else do
       unless (null binders) $ Left (ElabError sp "a function's arguments are types, not named binders")
       -- Its domains, as written: types, and propositions, the preconditions its proofs are of.
@@ -1861,7 +1902,7 @@ elabDecl fx env sp name ty0 clauses = do
       domainTys <- forM [d | d <- domains, not (isProp d)] (elabTypeIn env scope)
       resultTy <- elabTypeIn env scope resultE
       (props, signatureRequirements) <- runTCWithRequirements $ do
-        tell contextRequirements
+        requireAll contextRequirements
         forM [d | d <- domains, isProp d] \d -> toScope . fmap B <$> elabProp env {envScope = scope} full valueCtx d
       given <- constraintClasses env paramNames constraints
       let fty = foldr TArrow resultTy domainTys
@@ -1894,7 +1935,7 @@ elabDecl fx env sp name ty0 clauses = do
                 , next <= length values ->
                     withRuntime next
               Left failure -> Left (failureError failure)
-              Right (fcs1, clauseRequirements) -> Right (runtime, runtimeTys, env1, info1, fcs1, clauseRequirements)
+              Right (fcs1, logged) -> Right (runtime, runtimeTys, env1, info1, fcs1, elaborationRequirements logged)
       (runtime, runtimeTys, env1, info1, fcs1, clauseRequirements) <- withRuntime boundImplicits
       -- The function takes the places of its dictionary its clauses use; each proof its clauses give is an obligation.
       let needed = signatureRequirements <> clauseRequirements
@@ -2256,7 +2297,12 @@ typeVariables env le@(Located _ e) = case e of
 -- * Clauses
 
 elabFunClause :: Fixities -> Env -> FunInfo -> [Ty] -> [Ty] -> Ty -> R.Clause -> TC FunClause
-elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs)) = do
+elabFunClause fx env info runtimeTys args result clause = do
+  (checked, logged) <- listen (elabFunClauseBody fx env info runtimeTys args result clause)
+  pure checked {fcNames = elaborationNames logged}
+
+elabFunClauseBody :: Fixities -> Env -> FunInfo -> [Ty] -> [Ty] -> Ty -> R.Clause -> TC FunClause
+elabFunClauseBody fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs)) = do
   lhs <- liftE (resolved fx lhs0)
   (implicit, explicit) <- case lhsParts lhs of
     Just (_, parts) -> pure ([p | Left p <- parts], [p | Right p <- parts])
@@ -2340,7 +2386,7 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
       ownRecorded = [(h, p, used) | (Just h, (_, prop)) <- zip proofNames (funProofs info), Just (p, used) <- [ownProp prop]] <> [(h, p, used) | (Just h, q) <- boundProofs, Just (p, used) <- [boundProp q]]
       own = [(h, p) | (h, p, _) <- ownRecorded]
       contextRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (foldMap (\(_, _, used) -> used) ownRecorded))
-  tell contextRequirements
+  requireAll contextRequirements
   -- A clause with an absurd pattern has no right side, and is never reached: its code is 0.
   when (any nestedAbsurd pats) $ failAt (location lhs) "an absurd pattern, (), stands for a whole argument, for now"
   (body, bodyRequirements) <- listen $ case rhs of
@@ -2369,8 +2415,8 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
         , term /= projection
         ]
       indexRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (foldMap snd indexFacts))
-  tell coreRequirements
-  unless (null (Core.obligations prepared)) (tell indexRequirements)
+  requireAll coreRequirements
+  unless (null (Core.obligations prepared)) (requireAll indexRequirements)
   -- Each proof the body gives is an obligation: its proposition, under the clause's own
   -- preconditions, named by its proof patterns, a theorem proved by what was written.  The
   -- theorem's binders are the clause's variables, opened by distinct names.
@@ -2380,15 +2426,15 @@ elabFunClause fx env info runtimeTys args result (R.Clause lhs0 (Located rsp rhs
             -- The facts and preconditions, stated over the atoms, closed over the variables as the checker's proposition is.
             indices = map (closeIndices atoms . fst) indexFacts
             statement = foldr Arrow (foldr (Arrow . closeIndices atoms . snd) prop own) indices
-            needed = funRequirements info <> bodyRequirements <> coreRequirements <> contextRequirements <> indexRequirements
+            needed = funRequirements info <> elaborationRequirements bodyRequirements <> coreRequirements <> contextRequirements <> indexRequirements
             (slots, _) = theoremPlacesRequiring env needed (logicalFunSlots info) statement openedTypes
             premises = premisesFor env (classesOfSlots env slots) slots <> [PremiseDef (PSchema position ty) [] (toScope Top) | (position, ty) <- schemaArguments openedTypes]
             thm = TheoremInfo q (mangleGlobal (map segmentText q)) (map mangleVariable openedNames) openedTypes slots (map pdPremise premises) Nothing [] [] (funQuantifierViews info <> SourceView.quantifierViews q (envBuiltins env) (envScope envBody) raw) Nothing
             -- Its one clause: a variable for each of the clause's, and the names the clause gives recovered implicit arguments, closed over the variables.
-            pc = ProofClause [PVar (binderHint b) | b <- closed] closed (Located (location raw) (R.RExpr raw)) (location raw) [] [] [] [(n, closeIxWith atoms (applyIx refined x)) | (n, x) <- aliases]
-         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] closed (toScope (fmap B statement)) [pc] (location raw) slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) needed (envBuiltins env) []
+            pc = ProofClause [PVar (binderHint b) | b <- closed] closed (Located (location raw) (R.RExpr raw)) (location raw) mempty [] [] [] [(n, closeIxWith atoms (applyIx refined x)) | (n, x) <- aliases]
+         in TheoremDef thm [(v, KType) | v <- tsTypes (envScope env)] closed (toScope (fmap B statement)) [pc] (location raw) mempty slots premises [] (["#index" <> T.pack (show i) | i <- [0 .. length indices - 1]] <> map fst own) needed (envBuiltins env) []
   let numbered = State.evalState (Core.traverseObligations (\o -> State.state (\i -> (obligation i o, i + 1))) prepared) (0 :: Int)
-  pure (FunClause pats closed numbered (R.spanning (location lhs) rsp))
+  pure (FunClause pats closed numbered (R.spanning (location lhs) rsp) mempty)
 
 -- | The names a telescope's binders are written by.
 writtenNames :: Telescope -> [Text]
@@ -2444,7 +2490,12 @@ or @_@, which does not matter, and a hypothesis a name, a proposition having
 no constructors.
 -}
 elabProofClause :: Fixities -> Env -> Maybe [Maybe (Int, Ty)] -> [Ty] -> Int -> R.Clause -> TC ProofClause
-elabProofClause fx env slots binderTys hypotheses (R.Clause lhs0 rhs) = do
+elabProofClause fx env slots binderTys hypotheses clause = do
+  (checked, logged) <- listen (elabProofClauseBody fx env slots binderTys hypotheses clause)
+  pure checked {pcNames = elaborationNames logged}
+
+elabProofClauseBody :: Fixities -> Env -> Maybe [Maybe (Int, Ty)] -> [Ty] -> Int -> R.Clause -> TC ProofClause
+elabProofClauseBody fx env slots binderTys hypotheses (R.Clause lhs0 rhs) = do
   lhs <- liftE (resolved fx lhs0)
   (implicit, explicit) <- case lhsParts lhs of
     Just (_, parts) -> pure ([p | Left p <- parts], [p | Right p <- parts])
@@ -2488,7 +2539,7 @@ elabProofClause fx env slots binderTys hypotheses (R.Clause lhs0 rhs) = do
     (False, R.RAbsurd) -> failAt (location lhs) "a clause needs a right side, = …, unless one of its patterns is absurd, ()"
     (True, _) | r /= R.RAbsurd -> failAt (location rhs) "a clause with an absurd pattern, (), has no right side: nothing matches it"
     _ -> pure ()
-  pure (ProofClause pats vars rhs (R.spanning (location lhs) (location rhs)) valuePats hypNamesGiven proofNames aliases)
+  pure (ProofClause pats vars rhs (R.spanning (location lhs) (location rhs)) mempty valuePats hypNamesGiven proofNames aliases)
   where
     named why p = case stripParen p of
       Located _ (R.EName (QName [] (Ident h))) -> pure (Just h)
@@ -2615,7 +2666,7 @@ solve: a clash is a pattern which never matches there, and an index a
 function computes, which unification cannot see into, is refused.
 -}
 elabPattern :: Env -> [(Atom, Binder)] -> [(Text, Ix)] -> Matching -> Ty -> PatSource -> TC (Pattern, [(Atom, Binder)], [BoundProof], [(Text, Ix)], Matching)
-elabPattern env bound aliases m expected = \case
+elabPattern env bound aliases m expected source = case source of
   Hidden hint _ -> pure (PVar hint, [(Fresh (mFresh m) hint, Binder (Irrelevant Nothing) hint expected)], [], [], m {mFresh = mFresh m + 1})
   Written le@(Located sp e) -> case e of
     R.EParen x -> elabPattern env bound aliases m expected (Written x)
@@ -2656,13 +2707,14 @@ elabPattern env bound aliases m expected = \case
             unless (null [() | Left _ <- snd (rawArgs le)]) $ failAt hsp "S takes no implicit patterns"
             _ <- agree env hsp expected TNat
             (p, vs, ps, as, m') <- elabPattern env bound aliases m TNat (Written a)
+            resolvedName hsp SourceView.ResolvedBuiltin
             pure (PSucc p, vs, ps, as, m')
         | otherwise -> constructor le hsp q args
       _ -> failAt sp "a pattern: a variable, _, a numeral, or a constructor applied to patterns"
   where
     s = mSubst m
     -- A variable the pattern names, opened into the next atom.
-    variable n = pure (PVar (Hint n), [(Fresh (mFresh m) (Hint n), namedBinder n expected)], [], [], m {mFresh = mFresh m + 1})
+    variable n = resolvedName (sourceSpan source) SourceView.ResolvedLocal *> pure (PVar (Hint n), [(Fresh (mFresh m) (Hint n), namedBinder n expected)], [], [], m {mFresh = mFresh m + 1})
     -- The variables to solve for the entries of a constructor's telescope, from the next identity.
     ghostsOf tele = [IxMeta (mFresh m + i) (Hint (teName en)) | (i, en) <- zip [0 ..] tele]
     -- What the names bound so far stand for: the variables, each its atom, and the names given to implicit arguments.
@@ -2672,6 +2724,7 @@ elabPattern env bound aliases m expected = \case
         Just ci -> constructorWith le csp ci args
         Nothing -> failAt csp ("not a constructor: " <> T.unpack (displayQName q))
     constructorWith le csp ci args = do
+      resolvedName csp (SourceView.ResolvedGlobal (ctorQual ci))
       dat <- maybe (failAt csp "internal: a constructor of no data type") pure (dataOfCtor env ci)
       -- The type expected is known, an argument's or a field's: its arguments are the constructor's type's.
       let dn = renderQualName (dataQual dat)
@@ -3016,7 +3069,7 @@ elabTerm proofArguments env givens ctx le@(Located sp _) expected = WriterT $
                 pairs
           let proof = Located sp (R.EProof (R.RBy [Located sp (R.TCong Nothing)]))
               prerequisites = foldMap (requirement sp . CertifiedDeclaration) (Set.toList (foldMap snd converted))
-          Right ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | (prop, _) <- converted]), target), needed <> prerequisites)
+          Right ((At (Irrelevant sp) (Transport target value [ProofArg prop (Irrelevant proof) | (prop, _) <- converted]), target), needed <> ElaborationLog prerequisites mempty)
       where
         disagreement = ElabError sp (mismatch env expected actual)
         -- The equations of the indices mention values no term in scope stands for: the clause has to name them, or take them at runtime where they are the signature's.
@@ -3471,7 +3524,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
           -- unknown type must wait for a determining argument.
           case (byType, candidates, builtin q) of
             (g : _, _, _) -> typed hsp g
-            ([], _, Just b) | hint == TNat || null candidates -> pure b
+            ([], _, Just b) | hint == TNat || null candidates -> resolvedName hsp SourceView.ResolvedBuiltin *> pure b
             ([], [g], Nothing) -> typed hsp g
             ([], [], Nothing) -> failAt hsp ("not in scope: " <> T.unpack (displayQName q))
             ([], g : _, Nothing) | not (all isCtor candidates) -> typed hsp g
@@ -3531,6 +3584,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
               pure \as -> apps fn (pre <> as <> entries)
       GCtor c -> case dataOfCtor env c of
         Just d -> do
+          resolvedName hsp (SourceView.ResolvedGlobal (ctorQual c))
           let n = length (dataParams d)
               self = TData (renderQualName (dataQual d)) [TParam i [] | i <- [0 .. n - 1]]
               ref = Global (Ref RefConstructor (ctorCore c))

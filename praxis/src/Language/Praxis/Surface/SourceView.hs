@@ -1,12 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- |
-Source views of desugared quantifiers. These records are elaborator metadata,
-never constructors of Praxis Core. A consumer must reconstruct and match the
-lowered quantifier before using a view, because proof transformations can
-change or duplicate the syntax at a source location.
+Source names and views of desugared quantifiers. These records are elaborator
+metadata, never constructors of Praxis Core. A consumer must reconstruct and
+match a lowered quantifier before using its view, because proof transformations
+can change or duplicate the syntax at a source location.
 -}
 module Language.Praxis.Surface.SourceView (
+  ResolvedName (..),
+  NameResolutions (..),
+  nameResolution,
   QuantifierView (..),
   QuantifierViews,
   quantifierViews,
@@ -21,10 +24,30 @@ module Language.Praxis.Surface.SourceView (
 
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), Segment, Span)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ty, TyScope)
+
+{- | Source names selected during successful elaboration, for editor navigation.
+These records carry no logical evidence and are never replayed at call sites.
+-}
+data ResolvedName = ResolvedGlobal ![Segment] | ResolvedBuiltin | ResolvedLocal
+  deriving stock (Show, Eq, Ord)
+
+newtype NameResolutions = NameResolutions {resolvedNames :: Map Span (Set ResolvedName)}
+  deriving stock (Show, Eq)
+
+instance Semigroup NameResolutions where
+  NameResolutions a <> NameResolutions b = NameResolutions (Map.unionWith Set.union a b)
+
+instance Monoid NameResolutions where
+  mempty = NameResolutions Map.empty
+
+nameResolution :: Span -> ResolvedName -> NameResolutions
+nameResolution sp name = NameResolutions (Map.singleton sp (Set.singleton name))
 
 -- | The declaration and scope that gave one source binder its meaning.
 data QuantifierView = QuantifierView

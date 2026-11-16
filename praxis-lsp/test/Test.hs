@@ -253,6 +253,88 @@ tests =
         at 4 45 @?= [("A.px", Span (3, 15) (3, 18))]
         at 4 49 @?= [("A.px", Span (5, 1) (5, 5))]
         assertBool "the imported module is a namespace" ((3, "A", SemanticTokenTypes_Namespace, []) `elem` tokensOf text doc)
+    , testCase "S and suc navigate and highlight according to the constructor selected by elaboration" $ do
+        let source =
+              T.unlines
+                [ "module Names where"
+                , "data A = S Nat | suc Nat"
+                , "data B = S Nat | suc Nat"
+                , "a : A"
+                , "a = S 0"
+                , "b : B"
+                , "b = suc 1"
+                , "unbox : A -> Nat"
+                , "unbox (S n) = n"
+                , "unbox (suc n) = n"
+                , "step : Nat -> Nat"
+                , "step n = S n"
+                , "pred : Nat -> Nat"
+                , "pred 0 = 0"
+                , "pred (S n) = n"
+                , "made : B"
+                , "made = by"
+                , "  apply S"
+                , "  exact 2"
+                , "ok : unbox (S 1) = 1"
+                , "ok = rfl"
+                , "data Pair = S Nat Nat"
+                , "pair : Pair"
+                , "pair = 0 `S` 1"
+                ]
+        doc <- analyseDocument Px "<document>" source
+        docReports doc @?= []
+        let at l c = map targetSpan (definitionsAt source doc (Position l c))
+            toks = tokensOf source doc
+        at 4 4 @?= [Span (2, 10) (2, 11)]
+        at 6 4 @?= [Span (3, 18) (3, 21)]
+        at 8 7 @?= [Span (2, 10) (2, 11)]
+        at 9 7 @?= [Span (2, 18) (2, 21)]
+        at 11 9 @?= []
+        at 14 6 @?= []
+        at 17 8 @?= [Span (3, 10) (3, 11)]
+        at 19 12 @?= [Span (2, 10) (2, 11)]
+        at 23 10 @?= [Span (22, 13) (22, 14)]
+        mapM_
+          (\expected -> assertBool (show expected) (expected `elem` toks))
+          [ (5, "S", SemanticTokenTypes_EnumMember, [])
+          , (7, "suc", SemanticTokenTypes_EnumMember, [])
+          , (9, "S", SemanticTokenTypes_EnumMember, [])
+          , (10, "suc", SemanticTokenTypes_EnumMember, [])
+          , (12, "S", SemanticTokenTypes_Function, [SemanticTokenModifiers_DefaultLibrary])
+          , (15, "S", SemanticTokenTypes_Function, [SemanticTokenModifiers_DefaultLibrary])
+          , (18, "S", SemanticTokenTypes_EnumMember, [])
+          , (20, "S", SemanticTokenTypes_EnumMember, [])
+          , (24, "S", SemanticTokenTypes_EnumMember, [])
+          ]
+    , testCase "a pattern named S binds a local variable in editor tokens" $ do
+        let source = T.unlines ["module Local where", "identity : Nat -> Nat", "identity S = S"]
+        doc <- analyseDocument Px "<document>" source
+        docReports doc @?= []
+        let toks = tokensOf source doc
+        assertBool "the variable is declared" ((3, "S", SemanticTokenTypes_Variable, [SemanticTokenModifiers_Declaration]) `elem` toks)
+        assertBool "the variable is used" ((3, "S", SemanticTokenTypes_Variable, []) `elem` toks)
+        definitionsAt source doc (Position 2 9) @?= []
+        definitionsAt source doc (Position 2 13) @?= []
+    , testCase "Glivenko's S occurrences select intuitionistic, classical or arithmetic successor" $ do
+        source <- TIO.readFile "test/data/pkg/src/GlivenkoNames.px"
+        doc <- analyseDocument Px "<document>" source
+        docReports doc @?= []
+        let toks = tokensOf source doc
+            lineOf prefix = case [l | (l, line) <- zip [1 ..] (T.lines source), prefix `T.isPrefixOf` line] of
+              [l] -> pure l
+              ls -> assertFailure ("expected one line starting with " <> T.unpack prefix <> ": " <> show ls) >> pure 0
+            targetIn prefix column = do
+              l <- lineOf prefix
+              pure (map targetSpan (definitionsAt source doc (Position (fromIntegral (l - 1)) column)))
+        intuitionistic <- lineOf "  S : {a b c : Formula} -> Intuitionistic"
+        classical <- lineOf "  S : {a b c : Formula} -> Classical"
+        targetIn "    { exact S }" 12 >>= (@?= [Span (intuitionistic, 3) (intuitionistic, 4)])
+        targetIn "embed S = S" 6 >>= (@?= [Span (intuitionistic, 3) (intuitionistic, 4)])
+        targetIn "embed S = S" 10 >>= (@?= [Span (classical, 3) (classical, 4)])
+        targetIn "classical-size (f :@ x) = S" 26 >>= (@?= [])
+        l <- lineOf "embed S = S"
+        [t | t@(line, name, _, _) <- toks, line == l, name == "S"]
+          @?= replicate 2 (l, "S", SemanticTokenTypes_EnumMember, [])
     , testCase "a document which does not parse has no index, and says so" $ do
         doc <- analyseDocument Px "<document>" (surface <> "\nbroken : {a : Type\n")
         docParsed doc @?= False

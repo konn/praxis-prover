@@ -92,6 +92,7 @@ import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), preludeUnfoldings)
 import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), Renamed, ScopeError (..), moduleExports, renameModule)
+import Language.Praxis.Surface.SourceView qualified as SourceView
 import Language.Praxis.Surface.Syntax (Expr, Pattern)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), QName (..), Segment (..), Span (..))
 import Language.Praxis.Surface.Syntax.Raw qualified as R
@@ -125,6 +126,8 @@ data Checked = Checked
   , checkedRenamed :: !(Maybe Renamed)
   , checkedFixities :: !Fixities
   -- ^ the fixities of the operators in scope, for printers of its values
+  , checkedNames :: !SourceView.NameResolutions
+  -- ^ successful elaboration's name choices in this source file, for editors
   }
 
 -- * The core state
@@ -286,19 +289,19 @@ checkModule :: (Env -> FunDef -> [Spec]) -> Build -> Imports -> Maybe QualName -
 checkModule specsOf build imports name file src = case parseModule file src of
   Left err ->
     let (l, c) = syntaxErrorPosition err
-     in (Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing Nothing Map.empty, build)
+     in (Checked [Report (Span (l, c) (l, c + 1)) SevError (T.pack (renderSyntaxError err))] [] [] Nothing Nothing Map.empty mempty, build)
   Right m ->
     let modQ = fromMaybe (headerName m) name
         imported = Map.unions [meFixities e | Right e <- Map.elems imports]
      in case moduleFixitiesWith imported m of
           Left ferr ->
             let (sp, msg) = renderFixityError ferr
-             in (Checked [Report sp SevError (T.pack msg)] [] [] Nothing Nothing Map.empty, build)
+             in (Checked [Report sp SevError (T.pack msg)] [] [] Nothing Nothing Map.empty mempty, build)
           Right fx ->
             let (renamed, scopeErrors) = renameModule fx (buildEnv build) imports modQ m
                 (env, items) = elabModule fx (buildEnv build) renamed
                 (checked, build') = runItems specsOf fx env build (moduleExports fx renamed) [Report sp SevError (T.pack msg) | ScopeError sp msg <- scopeErrors] items
-             in (checked {checkedRenamed = Just renamed}, build')
+             in (checked {checkedRenamed = Just renamed, checkedNames = foldMap itemNameResolutions items}, build')
 
 data Run = Run
   { runCore :: !Core
@@ -339,7 +342,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
         , runObligations = []
         }
     finish r =
-      ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r)) Nothing fx
+      ( Checked (reverse (runReports r)) (reverse (runText r)) (reverse (runCertified r)) (Just (knowledge r, runCore r)) Nothing fx mempty
       , Build
           { buildCore = runCore r
           , buildRetainGeneratedText = buildRetainGeneratedText build0
