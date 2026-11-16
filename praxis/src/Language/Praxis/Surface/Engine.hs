@@ -1886,7 +1886,31 @@ indexEquation k g eqs l r = case closeEq indexFuel k g eqs l r of
       a : rest -> either (\e -> firstOf e rest) Right a
     ls = reductionsOf k l
     rs = reductionsOf k r
-    attempts = [attempt [] rs | not (null rs)] <> [attempt ls [] | not (null ls)] <> [attempt ls rs | not (null ls), not (null rs)]
+    attempts =
+      [attempt [] rs | not (null rs)]
+        <> [attempt ls [] | not (null ls)]
+        <> [attempt ls rs | not (null ls), not (null rs)]
+        <> [attempt (ls <> rewrittenLeft) (rs <> rewrittenRight) | not (null rewrittenLeft && null rewrittenRight)]
+    rewrittenLeft = refine (lastTerm l ls)
+    rewrittenRight = refine (lastTerm r rs)
+    -- A pattern can give m = 0 while another gives n = plus m 0.
+    -- Unfolding either equation alone is stuck: substitute the known value
+    -- inside the call, then unfold again. Each equation is used at most once
+    -- per side, with every step justified by congruence or an unfolding lemma.
+    refine = go indexFuel eqs
+      where
+        go remaining available t
+          | remaining <= 0 = []
+          | otherwise = case [ (i, h, substCT (Map.singleton v value) t)
+                             | (i, (h, a, b)) <- zip [0 ..] available
+                             , (CVar v, value) <- [(a, b), (b, a)]
+                             , v `elem` varsCT t
+                             , v `notElem` varsCT value
+                             ] of
+              (i, h, next) : _ ->
+                let steps = reductionChain k next
+                 in ("cong " <> fromText h, next) : steps <> go (remaining - 1) (take i available <> drop (i + 1) available) (lastTerm next steps)
+              [] -> []
     attempt ls' rs' = do
       let l' = lastTerm l ls'
           r' = lastTerm r rs'

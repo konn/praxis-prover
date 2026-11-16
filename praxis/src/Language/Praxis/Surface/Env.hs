@@ -31,6 +31,8 @@ module Language.Praxis.Surface.Env (
   CtorInfo (..),
   constructorValueTypes,
   ConstructorSignature (..),
+  constructorSignature,
+  constructorIndices,
   TeleEntry (..),
   Role (..),
   FunInfo (..),
@@ -398,13 +400,16 @@ data CtorInfo = CtorInfo
   deriving stock (Show)
 
 {- |
-A constructor in the GADT style, beyond the fields its code stores: its
-telescope, its implicit arguments and its fields in order, and the indices of
-its result over the telescope, @IxParam i@ for its @i@-th entry.
+A constructor has a uniform result over fresh index parameters, constrained
+by equations over its telescope. The telescope retains the stored and
+recoverable values; the result parameters and equality evidence are erased.
 -}
 data ConstructorSignature = ConstructorSignature
   { constructorTele :: ![TeleEntry]
   , constructorResult :: ![Ix]
+  -- ^ distinct index parameters, numbered immediately after the telescope
+  , constructorEqualities :: ![(Ix, Ix)]
+  -- ^ each result parameter equals an index expression over the telescope
   , constructorProofs :: ![(Int, Scope Int Expr Void)]
   {- ^ its proof arguments, preconditions its code does not store: each by
   its position among the explicit arguments, fields and proofs in order,
@@ -412,6 +417,16 @@ data ConstructorSignature = ConstructorSignature
   -}
   }
   deriving stock (Show)
+
+-- | Elaborate result indices into a uniform result and explicit equalities.
+constructorSignature :: [TeleEntry] -> [Ix] -> [(Int, Scope Int Expr Void)] -> ConstructorSignature
+constructorSignature tele indices proofs = ConstructorSignature tele parameters (zip parameters indices) proofs
+  where
+    parameters = [IxParam i | i <- take (length indices) [length tele ..]]
+
+-- | The indices computed by a constructor's numerical representation.
+constructorIndices :: ConstructorSignature -> [Ix]
+constructorIndices = map snd . constructorEqualities
 
 {- | The logical types of the stored values in physical argument order. Unlike
 'ctorFields', these retain the indices of the constructor telescope.
@@ -799,7 +814,7 @@ coreOf = mangleGlobal . map segmentRaw
 
 -- | Add a data type and its constructors; the type opens a namespace holding them.
 addData :: Env -> Segment -> [(Text, Kind)] -> [(Segment, [Ty])] -> (Env, DataInfo)
-addData env name params ctors = addIndexedData env name params [] [DataBinder n False (TypeParameter i) | (i, (n, _)) <- zip [0 ..] params] [] [(c, fs, ConstructorSignature [TeleEntry ("#" <> T.pack (show i)) t (Explicit i) | (i, t) <- zip [0 ..] fs] [] []) | (c, fs) <- ctors]
+addData env name params ctors = addIndexedData env name params [] [DataBinder n False (TypeParameter i) | (i, (n, _)) <- zip [0 ..] params] [] [(c, fs, constructorSignature [TeleEntry ("#" <> T.pack (show i)) t (Explicit i) | (i, t) <- zip [0 ..] fs] [] []) | (c, fs) <- ctors]
 
 -- | Add a data type whose constructors may be in the GADT style, with the types of its indices, which of its parameters are implicit, and its index functions.
 addIndexedData :: Env -> Segment -> [(Text, Kind)] -> [Ty] -> [DataBinder] -> [QualName] -> [(Segment, [Ty], ConstructorSignature)] -> (Env, DataInfo)

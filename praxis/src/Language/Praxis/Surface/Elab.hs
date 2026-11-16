@@ -875,7 +875,7 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
       tele =
         [TeleEntry v ty (role e) | (e, (v, ty)) <- zip [0 ..] (zip implicitNames implicitTys)]
           <> [TeleEntry (maybe ("#" <> T.pack (show fi)) unLocated mn) ty (Explicit (nStored + fi)) | (fi, ((mn, _), ty)) <- zip [0 :: Int ..] (zip fieldParts fieldTys)]
-  pure ((cname, [erase (implicitTys !! e) | e <- storedEs] <> map erase fieldTys, ConstructorSignature tele resultIx proofs), needed)
+  pure ((cname, [erase (implicitTys !! e) | e <- storedEs] <> map erase fieldTys, constructorSignature tele resultIx proofs), needed)
   where
     isImplicit = \case
       SigImplicit {} -> True
@@ -981,7 +981,7 @@ indexFunction env info fns p f sp = do
           IxSucc x -> App (Global (Ref RefBuiltin "S")) <$> term x
           IxCon cc xs -> apps (Global (Ref RefConstructor cc)) <$> traverse term xs
           _ -> Left (ElabError sp "internal: an index of a constructor's result which is no pattern")
-    bare <- term (constructorResult g !! p)
+    bare <- term (constructorIndices g !! p)
     let exprIndex e = case spine e of
           (Var i, []) -> fromMaybe (IxBound 0 i) (listToMaybe [IxParam k | (k, entry) <- zip [0 ..] tele, teRole entry `elem` [Explicit i, Stored i]])
           (Nat n, []) -> IxNat n
@@ -1008,7 +1008,7 @@ indexFunction env info fns p f sp = do
                   assignment <-
                     maybe (Left (ElabError sp "cannot instantiate a generated index constructor")) Right $
                       foldM (\s (a, b) -> matchTy n a b s) emptyAssignment {asValues = values} (zip (constructorValueTypes cc) actual)
-                  let result = substScheme n assignment (TData (renderQualName (dataQual dd)) [TParam i [] | i <- [0 .. fst n - 1]] (constructorResult sig))
+                  let result = substScheme n assignment (TData (renderQualName (dataQual dd)) [TParam i [] | i <- [0 .. fst n - 1]] (constructorIndices sig))
                   pure (result, [substScheme n assignment (TParam i []) | i <- [0 .. fst n - 1]], IM.toList values)
                 _ -> Left (ElabError sp "unknown generated index constructor")
               _ -> pure (erase (dataIndices info !! p), [], [])
@@ -1808,7 +1808,7 @@ ixType env sc = go
           tele = constructorTele g
           explicits = [(e, t) | (e, TeleEntry _ t (Explicit _)) <- zip [0 ..] tele]
           given = emptyAssignment {asValues = IM.fromList [(e, x) | ((e, _), x) <- zip explicits xs]}
-       in maybe THole (\s -> substScheme (np, length tele) s (self (constructorResult g))) (foldM (\s ((_, t), x) -> matchTyWith (unfolder env) (np, length tele) t (go x) s) given (zip explicits xs))
+       in maybe THole (\s -> substScheme (np, length tele) s (self (constructorIndices g))) (foldM (\s ((_, t), x) -> matchTyWith (unfolder env) (np, length tele) t (go x) s) given (zip explicits xs))
 
 -- | The names of the enclosing signature's value parameters, by their positions: how its messages render indices.
 valueNamesOf :: Env -> [Text]
@@ -1964,7 +1964,7 @@ elabDecl fx env sp name ty0 clauses = do
         , dd : _ <- [dd | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn] -> do
             let matched = [r | fc <- fcs, PCon (Ref _ r) _ <- [fcPatterns fc !! c]]
             fmap catMaybes . forM [ci | ci <- dataCtors dd, ctorCore ci `notElem` matched] $ \ci -> case ctorSignature ci of
-              g -> case unifyAllWith (unfolder env) flexibleKey (zip idxs (map (instValues [IxMeta i (Hint (teName en)) | (i, en) <- zip [0 ..] (constructorTele g)]) (constructorResult g))) emptySubst of
+              g -> case unifyAllWith (unfolder env) flexibleKey (zip idxs (map (instValues [IxMeta i (Hint (teName en)) | (i, en) <- zip [0 ..] (constructorTele g)]) (constructorIndices g))) emptySubst of
                 Clash _ -> pure (Just (ctorCore ci))
                 _ -> Left (ElabError sp ("the clauses of " <> T.unpack (segmentText name) <> " miss the constructor " <> T.unpack (segmentText (last (ctorQual ci))) <> ", which can match there"))
       _ -> pure []
@@ -2383,7 +2383,10 @@ elabFunClauseBody fx env info runtimeTys args result (R.Clause lhs0 (Located rsp
       boundProp q = do
         values <- traverse (indexTermInWithDependencies envBody namedContext . applyIx refined) q
         pure (values >>= fst, foldMap snd values)
-      ownRecorded = [(h, p, used) | (Just h, (_, prop)) <- zip proofNames (funProofs info), Just (p, used) <- [ownProp prop]] <> [(h, p, used) | (Just h, q) <- boundProofs, Just (p, used) <- [boundProp q]]
+      ownRecorded =
+        [(h, p, used) | (Just h, (_, prop)) <- zip proofNames (funProofs info), Just (p, used) <- [ownProp prop]]
+          <> [(h, p, used) | (Just h, q) <- boundProofs, Just (p, used) <- [boundProp q]]
+          <> [("#gadt" <> T.pack (show i), p, used) | (i, (x, y)) <- zip [0 :: Int ..] (mEqualities refinedM), Just (p, used) <- [boundProp (Rel RelEq (Var x) (Var y))]]
       own = [(h, p) | (h, p, _) <- ownRecorded]
       contextRequirements = foldMap (requirement rsp . CertifiedDeclaration) (Set.toList (foldMap (\(_, _, used) -> used) ownRecorded))
   requireAll contextRequirements
@@ -2587,6 +2590,7 @@ in.
 -}
 data Matching = Matching
   { mSubst :: !Subst
+  , mEqualities :: ![(Ix, Ix)]
   , mFresh :: !Int
   }
 
@@ -2600,7 +2604,7 @@ argument; and what matching the constructors of data types in the GADT
 style concluded of the indices, the variables' types at it.
 -}
 patterns :: Env -> [(Ty, PatSource)] -> TC ([Pattern], [(Atom, Binder)], [[BoundProof]], [(Text, Ix)], Matching)
-patterns env = patternsFrom env [] [] (Matching emptySubst (envFresh env))
+patterns env = patternsFrom env [] [] (Matching emptySubst [] (envFresh env))
 
 {- |
 A proof of a constructor a pattern binds: the name it gives it, if any, and
@@ -2660,10 +2664,10 @@ rankIn k
 A pattern against the type expected, the variables it binds, each opened
 into an atom fresh after those made so far, and what it concludes of the
 indices.  A
-constructor of a data type in the GADT style matches where its result's
-indices unify with those expected, its implicit arguments variables to
-solve: a clash is a pattern which never matches there, and an index a
-function computes, which unification cannot see into, is refused.
+constructor of a data type in the GADT style introduces its result's
+equality constraints. Unification refines the variables it can solve; an
+undecided equality remains a branch-local assumption. A constructor clash
+is still a pattern which can never match there.
 -}
 elabPattern :: Env -> [(Atom, Binder)] -> [(Text, Ix)] -> Matching -> Ty -> PatSource -> TC (Pattern, [(Atom, Binder)], [BoundProof], [(Text, Ix)], Matching)
 elabPattern env bound aliases m expected source = case source of
@@ -2680,7 +2684,7 @@ elabPattern env bound aliases m expected source = case source of
       TData dn _ idxs
         | dd : _ <- [dd | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn] -> do
             let possible ci = case ctorSignature ci of
-                  g | not (null idxs) -> case unifyAllWith (unfolder env) flexibleKey (zip idxs (map (instValues (ghostsOf (constructorTele g))) (constructorResult g))) s of
+                  g | not (null idxs) -> case unifyAllWith (unfolder env) flexibleKey (zip idxs (map (instValues (ghostsOf (constructorTele g))) (constructorIndices g))) s of
                     Clash _ -> False
                     _ -> True
                   _ -> True
@@ -2750,13 +2754,14 @@ elabPattern env bound aliases m expected source = case source of
           expectedIdx = case expected of
             TData _ _ xs -> xs
             _ -> []
-      sMatched <-
+      (sMatched, givenEqualities) <-
         if null expectedIdx
-          then pure s
-          else case unifyAllRankedWith (unfolder env) (valueNamesOf env) rankIn (zip expectedIdx (map inst (constructorResult g))) s of
-            Unified s' -> pure s'
-            Clash why -> failAt csp ("this pattern can never match here: " <> why)
-            Stuck why -> failAt csp ("cannot match on this index: " <> why)
+          then pure (s, mEqualities m)
+          else
+            let at = instValues (ghosts <> expectedIdx)
+                equations = [(at x, at y) | (x, y) <- constructorEqualities g]
+             in either (failAt csp . ("this pattern can never match here: " <>)) pure $
+                  refineEqualities (unfolder env) (valueNamesOf env) rankIn (mEqualities m <> equations) s
       -- An implicit pattern naming an argument its code does not store: a name for the index the argument is, by which
       -- the body may give it.  A name bound already names the argument only where matching has found it to be what
       -- the name stands for: a name asserts nothing of an index.
@@ -2814,13 +2819,12 @@ elabPattern env bound aliases m expected source = case source of
               (p, vs, _, as, mm') <- elabPattern env boundNow aliasesNow mm (applyTy (mSubst mm) f) a >>= nested (sourceSpan a)
               mm'' <- case fst (patternIxFrom (map fst vs) p) of
                 Nothing -> pure mm'
-                Just x -> case unifyIxRankedWith (unfolder env) (valueNamesOf env) rankIn (applyIx (mSubst mm') (ghostOf pos)) x (mSubst mm') of
-                  Unified u -> pure mm' {mSubst = u}
-                  Clash why -> failAt (sourceSpan a) ("this pattern can never match here: " <> why)
-                  Stuck why -> failAt (sourceSpan a) ("cannot match on this value: " <> why)
+                Just x -> case refineEqualities (unfolder env) (valueNamesOf env) rankIn (mEqualities mm' <> [(ghostOf pos, x)]) (mSubst mm') of
+                  Right (u, equations) -> pure mm' {mSubst = u, mEqualities = equations}
+                  Left why -> failAt (sourceSpan a) ("this pattern can never match here: " <> why)
               pure (acc <> [(p, vs, as)], mm'')
           )
-          ([], m1 {mSubst = s1})
+          ([], m1 {mSubst = s1, mEqualities = givenEqualities})
           matchedFields
       -- The fields its code stores, in order: the explicit ones as matched, the implicit ones not.
       let s2 = mSubst m2
@@ -2950,6 +2954,8 @@ data AppHead a = AppHead
   -- ^ the positions of its arguments which are proofs, each with its proposition at the parameters found
   , ahProofShapes :: ![(Int, Expr Int)]
   -- ^ the same propositions over value parameters, for inference from named proofs
+  , ahEqualities :: ![(Ix, Ix)]
+  -- ^ wanted constructor equalities: fresh result parameters and their defining indices
   , ahRefine :: Assignment -> TC Assignment
   -- ^ fill dependent dictionary indices after the class type is determined
   , ahApply :: Assignment -> TC ([Expr a] -> Expr a)
@@ -3258,7 +3264,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       hinted <- applicationAssignment expected h imps args
       (s1, done, pending) <- foldM (argument (ahDependent h) n) (hinted, IM.empty, []) (zip3 [0 :: Int ..] (ahDomains h) termArgs)
       (settled, done') <- settle (ahDependent h) n s1 done pending
-      s2 <- ahRefine h settled
+      s2 <- ahRefine h (constructorHints h settled)
       -- Each proof, against its proposition at what the application found: kept in the
       -- term, for the proof to be checked there, and erased from the code.
       proofs <- forM proofAt \(i, prop) -> (\p -> (i, ProofArg p (Irrelevant (args !! i)))) <$> prop s2
@@ -3267,11 +3273,19 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
         _ -> pure ()
       apply <- ahApply h s2
       -- The type found for it; agreeing with the one expected only once abbreviations are unfolded, it stands, and 'elabTerm' transports the term to the type expected by the equations of their indices.
-      let actual = substScheme n s2 (ahResult h)
+      -- A constructor has a uniform result constrained by equalities. Build
+      -- it at its defining indices; elabTerm emits checked transports for
+      -- the wanted equalities instead of requiring inference to prove them.
+      let defined = mapIx (\x -> fromMaybe x (lookup x (ahEqualities h))) (ahResult h)
+          actual = substScheme n s2 defined
       t <- case mergeTy expected actual of
         Just agreed -> pure agreed
         Nothing
           | Just _ <- mergeTyWith (unfolder env) expected actual -> pure actual
+          | not (null (ahEqualities h))
+          , Just _ <- proofHypotheses proofArguments
+          , Just _ <- mergeTy (erase expected) (erase actual) ->
+              pure actual
           | otherwise -> failAt sp (mismatch env expected actual)
       unless (firstOrder t) $ failAt sp "a function-valued result is not a first-order value"
       terms <-
@@ -3284,7 +3298,11 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
             | Just p <- lookup i proofs = p : inOrder (i + 1) ts
             | x : ts' <- ts = x : inOrder (i + 1) ts'
             | otherwise = []
-      pure (At (Irrelevant sp) (Typed t [substScheme n s2 (TParam i []) | i <- [0 .. fst n - 1]] (if ahRecordIndices h then IM.toList (asValues s2) else []) (apply (inOrder (0 :: Int) terms))), t)
+          -- Fresh result parameters belong to the wanted equalities, not
+          -- the primitive constructor call. Its transport carries the
+          -- completed target type; partial inference hints must not escape.
+          indices = [(i, x) | (i, x) <- IM.toList (asValues s2), ahRecordIndices h, IxParam i `notElem` map fst (ahEqualities h)]
+      pure (At (Irrelevant sp) (Typed t [substScheme n s2 (TParam i []) | i <- [0 .. fst n - 1]] indices (apply (inOrder (0 :: Int) terms))), t)
     -- Construction scripts ask the ordinary application checker for each
     -- next domain. Already supplied arguments refine dependent indices and
     -- type parameters; the completed term still undergoes full checking.
@@ -3321,7 +3339,17 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       selectedTypes <- forM (zip (ahTypeImplicits h) typeImplicits) \(i, argument') -> (i,) <$> liftE (elabTypeIn env (envScope env) argument')
       given <- foldM (implicitArg n) emptyAssignment {asTypes = IM.fromList selectedTypes} (zip (ahImplicits h) valueImplicits)
       s0 <- maybe (failAt sp (mismatch env wanted (substScheme n given (ahResult h)))) pure (matchTyWith (unfolder env) n (ahResult h) wanted given)
-      pure (foldl (proofHint n args) s0 (ahProofShapes h))
+      -- Preserve the precedence of the expected result over hints supplied
+      -- by a proof argument: that proof may itself need equality transport.
+      pure (constructorHints h (foldl (proofHint n args) (constructorHints h s0) (ahProofShapes h)))
+    -- Equalities guide inference, but only their subsequently checked
+    -- evidence can justify a repeated parameter at different indices.
+    constructorHints h s = foldl hint s (ahEqualities h)
+      where
+        hint assigned (IxParam i, defining) = case IM.lookup i (asValues assigned) of
+          Just actual -> hintIndex (unfolder env) (snd (ahParams h)) defining actual assigned
+          Nothing -> assigned
+        hint assigned _ = assigned
     proofHint n args s (pos, shape)
       | pos < length args
       , Just hypotheses <- proofHypotheses proofArguments
@@ -3391,7 +3419,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       R.ENat k -> pure (plain (0, 0) [] TNat (Nat k))
       R.EParen x -> (\(e', t) -> plain (0, 0) [] t e') <$> elabTerm proofArguments env givens ctx x THole
       _ -> failAt hsp "a term: a variable, a constructor or a function, applied"
-    plain n doms res hd = AppHead n [] True doms res [] [] [] [] pure (const (pure (apps hd)))
+    plain n doms res hd = AppHead n [] True doms res [] [] [] [] [] pure (const (pure (apps hd)))
     -- A value parameter of the enclosing signature, where a variable in scope stands for it.
     valueParam i = (\l -> Typed (localTy l) [] [] (Var (localVar l))) <$> standingFor (IxParam i) ctx
     -- The value found for a parameter of the head's type, as a term of what is in scope.
@@ -3441,7 +3469,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                 n = (length (dataParams dat), length (constructorTele sig))
                 valueAtPosition j = listToMaybe (drop j xs)
                 values = [(i, value) | (i, entry) <- zip [0 ..] (constructorTele sig), j <- case teRole entry of Explicit j -> [j]; Stored j -> [j]; _ -> [], Just value <- [valueAtPosition j]]
-                result = TData (renderQualName (dataQual dat)) [TParam i [] | i <- [0 .. fst n - 1]] (constructorResult sig)
+                result = TData (renderQualName (dataQual dat)) [TParam i [] | i <- [0 .. fst n - 1]] (constructorIndices sig)
             indexApplication (Ref RefConstructor name) n emptyAssignment {asValues = IM.fromList values} (constructorValueTypes c) result xs
       IxSchema name | hint /= THole -> pure (Dictionary hint (Global (Ref RefStatic name)), hint)
       IxPartial name arity prefix xs | hint /= THole -> do
@@ -3570,7 +3598,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                 )
               | (pos, prop) <- funProofs f
               ]
-        pure $ AppHead n [] True doms res (zip [0 ..] (map snd (schemeValues (funScheme f)))) [] proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- funProofs f] refine \s -> do
+        pure $ AppHead n [] True doms res (zip [0 ..] (map snd (schemeValues (funScheme f)))) [] proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- funProofs f] [] refine \s -> do
           let actualTypes = [substScheme n s (TParam i []) | i <- [0 .. fst n - 1]]
           replayRequirements env givens hsp actualTypes (funRequirements f)
           pre <- passed s
@@ -3592,7 +3620,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
           let tele = constructorTele g
               doms = [t | TeleEntry _ t (Explicit _) <- tele]
               positions = [k | TeleEntry _ _ (Explicit k) <- tele]
-              mentioned = nub (concatMap paramsOf (constructorResult g <> concatMap (tyIndices . teType) tele) <> [i | (_, prop) <- constructorProofs g, B i <- toList (fromScope prop)])
+              mentioned = nub (concatMap paramsOf (constructorIndices g <> concatMap (tyIndices . teType) tele) <> [i | (_, prop) <- constructorProofs g, B i <- toList (fromScope prop)])
               -- Each by its position among the arguments, the fields in order, which is not its position in the code where implicit arguments are stored before them.
               depends = [(fi, pos) | (fi, pos) <- zip [0 :: Int ..] [pos | (pos, TeleEntry _ _ (Explicit _)) <- zip [0 ..] tele], pos `elem` mentioned]
               cname = T.unpack (segmentText (last (ctorQual c)))
@@ -3607,7 +3635,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                   )
                 | (a, prop) <- constructorProofs g
                 ]
-          pure $ AppHead (n, length tele) [] True doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- constructorProofs g] pure \s -> do
+          pure $ AppHead (n, length tele + length (constructorResult g)) [] True doms (self (constructorResult g)) [(pos, t) | (pos, TeleEntry _ t role) <- zip [0 ..] tele, role `notElem` map Explicit positions] depends proofAt [(pos, instantiate Var (fmap absurd prop)) | (pos, prop) <- constructorProofs g] (constructorEqualities g) pure \s -> do
             stored <- forM [(k, pos, en) | (pos, en@(TeleEntry _ _ (Stored k))) <- zip [0 ..] tele] \(k, pos, en) -> do
               let what = "the implicit argument " <> T.unpack (teName en) <> " of " <> cname
               case IM.lookup pos (asValues s) of
@@ -3647,7 +3675,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
                 other -> maybe (failAt hsp "a dependent class member needs a first-order dictionary value") pure (expressionIndex (dictionaryEntry (Slot q 0 0) other))
               pure s {asValues = IM.insert i ix (asValues s)}
         when (fst n == 0) $ failAt hsp "internal: a method of no class"
-        pure $ AppHead n [0] False doms res [] [] [] [] refine \s -> do
+        pure $ AppHead n [0] False doms res [] [] [] [] [] refine \s -> do
           selected <- resolution (methodAt env givens m (substScheme n s (TParam 0 [])))
           case selected of
             AtPlace r -> pure (apps (Global r))
@@ -3689,7 +3717,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       QName [] (Ident x) | x `elem` ["S", "suc"] -> Just (plain (0, 0) [TNat] TNat (Global (Ref RefBuiltin "S")))
       QName [] (Op o) | Just core <- lookup o arithmetic -> Just (plain (0, 0) [TNat, TNat] TNat (Global (Ref RefBuiltin core)))
       -- absurd p, p a proof of what cannot be: a value of any type.
-      QName [] (Ident "absurd") -> Just (AppHead (1, 0) [] True [] (TParam 0 []) [] [] [(0, const (pure Bottom))] [] pure (const (pure (\case [ProofArg _ raw] -> Absurd raw; _ -> Hole))))
+      QName [] (Ident "absurd") -> Just (AppHead (1, 0) [] True [] (TParam 0 []) [] [] [(0, const (pure Bottom))] [] [] pure (const (pure (\case [ProofArg _ raw] -> Absurd raw; _ -> Hole))))
       _ -> Nothing
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
 

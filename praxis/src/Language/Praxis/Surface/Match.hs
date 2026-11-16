@@ -100,7 +100,7 @@ possibleShapes args runtime selected = case unifyAll (const True) equations empt
     equations =
       [(IxParam p, value i) | (i, p) <- zip [0 ..] runtime]
         <> concat
-          [ zip indices (map (instValues (entries i c)) (constructorResult (ctorSignature c)))
+          [ zip indices (map (instValues (entries i c)) (constructorIndices (ctorSignature c)))
           | (i, Constructor c) <- selected
           , TData _ _ indices <- [args !! i]
           ]

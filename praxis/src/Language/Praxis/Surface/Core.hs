@@ -301,9 +301,12 @@ validateGlobal env slots ref proofCount explicitIndices actualValues actual resu
   S.RefConstructor -> case [c | GCtor c <- globals, ctorCore c == S.refName ref] of
     c : _
       | Just d <- dataOfCtor env c ->
+          -- Lower the uniform constructor at its defining indices. Any
+          -- other instantiation needs a Transport with the exact equality
+          -- evidence checked above; an annotation cannot supply it.
           let n = length (dataParams d)
               sig = ctorSignature c
-           in check (length (constructorProofs sig)) (n, length (constructorTele sig)) (constructorValueTypes c) (Ty.TData (renderQualName (dataQual d)) [Ty.TParam i [] | i <- [0 .. n - 1]] (constructorResult sig))
+           in check (length (constructorProofs sig)) (n, length (constructorTele sig)) (constructorValueTypes c) (Ty.TData (renderQualName (dataQual d)) [Ty.TParam i [] | i <- [0 .. n - 1]] (constructorIndices sig))
     _ -> missing
   S.RefStatic -> case [s | (s, r) <- places, r == ref] of
     s : _ -> checkSlot s

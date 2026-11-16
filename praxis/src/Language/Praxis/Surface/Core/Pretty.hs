@@ -40,7 +40,7 @@ datatype env info = T.unlines (header : map constructor (dataCtors info))
           implicit = ["{" <> n <> " : " <> ty t <> "}" | TeleEntry n t role <- tele, not (explicit role)]
           fields = [if "#" `T.isPrefixOf` n then P.typeText env scope 1 t else binder n (ty t) | TeleEntry n t (Explicit _) <- tele]
           proofs = [(pos, binder ("proof" <> T.pack (show (pos + 1))) (P.expression (P.nameAt "i" (P.indexNames scope)) (instantiate Var (fmap absurd prop)))) | (pos, prop) <- constructorProofs sig]
-          result = TData (renderQualName (dataQual info)) [TParam i [] | i <- [0 .. length params - 1]] (constructorResult sig)
+          result = TData (renderQualName (dataQual info)) [TParam i [] | i <- [0 .. length params - 1]] (constructorIndices sig)
           types = ["@{" <> n <> " : " <> T.pack (renderKind k) <> "}" | (n, k) <- params]
        in "  " <> displayQualName (ctorQual c) <> " : " <> T.intercalate " -> " (types <> implicit <> P.interleave proofs fields <> [ty result])
     explicit = \case Explicit _ -> True; _ -> False

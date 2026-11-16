@@ -20,7 +20,7 @@ import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, pre
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Encode (natInductionLemma)
 import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, initialSourceBindings, membershipProof, theoremStatement)
-import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), Env (..), FunInfo (..), Global (..), TeleEntry (..), constructorsNamed, emptyEnv, resolve)
+import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), Env (..), FunInfo (..), Global (..), TeleEntry (..), constructorIndices, constructorsNamed, emptyEnv, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Index (Unified (..), emptySubst, unifyIx)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
@@ -174,7 +174,7 @@ checkTests =
         let constructors = constructorsNamed (knowEnv k)
         case (constructors (Ident "plain"), constructors (Ident "explicit")) of
           ([ordinary], [indexed]) -> do
-            let shape c = let signature = ctorSignature c in (map (\e -> (teType e, teRole e)) (constructorTele signature), constructorResult signature, length (constructorProofs signature))
+            let shape c = let signature = ctorSignature c in (map (\e -> (teType e, teRole e)) (constructorTele signature), constructorIndices signature, length (constructorProofs signature))
             shape ordinary @?= shape indexed
           _ -> assertFailure "missing constructors"
     , testCase "type synonyms infer indices and expand through functions, fields and proofs" $ do
@@ -895,6 +895,37 @@ checkTests =
           $ \(what, bad, expected) -> case errors (checkSource p "bad-abbreviations.px" (source <> bad)) of
             [] -> assertFailure (what <> " was accepted")
             reported -> assertBool (what <> ": " <> unlines reported) (any (expected `isInfixOf`) reported)
+    , testCase "GADT construction discharges equality constraints and patterns retain unsolved givens" $ do
+        c <- checkFile "test/data/gadt-computation.px"
+        errors c @?= []
+        forM_ ["H", "reversed", "closed", "recursive", "open-zero", "open-succ", "nested", "constructor", "builtin", "reuse-open", "refine-later", "nested-given", "bump-bound"] $ \name ->
+          assertBool ("the index contract of " <> T.unpack name) (("GadtComputation." <> name <> ".#index") `elem` checkedTheorems c)
+        (knowledge, core) <- maybe (assertFailure "missing checked core") pure (checkedFinal c)
+        let refl = [ctorSignature ctor | GCtor ctor <- Map.elems (envGlobals (knowEnv knowledge)), ctorCore ctor == mangleGlobal ["GadtComputation", "Id", "Refl"]]
+        case refl of
+          [signature] -> do
+            constructorResult signature @?= [IxParam 1, IxParam 2]
+            constructorEqualities signature @?= [(IxParam 1, IxParam 0), (IxParam 2, IxParam 0)]
+            length (constructorTele signature) @?= 1
+          _ -> assertFailure "missing normalized Refl signature"
+        let forged = Typed (TData "GadtComputation.Id" [] [IxNat 0, IxNat 1]) [] [(0, IxNat 0)] (App (Global (Ref RefConstructor (mangleGlobal ["GadtComputation", "Id", "Refl"]))) (Nat 0))
+        case SurfaceCore.elaborate (knowEnv knowledge) [] [] forged of
+          Left _ -> pure ()
+          Right _ -> assertFailure "the explicit core accepted a constructor without its equality evidence"
+        forM_ ["H", "closed", "recursive"] $ \name -> case Map.lookup (mangleGlobal ["GadtComputation", name]) (coreBodies core) of
+          Just [body] -> assertBool (T.unpack name <> " needs certified index transport") ("transport" `T.isInfixOf` SurfaceCore.dump body)
+          _ -> assertFailure (T.unpack name <> " has no single body")
+    , testCase "GADT equality constraints reject false constructions and do not assume function injectivity" $ do
+        p <- either assertFailure pure prelude
+        source <- TIO.readFile "test/data/gadt-computation.px"
+        forM_
+          [ "wrong : Id (plus 0 0) 1\nwrong = Refl\n"
+          , "wrong-recursive : Id (plus 2 3) 4\nwrong-recursive = Refl\n"
+          , "impossible : Id 0 1 -> Nat\nimpossible Refl = 0\n"
+          , "not-injective : {m n : Nat} -> Id (constant m) (constant n) -> Id m n\nnot-injective Refl = Refl\n"
+          , "escaped : {m : Nat} -> Id (plus m 0) 0\nescaped = Refl\n"
+          ]
+          $ \bad -> assertBool ("accepted: " <> T.unpack bad) (not (null (errors (checkSource p "bad-gadt-computation.px" (source <> bad)))))
     , -- Found at once: 3.7 s here, 10-19 s on the shared CI runners, whose speed varies; an exponential unfolding would take far longer than the minute allowed.
       localOption (mkTimeout 60000000) $ testCase "indices differing under many nested abbreviations are compared once unfolded, not unfolded at every level: the mismatch is found at once" $ do
         p <- either assertFailure pure prelude

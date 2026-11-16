@@ -69,7 +69,7 @@ import Language.Praxis.Surface.CoreText (CT (..), isParameter, termCT)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule, fcBody)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
 import Language.Praxis.Surface.Engine (theoremStatement)
-import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), DataInfo (..), FunInfo (..), Role (..), TeleEntry (..), TheoremInfo (..), emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), DataInfo (..), FunInfo (..), Role (..), TeleEntry (..), TheoremInfo (..), constructorIndices, emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Eval qualified as Runtime
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
@@ -286,7 +286,7 @@ genData ld d args asked = sized \s ->
     -- The constructors which build a value at the indices asked, each with what that fixes of its telescope.
     fits = [(c, fixed) | c <- dataCtors d, Just fixed <- [fitting c]]
     fitting c = case ctorSignature c of
-      g -> foldM (\acc (x, a) -> maybe (Just acc) (\v -> matchValue x v acc) a) Map.empty (zip (constructorResult g) asked)
+      g -> foldM (\acc (x, a) -> maybe (Just acc) (\v -> matchValue x v acc) a) Map.empty (zip (constructorIndices g) asked)
     leaves = [cf | cf@(c, _) <- fits, not (any (mentions self) (ctorFields c))]
     build c fixed = case ctorSignature c of
       g -> do
@@ -300,7 +300,7 @@ genData ld d args asked = sized \s ->
           -- Its preconditions hold of the entries, or no value is built of them.
           guard (all (\(_, p) -> truth ld (instantiate (\i -> Var (env Map.! i)) (fmap absurd p))) (constructorProofs g))
           fields <- traverse (\k -> at k >>= (`Map.lookup` env)) [0 .. length (ctorFields c) - 1]
-          is <- traverse (ixValue ld (`Map.lookup` env)) (constructorResult g)
+          is <- traverse (ixValue ld (`Map.lookup` env)) (constructorIndices g)
           pure (VCon (ctorCore c) fields, is)
 
 {- | Construct witnesses for equality preconditions by assigning an unfixed
@@ -707,7 +707,7 @@ emptyTelescope ld = any emptyType
     emptyType (TData n _ asked)
       | Just d <- Map.lookup n (ldDatas ld) =
           all
-            (\c -> or (zipWith clash asked (constructorResult (ctorSignature c))))
+            (\c -> or (zipWith clash asked (constructorIndices (ctorSignature c))))
             (dataCtors d)
     emptyType _ = False
     clash x y = case (normIx x, normIx y) of

@@ -9,7 +9,7 @@ import Language.Praxis.Surface.Core qualified as Core
 import Language.Praxis.Surface.Core.Types qualified as Reified
 import Language.Praxis.Surface.CoreText qualified as CT
 import Language.Praxis.Surface.Env
-import Language.Praxis.Surface.Index (ixToExprWith)
+import Language.Praxis.Surface.Index (applyIx, emptySubst, ixToExprWith, refineEqualities, substKeys)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Language.Praxis.Surface.Term qualified as Term
@@ -21,7 +21,25 @@ computationIndexTests :: TestTree
 computationIndexTests =
   testGroup
     "computation indices"
-    [ testCase "schema captures survive substitution and explicit type reflection" $ do
+    [ testCase "given equalities retain stuck computations while propagating substitutions" $ do
+        let x = IxMeta 0 (Hint "x")
+            computed = IxFun "f" [x]
+            refine equations = refineEqualities noUnfold [] (const (Just 0)) equations emptySubst
+        (solved, residual) <- either assertFailure pure (refine [(computed, IxNat 0), (x, IxNat 0)])
+        applyIx solved computed @?= IxFun "f" [IxNat 0]
+        residual @?= [(IxFun "f" [IxNat 0], IxNat 0)]
+        (fields, nested) <- either assertFailure pure (refine [(IxCon "C" [x, computed], IxCon "C" [IxNat 0, IxNat 0])])
+        applyIx fields x @?= IxNat 0
+        nested @?= residual
+        let y = IxMeta 1 (Hint "y")
+        (opaque, equalCalls) <- either assertFailure pure (refine [(computed, IxFun "f" [y])])
+        substKeys opaque @?= []
+        equalCalls @?= [(computed, IxFun "f" [y])]
+        assertBool "contradictory givens" (isLeft (refine [(x, IxNat 0), (x, IxNat 1)]))
+        assertBool "a constructor cycle" (isLeft (refine [(x, IxSucc x)]))
+        (_, recursive) <- either assertFailure pure (refine [(x, computed)])
+        recursive @?= [(x, computed)]
+    , testCase "schema captures survive substitution and explicit type reflection" $ do
         let index = IxFun "compute" [IxSchema "w_1", IxPartial "step" 1 1 [IxParam 0, IxBound 0 0]]
             concrete = IxFun "compute" [IxSchema "w_1", IxPartial "step" 1 1 [IxNat 3, IxBound 0 0]]
             ty = TData "Box" [] [concrete]

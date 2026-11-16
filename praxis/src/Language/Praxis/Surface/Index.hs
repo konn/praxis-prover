@@ -41,6 +41,8 @@ module Language.Praxis.Surface.Index (
   unifyIxNamedWith,
   unifyAllWith,
   unifyAllRankedWith,
+  refineEqualities,
+  hintIndex,
 
   -- * Terms
   ixToExpr,
@@ -219,6 +221,47 @@ unifyAllRanked names rank pairs s0 = foldl step (Unified s0) pairs
     step acc (x, y) = case acc of
       Unified s -> unifyIxRanked names rank x y s
       other -> other
+
+{- | Refine a branch using its given equalities. Solvable equations produce
+substitutions; undecided equations remain assumptions. Retry those after
+other equations refine the variables. Only constructors are decomposed:
+equal applications of an arbitrary function do not imply equal arguments.
+-}
+refineEqualities :: Unfold -> [Text] -> (Key -> Maybe Int) -> [(Ix, Ix)] -> Subst -> Either String (Subst, [(Ix, Ix)])
+refineEqualities unfold names rank equations initial = pass initial [] equations
+  where
+    pass s pending []
+      | s /= initial = refineEqualities unfold names rank pending s
+      | otherwise = Right (s, pending)
+    pass s pending ((x, y) : rest) =
+      let a = applyIx s x
+          b = applyIx s y
+       in case unifyIxRankedWith unfold names rank a b s of
+            Unified solved -> pass solved pending rest
+            Clash why -> Left why
+            Stuck _ -> case (a, b) of
+              (IxCon c xs, IxCon d ys) | c == d, length xs == length ys -> pass s pending (zip xs ys <> rest)
+              (IxSucc u, IxSucc v) -> pass s pending ((u, v) : rest)
+              (IxSucc u, IxNat n) | n > 0 -> pass s pending ((u, IxNat (n - 1)) : rest)
+              (IxNat n, IxSucc v) | n > 0 -> pass s pending ((IxNat (n - 1), v) : rest)
+              _ -> pass s (pending <> [(a, b)]) rest
+
+{- | Infer constructor arguments from a wanted equality without requiring the
+equality to be solved during inference. Conflicting occurrences retain the
+first choice; the explicit equality evidence must justify that choice later.
+-}
+hintIndex :: Unfold -> Int -> Ix -> Ix -> Assignment -> Assignment
+hintIndex unfold count pattern' actual assigned =
+  case matchIxWith unfold count pattern' actual assigned of
+    Just solved -> solved
+    Nothing -> case (pattern', actual) of
+      (IxCon c xs, IxCon d ys) | c == d, length xs == length ys -> pairs xs ys
+      (IxSucc x, IxSucc y) -> hintIndex unfold count x y assigned
+      (IxSucc x, IxNat n) | n > 0 -> hintIndex unfold count x (IxNat (n - 1)) assigned
+      (IxFun f xs, IxFun g ys) | f == g, length xs == length ys -> pairs xs ys
+      _ -> assigned
+  where
+    pairs xs ys = foldl (\s (x, y) -> hintIndex unfold count x y s) assigned (zip xs ys)
 
 -- * Terms
 

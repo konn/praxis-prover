@@ -613,6 +613,15 @@ indices clash with those of the argument's type — `nil`, of length 0, at
 `S n` — can never match there: its clause may be omitted, and a clause for it
 is refused. Every other constructor must have its clause.
 
+Matching also retains equalities that substitution cannot solve. Given
+`Refl : Id x x`, a pattern `Refl` against `Id (plus m 0) 0` brings the
+equation `plus m 0 = 0` into the clause; it need not first solve for `m`.
+Those equalities may justify construction or index transport in the body,
+and are confined to that clause. Construction emits equality obligations:
+for example, `Refl` at `Id (plus 0 0) 0` requires the ordinary proof engine
+to establish `plus 0 0 = 0` by computation. No additional proof argument
+has to be written at the call site.
+
 Where no constructor can match an argument, the absurd pattern `()` stands
 for it, and its clause has no right side, since nothing matches it:
 

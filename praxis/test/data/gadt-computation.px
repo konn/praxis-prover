@@ -1,0 +1,76 @@
+module GadtComputation where
+
+data Id (x : nat) (y : nat) where
+  Refl : Id x x
+
+plus : nat -> nat -> nat
+plus 0 m = m
+plus (S n) m = S (plus n m)
+
+-- Matching propagates m = 0 inside plus before checking the result.
+H : {m n : Nat} -> Id n (plus m 0) -> Id m 0 -> Id n 0
+H Refl Refl = Refl
+
+reversed : {m n : Nat} -> Id m 0 -> Id n (plus m 0) -> Id n 0
+reversed Refl Refl = Refl
+
+closed : Id (plus 0 0) 0
+closed = Refl
+
+consume : Id (plus 0 0) 0 -> Nat
+consume Refl = 0
+
+-- A match keeps an equality even when it cannot solve for m.
+consume-open : {m : Nat} -> Id (plus m 0) 0 -> Nat
+consume-open Refl = 0
+
+reuse-open : {m : Nat} -> Id (plus m 0) 0 -> Id (plus m 0) 0
+reuse-open Refl = Refl
+
+refine-later : {m : Nat} -> Id (plus m 0) 0 -> Id m 0 -> Id (plus m 0) 0
+refine-later Refl Refl = Refl
+
+data Boxed (m : Nat) where
+  MkBoxed : Id (plus m 0) 0 -> Boxed m
+
+nested-given : {m : Nat} -> Boxed m -> Id (plus m 0) 0
+nested-given (MkBoxed p) = reuse-open p
+
+constant : Nat -> Nat
+constant 0 = 0
+constant (S n) = 0
+
+consume-non-injective : {m n : Nat} -> Id (constant m) (constant n) -> Nat
+consume-non-injective Refl = 0
+
+-- The expected result determines n before a proof argument offers a hint.
+-- Its proof is checked at S k < S n, which reduces to the given k < n.
+data Bounded (n : Nat) where
+  Bound : (k : Nat) -> k < n -> Bounded n
+
+bump-bound : {n : Nat} -> Bounded n -> Bounded (S n)
+bump-bound (Bound {n} k h) = Bound (S k) h
+
+recursive : Id (plus 2 3) 5
+recursive = Refl
+
+-- Reduction needs only the matched argument, not a wholly closed call.
+open-zero : {n : Nat} -> Id (plus 0 n) n
+open-zero = Refl
+
+open-succ : {n m : Nat} -> Id (plus (S n) m) (S (plus n m))
+open-succ = Refl
+
+nested : Id (plus (plus 1 1) (plus 1 2)) 5
+nested = Refl
+
+data Box = MkBox Nat
+
+unbox : Box -> Nat
+unbox (MkBox n) = n
+
+constructor : Id (unbox (MkBox (plus 2 3))) 5
+constructor = Refl
+
+builtin : {m n : Nat} -> Id n (m + 0) -> Id m 0 -> Id n 0
+builtin Refl Refl = Refl

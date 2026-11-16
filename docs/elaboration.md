@@ -211,6 +211,24 @@ a primitive recursive function of its code — which keeps induction on a
 value of an indexed type the core's induction on one variable, whatever the
 indices of the value's fields.
 
+Before numerical encoding, `ConstructorSignature` gives every constructor a
+uniform result over fresh index parameters and explicit equality constraints.
+For example, `Refl : Id x x` has result `Id i j` with constraints `i = x`
+and `j = x`. These fresh parameters and their equality evidence add no stored
+fields; `constructorIndices` recovers the defining indices used by the index
+functions above. At construction, the constraints guide inference, and any
+remaining equalities become checked `Surface.Core.Transport` obligations.
+They use the ordinary equality proof engine, including computation, rather
+than a separate evaluator for constructor indices.
+
+At a pattern, the same constraints are givens. Unification substitutes solved
+variables through the clause and retries pending constraints after further
+refinement. An equality it cannot solve, such as `plus m 0 = 0`, remains a
+branch-local assumption for the body's obligations. Equal applications of a
+function are not decomposed into equal arguments. The function's generated
+contracts must establish the assumptions at each use of a body obligation;
+the core still checks every resulting proof.
+
 Its membership predicate is the erased type's, and it checks indices too
 (`Encode.ctorIndexEquations`): a constructor makes a value of its type only of
 entries at the indices its signature gives them. For each entry of the
