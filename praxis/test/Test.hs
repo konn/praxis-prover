@@ -17,6 +17,7 @@ import Language.Praxis.Surface.Encode (natInductionLemma)
 import Language.Praxis.Surface.EvalTest (evalTests)
 import Language.Praxis.Surface.EvidenceTest (evidenceTests)
 import Language.Praxis.Surface.ExactPredicateTest (exactPredicateTests)
+import Language.Praxis.Surface.ExtractTest (extractTests)
 import Language.Praxis.Surface.FiniteElaborationTest (finiteElaborationTests)
 import Language.Praxis.Surface.FiniteQuantifierTest (finiteQuantifierTests)
 import Language.Praxis.Surface.FiniteTacticTest (finiteTacticTests)
@@ -63,6 +64,7 @@ main =
       , exactPredicateTests
       , evidenceTests
       , evalTests
+      , extractTests
       , glivenkoTests
       , internalTests
       , withResource loadFirstOrderFixture (const (pure ())) $ \get ->

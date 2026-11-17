@@ -1,0 +1,26 @@
+cabal-version: 3.4
+name: shake-praxis
+version: 0.1.0.0
+synopsis: Build checked Praxis Surface programs for the browser
+description: Shake build rules for native Praxis extraction and browser WebAssembly bundles.
+category: Development
+maintainer: konn.jinro_at_gmail.com
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+
+executable shake-praxis
+  hs-source-dirs: app
+  main-is: Main.hs
+  default-language: GHC2024
+  ghc-options:
+    -Wall
+    -threaded
+    -rtsopts
+
+  build-depends:
+    base >=4.21 && <5,
+    directory,
+    filepath,
+    shake,
+    text,

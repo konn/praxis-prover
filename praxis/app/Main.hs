@@ -11,18 +11,19 @@ import Data.Version (showVersion)
 import Language.Praxis.Package.Build
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Eval (EvalResult (..), displayOf, evaluateEntryWithNats, renderValueWith)
+import Language.Praxis.Surface.Extract (extractProgram, haskellModule)
 import Language.Praxis.Surface.Prelude
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
 import Numeric.Natural (Natural)
 import Options.Applicative
 import Paths_praxis (version)
-import System.Directory (doesDirectoryExist)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist)
 import System.Exit (exitFailure, exitSuccess)
-import System.FilePath (takeExtension, takeFileName)
+import System.FilePath (takeDirectory, takeExtension, takeFileName)
 import System.IO (hPutStrLn, stderr)
 
 -- | What the command line asks for.
-data Command = Check CheckOptions | Evaluate FilePath String [Natural] Int Int
+data Command = Check CheckOptions | Evaluate FilePath String [Natural] Int Int | Extract FilePath String FilePath
 
 data CheckOptions = CheckOptions
   { dumpCore :: !Bool
@@ -40,23 +41,54 @@ main = do
       oks <- mapM (checkTarget p dumpCore dumpPra alone) (if null targets then ["."] else targets)
       if and oks then exitSuccess else exitFailure
     Evaluate source entry arguments fuel depth -> do
-      src <- readFileUtf8 source
-      hPutStrLn stderr ("Checking " <> source <> "...")
-      let checked = fst (checkModule (\_ _ -> []) (initialBuild p) {buildRetainGeneratedText = False} mempty Nothing source src)
-      ok <- printChecked False False source checked
-      when (not ok) exitFailure
+      checked <- loadChecked p source
       hPutStrLn stderr ("Evaluating " <> entry <> "...")
       case evaluateEntryWithNats fuel (T.pack entry) arguments checked of
         Left err -> hPutStrLn stderr err *> exitFailure
         Right result -> do
           TIO.putStrLn (renderValueWith (displayOf checked) depth (evalValue result))
           hPutStrLn stderr ("Evaluated " <> show (evalCalls result) <> " distinct calls; " <> show (evalNodes result) <> " shared value nodes.")
+    Extract source entry output -> do
+      checked <- loadChecked p source
+      program <- either (\err -> hPutStrLn stderr err *> exitFailure) pure (extractProgram (T.pack entry) checked)
+      createDirectoryIfMissing True (takeDirectory output)
+      TIO.writeFile output (haskellModule program)
+      hPutStrLn stderr ("Extracted " <> entry <> " to " <> output)
 
 commandP :: Parser Command
 commandP =
   hsubparser $
     command "check" (info (Check <$> checkP) (progDesc "Check the modules of a project, a package, or files, printing every report; fail when one has an error"))
-      <> command "eval" (info evalP (progDesc "Check a standalone module and evaluate a first-order definition on shared constructor trees"))
+      <> command "eval" (info evalP (progDesc "Check a module and its imports, then evaluate on shared constructor trees"))
+      <> command "extract" (info extractP (progDesc "Check a module and extract its Surface computation to a Haskell WASM target"))
+
+extractP :: Parser Command
+extractP =
+  Extract
+    <$> strArgument (metavar "FILE.px")
+    <*> strOption (long "entry" <> metavar "QUALIFIED.NAME" <> help "Monomorphic exported definition")
+    <*> strOption (long "output" <> metavar "Extracted.hs" <> help "Generated Haskell module for the WASM target")
+
+loadChecked :: Prelude -> FilePath -> IO Checked
+loadChecked p source = do
+  src <- readFileUtf8 source
+  hPutStrLn stderr ("Checking " <> source <> " and its imports...")
+  let initial = (initialBuild p) {buildRetainGeneratedText = False}
+  located <- checkFileFrom initial source src
+  case located of
+    Nothing -> accept source (fst (checkModule (\_ _ -> []) initial mempty Nothing source src))
+    Just (Left err) -> hPutStrLn stderr err *> exitFailure
+    Just (Right results) -> do
+      oks <- mapM (\r -> printChecked False False (mrPath r) (mrChecked r)) results
+      when (not (and oks)) exitFailure
+      case reverse results of
+        r : _ -> pure (mrChecked r)
+        [] -> hPutStrLn stderr "no checked module" *> exitFailure
+  where
+    accept path checked = do
+      ok <- printChecked False False path checked
+      when (not ok) exitFailure
+      pure checked
 
 evalP :: Parser Command
 evalP = do

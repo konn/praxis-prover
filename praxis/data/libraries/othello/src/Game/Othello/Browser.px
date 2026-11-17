@@ -1,0 +1,10 @@
+module Game.Othello.Browser where
+
+import "base" Data.List as L
+import Game.Othello.Interactive as I
+import Game.Othello.FourSolved as F
+
+-- Each request follows Black's moves through the checked strategy witness.
+-- A caller cannot inject a board or a strategy node.
+play : L.List Nat -> I.Playback
+play moves = I.run (I.erase F.white-wins) moves

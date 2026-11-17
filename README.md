@@ -27,6 +27,7 @@ So Praxis provides the following powerful and rich features:
 7. Proof-irrelevant proof objects.
 8. A tactic language and a calculational proof command to make proofs easier to write.
    - You can still write proofs recursively in an equational form, as in Agda.
+9. [Surface evaluation and Haskell/WASM extraction](docs/wasm.md), including a browser-playable 4×4 Othello strategy with checked JSON inputs.
 
 To remain within a first-order framework, all values in Praxis must be first-order.
 Still, you can define higher-order functions (or function schemas) equationally, provided that function parameters remain fixed during recursion and are not themselves recursed on.

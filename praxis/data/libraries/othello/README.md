@@ -1,5 +1,20 @@
 # Othello in Praxis
 
+## Play the checked 4×4 strategy
+
+From the repository root, run `cabal run shake-praxis -- browser`, then serve
+`_build/browser` over HTTP. For example,
+`python3 -m http.server 8080 --directory _build/browser` serves it at
+`http://localhost:8080`.
+
+`Game.Othello.Interactive` eliminates the checked strategy witness in Praxis;
+`Game.Othello.Browser.play` follows the user's move history through that
+witness. A shared Haskell Surface evaluator is compiled with GHC WASM and
+called by the single-page application. JavaScript only renders views and
+encodes user input. See [the build, JSON protocol, and design overview](../../../../docs/wasm.md).
+
+## Formalisation and certificates
+
 A separate Surface library for the 4×4 and 6×6 Othello tasks in the
 [TPP 2026 problem collection](https://auto-res.github.io/tpp2026/ja/tpp2026mark/).
 It depends on the bundled `base` library and adds no axioms.

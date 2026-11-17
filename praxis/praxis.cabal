@@ -81,6 +81,7 @@ library
     Language.Praxis.Surface.Env
     Language.Praxis.Surface.Eval
     Language.Praxis.Surface.Evidence
+    Language.Praxis.Surface.Extract
     Language.Praxis.Surface.Fixity
     Language.Praxis.Surface.Index
     Language.Praxis.Surface.Lexer
@@ -111,6 +112,7 @@ library
     megaparsec,
     mtl,
     praxis-copra,
+    praxis-runtime,
     template-haskell,
     text,
     text-builder-linear,
@@ -155,6 +157,7 @@ test-suite praxis-test
     Language.Praxis.Surface.EvalTest
     Language.Praxis.Surface.EvidenceTest
     Language.Praxis.Surface.ExactPredicateTest
+    Language.Praxis.Surface.ExtractTest
     Language.Praxis.Surface.FiniteElaborationTest
     Language.Praxis.Surface.FiniteFixtures
     Language.Praxis.Surface.FiniteQuantifierTest
@@ -189,6 +192,7 @@ test-suite praxis-test
     megaparsec,
     praxis,
     praxis-copra,
+    praxis-runtime,
     tasty,
     tasty-hunit,
     tasty-quickcheck,

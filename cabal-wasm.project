@@ -1,0 +1,22 @@
+packages:
+  praxis-runtime/praxis-runtime.cabal
+  praxis-wasm/praxis-wasm.cabal
+
+with-compiler: wasm32-wasi-ghc-9.12.4.20260402
+with-hc-pkg: wasm32-wasi-ghc-pkg-9.12.4.20260402
+optimization: 2
+documentation: False
+tests: False
+write-ghc-environment-files: never
+
+program-locations
+  ghc-location: wasm32-wasi-ghc-9.12.4.20260402
+  ghc-pkg-location: wasm32-wasi-ghc-pkg-9.12.4.20260402
+  haddock-location: wasm32-wasi-haddock-9.12.4.20260402
+  hsc2hs-location: wasm32-wasi-hsc2hs-9.12.4.20260402
+
+package *
+  documentation: False
+
+package praxis-wasm
+  flags: +extracted

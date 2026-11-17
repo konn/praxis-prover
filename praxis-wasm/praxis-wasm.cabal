@@ -1,0 +1,42 @@
+cabal-version: 3.4
+name: praxis-wasm
+version: 0.1.0.0
+synopsis: Browser JS FFI target for extracted Praxis Surface programs
+description: GHC WebAssembly reactor exporting checked Praxis Surface computations through JavaScript FFI.
+category: Language
+maintainer: konn.jinro_at_gmail.com
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+
+flag extracted
+  description: Build the target after praxis extract has generated Extracted.hs
+  default: False
+  manual: True
+
+executable praxis-wasm
+  if !flag(extracted)
+    buildable: False
+  hs-source-dirs:
+    app
+    generated
+
+  main-is: Main.hs
+  other-modules: Extracted
+  default-language: GHC2024
+  ghc-options:
+    -Wall
+    -O2
+
+  build-depends:
+    base >=4.21 && <5,
+    containers,
+    praxis-runtime,
+    text,
+
+  if os(wasi)
+    build-depends: ghc-experimental
+    ghc-options:
+      -no-hs-main
+      -optl-mexec-model=reactor
+      "-optl-Wl,--export=praxis_eval"

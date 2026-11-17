@@ -1,0 +1,18 @@
+module WasmAPI where
+
+data Vec (n : Nat) a where
+  Nil : Vec 0 a
+  Cons : {n : Nat} -> a -> Vec n a -> Vec (S n) a
+
+data Bounded where
+  Mk : {n : Nat} -> n < 4 -> Bounded
+
+data Request = Add Nat Nat | CheckVector (Vec 2 Nat) | CheckBound Bounded
+
+bound : Bounded -> Nat
+bound (Bounded.Mk {n} proof) = n
+
+run : Request -> Nat
+run (Request.Add a b) = a + b
+run (Request.CheckVector xs) = 2
+run (Request.CheckBound x) = bound x

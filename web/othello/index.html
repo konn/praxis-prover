@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#164c3f">
+  <title>Four by Four · Praxis Othello</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header><span class="eyebrow">PRAXIS / A PLAYABLE PROOF</span><h1>Four by four.</h1><p class="intro">A small board. A complete strategy.<br>You play Black. White follows its verified winning strategy.</p></header>
+    <section class="game" aria-label="Othello game">
+      <div class="scores" aria-label="Disc counts">
+        <div><span class="disc black small"></span><span>You · Black</span><strong id="black-count">—</strong></div>
+        <div><span class="disc white small"></span><span>Praxis · White</span><strong id="white-count">—</strong></div>
+      </div>
+      <div class="board-wrap"><div class="columns" aria-hidden="true"><span>A</span><span>B</span><span>C</span><span>D</span></div><div id="board" class="board" role="group" aria-label="4 by 4 Othello board"></div></div>
+      <div class="status"><span id="status-dot"></span><p id="status" role="status" aria-live="polite">Loading the strategy…</p></div>
+      <div class="controls"><button id="pass" hidden>Pass turn</button><button id="undo" disabled>Undo round</button><button id="restart" disabled>New game</button></div>
+      <label class="animation-control"><input id="animate" type="checkbox" checked> Animate each turn</label>
+      <p id="error" role="alert" hidden></p>
+    </section>
+    <aside>
+      <h2>How to play</h2><p>Choose a marked square. Capture White discs by enclosing them between your new disc and another Black disc. White replies automatically. Pass only when no placement is available.</p>
+      <details><summary>What makes this a playable proof?</summary><p>The game follows the strategy witness in <code>FourSolved.px</code>. Praxis checks the witness, extracts its Surface computation to Haskell, and GHC compiles it to WebAssembly. Every move is processed locally in your browser.</p><p>The certificate guarantees White a tournament score of at least 9 out of 16. The counters above show actual discs; tournament scoring awards unused squares to the winner.</p></details>
+      <p class="history-label">YOUR MOVES</p><p id="history" class="history">A fresh board.</p>
+    </aside>
+    <footer>CHECKED IN PRAXIS · RUNNING IN WEBASSEMBLY</footer>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

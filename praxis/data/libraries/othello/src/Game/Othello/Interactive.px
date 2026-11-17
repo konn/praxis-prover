@@ -1,0 +1,104 @@
+module Game.Othello.Interactive where
+
+import "base" Data.Bool as B
+import "base" Data.List as L
+import "base" Data.Maybe as M
+import Game.Othello.Board as C
+import Game.Othello.Rules as R
+import Game.Othello.Certificate as K
+
+-- This is an ordinary Praxis eliminator of the checked strategy witness.
+-- The browser never parses the certificate or implements Othello rules.
+data Plan = End R.Position Nat | Choice R.Position R.Move Plan | Replies R.Position Plan | NoReplies | Reply R.Move Plan Plan
+open Plan
+
+erase : {j : K.Judgement} -> K.Derivation j -> Plan
+erase (K.Derivation.LeafLower {p} {b} {v} terminal bound) = End (R.Turn p b) v
+erase (K.Derivation.LeafUpper {p} {b} {v} terminal bound) = End (R.Turn p b) v
+erase (K.Derivation.Choice {k} {p} {b} {v} {m} {next} formed choosing successor child) = Choice (R.Turn p b) m (erase child)
+erase (K.Derivation.Replies {k} {p} {b} {v} {ms} formed terminal choosing moves children) = Replies (R.Turn p b) (erase children)
+erase (K.Derivation.NoMoves {k} {pos} {v} {ms} empty) = NoReplies
+erase (K.Derivation.Reply {k} {pos} {v} {m} {ms} {next} successor child siblings) = Reply m (erase child) (erase siblings)
+
+move-code : R.Move -> Nat
+move-code R.Pass = 16
+move-code (R.Place square) = C.index 4 square
+
+-- White choices are automatic. Black must select one of the certified replies.
+select : Nat -> Plan -> M.Maybe Plan
+select n (End pos score) = M.Nothing
+select n (Choice pos move next) = select n next
+select n (Replies pos children) = select n children
+select n NoReplies = M.Nothing
+select n (Reply move next siblings) = B.choose (B.equal-nat n (move-code move)) (M.Just next) (select n siblings)
+
+step : Nat -> M.Maybe Plan -> M.Maybe Plan
+step n M.Nothing = M.Nothing
+step n (M.Just state) = select n state
+
+replay : L.List Nat -> M.Maybe Plan -> M.Maybe Plan
+replay L.Nil state = state
+replay (L.(::) n ns) state = step n (replay ns state)
+
+legal : Plan -> L.List Nat
+legal (End pos score) = L.Nil
+legal (Choice pos move next) = L.Nil
+legal (Replies pos children) = legal children
+legal NoReplies = L.Nil
+legal (Reply move next siblings) = L.(::) (move-code move) (legal siblings)
+
+player-code : C.Player -> Nat
+player-code C.Black = 1
+player-code C.White = 2
+
+cell-code : C.Cell -> Nat
+cell-code C.Empty = 0
+cell-code (C.Disc p) = player-code p
+
+-- Row-major cells, legal Black moves, then raw Black and White disc counts.
+-- A terminal view also carries the certified lower bound on White's score.
+data View = Playing (L.List Nat) (L.List Nat) Nat Nat | Finished (L.List Nat) Nat Nat Nat | Invalid
+open View
+
+playing : R.Position -> Plan -> View
+playing (R.Turn p b) children = Playing (L.map cell-code (C.cells b)) (legal children) (C.count C.Black b) (C.count C.White b)
+
+finished : R.Position -> Nat -> View
+finished (R.Turn p b) bound = Finished (L.map cell-code (C.cells b)) (C.count C.Black b) (C.count C.White b) bound
+
+view : Plan -> View
+view (End pos bound) = finished pos bound
+view (Choice pos move next) = view next
+view (Replies pos children) = playing pos children
+view NoReplies = Invalid
+view (Reply move next siblings) = Invalid
+
+view-maybe : M.Maybe Plan -> View
+view-maybe M.Nothing = Invalid
+view-maybe (M.Just state) = view state
+
+-- Preserve the board immediately after Black's move, before each automatic
+-- White choice. The UI can animate these observations without computing moves.
+data Frame = BeforeWhite (L.List Nat) Nat Nat Nat
+open Frame
+
+frame : R.Position -> R.Move -> Frame
+frame (R.Turn p b) move = BeforeWhite (L.map cell-code (C.cells b)) (C.count C.Black b) (C.count C.White b) (move-code move)
+
+frames : Plan -> L.List Frame
+frames (End pos bound) = L.Nil
+frames (Choice pos move next) = L.(::) (frame pos move) (frames next)
+frames (Replies pos children) = L.Nil
+frames NoReplies = L.Nil
+frames (Reply move next siblings) = L.Nil
+
+data Playback = WithFrames (L.List Frame) View
+open Playback
+
+playback : M.Maybe Plan -> Playback
+playback M.Nothing = WithFrames L.Nil Invalid
+playback (M.Just state) = WithFrames (frames state) (view state)
+
+-- Execute a move history against a strategy obtained by elimination.
+run : Plan -> L.List Nat -> Playback
+run state moves = playback (replay (L.reverse moves) (M.Just state))
