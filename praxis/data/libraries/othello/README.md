@@ -3,9 +3,10 @@
 ## Play the checked 4×4 strategy
 
 From the repository root, run `cabal run shake-praxis -- browser`, then serve
-`_build/browser` over HTTP. For example,
-`python3 -m http.server 8080 --directory _build/browser` serves it at
-`http://localhost:8080`.
+`_build/browser` over HTTP with Servant and Warp:
+`cabal run shake-praxis -- serve` serves it at `http://localhost:8080` (and
+builds `browser` automatically if `_build/browser` does not exist yet; pass
+`--port=PORT` or `--directory=DIR` to customize).
 
 `Game.Othello.Interactive` eliminates the checked strategy witness in Praxis;
 `Game.Othello.Browser.play` follows the user's move history through that
@@ -28,9 +29,21 @@ tournament score of at least 9 from the standard 4×4 opening. The optimal
   termination when neither colour can move. The reference model checks its
   flat storage length at game entry points.
 - `Game.Othello.Initial` defines the standard 4×4 and 6×6 openings.
-- `Game.Othello.FourSolved.white-wins` is the checked 4×4 strategy certificate.
-  It shares 128 positions in 77,651 bytes of Surface source, including all
-  opponent replies, move legality, terminal bounds and the opening equality.
+- `Game.Othello.Four` provides a dedicated 4×4 board representation (`Board4`)
+  with constant-time cell access and three-ray capture evaluation, proved
+  equivalent to `Game.Othello.Board`, `Game.Othello.Rules`,
+  `Game.Othello.Initial`, and `Game.Othello.Certificate`, together with
+  certified reflection constructors (`mk-leaf`, `mk-choice`, `mk-replies`,
+  `mk-no-moves`, `mk-reply`) and a boolean-indexed witness container
+  (`Check4 j ok`, `extract4`).
+- `Game.Othello.FourSolved.white-wins` is the checked 4×4 strategy certificate,
+  constructed and certified entirely in Praxis with no external code generator.
+  At White turns it applies a zero-lookahead square-priority policy
+  (`white-place`, selecting between a top-corner priority order for the
+  `(0, 1)`/`(1, 0)` Black openings and its $180^\circ$-rotated counterpart for
+  `(3, 2)`/`(2, 3)`), checks all seven Black–White rounds purely on `Board4`
+  booleans via `by decide`, and reflects the result into
+  `K.Derivation (K.AtBound K.Lower I.four-opening 9)` in a single top-down pass.
 - `Game.Othello.Sized` supplies the intended board representation,
   `Vec n (Vec n Cell)`, with finite row and column indices. Cell writes use
   `Vec.modify` and `Vec.update`; `read-write` proves the selected cell changes.
@@ -49,70 +62,8 @@ From the repository root:
 cabal run praxis -- check praxis/data/libraries/othello +RTS -N1 -M12G -RTS
 ```
 
-`tools/generate_four.py` is an **untrusted** search and candidate-certificate
-generator targeting the certificate API. Running it is not a proof.
-The generated output must pass the Praxis checker before
-it can support a solution claim. The shipped `FourSolved.px` is the exact
-candidate that passed the complete check; this generator does not search 6×6.
-
-The generator caches search positions modulo the eight square symmetries and
-selects winning White moves with minimum unfolded proof-tree size. The emitted
-DAG shares only identical boards: each rotated or reflected board still has
-its own checked move obligations, so this optimization adds no symmetry axiom.
-This reduces the current candidate from 277 positions / 158,845 bytes to
-128 positions / 77,651 bytes (including move-coverage proofs and explicit
-transport to the standard opening). The cost calculation explores 5,131 canonical
-positions; it minimizes tree size, not globally shared DAG size. This exhaustive
-cost optimization is restricted to 4×4. Run its untrusted-tool checks with:
-
-```sh
-python3 -m unittest discover -s praxis/data/libraries/othello/tools -v
-```
-
-`tools/search_exact.cpp` prepares an untrusted exact search for both board
-sizes. It uses bitboards, alpha–beta bounds, full-key transposition entries,
-and mobility ordering with positional tie breakers. Each table bucket preserves
-an earlier position with more empty squares and a recent position; the last
-four empty squares are searched without table access. Opening positions with
-at most twelve discs are canonicalized under square symmetries. Hash collisions
-cannot establish a bound.
-It respects node/time budgets and reports `certified: false` even on success;
-its persistent query mode supplies untrusted bounds to the strategy extractor.
-Its differential tests compare
-the 4×4 opening, all positions in the candidate strategy, forced passes, and
-small 6×6 endgames with an independent exhaustive coordinate-based evaluator.
-`--stability 1` additionally computes conservative stable-disc bounds, using
-full lines, board edges and previously established stable neighbours. It is
-optional: a 24-position endgame sample reduced nodes from 256,484 to 186,992,
-but increased search time from 37 to 49 ms. These bounds are not yet proved in
-Praxis and cannot replace a subtree in a formal certificate.
-
-`tools/generate_strategy.py` extracts either bound on either board size, sharing
-only identical positions. It checks every defender's reply and every terminal
-score with its coordinate model, then emits all obligations for Praxis. Partial
-checkpoints preserve the candidate DAG and untrusted oracle answers; they do
-not assert the root result. The output file is written only after the complete
-root candidate has been extracted. For example, a bounded 6×6 attempt is:
-
-```sh
-python3 praxis/data/libraries/othello/tools/generate_strategy.py \
-  --solver /tmp/othello-search --size 6 --bound lower --score 20 \
-  --positions 10000 --nodes 100000000 --seconds 60 \
-  --output /tmp/SixLower.px --checkpoint /tmp/six-lower.json
-```
-
-Repeating the command resumes its checkpoint. Both the checkpoint and the
-emitted source remain untrusted until the source passes Praxis. The 4×4
-integration run extracted 145 positions for the lower bound 9 and 231 for the
-upper bound 13; the separate proof-size optimizer still gives the smaller
-128-position candidate for the first problem.
-
-```sh
-clang++ -std=c++20 -O3 -Wall -Wextra -Wpedantic \
-  praxis/data/libraries/othello/tools/search_exact.cpp -o /tmp/othello-search
-OTHELLO_SEARCH_BIN=/tmp/othello-search python3 -m unittest discover \
-  -s praxis/data/libraries/othello/tools -v
-```
+The 4×4 certificate (`Game.Othello.Four` and `Game.Othello.FourSolved`) is
+written and checked entirely in Praxis, with no external code generator.
 
 ## Search-method survey
 
@@ -159,33 +110,11 @@ The score convention must remain explicit: the historical result credits
 empty squares to the winner, as stated by
 [Feinstein](https://www.maths.nottingham.ac.uk/plp/pmzjff/Othello/Amenor.html).
 
-The 4×4 bottleneck was proof checking rather than search. Reusing
-`cvrecUnfold` fixes GADT admission; `by decide` emits shared, checked computation
-lemmas, and constructor checking reuses already certified proof arguments.
-Terminal leaves, both standard opening definitions, and a three-position
-branch containing a forced pass now pass. On this branch, peak live heap fell
-from 944 MiB to 697 MiB with term interning, then 226 MiB with strict step
-reconstruction, and 142 MiB with identifier sharing and omission of inspection
-text. All derivations and lexical dependencies remain available for replay;
-`--dump-pra` still retains the complete generated text. Earlier full attempts
-exhausted their heap caps. The corrected full 4×4 certificate now passes with
-`+RTS -N1 -M12G -s`: 1,157 seconds, 2,342,874,184 bytes maximum live residency
-(2.18 GiB), and 6,110 MiB total heap memory in use. This includes the explicit
-equality transport to the standard opening. The check still allocates heavily
-(3.61 TB cumulatively); source size, live memory and cumulative allocation are
-different measurements.
-
-The native 6×6 benchmark exhausted a 100-million-node budget in about 20
-seconds without finishing; a one-billion-node attempt without symmetry took
-about 177 seconds and also did not finish. Neither establishes the opening
-value or a formal certificate. `--guess-white 20` selects the first search
-window but never assumes that score as a bound.
-
-The lower-bound strategy extraction at score 20 has also exhausted a
-one-million-position certificate budget without completing the opening.
-Its resumable, untrusted checkpoint occupies 81,283,815 bytes; 850,348 of
-those positions have at most six empty squares. No 6×6 proof source has been
-emitted or certified. This is a concrete limit of the current explicit
-strategy representation even with exact-position sharing. A proved
-endgame or stability reduction is the next compression target; merely
-raising the extraction cap would work against the lightweight-proof goal.
+The pure-Praxis 4×4 certificate (`Game.Othello.Four` + `Game.Othello.FourSolved`)
+passes with `+RTS -N1 -M4G -s` in ~54 seconds (~307 MiB maximum live
+residency, ~916 MiB total heap memory in use, ~246 GB cumulative allocation),
+and the full `othello` package checks in ~56 seconds (~290 MiB maximum live
+residency) — down from 1,157 seconds and 3.61 TB cumulative allocation for
+the earlier Python-generated 128-position DAG. All derivations and lexical
+dependencies remain available for replay; `--dump-pra` still retains the
+complete generated text.
