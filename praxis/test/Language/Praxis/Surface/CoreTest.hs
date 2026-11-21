@@ -90,6 +90,23 @@ coreTests =
             unproved = SchemaClosure ty (Lam [Hint "x"] (toScope (Typed TNat [] [] (Absurd (Irrelevant raw)))))
         assertBool "forged callback result" (isLeft (Core.elaborate emptyEnv [] [] forged))
         assertBool "an unused callback cannot erase a proof" (isLeft (Core.elaborate emptyEnv [] [] unproved))
+    , testCase "higher-kinded applications and datatype kinds are checked in explicit core" $ do
+        let (env1, _) = addData emptyEnv (R.Ident "Void") [] []
+            (env2, _) = addData env1 (R.Ident "List") [("a", KType)] [(R.Ident "Nil", []), (R.Ident "Cons", [TParam 0 [], TData "List" [TParam 0 []] []])]
+            (env3, box) = addData env2 (R.Ident "Box") [("f", KArrow KType KType), ("a", KType)] [(R.Ident "MkBox", [TParam 0 [TParam 1 []]])]
+        mkBoxCtor <- case dataCtors box of
+          c : _ -> pure c
+          [] -> assertFailure "missing MkBox constructor"
+        let mkBox = Ref RefConstructor (ctorCore mkBoxCtor)
+            overApplied = Typed (TData "Void" [TNat] []) [] [] (Var 0)
+            badKindArg = Typed (TData "Box" [TData "Void" [] [], TNat] []) [] [] (App (Global mkBox) (Var 0))
+            mismatchedHkt = Typed (TData "Box" [TParam 0 [], TNat] []) [] [] (App (Global mkBox) (Var 0))
+            goodUnsaturated = Typed (TData "Box" [TData "List" [] [], TNat] []) [] [] (App (Global mkBox) (Var 0))
+        assertBool "over-applied nullary datatype rejected" (isLeft (Core.elaborate env3 [] [TData "Void" [TNat] []] overApplied))
+        assertBool "ill-kinded type argument rejected" (isLeft (Core.elaborate env3 [] [TData "Void" [] []] badKindArg))
+        assertBool "mismatched higher-kinded parameter rejected" (isLeft (Core.elaborate env3 [] [TParam 1 [TNat]] mismatchedHkt))
+        body <- either assertFailure pure (Core.elaborate env3 [] [TData "List" [TNat] []] goodUnsaturated)
+        Core.bodyType body @?= TData "Box" [TData "List" [] [], TNat] []
     , testCase "core printing uses surface types and preserves application precedence" $ do
         let successor x = Typed TNat [] [] (App (Global (Ref RefBuiltin "S")) x)
         value <- either assertFailure pure (Core.elaborate emptyEnv [] [TNat] (successor (successor (Var 0))))

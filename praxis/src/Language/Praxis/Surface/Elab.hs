@@ -365,14 +365,68 @@ elabModule fx env0 rn = withModules (walk envData decls [])
     dataDecls = [(owner, sp, d) | RDecl owner (Located sp (R.DData d)) <- decls]
     dataNames = [(owner, unLocated (R.dataName d)) | (owner, _, d) <- dataDecls]
     kindSigs = Map.fromList [((owner, unLocated n), (location n, k)) | RDecl owner (Located _ (R.DKindSig n k)) <- decls]
+    -- Infer unannotated higher-kinded parameters across mutually recursive data declarations.
+    inferredDataKinds = fixpoint initialDataKinds
+      where
+        initialDataKinds =
+          Map.fromList
+            [ (owner <> [Ident (unLocated (R.dataName d))], [directKind d p | p <- R.dataParams d])
+            | (owner, _, d) <- dataDecls
+            ]
+        directKind d p = case R.dataParamKind p of
+          Just k | not (valueKind k) -> Just (kindOfRaw k)
+          _ ->
+            let n = unLocated (R.dataParamName p)
+                exprs = dataFieldExprs d
+             in listToMaybe [foldr KArrow KType (replicate k KType) | k <- concatMap (paramAppArities n) exprs, k > 0]
+        fixpoint current =
+          let next = Map.fromList [(q, refineKinds current d (Map.findWithDefault [] q current)) | (owner, _, d) <- dataDecls, let q = owner <> [Ident (unLocated (R.dataName d))]]
+           in if next == current then current else fixpoint next
+        refineKinds known d ks =
+          let exprs = dataFieldExprs d
+              pnames = map (unLocated . R.dataParamName) (R.dataParams d)
+              propagated = concatMap (propagateFrom known pnames) exprs
+           in [k <|> lookup i propagated | (i, k) <- zip [0 ..] ks]
+        propagateFrom known pnames expr = case unLocated expr of
+          R.EParen x -> propagateFrom known pnames x
+          R.EArrow a b -> propagateFrom known pnames a <> propagateFrom known pnames b
+          _ -> case rawSpine expr of
+            (Located _ (R.EName (QName qs seg)), args) ->
+              let target = qs <> [seg]
+                  here = case Map.lookup target known of
+                    Just targetKs ->
+                      [ (pi', tk)
+                      | (Just tk, arg) <- zip targetKs args
+                      , Located _ (R.EName (QName [] (Ident an))) <- [stripParen arg]
+                      , Just pi' <- [elemIndex an pnames]
+                      ]
+                    Nothing -> []
+               in here <> concatMap (propagateFrom known pnames) args
+            (_, args) -> concatMap (propagateFrom known pnames) args
+        paramAppArities n expr = case unLocated expr of
+          R.EParen x -> paramAppArities n x
+          R.EArrow a b -> paramAppArities n a <> paramAppArities n b
+          _ -> case rawSpine expr of
+            (Located _ (R.EName (QName [] (Ident m))), args) | m == n -> length args : concatMap (paramAppArities n) args
+            (_, args) -> concatMap (paramAppArities n) args
+        dataFieldExprs d =
+          [f | Located _ c <- R.dataConstructors d, f0 <- R.constructorFields c, Right f <- [resolved fx f0]]
+            <> [t | (_, s0) <- R.dataSignatures d, Right s <- [resolved fx s0], SigField _ t <- fst (gadtShape s), not (isProp t)]
+    placeholderKinds owner d params =
+      let q = owner <> [Ident (unLocated (R.dataName d))]
+          byName = zip (map (unLocated . R.dataParamName) (R.dataParams d)) (Map.findWithDefault [] q inferredDataKinds)
+          written = [(unLocated (R.dataParamName p), k) | p <- R.dataParams d, Just k <- [R.dataParamKind p], not (valueKind k)]
+       in [ (n, if isJust (lookup n written) || k /= KType then k else fromMaybe k (join (lookup n byName)))
+          | (n, k) <- params
+          ]
     -- Names, and which parameters are types and which indices, first; then the constructors, against all of them.
     placeholders = foldl placeholder env1 dataDecls
     placeholder e0 (owner, _, d) =
       let e = at owner e0
           name = unLocated (R.dataName d)
        in case dataLayout fx e (Map.lookup (owner, name) kindSigs) d of
-            Right (params, indices, implicits) -> fst (addIndexedData e (Ident name) params indices implicits [] [])
-            Left _ -> fst (addData e (Ident name) [(unLocated (R.dataParamName p), KType) | p <- R.dataParams d] [])
+            Right (params, indices, implicits) -> fst (addIndexedData e (Ident name) (placeholderKinds owner d params) indices implicits [] [])
+            Left _ -> fst (addData e (Ident name) (placeholderKinds owner d [(unLocated (R.dataParamName p), KType) | p <- R.dataParams d]) [])
     aliasDecls = [(owner, sp, n, ps, body) | RDecl owner (Located sp (R.DTypeAlias n ps body)) <- decls]
     -- A synonym may use a datatype whose index annotations themselves use
     -- synonyms. Order their headers together, so aliases never capture a
@@ -506,41 +560,53 @@ elabAlias fx env name ps body0 = do
   body <- resolved fx body0
   (params, indices, binders) <- parameterLayout fx env Nothing (R.DataDecl name ps Nothing [] []) [body]
   let values = [(dbName b, indices !! i) | b <- binders, IndexParameter i <- [dbParameter b]]
-      scope = TyScope (map fst params) [(n, IxParam i) | (i, (n, _)) <- zip [0 ..] values] values
+      declaredKind n = listToMaybe [kindOfRaw k | p <- ps, unLocated (R.dataParamName p) == n, Just k <- [R.dataParamKind p], not (valueKind k)]
+      scope = TyScope (map fst params) [declaredKind n | (n, _) <- params] [(n, IxParam i) | (i, (n, _)) <- zip [0 ..] values] values
   ty <- elabTypeIn env scope body
-  kinds <- synonymKinds env (location body) ps params (ty : indices)
+  kinds <- inferTypeKinds env (location body) [(n, declaredKind n) | (n, _) <- params] (ty : indices)
   pure (AliasInfo (qualify env [Ident (unLocated name)]) (Scheme kinds values ty) binders)
 
-{- | Type parameters used as constructors take their kind from their
-applications. Check repeated uses and written kinds before publishing the
-synonym, rather than letting ill-kinded substitution produce a hole.
+-- | Split a kind into its arrow domains and its result kind.
+splitCoreKind :: Kind -> ([Kind], Kind)
+splitCoreKind = \case
+  KArrow a b -> let (as, r) = splitCoreKind b in (a : as, r)
+  k -> ([], k)
+
+{- | Infer and check the kinds of type parameters across a list of elaborated
+types. Every occurrence of a parameter must agree on one kind, and any
+written kind annotation must match it.
 -}
-synonymKinds :: Env -> Span -> [R.DataParam] -> [(Text, Kind)] -> [Ty] -> Either ElabError [(Text, Kind)]
-synonymKinds env sp written params tys = do
+inferTypeKinds :: Env -> Span -> [(Text, Maybe Kind)] -> [Ty] -> Either ElabError [(Text, Kind)]
+inferTypeKinds env sp params tys = do
   uses <- concat <$> traverse (collect KType) tys
-  forM (zip [0 ..] params) \(i, (n, fallback)) -> do
+  forM (zip [0 ..] params) \(i, (n, declared)) -> do
     let inferred = nub [k | (j, k) <- uses, j == i]
-        annotated = [kindOfRaw k | p <- written, unLocated (R.dataParamName p) == n, Just k <- [R.dataParamKind p], not (valueKind k)]
-    case nub (annotated <> inferred) of
-      [] -> pure (n, fallback)
+    case nub (maybeToList declared <> inferred) of
+      [] -> pure (n, KType)
       [k] -> pure (n, k)
       _ -> Left (ElabError sp ("the type parameter " <> T.unpack n <> " is used at incompatible kinds"))
   where
     collect expected = \case
       TParam i args -> do
-        nested <- concat <$> traverse (collect KType) args
-        pure ((i, foldr KArrow expected (replicate (length args) KType)) : nested)
+        let argKinds = case listToMaybe (drop i params) of
+              Just (_, Just k) -> take (length args) (fst (splitCoreKind k)) <> repeat KType
+              _ -> repeat KType
+        nested <- concat <$> zipWithM collect argKinds args
+        pure ((i, foldr KArrow expected (take (length args) argKinds)) : nested)
       TData dn args _ -> do
-        unless (expected == KType) $ Left (ElabError sp "a fully applied data type where a type constructor is expected")
         let ks = fromMaybe (repeat KType) (listToMaybe [map snd (dataParams d) | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn])
-        concat <$> sequence (zipWith collect ks args)
+            remaining = drop (length args) ks
+            actualKind = foldr KArrow KType remaining
+        unless (actualKind == expected) $
+          Left (ElabError sp ("data type " <> T.unpack (last (T.splitOn "." dn)) <> " has kind " <> renderKind actualKind <> ", expected " <> renderKind expected))
+        concat <$> zipWithM collect ks args
       TArrow a b -> do
         unless (expected == KType) $ Left (ElabError sp "a function type where a type constructor is expected")
         (<>) <$> collect KType a <*> collect KType b
       TNat -> do
         unless (expected == KType) $ Left (ElabError sp "Nat where a type constructor is expected")
         pure []
-      THole -> Left (ElabError sp "an undetermined type in a type synonym")
+      THole -> Left (ElabError sp "an undetermined type")
 
 {- |
 A data type: its declaration's item, with, for one in the GADT style — its
@@ -554,10 +620,18 @@ elabDataDecl fx env sig sp d
   | gadtStyle = do
       unless (null (R.dataConstructors d)) $
         Left (ElabError (location (R.dataName d)) "a data type with a kind or indices gives its constructors by their signatures, after where")
-      (params, indices, implicits) <- dataLayout fx env sig d
-      constructors <- forM (R.dataSignatures d) (elabConstructorSignature fx env d params indices implicits)
+      (params0, indices, implicits) <- dataLayout fx env sig d
+      let hasExplicitKind = isJust sig || isJust (R.dataKind d)
+          declaredParamKind (n, k)
+            | hasExplicitKind = Just k
+            | Just _ <- listToMaybe [pk | p <- R.dataParams d, unLocated (R.dataParamName p) == n, Just pk <- [R.dataParamKind p], not (valueKind pk)] = Just k
+            | otherwise = Nothing
+          paramDecls = [(n, declaredParamKind (n, k)) | (n, k) <- params0]
+      constructors <- forM (R.dataSignatures d) (elabConstructorSignature fx env d paramDecls indices implicits)
       let ctors = map fst constructors
           needed = foldMap snd constructors
+          allCtorTys = indices <> [teType en | (_, _, csig) <- ctors, en <- constructorTele csig]
+      params <- inferTypeKinds env (location (R.dataName d)) paramDecls allCtorTys
       let name = Ident (unLocated (R.dataName d))
           q = qualify env [name]
           fnNames = [if length indices == 1 then "#idx" else "#idx-" <> T.pack (show p) | p <- [0 .. length indices - 1]]
@@ -659,7 +733,9 @@ parameterLayout fx env sig d bodies = do
       when (n `elem` map dbName binders) $
         Left (ElabError nameSpan ("duplicate data parameter " <> T.unpack n))
       case entry of
-        Left (_, k) -> pure (types <> [(n, k)], indices, binders <> [DataBinder n implicit (TypeParameter (length types))], sc {tsTypes = tsTypes sc <> [n]})
+        Left (_, k) ->
+          let explicitKind = any (\p -> unLocated (R.dataParamName p) == n && isJust (R.dataParamKind p)) params
+           in pure (types <> [(n, k)], indices, binders <> [DataBinder n implicit (TypeParameter (length types))], sc {tsTypes = tsTypes sc <> [n], tsTypeKinds = tsTypeKinds sc <> [if explicitKind then Just k else Nothing]})
         Right (_, e) -> do
           t <- either pure (elabTypeIn env sc) e
           unless (valueKindTy t) $ Left (ElabError (either (const nameSpan) location e) ("the type of the index " <> T.unpack n <> " is Nat, or a data type"))
@@ -767,7 +843,7 @@ its data type at distinct type variables, the type's parameters in order, and
 at indices which are patterns.  An implicit argument which is an index of a
 field is not stored: the index function of the field's type recovers it.
 -}
-elabConstructorSignature :: Fixities -> Env -> R.DataDecl -> [(Text, Kind)] -> [Ty] -> [DataBinder] -> (Located Segment, Located R.Expr) -> Either ElabError ((Segment, [Ty], ConstructorSignature), Requirements)
+elabConstructorSignature :: Fixities -> Env -> R.DataDecl -> [(Text, Maybe Kind)] -> [Ty] -> [DataBinder] -> (Located Segment, Located R.Expr) -> Either ElabError ((Segment, [Ty], ConstructorSignature), Requirements)
 elabConstructorSignature fx env d params indices binders (Located csp cname, sig0) = do
   sig <- resolved fx sig0
   let (parts, result) = gadtShape sig
@@ -811,18 +887,37 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
       typeOf v = fromMaybe THole (listToMaybe [t | (w, t) <- mentioned, w == v, t /= THole])
       free = [v | v <- nub (map fst mentioned), v `notElem` map fst declared, v `notElem` fieldNames, v `notElem` typeVars]
       implicitNames = map fst declared <> free
-      -- The implicit arguments' types may mention one another.
-      scope0 = TyScope typeVars [(v, IxParam e) | (e, v) <- zip [0 ..] implicitNames] []
-  implicitTys <- forM implicitNames \v -> case lookup v declared of
-    Just (Just t) -> do
-      ty <- elabTypeIn env scope0 t
-      unless (valueType ty) $
-        Left (ElabError (location t) (what <> ": the implicit argument " <> T.unpack v <> " is of a value type: Nat, a data type, or a type parameter"))
-      pure ty
-    _
-      | typeOf v /= THole -> pure (typeOf v)
-      | otherwise -> Left (ElabError csp (what <> ": the type of the implicit argument " <> T.unpack v <> " is not known; write {" <> T.unpack v <> " : T}"))
-  let scope = scope0 {tsValueTys = zip implicitNames implicitTys}
+      typeKinds = map snd params
+  freeTys <- forM free \v ->
+    if typeOf v /= THole
+      then pure (typeOf v)
+      else Left (ElabError csp (what <> ": the type of the implicit argument " <> T.unpack v <> " is not known; write {" <> T.unpack v <> " : T}"))
+  let freeStart = length declared
+      -- Elaborate declared implicit binders left-to-right so each type is checked
+      -- against earlier binders' actual types (preventing ill-typed or forward references),
+      -- while keeping inferred free value parameters available with their inferred types.
+      scopeInit = TyScope typeVars typeKinds [(v, IxParam (freeStart + i)) | (i, v) <- zip [0 ..] free] (zip free freeTys)
+  (declaredTys, scopeDeclared) <-
+    foldM
+      ( \(acc, sc) (e, (v, mt)) -> do
+          when (v `elem` map fst acc) $
+            Left (ElabError csp (what <> ": duplicate implicit argument " <> T.unpack v))
+          ty <- case mt of
+            Just t -> do
+              t' <- elabTypeIn env sc t
+              unless (valueType t') $
+                Left (ElabError (location t) (what <> ": the implicit argument " <> T.unpack v <> " is of a value type: Nat, a data type, or a type parameter"))
+              pure t'
+            Nothing
+              | typeOf v /= THole -> pure (typeOf v)
+              | otherwise -> Left (ElabError csp (what <> ": the type of the implicit argument " <> T.unpack v <> " is not known; write {" <> T.unpack v <> " : T}"))
+          let sc' = sc {tsValues = tsValues sc <> [(v, IxParam e)], tsValueTys = tsValueTys sc <> [(v, ty)]}
+          pure (acc <> [(v, ty)], sc')
+      )
+      ([], scopeInit)
+      (zip [0 ..] declared)
+  let implicitTys = map snd declaredTys <> freeTys
+      scope = scopeDeclared {tsValues = [(v, IxParam e) | (e, v) <- zip [0 ..] implicitNames], tsValueTys = zip implicitNames implicitTys}
       nImplicit = length implicitNames
       entryNames = implicitNames <> [maybe ("#" <> T.pack (show fi)) unLocated mn | (fi, (mn, _)) <- zip [0 :: Int ..] fieldParts]
   forM_ [n | (Just n, _) <- fieldParts, unLocated n `elem` implicitNames] \(Located nsp n) ->
@@ -842,7 +937,8 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
       )
       ([], scope)
       (zip [0 :: Int ..] fieldParts)
-  writtenIx <- zipWithM (elabIx env (tsValues scopeFields)) [closedKind (indices !! j) | j <- eis] indexArgs
+  writtenIxTys <- zipWithM (elabIx env scopeFields) [closedKind (indices !! j) | j <- eis] indexArgs
+  let writtenIx = map fst writtenIxTys
   -- Its proofs: each of a precondition over the implicit arguments and the named fields, in scope by their names.
   checkedProofs <- forM proofParts \(a, t) -> do
     let available = nImplicit + length [() | (_, field) <- take a explicitParts, not (isProp field)]
@@ -856,10 +952,10 @@ elabConstructorSignature fx env d params indices binders (Located csp cname, sig
   let proofs = map fst checkedProofs
       needed = foldMap snd checkedProofs
   -- Its result's implicit indices, and the agreement of its type parameters, from the kinds of the indices written.
-  let kinded s (j, x, a) = case ixType env scopeFields x of
+  let kinded s (j, (x, t), a) = case t of
         THole -> Right s
-        t -> maybe (Left (ElabError (location a) (what <> ": the index " <> renderIx entryNames x <> " is of type " <> renderType env typeVars entryNames t <> ", which " <> T.unpack dname <> " does not take there"))) Right (matchTy (np, length indices) (indices !! j) t s)
-  found <- foldM kinded (Assignment (IM.fromList [(i, TParam i []) | i <- [0 .. np - 1]]) (IM.fromList (zip eis writtenIx))) (zip3 eis writtenIx indexArgs)
+        _ -> maybe (Left (ElabError (location a) (what <> ": the index " <> renderIx entryNames x <> " is of type " <> renderType env typeVars entryNames t <> ", which " <> T.unpack dname <> " does not take there"))) Right (matchTy (np, length indices) (indices !! j) t s)
+  found <- foldM kinded (Assignment (IM.fromList [(i, TParam i []) | i <- [0 .. np - 1]]) (IM.fromList (zip eis writtenIx))) (zip3 eis writtenIxTys indexArgs)
   resultIx <- forM [0 .. length indices - 1] \j -> case IM.lookup j (asValues found) of
     Nothing -> Left (ElabError rsp (what <> ": an implicit index of its result is not determined by the indices written"))
     Just x
@@ -968,54 +1064,77 @@ indexFunction :: Env -> DataInfo -> [FunInfo] -> Int -> FunInfo -> Span -> Eithe
 indexFunction env info fns p f sp = do
   clauses <- forM (dataCtors info) \c -> do
     let g = ctorSignature c
-    let fieldTypes = constructorValueTypes c
-        fields = ["f" <> T.pack (show k) | k <- [0 .. length (ctorFields c) - 1]]
         tele = constructorTele g
+        paramToBound = \case
+          IxParam e | e < length tele -> case teRole (tele !! e) of
+            Explicit k -> IxBound 0 k
+            Stored k -> IxBound 0 k
+            Recovered {} -> IxParam e
+          IxSucc x -> IxSucc (paramToBound x)
+          IxCon nm xs -> IxCon nm (map paramToBound xs)
+          IxFun nm xs -> IxFun nm (map paramToBound xs)
+          IxPartial nm a pr xs -> IxPartial nm a pr (map paramToBound xs)
+          x -> x
+        fieldTypes = map (mapIx paramToBound) (constructorValueTypes c)
+        fields = ["f" <> T.pack (show k) | k <- [0 .. length (ctorFields c) - 1]]
         term :: Ix -> Either ElabError (Expr Int)
         term = \case
           IxParam e | e < length tele -> case teRole (tele !! e) of
             Explicit k -> Right (Var k)
             Stored k -> Right (Var k)
-            Recovered k j -> (\fn -> Typed (teType (tele !! e)) [] [] (App (Global (Ref RefFunction fn)) (Var k))) <$> indexFnOf (ctorFields c !! k) j
+            Recovered k j -> (\fn -> Typed (mapIx paramToBound (teType (tele !! e))) [] [] (App (Global (Ref RefFunction fn)) (Var k))) <$> indexFnOf (ctorFields c !! k) j
           IxNat n -> Right (Nat n)
           IxSucc x -> App (Global (Ref RefBuiltin "S")) <$> term x
           IxCon cc xs -> apps (Global (Ref RefConstructor cc)) <$> traverse term xs
           _ -> Left (ElabError sp "internal: an index of a constructor's result which is no pattern")
     bare <- term (constructorIndices g !! p)
     let exprIndex e = case spine e of
-          (Var i, []) -> fromMaybe (IxBound 0 i) (listToMaybe [IxParam k | (k, entry) <- zip [0 ..] tele, teRole entry `elem` [Explicit i, Stored i]])
+          (Var i, []) -> IxBound 0 i
           (Nat n, []) -> IxNat n
+          (Global (Ref RefFunction fn), [child])
+            | Var k <- stripLocations child
+            , k >= 0
+            , Just (TData dn _ indices) <- listToMaybe (drop k fieldTypes)
+            , Just fns' <- if dn == self then Just (map funCore fns) else indexFunctionCores env dn
+            , Just ix <- lookup fn (zip fns' indices) ->
+                ix
           (Global (Ref RefBuiltin "S"), [x]) -> IxSucc (exprIndex x)
           (Global r, as) -> (if refKind r == RefConstructor then IxCon else IxFun) (refName r) (map exprIndex as)
           _ -> IxHole
-        annotate (Typed t ts is e) = do
-          (checked, _) <- annotate e
-          pure (Typed t ts is checked, t)
-        annotate e = case spine e of
-          (Var i, []) -> Right (Typed (fieldTypes !! i) [] [] e, fieldTypes !! i)
-          (Nat _, []) -> Right (Typed TNat [] [] e, TNat)
-          (Global r, args) -> do
-            annotated <- traverse annotate args
-            let actual = map snd annotated
-            (result, typeArgs, indices) <- case refKind r of
-              RefBuiltin -> pure (TNat, [], [])
-              RefConstructor -> case [cc | GCtor cc <- Map.elems (envGlobals env), ctorCore cc == refName r] of
-                cc : _ | Just dd <- dataOfCtor env cc -> do
-                  let sig = ctorSignature cc
-                      n = (length (dataParams dd), length (constructorTele sig))
-                      entries = zip [0 ..] (constructorTele sig)
-                      values = IM.fromList [(k, exprIndex (args !! j)) | (k, en) <- entries, j <- case teRole en of Explicit j -> [j]; Stored j -> [j]; _ -> [], j < length args]
-                  assignment <-
-                    maybe (Left (ElabError sp "cannot instantiate a generated index constructor")) Right $
-                      foldM (\s (a, b) -> matchTy n a b s) emptyAssignment {asValues = values} (zip (constructorValueTypes cc) actual)
-                  let result = substScheme n assignment (TData (renderQualName (dataQual dd)) [TParam i [] | i <- [0 .. fst n - 1]] (constructorIndices sig))
-                  pure (result, [substScheme n assignment (TParam i []) | i <- [0 .. fst n - 1]], IM.toList values)
-                _ -> Left (ElabError sp "unknown generated index constructor")
-              _ -> pure (erase (dataIndices info !! p), [], [])
-            pure (Typed result typeArgs indices (apps (Global r) (map fst annotated)), result)
-          _ -> Left (ElabError sp "invalid generated index expression")
-    (body, _) <- annotate bare
+        annotate expected e = case e of
+          Typed t ts is inner -> do
+            (checked, _) <- annotate (Just t) inner
+            pure (Typed t ts is checked, t)
+          _ -> case spine e of
+            (Var i, []) -> Right (Typed (fieldTypes !! i) [] [] e, fieldTypes !! i)
+            (Nat _, []) -> Right (Typed TNat [] [] e, TNat)
+            (Global r, args) -> do
+              annotated <- traverse (annotate Nothing) args
+              let actual = map snd annotated
+              (result, typeArgs, indices) <- case refKind r of
+                RefBuiltin -> pure (TNat, [], [])
+                RefConstructor -> case [cc | GCtor cc <- Map.elems (envGlobals env), ctorCore cc == refName r] of
+                  cc : _ | Just dd <- dataOfCtor env cc -> do
+                    let sig = ctorSignature cc
+                        n = (length (dataParams dd), length (constructorTele sig))
+                        entries = zip [0 ..] (constructorTele sig)
+                        values = IM.fromList [(k, exprIndex (args !! j)) | (k, en) <- entries, j <- case teRole en of Explicit j -> [j]; Stored j -> [j]; _ -> [], j < length args]
+                        resultShape = TData (renderQualName (dataQual dd)) [TParam i [] | i <- [0 .. fst n - 1]] (constructorIndices sig)
+                        seed0 = emptyAssignment {asValues = values}
+                        seed = maybe seed0 (\wanted -> fromMaybe seed0 (matchTy n resultShape wanted seed0)) expected
+                    assignment <-
+                      maybe (Left (ElabError sp "cannot instantiate a generated index constructor")) Right $
+                        foldM (\s (a, b) -> matchTy n a b s) seed (zip (constructorValueTypes cc) actual)
+                    let result = substScheme n assignment resultShape
+                    pure (result, [substScheme n assignment (TParam i []) | i <- [0 .. fst n - 1]], IM.toList values)
+                  _ -> Left (ElabError sp "unknown generated index constructor")
+                _ -> pure (fromMaybe (erase (dataIndices info !! p)) expected, [], [])
+              pure (Typed result typeArgs indices (apps (Global r) (map fst annotated)), result)
+            _ -> Left (ElabError sp "invalid generated index expression")
+    (body, _) <- annotate (Just (erase (dataIndices info !! p))) bare
     prepared <- either (Left . ElabError sp) Right (Core.elaborate env [] fieldTypes body)
+    unless (isJust (mergeTy (erase (dataIndices info !! p)) (Core.bodyType prepared))) $
+      Left (ElabError sp "internal: generated index function body has the wrong type")
     withoutProofs <- Core.traverseObligations (const (Left (ElabError sp "internal: index expression has a proof argument"))) prepared
     pure (FunClause [PCon (Ref RefConstructor (ctorCore c)) (map (PVar . Hint) fields)] (zipWith hiddenBinder fields fieldTypes) withoutProofs sp mempty)
   let needed = foldMap (requirement sp . CertifiedDeclaration) (Set.unions (map (Core.indexDependencies . fcTerm) clauses))
@@ -1034,27 +1153,17 @@ indexFunction env info fns p f sp = do
 -- | A data type's parameters, with their kinds, and its constructors, with the types of their fields.
 elabData :: Fixities -> Env -> R.DataDecl -> Either ElabError ([(Text, Kind)], [(Segment, [Ty])])
 elabData fx env d = do
-  let params = map (unLocated . R.dataParamName) (R.dataParams d)
+  let paramDecls = [(unLocated (R.dataParamName p), kindFrom <$> R.dataParamKind p) | p <- R.dataParams d]
+      scope = TyScope (map fst paramDecls) (map snd paramDecls) [] []
   ctors <- forM (R.dataConstructors d) \(Located _ c) -> do
     fields <- forM (R.constructorFields c) \f -> do
-      t <- resolved fx f >>= elabType env params
+      t <- resolved fx f >>= elabTypeIn env scope
       unless (firstOrder t) $ Left (ElabError (location f) "a field of function type: values are first-order, and a function is not one")
       pure t
     pure (unLocated (R.constructorName c), fields)
-  let arities = [(i, length ts) | (_, fs) <- ctors, f <- fs, (i, ts) <- applications f]
-      kindOf i = case [n | (j, n) <- arities, j == i] of
-        n : _ -> foldr KArrow KType (replicate n KType)
-        [] -> KType
-  forM_ (zip [0 :: Int ..] (R.dataParams d)) \(i, R.DataParam (Located psp p) _ k) -> case k of
-    Just kd | kindFrom kd /= kindOf i -> Left (ElabError psp ("the parameter " <> T.unpack p <> " is used at another kind than declared"))
-    _ -> pure ()
-  pure ([(p, kindOf i) | (i, p) <- zip [0 ..] params], ctors)
+  kinds <- inferTypeKinds env (location (R.dataName d)) paramDecls (concatMap snd ctors)
+  pure (kinds, ctors)
   where
-    applications = \case
-      TParam i ts -> (i, ts) : concatMap applications ts
-      TData _ ts _ -> concatMap applications ts
-      TArrow a b -> applications a <> applications b
-      _ -> []
     kindFrom = \case
       R.KType -> KType
       R.KArrow a b -> KArrow (kindFrom a) (kindFrom b)
@@ -1081,7 +1190,7 @@ elabClass fx env cd = do
   methods <- foldM (member className a) [] [x | x@(_, _, ty) <- members, not (isProp ty)]
   let (env1, info) = addClass env (Ident (unLocated (R.className cd))) supers methods
       slots = [Slot (methodQual m) 0 (methodArity m) | c <- classClosure env1 info, m <- classMethods c] <> [membershipSlot 0]
-  classScope <- first (ElabError (location (R.className cd))) (dictionaryScope env1 slots (TyScope [a] [] []))
+  classScope <- first (ElabError (location (R.className cd))) (dictionaryScope env1 slots (typedScope [(a, KType)] [] []))
   -- A law: a statement over values of the parameter and of types over it, its methods the places of the class's dictionary.
   laws <- forM [x | x@(_, _, ty) <- members, isProp ty] \(msp, m, ty) -> do
     let (binders, body) = valueBinders ty
@@ -1100,13 +1209,15 @@ elabClass fx env cd = do
     withoutOwnClass cls = foldMap (\entry -> if requirementDependency entry == AdmittedClass (evidenceQName (classQual cls)) then mempty else requirement (requirementSpan entry) (requirementDependency entry)) . requirements
     member className a preceding (msp, m, ty) = do
       let params = a : filter (/= a) (nub (typeVariables env ty))
+          paramDecls = (a, Just KType) : [(p, Nothing) | p <- drop 1 params]
           values = [(renderQualName (className <> [name]), methodIndex (className <> [name])) | (name, _, 0) <- preceding]
           valueTypes = [(renderQualName (className <> [name]), schemeType sch) | (name, sch, 0) <- preceding]
-      t <- elabTypeIn env (TyScope params values valueTypes) ty
+      t <- elabTypeIn env (TyScope params (map snd paramDecls) values valueTypes) ty
+      kinds <- inferTypeKinds env msp paramDecls [t]
       let (args, result) = arrows t
       unless (all firstOrder (result : args)) $ Left (ElabError msp "a method of functions: its arguments and its result are values, which are first-order")
       unless (null args || 0 `elem` tyParams t) $ Left (ElabError msp ("the method does not mention the class's parameter " <> T.unpack a))
-      pure (preceding <> [(m, Scheme [(p, KType) | p <- params] [] t, length args)])
+      pure (preceding <> [(m, Scheme kinds [] t, length args)])
 
 -- | A class after its superclasses, each once.
 classClosure :: Env -> ClassInfo -> [ClassInfo]
@@ -1137,24 +1248,30 @@ elabInstance fx env sp idl = do
   let mentioned = typeIndexNames env ty0
       indexNames' = [name | name <- nub (map fst mentioned), name `notElem` vars]
       tentative = [(name, fromMaybe THole (lookup name mentioned)) | name <- indexNames']
-      scopeWith values' = TyScope vars [(name, IxParam i) | (i, (name, _)) <- zip [0 ..] values'] values'
+      scopeWith values' = tyScope vars [(name, IxParam i) | (i, (name, _)) <- zip [0 ..] values'] values'
       runtime = [0 .. length indexNames' - 1]
   headTy <- elabTypeIn env (scopeWith tentative) ty0
   headName <- case headTy of
     TNat -> pure "Nat"
     TData dn args indices | args == [TParam i [] | i <- [0 .. length vars - 1]], indices == map IxParam runtime -> pure dn
     _ -> Left (ElabError (location ty0) "an instance is for a data type applied to distinct type variables, or for Nat")
-  let kinds = case headTy of
+  let (headParamKinds, kinds) = case headTy of
         TData datatype arguments indices
           | dat : _ <- [dat | GData dat <- Map.elems (envGlobals env), renderQualName (dataQual dat) == datatype] ->
-              map (substScheme (length arguments, length indices) (Assignment (IM.fromList (zip [0 ..] arguments)) (IM.fromList (zip [0 ..] indices)))) (dataIndices dat)
-        _ -> []
+              ( map snd (dataParams dat)
+              , map (substScheme (length arguments, length indices) (Assignment (IM.fromList (zip [0 ..] arguments)) (IM.fromList (zip [0 ..] indices)))) (dataIndices dat)
+              )
+        _ -> ([], [])
+      headParams = zip vars headParamKinds
       values = zip indexNames' kinds
-      headScope = scopeWith values
-      headScheme = Scheme [(name, KType) | name <- vars] values
+      headScope = typedScope headParams [(name, IxParam i) | (i, (name, _)) <- zip [0 ..] values] values
+      headScheme = Scheme headParams values
   unless (length kinds == length indexNames' && all firstOrder kinds && all determined kinds) $
     Left (ElabError (location ty0) "the instance head's index kinds are not determined")
   given <- constraintClasses env vars (R.instanceContext idl)
+  forM_ given \(_, paramIdx) ->
+    unless (listToMaybe (drop paramIdx headParamKinds) == Just KType) $
+      Left (ElabError sp "a class constraint in an instance context must constrain a parameter of kind Type")
   full <- dictionaryOf env vars (R.instanceContext idl)
   contextRequirements <- constraintRequirements env vars (R.instanceContext idl)
   let instanceRequirements = requirement csp (AdmittedClass (evidenceQName (classQual cls))) <> contextRequirements
@@ -1162,16 +1279,35 @@ elabInstance fx env sp idl = do
       iq = qualify env [Ident (maybe (className' <> "-" <> shortHead) unLocated (R.instanceName idl))]
   when (Map.member (classQual cls, headName) (envInstances env)) $
     Left (ElabError sp ("a second instance of " <> T.unpack className' <> " for " <> T.unpack shortHead <> ": an instance is the only one of its class for its type"))
-  forM_ (classSuperclasses cls) \s ->
-    unless (Map.member (s, headName) (envInstances env)) $
+  let givenClosure = [(classQual parent, paramIdx) | (contextClass, paramIdx) <- given, parent <- classClosure env contextClass]
+  forM_ (classSuperclasses cls) \s -> case Map.lookup (s, headName) (envInstances env) of
+    Nothing ->
       Left (ElabError sp ("no instance of " <> T.unpack (segmentText (last s)) <> " for " <> T.unpack shortHead <> ", a superclass of " <> T.unpack className' <> ", before this one"))
+    Just superInst ->
+      forM_ (instClassContext superInst) \(reqCls, reqParam) ->
+        unless ((reqCls, reqParam) `elem` givenClosure) $
+          Left
+            ( ElabError
+                sp
+                ( "instance of "
+                    <> T.unpack className'
+                    <> " for "
+                    <> T.unpack shortHead
+                    <> " is missing constraint "
+                    <> T.unpack (displayQualName reqCls)
+                    <> " "
+                    <> maybe ("#" <> show reqParam) T.unpack (listToMaybe (drop reqParam vars))
+                    <> " required by superclass "
+                    <> T.unpack (segmentText (last s))
+                )
+            )
   let clauses = [c | Located _ c <- R.instanceClauses idl]
       methodName m = last (methodQual m)
   forM_ clauses \c -> case clauseHead c of
     Just n | n `elem` map methodName (classMethods cls) <> map (last . lawQual) (classLaws cls) -> pure ()
     _ -> Left (ElabError (location (R.clauseLhs c)) ("a clause for no method or law of " <> T.unpack className'))
   let atType slotsOf runtimeOf m = case methodScheme m of
-        Scheme mparams mvals mty -> Scheme ([(v, KType) | v <- vars] <> drop 1 mparams) (values <> mvals) (atInstance headTy (length vars) (instanceDependencies cls iq (map IxParam . runtimeOf) (slotsOf m) slotsOf mty))
+        Scheme mparams mvals mty -> Scheme (headParams <> drop 1 mparams) (values <> mvals) (atInstance headTy (length vars) (instanceDependencies cls iq (map IxParam . runtimeOf) (slotsOf m) slotsOf mty))
       declare needed slotsOf runtimeOf (e, fs) m =
         let (declared, function) = setFunRuntime (runtimeOf m) (addInstanceFunction e iq (methodName m) (atType slotsOf runtimeOf m) (methodArity m) (slotsOf m))
             logical = nub (funSlots function <> full)
@@ -1366,7 +1502,7 @@ atInstance :: Ty -> Int -> Ty -> Ty
 atInstance headTy n = go
   where
     go = \case
-      TParam 0 _ -> headTy
+      TParam 0 [] -> headTy
       TParam i ts -> TParam (n + i - 1) (map go ts)
       TData d ts xs -> TData d (map go ts) xs
       TArrow a b -> TArrow (go a) (go b)
@@ -1665,7 +1801,7 @@ resolved fx e = either (\err -> let (sp, msg) = renderFixityError err in Left (E
 
 -- | A type over the type parameters named: a parameter, @Nat@, a data type applied, or an arrow.
 elabType :: Env -> [Text] -> Located R.Expr -> Either ElabError Ty
-elabType env params = elabTypeIn env (TyScope params [] [])
+elabType env params = elabTypeIn env (tyScope params [] [])
 
 {- |
 A type in a scope: a type parameter, @Nat@, a data type applied to types and
@@ -1673,9 +1809,19 @@ to indices, or an arrow. Applications follow the data declaration's ordered
 parameter telescope and normalize into separate type and index lists.
 -}
 elabTypeIn :: Env -> TyScope -> Located R.Expr -> Either ElabError Ty
-elabTypeIn env sc le@(Located sp e) = case e of
-  R.EParen x -> elabTypeIn env sc x
-  R.EArrow a b -> TArrow <$> elabTypeIn env sc a <*> elabTypeIn env sc b
+elabTypeIn env sc = elabTypeInWithKind env sc KType
+
+{- | Kind-directed type elaboration: checks @TParam@ arities, datatype/synonym
+parameter kinds, and permits unsaturated non-indexed data types only when
+their remaining kind matches a higher expected kind.
+-}
+elabTypeInWithKind :: Env -> TyScope -> Kind -> Located R.Expr -> Either ElabError Ty
+elabTypeInWithKind env sc expected le@(Located sp e) = case e of
+  R.EParen x -> elabTypeInWithKind env sc expected x
+  R.EArrow a b -> do
+    unless (expected == KType) $
+      Left (ElabError sp ("a function type has kind Type, expected " <> renderKind expected))
+    TArrow <$> elabTypeInWithKind env sc KType a <*> elabTypeInWithKind env sc KType b
   _ -> case rawArgs le of
     (Located hsp (R.EName q), args0) -> do
       let (imps, args, late) = splitImplicits args0
@@ -1688,93 +1834,192 @@ elabTypeIn env sc le@(Located sp e) = case e of
           | Just actual <- lookup n (envTypeBindings env) -> do
               noImplicits imps
               unless (null args) $ Left (ElabError hsp "a specialized class parameter is a complete first-order type")
+              unless (expected == KType) $
+                Left (ElabError hsp ("a specialized class parameter has kind Type, expected " <> renderKind expected))
               pure actual
-          | Just i <- elemIndex n (tsTypes sc) -> noImplicits imps *> (TParam i <$> traverse (elabTypeIn env sc) args)
-          | n `elem` ["Nat", "nat"] && null args -> noImplicits imps *> pure TNat
-        _ -> case [t | g <- resolve env q, Just t <- [typeScheme g]] of
-          (sch, binders) : _ -> do
-            let np = length (schemeParams sch)
-                ni = length (schemeValues sch)
-                positions = [dbParameter b | b <- binders, not (dbImplicit b)]
-                ets = [i | TypeParameter i <- positions]
-                eis = [i | IndexParameter i <- positions]
-                dname = T.unpack (displayQName q)
-                slots = [dbParameter b | b <- binders, dbImplicit b]
-            unless (length args == length ets + length eis) $
-              Left (ElabError hsp (dname <> " takes " <> show (length ets) <> " type arguments" <> (if null eis then "" else " and " <> show (length eis) <> " indices")))
-            case drop (length slots) imps of
-              x : _ -> Left (ElabError (location x) (dname <> " takes " <> show (length slots) <> " implicit arguments"))
-              [] -> pure ()
-            let targs = [x | (TypeParameter _, x) <- zip positions args]
-                iargs = [x | (IndexParameter _, x) <- zip positions args]
-                givenTypes = [(i, x) | (TypeParameter i, x) <- zip slots imps]
-                givenIxs = [(j, x) | (IndexParameter j, x) <- zip slots imps]
-            tys <- traverse (elabTypeIn env sc) (targs <> map snd givenTypes)
-            ixs <- zipWithM (elabIx env (tsValues sc)) [closedKind (snd (schemeValues sch !! j)) | j <- eis <> map fst givenIxs] (iargs <> map snd givenIxs)
-            -- The implicit parameters not given: found by matching the kind of each index against its type.
-            let valueNames = map fst (tsValues sc)
-                kinded s (j, x, a) = case ixType env sc x of
-                  THole -> Right s
-                  t -> maybe (Left (ElabError (location a) ("the index " <> renderIx valueNames x <> " is of type " <> renderType env (tsTypes sc) valueNames t <> ", which " <> dname <> " does not take there"))) Right (matchTyWith (unfolder env) (np, ni) (snd (schemeValues sch !! j)) t s)
-                typePositions = ets <> map fst givenTypes
-                indexPositions = eis <> map fst givenIxs
-            found <- foldM kinded (Assignment (IM.fromList (zip typePositions tys)) (IM.fromList (zip indexPositions ixs))) (zip3 indexPositions ixs (iargs <> map snd givenIxs))
-            let unfound what = ElabError hsp ("the implicit " <> what <> " of " <> dname <> " is not determined by the indices written: give it in braces")
-            ts <- forM [0 .. np - 1] \i -> maybe (Left (unfound ("type parameter " <> T.unpack (fst (schemeParams sch !! i))))) Right (IM.lookup i (asTypes found))
-            xs <- forM [0 .. ni - 1] \j -> maybe (Left (unfound ("index " <> show j))) Right (IM.lookup j (asValues found))
-            let expanded = substScheme (np, ni) (Assignment (IM.fromList (zip [0 ..] ts)) (IM.fromList (zip [0 ..] (map normIx xs)))) (schemeType sch)
-            unless (determined expanded) $ Left (ElabError hsp ("the arguments of " <> dname <> " do not determine a well-formed type"))
-            pure expanded
-          [] -> Left (ElabError hsp ("not a type: " <> T.unpack (displayQName q)))
+          | Just i <- elemIndex n (tsTypes sc) -> do
+              noImplicits imps
+              case join (listToMaybe (drop i (tsTypeKinds sc))) of
+                Just k -> do
+                  let (kArgs, kRes) = splitCoreKind k
+                      (used, rest) = splitAt (length args) kArgs
+                      actualRes = foldr KArrow kRes rest
+                  unless (length args <= length kArgs && actualRes == expected) $
+                    Left (ElabError hsp ("the type parameter " <> T.unpack n <> " has kind " <> renderKind k <> ", which cannot produce " <> renderKind expected <> " with " <> show (length args) <> " argument(s)"))
+                  TParam i <$> zipWithM (elabTypeInWithKind env sc) used args
+                Nothing ->
+                  TParam i <$> traverse (elabTypeInWithKind env sc KType) args
+          | n `elem` ["Nat", "nat"] && null args -> do
+              noImplicits imps
+              unless (expected == KType) $
+                Left (ElabError hsp ("Nat has kind Type, expected " <> renderKind expected))
+              pure TNat
+        _ -> case resolve env q of
+          GData d : _
+            | expected /= KType
+            , null (dataIndices d)
+            , null imps
+            , all (not . dbImplicit) (dataBinders d)
+            , length args < length (dataParams d) -> do
+                let (used, rest) = splitAt (length args) (map snd (dataParams d))
+                    remainingKind = foldr KArrow KType rest
+                unless (remainingKind == expected) $
+                  Left (ElabError hsp (T.unpack (displayQName q) <> " has kind " <> renderKind remainingKind <> ", expected " <> renderKind expected))
+                tys <- zipWithM (elabTypeInWithKind env sc) used args
+                pure (TData (renderQualName (dataQual d)) tys [])
+          resolvedGlobals -> case [t | g <- resolvedGlobals, Just t <- [typeScheme g]] of
+            (sch, binders) : _ -> do
+              let np = length (schemeParams sch)
+                  ni = length (schemeValues sch)
+                  positions = [dbParameter b | b <- binders, not (dbImplicit b)]
+                  ets = [i | TypeParameter i <- positions]
+                  eis = [i | IndexParameter i <- positions]
+                  dname = T.unpack (displayQName q)
+                  slots = [dbParameter b | b <- binders, dbImplicit b]
+              unless (expected == KType) $
+                Left (ElabError hsp (dname <> " has kind Type, expected " <> renderKind expected))
+              unless (length args == length ets + length eis) $
+                Left (ElabError hsp (dname <> " takes " <> show (length ets) <> " type arguments" <> (if null eis then "" else " and " <> show (length eis) <> " indices")))
+              case drop (length slots) imps of
+                x : _ -> Left (ElabError (location x) (dname <> " takes " <> show (length slots) <> " implicit arguments"))
+                [] -> pure ()
+              let targs = [(i, x) | (TypeParameter i, x) <- zip positions args]
+                  iargs = [x | (IndexParameter _, x) <- zip positions args]
+                  givenTypes = [(i, x) | (TypeParameter i, x) <- zip slots imps]
+                  givenIxs = [(j, x) | (IndexParameter j, x) <- zip slots imps]
+              tys <- forM (targs <> givenTypes) \(i, x) -> elabTypeInWithKind env sc (snd (schemeParams sch !! i)) x
+              ixTys <- zipWithM (elabIx env sc) [closedKind (snd (schemeValues sch !! j)) | j <- eis <> map fst givenIxs] (iargs <> map snd givenIxs)
+              let ixs = map fst ixTys
+              -- The implicit parameters not given: found by matching the kind of each index against its type.
+              let valueNames = map fst (tsValues sc)
+                  kinded s (j, (x, t), a) = case t of
+                    THole -> Right s
+                    _ -> maybe (Left (ElabError (location a) ("the index " <> renderIx valueNames x <> " is of type " <> renderType env (tsTypes sc) valueNames t <> ", which " <> dname <> " does not take there"))) Right (matchTyWith (unfolder env) (np, ni) (snd (schemeValues sch !! j)) t s)
+                  typePositions = ets <> map fst givenTypes
+                  indexPositions = eis <> map fst givenIxs
+              found <- foldM kinded (Assignment (IM.fromList (zip typePositions tys)) (IM.fromList (zip indexPositions ixs))) (zip3 indexPositions ixTys (iargs <> map snd givenIxs))
+              let unfound what = ElabError hsp ("the implicit " <> what <> " of " <> dname <> " is not determined by the indices written: give it in braces")
+              ts <- forM [0 .. np - 1] \i -> maybe (Left (unfound ("type parameter " <> T.unpack (fst (schemeParams sch !! i))))) Right (IM.lookup i (asTypes found))
+              xs <- forM [0 .. ni - 1] \j -> maybe (Left (unfound ("index " <> show j))) Right (IM.lookup j (asValues found))
+              let expanded = substScheme (np, ni) (Assignment (IM.fromList (zip [0 ..] ts)) (IM.fromList (zip [0 ..] (map normIx xs)))) (schemeType sch)
+              unless (determined expanded) $ Left (ElabError hsp ("the arguments of " <> dname <> " do not determine a well-formed type"))
+              pure expanded
+            [] -> Left (ElabError hsp ("not a type: " <> T.unpack (displayQName q)))
     _
       | isProp le -> Left (ElabError sp "a proposition where a type is expected: the arguments and the result of a function are types")
       | otherwise -> Left (ElabError sp "a type")
 
 {- |
-An index in a type: a value in scope, a numeral, the successor, the
-arithmetic of @Nat@, or a constructor or a function applied, at the type
-given where it is known: of several constructors of the name, the one of
-that type; the arguments of a constructor or a function at the types of its
-fields or its domains.
+An index in a type, together with its checked type: a value in scope, a
+numeral, the successor, the arithmetic of @Nat@, or a first-order, proof-free
+constructor or function applied. Every subexpression is typechecked against
+its operator's, constructor's, or function's domains rather than silently
+defaulting to a hole on mismatch.
 -}
-elabIx :: Env -> [(Text, Ix)] -> Ty -> Located R.Expr -> Either ElabError Ix
-elabIx env vals kind le@(Located sp e) = case e of
-  R.EParen x -> elabIx env vals kind x
-  R.ENat n -> pure (IxNat n)
+elabIx :: Env -> TyScope -> Ty -> Located R.Expr -> Either ElabError (Ix, Ty)
+elabIx env sc kind le@(Located sp e) = case e of
+  R.EParen x -> elabIx env sc kind x
+  R.ENat n -> pure (IxNat n, TNat)
   R.EInfix (Located osp op) l r -> case R.operatorName op of
-    QName [] (Op o) | Just f <- lookup o arithmetic -> (\a b -> IxFun f [a, b]) <$> elabIx env vals TNat l <*> elabIx env vals TNat r
+    QName [] (Op o) | Just f <- lookup o arithmetic -> do
+      (a, ta) <- elabIx env sc TNat l
+      expectNat (location l) ta
+      (b, tb) <- elabIx env sc TNat r
+      expectNat (location r) tb
+      pure (IxFun f [a, b], TNat)
     q -> applied osp q [l, r]
   _ -> case rawSpine le of
     (Located hsp (R.EName q), args)
-      | null args, Just x <- lookup (case q of QName path name -> renderQualName (path <> [name])) vals -> pure x
+      | null args
+      , let qtext = case q of QName path name -> renderQualName (path <> [name])
+      , Just x <- lookup qtext vals ->
+          pure (x, fromMaybe THole (lookup qtext valTys))
       | otherwise -> case q of
           QName [] (Ident n)
-            | Just x <- lookup n vals, null args -> pure x
-            | naturalSuccessor env kind q, [a] <- args -> IxSucc <$> elabIx env vals TNat a
+            | Just x <- lookup n vals, null args -> pure (x, fromMaybe THole (lookup n valTys))
+            | naturalSuccessor env kind q
+            , [a] <- args -> do
+                (x, tx) <- elabIx env sc TNat a
+                expectNat (location a) tx
+                pure (IxSucc x, TNat)
           _ -> applied hsp q args
     _ -> Left (ElabError sp "an index: a value, a numeral, S, or a constructor or a function applied")
   where
+    vals = tsValues sc
+    valTys = tsValueTys sc
     arithmetic = [("+", "add"), ("-", "sub"), ("*", "mul"), ("^", "pow")] :: [(Text, Text)]
-    -- What the head names, the constructors of the type the index is of first, where several have the name.
-    candidates q =
-      let found = [g | g <- resolve env q, isValueHead g] <> [GCtor c | QName [] s <- [q], null (resolve env q), c <- constructorsNamed env s]
+    expectNat asp t = case mergeTy TNat t of
+      Just _ -> pure ()
+      Nothing -> Left (ElabError asp ("type mismatch in index: expected Nat, got " <> renderType env (tsTypes sc) (map fst vals) t))
+    -- Disambiguate constructors by expected type when available; report
+    -- ambiguity instead of arbitrarily taking the first constructor in map order.
+    selectCandidate hsp q =
+      let found = nubBy sameGlobal ([g | g <- resolve env q, isValueHead g] <> [GCtor c | QName [] s <- [q], null (resolve env q), c <- constructorsNamed env s])
           ofType = case kind of
             TData dn _ _ -> [g | g@(GCtor c) <- found, renderQualName (ctorData c) == dn]
             _ -> []
-       in ofType <> found
-    applied hsp q args = case candidates q of
-      GCtor c : _ -> do
-        let fields = [t | TeleEntry _ t (Explicit _) <- constructorTele (ctorSignature c)]
-            storing = or [True | TeleEntry _ _ (Stored _) <- constructorTele (ctorSignature c)]
-        unless (length args == length fields) $ Left (ElabError hsp (T.unpack (displayQName q) <> " takes " <> show (length fields) <> " fields"))
-        when storing $ Left (ElabError hsp ("a constructor storing implicit arguments, " <> T.unpack (displayQName q) <> ", in an index: not supported yet"))
-        IxCon (ctorCore c) <$> zipWithM (elabIx env vals . closedKind) fields args
-      GFun f : _ -> do
-        unless (length args == funArity f) $ Left (ElabError hsp (T.unpack (displayQName q) <> " takes " <> show (funArity f) <> " arguments"))
-        unless (null (funSlots f)) $ Left (ElabError hsp "a function under constraints, in an index: not supported")
-        unless (null (funRuntime f)) $ Left (ElabError hsp "a function taking implicit values at runtime, in an index: not supported yet")
-        IxFun (funCore f) <$> zipWithM (elabIx env vals . closedKind) (fst (arrows (schemeType (funScheme f))) <> repeat THole) args
-      _ -> Left (ElabError hsp ("not a value in scope here: " <> T.unpack (displayQName q)))
+       in case (ofType, found) of
+            ([g], _) -> Right g
+            (g : _, _) -> Right g
+            ([], [g]) -> Right g
+            ([], []) -> Left (ElabError hsp ("not a value in scope here: " <> T.unpack (displayQName q)))
+            ([], gs) | all isCtorG gs -> Left (ElabError hsp ("ambiguous constructor in index: " <> T.unpack (displayQName q)))
+            ([], g : _) -> Right g
+    sameGlobal (GCtor a) (GCtor b) = ctorQual a == ctorQual b
+    sameGlobal (GFun a) (GFun b) = funQual a == funQual b
+    sameGlobal _ _ = False
+    isCtorG = \case
+      GCtor _ -> True
+      _ -> False
+    applied hsp q args =
+      selectCandidate hsp q >>= \case
+        GCtor c -> do
+          let g = ctorSignature c
+              tele = constructorTele g
+              explicits = [(pos, t) | (pos, TeleEntry _ t (Explicit _)) <- zip [0 ..] tele]
+              fields = map snd explicits
+              storing = or [True | TeleEntry _ _ (Stored _) <- tele]
+          unless (length args == length fields) $ Left (ElabError hsp (T.unpack (displayQName q) <> " takes " <> show (length fields) <> " fields"))
+          when storing $ Left (ElabError hsp ("a constructor storing implicit arguments, " <> T.unpack (displayQName q) <> ", in an index: not supported yet"))
+          unless (null (constructorProofs g)) $ Left (ElabError hsp ("a constructor with proof preconditions, " <> T.unpack (displayQName q) <> ", in an index: not supported"))
+          dd <- maybe (Left (ElabError hsp "internal: a constructor of no data type")) Right (dataOfCtor env c)
+          argIxTys <- zipWithM (elabIx env sc . closedKind) fields args
+          let np = length (dataParams dd)
+              self = TData (renderQualName (dataQual dd)) [TParam i [] | i <- [0 .. np - 1]]
+              given = emptyAssignment {asValues = IM.fromList [(pos, x) | ((pos, _), (x, _)) <- zip explicits argIxTys]}
+          assigned <-
+            foldM
+              ( \s ((_, dom), ((_, t), argExpr)) ->
+                  maybe
+                    (Left (ElabError (location argExpr) ("type mismatch in index argument: expected " <> renderType env (tsTypes sc) (map fst vals) (substScheme (np, length tele) s dom) <> ", got " <> renderType env (tsTypes sc) (map fst vals) t)))
+                    Right
+                    (matchTyWith (unfolder env) (np, length tele) dom t s)
+              )
+              given
+              (zip explicits (zip argIxTys args))
+          pure (IxCon (ctorCore c) (map fst argIxTys), substScheme (np, length tele) assigned (self (constructorIndices g)))
+        GFun f -> do
+          unless (length args == funArity f) $ Left (ElabError hsp (T.unpack (displayQName q) <> " takes " <> show (funArity f) <> " arguments"))
+          unless (null (funSlots f)) $ Left (ElabError hsp "a function under constraints, in an index: not supported")
+          unless (null (funRuntime f)) $ Left (ElabError hsp "a function taking implicit values at runtime, in an index: not supported yet")
+          unless (null (funProofs f)) $ Left (ElabError hsp "a function with proof preconditions, in an index: not supported")
+          let sch = funScheme f
+              nm = (length (schemeParams sch), length (schemeValues sch))
+              (doms, res) = splitArrows (funArity f) (schemeType sch)
+          unless (all firstOrder (res : doms)) $ Left (ElabError hsp "a function taking or returning a fixed schema, in an index: not supported")
+          argIxTys <- zipWithM (elabIx env sc . closedKind) (doms <> repeat THole) args
+          assigned <-
+            foldM
+              ( \s (dom, ((_, t), argExpr)) ->
+                  maybe
+                    (Left (ElabError (location argExpr) ("type mismatch in index argument: expected " <> renderType env (tsTypes sc) (map fst vals) (substScheme nm s dom) <> ", got " <> renderType env (tsTypes sc) (map fst vals) t)))
+                    Right
+                    (matchTyWith (unfolder env) nm dom t s)
+              )
+              emptyAssignment
+              (zip doms (zip argIxTys args))
+          pure (IxFun (funCore f) (map fst argIxTys), substScheme nm assigned res)
+        _ -> Left (ElabError hsp ("not a value in scope here: " <> T.unpack (displayQName q)))
     isValueHead = \case
       GCtor _ -> True
       GFun _ -> True
@@ -1836,33 +2081,49 @@ elabDecl fx env sp name ty0 clauses = do
       typeImplicits = [n | (n, mt) <- implicits, maybe True isTypeExpr mt]
       valueImplicits = [(n, t) | (n, Just t) <- implicits, not (isTypeExpr t)]
       freeVars = nub (concatMap (typeVariables env) (signed <> map snd valueImplicits) <> concat [filter (`notElem` local) (typeVariables env annotation) | (local, annotation) <- annotated])
-      params = [(n, KType) | n <- typeImplicits] <> [(v, KType) | v <- freeVars, v `notElem` typeImplicits, v `notElem` map fst valueImplicits]
-      paramNames = map fst params
+      paramNames = nub (typeImplicits <> [v | v <- freeVars, v `notElem` map fst valueImplicits])
       -- The values the indices of its types mention which nothing binds: implicit value parameters, of the types of the indices they stand at.
       mentioned = concatMap (typeIndexNames env) (signed <> map snd valueImplicits) <> concat [filter ((`notElem` local) . fst) (typeIndexNames env annotation) | (local, annotation) <- annotated]
       bound = paramNames <> map fst valueImplicits <> map (unLocated . fst) binders
       freeValues = [v | v <- nub (map fst mentioned), v `notElem` bound]
-  -- The declared values' types, in the scope of all the values, whose indices they may mention.
-  let valueScope = TyScope paramNames [(v, IxParam i) | (i, v) <- zip [0 ..] (map fst valueImplicits <> freeValues)] []
-  valueTys <- forM valueImplicits \(n, t) -> do
-    vty <- elabTypeIn env valueScope t
-    unless (firstOrder vty) $ Left (ElabError (location t) ("the implicit value " <> T.unpack n <> " is of a first-order type"))
-    pure (n, vty)
-  let values = valueTys <> [(v, fromMaybe TNat (listToMaybe [t | (w, t) <- mentioned, w == v, t /= THole])) | v <- freeValues]
-      basicScope = TyScope paramNames [(v, IxParam i) | (i, (v, _)) <- zip [0 ..] values] values
+      freeValueTys = [(v, fromMaybe TNat (listToMaybe [t | (w, t) <- mentioned, w == v, t /= THole])) | v <- freeValues]
+      freeStart = length valueImplicits
+      -- Elaborate declared implicit value binders left-to-right so each index is
+      -- checked against earlier binders' real types and forward references to
+      -- later declared binders are rejected; inferred free values stay available.
+      valueScope0 = tyScope paramNames [(v, IxParam (freeStart + i)) | (i, (v, _)) <- zip [0 ..] freeValueTys] freeValueTys
+  (valueTys, _) <-
+    foldM
+      ( \(acc, sc) (i, (n, t)) -> do
+          when (n `elem` map fst acc) $
+            Left (ElabError (location t) ("the implicit value " <> T.unpack n <> " is bound twice"))
+          vty <- elabTypeIn env sc t
+          unless (firstOrder vty) $ Left (ElabError (location t) ("the implicit value " <> T.unpack n <> " is of a first-order type"))
+          let sc' = sc {tsValues = tsValues sc <> [(n, IxParam i)], tsValueTys = tsValueTys sc <> [(n, vty)]}
+          pure (acc <> [(n, vty)], sc')
+      )
+      ([], valueScope0)
+      (zip [0 ..] valueImplicits)
+  let values = valueTys <> freeValueTys
+      basicScope = tyScope paramNames [(v, IxParam i) | (i, (v, _)) <- zip [0 ..] values] values
   full <- dictionaryOf env paramNames constraints
   contextRequirements <- constraintRequirements env paramNames constraints
-  scope <- first (ElabError sp) (dictionaryScope env full basicScope)
+  scope0 <- first (ElabError sp) (dictionaryScope env full basicScope)
+  givenConstraints <- constraintClasses env paramNames constraints
+  let constrainedParams = nub [i | (_, i) <- givenConstraints]
+      paramDecls = [(n, if i `elem` constrainedParams then Just KType else Nothing) | (i, n) <- zip [0 ..] paramNames]
   if isProp body
     then do
       -- Statement lowering names each value by its binder. Distinct values
       -- must never acquire the same core variable and share memberships.
       _ <- foldM checkBinder [] (map (Located sp . fst) values <> map fst binders)
       binderTys <- forM binders \(Located nsp n, t) -> do
-        bty <- elabTypeIn env scope t
+        bty <- elabTypeIn env scope0 t
         unless (argumentType bty) $ Left (ElabError nsp ("the variable " <> T.unpack n <> " must be a value or a fixed function schema over first-order values"))
         pure (namedBinder n bty)
-      given <- constraintClasses env paramNames constraints
+      params <- inferTypeKinds env sp paramDecls (map snd values <> map binderTy binderTys)
+      let scope = scope0 {tsTypeKinds = map (Just . snd) params}
+          given = givenConstraints
       -- The binders opened into fresh atoms for the statement, which is closed over them again, a scope over its values and binders.
       let (atoms, opened) = freshAtoms [binderHint b | b <- binderTys] env
           ctx0 = statementCtx atoms values binderTys
@@ -1888,7 +2149,7 @@ elabDecl fx env sp name ty0 clauses = do
             map valueSlot declared
               <> [Nothing | (n, _) <- params, n `notElem` declared]
               <> [valueSlot n | n <- map fst values, n `notElem` declared]
-      (pcs, patternRequirements) <- runTCWithRequirements (traverse (elabProofClause fx env (Just implicitSlots) (map binderTy binderTys) (antecedentCount prop)) clauses)
+      (pcs, patternRequirements) <- runTCWithRequirements (traverse (elabProofClause fx env {envScope = scope} (Just implicitSlots) (map binderTy binderTys) (antecedentCount prop)) clauses)
       case [pcSpan pc | length pcs > 1, pc <- pcs, PAbsurd `elem` (pcValuePats pc <> pcPatterns pc)] of
         asp : _ -> Left (ElabError asp "an absurd clause is its theorem's only clause, for now")
         [] -> pure ()
@@ -1899,12 +2160,14 @@ elabDecl fx env sp name ty0 clauses = do
       let (domains, resultE) = rawArrows body
           proofPositions = [i | (i, d) <- zip [0 ..] domains, isProp d]
           valueCtx = statementCtx [] values []
-      domainTys <- forM [d | d <- domains, not (isProp d)] (elabTypeIn env scope)
-      resultTy <- elabTypeIn env scope resultE
+      domainTys <- forM [d | d <- domains, not (isProp d)] (elabTypeIn env scope0)
+      resultTy <- elabTypeIn env scope0 resultE
+      params <- inferTypeKinds env sp paramDecls (map snd values <> domainTys <> [resultTy])
+      let scope = scope0 {tsTypeKinds = map (Just . snd) params}
+          given = givenConstraints
       (props, signatureRequirements) <- runTCWithRequirements $ do
         requireAll contextRequirements
         forM [d | d <- domains, isProp d] \d -> toScope . fmap B <$> elabProp env {envScope = scope} full valueCtx d
-      given <- constraintClasses env paramNames constraints
       let fty = foldr TArrow resultTy domainTys
       -- The implicit values its clauses bind, {n}, in order: taken at runtime, before its arguments.
       boundImplicits <- fmap (maximum . (0 :)) . forM clauses $ \(R.Clause lhs0 _) -> do
@@ -2339,14 +2602,16 @@ elabFunClauseBody fx env info runtimeTys args result (R.Clause lhs0 (Located rsp
       )
       (mSubst m0)
       (zip [0 ..] (zip (patternIxs (map fst ivars) ipats) implicit'))
-  (epats, evars, eproofs, ealiases, refinedM) <- patternsFrom env ivars ialiases m0 {mSubst = s1} (zip args (map Written explicitTerms))
+  let ivars1 = [(a, b {binderTy = applyTy s1 (binderTy b)}) | (a, b) <- ivars]
+  (epats, evars, eproofs, ealiases, refinedM) <- patternsFrom env ivars1 ialiases m0 {mSubst = s1} (zip args (map Written explicitTerms))
   let refined = mSubst refinedM
       -- The variables bound, each by the atom its binder was opened into, its type open over the atoms before it.
-      opened = ivars <> evars
+      ivarsRefined = [(a, b {binderTy = applyTy refined (binderTy b)}) | (a, b) <- ivars1]
+      opened = ivarsRefined <> evars
       atoms = map fst opened
       vars = map snd opened
       pats = ipats <> epats
-      aliases = ialiases <> ealiases
+      aliases = [(n, applyIx refined x) | (n, x) <- ialiases] <> ealiases
       -- The proofs the patterns bind, of the preconditions of the constructors matched.
       boundProofs = concat (iproofs <> eproofs)
   -- The names written are distinct: the variables', the proofs' and those given implicit arguments.
@@ -2519,14 +2784,30 @@ elabProofClauseBody fx env slots binderTys hypotheses (R.Clause lhs0 rhs) = do
         (Just (i, t), p) -> pure (Just (i, t, p))
         (Nothing, p) -> Nothing <$ named "an implicit type is named by a variable or _: a type is not matched on" p
   hypNamesGiven <- forM (drop nb explicit) (named "a hypothesis is named by a variable or _: a proposition has no constructors")
-  -- The implicit values are matched before the binders: what matching one concludes holds of the binders' types, whose indices mention it.
-  (allPats, opened, allProofs, aliases0, _) <- patterns env ([(t, Written p) | (_, t, p) <- valueArgs] <> zip binderTys (map Written (take nb explicit)))
+  -- The implicit values are matched before the binders, unifying each with its
+  -- signature parameter so what matching one concludes holds of the binders' types.
+  (ipats, ivars, iproofs, ialiases, m0) <- patterns env [(t, Written p) | (_, t, p) <- valueArgs]
+  s1 <-
+    foldM
+      ( \s ((i, _, p), x) -> case x of
+          Nothing -> pure s
+          Just x' -> case unifyIxNamedWith (unfolder env) (valueNamesOf env) flexibleKey (IxParam i) x' s of
+            Unified s' -> pure s'
+            Clash why -> failAt (location p) ("this pattern can never match here: " <> why)
+            Stuck why -> failAt (location p) ("cannot match on this value: " <> why)
+      )
+      (mSubst m0)
+      (zip valueArgs (patternIxs (map fst ivars) ipats))
+  let ivars1 = [(a, b {binderTy = applyTy s1 (binderTy b)}) | (a, b) <- ivars]
+  (pats, evars, pproofs, ealiases, refinedM) <- patternsFrom env ivars1 ialiases m0 {mSubst = s1} (zip binderTys (map Written (take nb explicit)))
   -- The clause keeps its variables closed over the atoms they were opened into, and what it names over them too.
-  let atoms = map fst opened
+  let refined = mSubst refinedM
+      opened = [(a, b {binderTy = applyTy refined (binderTy b)}) | (a, b) <- ivars1] <> evars
+      atoms = map fst opened
       vars = [b {binderTy = mapIx (closeIxWith atoms) (binderTy b)} | (_, b) <- opened]
+      aliases0 = [(n, applyIx refined x) | (n, x) <- ialiases] <> ealiases
       aliases = [(n, closeIxWith atoms x) | (n, x) <- aliases0]
-      (ipats, pats) = splitAt (length valueArgs) allPats
-      (iproofs, pproofs) = splitAt (length valueArgs) allProofs
+      allProofs = iproofs <> pproofs
       nvalues = maybe 0 (length . filter isJust) slots
       valueIdx = [j | (j, _, _) <- valueArgs]
       valuePats = [fromMaybe PWild (lookup i (zip valueIdx ipats)) | i <- [0 .. nvalues - 1]]
@@ -2853,15 +3134,6 @@ elabPattern env bound aliases m expected source = case source of
 
 nubCtors :: [CtorInfo] -> [CtorInfo]
 nubCtors = foldr (\c acc -> if any ((== ctorQual c) . ctorQual) acc then acc else c : acc) []
-
--- | The parameters of a type replaced by the types given.
-substParams :: [Ty] -> Ty -> Ty
-substParams args = \case
-  TParam i [] | i < length args -> args !! i
-  TParam i ts -> TParam i (map (substParams args) ts)
-  TData n ts xs -> TData n (map (substParams args) ts) xs
-  TArrow a b -> TArrow (substParams args a) (substParams args b)
-  t -> t
 
 -- | A type expected and a type found, as one: what both say of it.
 agree :: Env -> Span -> Ty -> Ty -> TC Ty
@@ -3247,8 +3519,10 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     the operator @:@ applied, a constructor. -}
     ascribed r =
       let sc = envScope env
-          free = [v | (v, _) <- typeIndexNames env r, v `notElem` map fst (tsValues sc)]
-       in elabTypeIn env sc {tsValues = tsValues sc <> [(v, IxFree (Named v)) | v <- nub free]} r
+          mentionedFree = [(v, t) | (v, t) <- typeIndexNames env r, v `notElem` map fst (tsValues sc)]
+          free = nub (map fst mentionedFree)
+          freeTys = [(v, t) | v <- free, Just t <- [listToMaybe [ty | (w, ty) <- mentionedFree, w == v, ty /= THole]]]
+       in elabTypeIn env sc {tsValues = tsValues sc <> [(v, IxFree (Named v)) | v <- free], tsValueTys = tsValueTys sc <> freeTys} r
     application hd imps args = do
       h <- headOf expected hd
       let n = ahParams h
@@ -3288,11 +3562,11 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
               pure actual
           | otherwise -> failAt sp (mismatch env expected actual)
       unless (firstOrder t) $ failAt sp "a function-valued result is not a first-order value"
-      terms <-
-        if asTypes s2 == asTypes settled && asValues s2 == asValues settled
-          then pure [done' IM.! j | j <- [0 .. length (ahDomains h) - 1]]
-          else forM (zip (ahDomains h) termArgs) \(domain, argument') ->
-            fst <$> elabTerm proofArguments env givens ctx argument' (substScheme n s2 domain)
+      terms <- forM (zip3 [0 :: Int ..] (ahDomains h) termArgs) \(j, domain, argument') ->
+        let finalDom = substScheme n s2 domain
+         in case IM.lookup j done' of
+              Just (checked, actualTy) | actualTy == finalDom -> pure checked
+              _ -> fst <$> elabTerm proofArguments env givens ctx argument' finalDom
       let inOrder i ts
             | i >= arity = []
             | Just p <- lookup i proofs = p : inOrder (i + 1) ts
@@ -3336,7 +3610,10 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
           | otherwise -> failAt (location extra) ("applied to " <> show (length imps) <> " implicit arguments, where it takes " <> show (length (ahImplicits h)))
         [] -> pure ()
       -- The implicit arguments given, in braces; then the parameters the type expected fixes, then those the arguments do.
-      selectedTypes <- forM (zip (ahTypeImplicits h) typeImplicits) \(i, argument') -> (i,) <$> liftE (elabTypeIn env (envScope env) argument')
+      selectedTypes <- forM (zip (ahTypeImplicits h) typeImplicits) \(i, argument') -> do
+        ty' <- liftE (elabTypeIn env (envScope env) argument')
+        unless (firstOrder ty') $ failAt (location argument') "an explicit class type argument must be a first-order type"
+        pure (i, ty')
       given <- foldM (implicitArg n) emptyAssignment {asTypes = IM.fromList selectedTypes} (zip (ahImplicits h) valueImplicits)
       s0 <- maybe (failAt sp (mismatch env wanted (substScheme n given (ahResult h)))) pure (matchTyWith (unfolder env) n (ahResult h) wanted given)
       -- Preserve the precedence of the expected result over hints supplied
@@ -3360,24 +3637,25 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     -- An implicit argument: an index over what is in scope, of its parameter's type, which it fixes.
     implicitArg n s ((key, kind), x) = do
       let values = tsValues (envScope env) <> ctxValues ctx
-          sc = (envScope env) {tsValues = values, tsValueTys = ctxValueTys ctx <> tsValueTys (envScope env)}
-      ix <- liftE (elabIx env values kind x)
-      s' <- case ixType env sc ix of
+          sc = (envScope env) {tsValues = values, tsValueTys = tsValueTys (envScope env) <> ctxValueTys ctx}
+      (ix, t) <- liftE (elabIx env sc (substScheme n s kind) x)
+      s' <- case t of
         THole -> pure s
-        t -> maybe (failAt (location x) (mismatch env (substScheme n s kind) t)) pure (matchTyWith (unfolder env) n kind t s)
+        _ -> maybe (failAt (location x) (mismatch env (substScheme n s kind) t)) pure (matchTyWith (unfolder env) n kind t s)
       pure s' {asValues = IM.insert key (normIx ix) (asValues s')}
     -- An argument against its domain as far as it is known; put off, with the type tried and why, when undetermined.
     argument deps n (s, done, pending) (i, d, a) = do
       let dom = substScheme n s d
       attempt (elabTerm proofArguments env givens ctx a dom) >>= \case
-        Right (a', t) -> (,IM.insert i a' done,pending) <$> (found n (location a) d t s >>= dependent deps i a)
+        Right (a', t) -> (,IM.insert i (a', t) done,pending) <$> (found n (location a) d t s >>= dependent deps i t a)
         Left why -> pure (s, done, pending <> [(i, d, a, dom, why)])
     -- An argument the head's type depends on, a constructor's named field: the index it is, at the value parameter it stands for.
-    dependent deps i a s = case lookup i deps of
+    dependent deps i fieldTy a s = case lookup i deps of
       Nothing -> pure s
       Just pos -> do
         let values = tsValues (envScope env) <> ctxValues ctx
-        x <- either (\_ -> failAt (location a) "an argument the type depends on is an index: a variable, a numeral, S, or a constructor or a function applied") pure (elabIx env values THole a)
+            sc = (envScope env) {tsValues = values, tsValueTys = tsValueTys (envScope env) <> ctxValueTys ctx}
+        (x, _) <- either (\_ -> failAt (location a) "an argument the type depends on is an index: a variable, a numeral, S, or a constructor or a function applied") pure (elabIx env sc fieldTy a)
         pure s {asValues = IM.insert pos (normIx x) (asValues s)}
     -- The arguments put off, each again once its domain is known further, until none is.
     settle deps n s done pending = do
@@ -3391,7 +3669,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       | dom == tried = pure (s, done, left <> [entry], progress)
       | otherwise =
           attempt (elabTerm proofArguments env givens ctx a dom) >>= \case
-            Right (a', t) -> (,IM.insert i a' done,left,True) <$> (found n (location a) d t s >>= dependent deps i a)
+            Right (a', t) -> (,IM.insert i (a', t) done,left,True) <$> (found n (location a) d t s >>= dependent deps i t a)
             Left why -> pure (s, done, left <> [(i, d, a, dom, why)], progress)
       where
         dom = substScheme n s d
@@ -3521,7 +3799,7 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
     recovered wanted =
       listToMaybe
         [ ( Typed
-              (substParams ts (dataIndices dat !! j))
+              (substScheme (length (dataParams dat), length (dataIndices dat)) (Assignment (IM.fromList (zip [0 ..] ts)) (IM.fromList (zip [0 ..] indices))) (dataIndices dat !! j))
               []
               []
               (App (Global (Ref RefFunction fn)) (Typed ty [] [] (Var (localVar l))))
@@ -3695,10 +3973,16 @@ elabTermDirect proofArguments env givens ctx le@(Located sp e) expected = case e
       GInstance i -> failAt sp (T.unpack (displayQualName (instQual i)) <> " is an instance, not a term")
       GModule m -> failAt sp (T.unpack (displayQualName (modQual m)) <> " is a module, not a term")
     typedDictionary slots types entries = forM (zip slots entries) \(slot, entry) -> do
-      template <- either (failAt sp) pure (dictionaryMethodType env slots slot)
+      (extra, template) <- either (failAt sp) pure (dictionaryMethodScheme env slots slot)
       let values = [value | (place, value) <- zip slots entries, slotArity place == 0]
           at i = listToMaybe (drop i values) >>= expressionIndex
-          instantiated = substScheme (length types, 0) emptyAssignment {asTypes = IM.fromList (zip [0 ..] types)} template
+          freshBase = max (length (tsTypes (envScope env))) (1 + maximum (-1 : concatMap tyParams types))
+          mapping =
+            IM.fromList
+              ( [(k, TParam (freshBase + k) []) | k <- [0 .. extra - 1]]
+                  <> [(extra + i, t) | (i, t) <- zip [0 ..] types]
+              )
+          instantiated = substScheme (extra + length types, 0) emptyAssignment {asTypes = mapping} template
           ty = mapIx (rewriteDictionaryIndices at) instantiated
       scoped <- requireIndexResult sp "a dictionary captures an index with no scoped value" (runWriterT (join <$> traverse valueIndex entry))
       pure (Dictionary ty scoped)

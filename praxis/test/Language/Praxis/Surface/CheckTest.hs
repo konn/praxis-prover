@@ -4,6 +4,7 @@
 module Language.Praxis.Surface.CheckTest (checkTests) where
 
 import Control.Monad (forM_)
+import Data.Either (isLeft)
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Map.Strict qualified as Map
 import Data.Multiset qualified as MS
@@ -27,8 +28,9 @@ import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Rename (renameModule)
-import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..), RelOp (..))
+import Language.Praxis.Surface.Syntax (Expr (..), Irrelevant (..), Ref (..), RefKind (..), RelOp (..), apps)
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..), segmentText)
+import Language.Praxis.Surface.Syntax.Raw qualified as R
 import Language.Praxis.Surface.Types (Ix (..), Ty (..), binderTy, namedBinder)
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -257,8 +259,8 @@ checkTests =
           , ("type Board n a = Vec n (Vec n a)\nf : Board 0\nf = Nil", "takes 1 type arguments and 1 indices")
           , ("type Board n a = Vec n (Vec n a)\nf : Board Nat 0\nf = Nil", "a type")
           , ("type Hidden = Nat -> Nat\ndata Bad = Mk Hidden", "a field of function type")
-          , ("type Apply f a = f a\ntype Bad = Apply Nat Nat", "well-formed type")
-          , ("type Bad (a : Type) = a Nat", "incompatible kinds")
+          , ("type Apply f a = f a\ntype Bad = Apply Nat Nat", "expected Type -> Type")
+          , ("type Bad (a : Type) = a Nat", "has kind Type")
           , ("type Board n a = Vec n (Vec n a)\nf : Board 0 a -> Board 1 a\nf b = b", "type mismatch")
           , ("type Board n a = Vec n (Vec n a)\nf : Nat\nf = Board", "not in scope")
           ]
@@ -890,7 +892,7 @@ checkTests =
         forM_
           [ ("a mismatch through an abbreviation", "wrong : Pf a -> Pf (neg a)\nwrong p = dni :@ p\n", "type mismatch")
           , ("an implicit no argument determines", "loose : Pf (nn a) -> Pf (nn b) -> Pf (nn a)\nloose f x = mp :@ f :@ x\n", "type mismatch")
-          , ("an implicit which is no value of its type", "three : IxS (Circle Bottom)\nthree = MkS\n", "no value of the type")
+          , ("an implicit which is no value of its type", "three : IxS (Circle Bottom)\nthree = MkS\n", "type mismatch in index argument")
           ]
           $ \(what, bad, expected) -> case errors (checkSource p "bad-abbreviations.px" (source <> bad)) of
             [] -> assertFailure (what <> " was accepted")
@@ -999,6 +1001,270 @@ checkTests =
               either assertFailure pure (certifyDecl (runBuilder ("theorem " <> name <> " : " <> hyps <> " |- " <> membershipText lists t <> "\nby " <> tactic)) core)
         -- Through the introduction of (:), and through the closure lemma of copy.
         mapM_ (uncurry prove) [("consBelow", CSym cons [CVar "a", CVar "xs"]), ("copyBelow", CSym copy [CVar "xs"])]
+    , testCase "surface type system soundness regressions: HKT, kinds, index types, scoping, superclasses, and polymorphism" $ do
+        p <- either assertFailure pure prelude
+        let expectRejected label src =
+              case errors (checkSource p "regression-bad.px" src) of
+                [] -> assertFailure (label <> " was unexpectedly accepted")
+                _ : _ -> pure ()
+            expectAccepted label src =
+              case errors (checkSource p "regression-ok.px" src) of
+                [] -> pure ()
+                errs -> assertFailure (label <> " failed unexpectedly:\n" <> unlines errs)
+        expectRejected
+          "higher-kinded constructor mismatch"
+          ( T.unlines
+              [ "module BadHkt where"
+              , "data Wrap (f : Type -> Type) a = MkWrap (f a)"
+              , "bad : Wrap f Nat -> Wrap g Nat"
+              , "bad (MkWrap x) = MkWrap x"
+              ]
+          )
+        expectRejected
+          "nullary datatype over-applied through type synonym"
+          ( T.unlines
+              [ "module BadVoidAlias where"
+              , "data Void"
+              , "type Ap f a = f a"
+              , "boom : Ap Void Nat"
+              , "boom = 0"
+              ]
+          )
+        expectRejected
+          "inconsistent parameter kinds in datatype and function"
+          ( T.unlines
+              [ "module BadKinds where"
+              , "data Bad f = MkBad f (f Nat)"
+              ]
+          )
+        expectRejected
+          "inconsistent parameter kinds in function signature"
+          ( T.unlines
+              [ "module BadFunKinds where"
+              , "weird : a -> a Nat -> a"
+              , "weird x y = x"
+              ]
+          )
+        expectRejected
+          "ill-kinded class parameter applied to type"
+          ( T.unlines
+              [ "module BadClassKind where"
+              , "class Magic a where"
+              , "  cast : a Nat -> a"
+              ]
+          )
+        expectRejected
+          "ill-typed index expressions"
+          ( T.unlines
+              [ "module BadIndexTypes where"
+              , "data Bool = False | True"
+              , "data Vec (n : Nat) a where"
+              , "  Nil : Vec 0 a"
+              , "bad : Vec (S True) Nat -> Nat"
+              , "bad x = 0"
+              ]
+          )
+        expectRejected
+          "ill-typed constructor argument in index"
+          ( T.unlines
+              [ "module BadIndexArg where"
+              , "data Bool = False | True"
+              , "data Box = MkBox Bool"
+              , "data Tag (b : Box) where"
+              , "  MkTag : Tag (MkBox True)"
+              , "bad : Tag (MkBox 0) -> Nat"
+              , "bad x = 0"
+              ]
+          )
+        expectRejected
+          "function with proof precondition in index"
+          ( T.unlines
+              [ "module BadProofIndex where"
+              , "data Vec (n : Nat) a where"
+              , "  Nil : Vec 0 a"
+              , "pos : (n : Nat) -> 0 < n -> Nat"
+              , "pos n h = n"
+              , "bad : Vec (pos 0) Nat -> Nat"
+              , "bad x = 0"
+              ]
+          )
+        expectRejected
+          "higher-order function in index"
+          ( T.unlines
+              [ "module BadHoIndex where"
+              , "data Vec (n : Nat) a where"
+              , "  Nil : Vec 0 a"
+              , "ho : (Nat -> Nat) -> Nat"
+              , "ho f = f 0"
+              , "bad : Vec (ho 0) Nat -> Nat"
+              , "bad x = 0"
+              ]
+          )
+        expectRejected
+          "ill-typed declared implicit binder"
+          ( T.unlines
+              [ "module BadImplicitType where"
+              , "data Bool = False | True"
+              , "data Vec (n : Nat) a where"
+              , "  Nil : Vec 0 a"
+              , "bad : {b : Bool} -> {xs : Vec b Nat} -> Nat"
+              , "bad = 0"
+              ]
+          )
+        expectRejected
+          "forward-referenced declared implicit binder"
+          ( T.unlines
+              [ "module BadImplicitOrder where"
+              , "data Vec (n : Nat) a where"
+              , "  Nil : Vec 0 a"
+              , "bad : {xs : Vec n Nat} -> {n : Nat} -> Nat"
+              , "bad = 0"
+              ]
+          )
+        expectRejected
+          "recovered dependent index IxParam leakage"
+          ( T.unlines
+              [ "module BadRecovered where"
+              , "data Vec a (n : Nat) where"
+              , "  VNil : Vec a 0"
+              , "  VCons : {n : Nat} -> a -> Vec a n -> Vec a (S n)"
+              , "data SameVec {a} {n} {m} (l : Vec a n) (r : Vec a m) where"
+              , "  BothNil : SameVec VNil VNil"
+              , "getLeft : {k : Nat} -> {n : Nat} -> {m : Nat} -> {xs : Vec Nat n} -> {ys : Vec Nat m} -> SameVec xs ys -> Vec Nat k"
+              , "getLeft p = xs"
+              ]
+          )
+        expectRejected
+          "superclass instance context bypass"
+          ( T.unlines
+              [ "module BadSuper where"
+              , "data Box a = MkBox a"
+              , "class HasVal a where"
+              , "  val : a"
+              , "class HasVal a => Sub a where"
+              , "  dummy : a -> Nat"
+              , "instance HasVal a => HasVal (Box a) where"
+              , "  val = MkBox val"
+              , "instance Sub (Box a) where"
+              , "  dummy (MkBox x) = 0"
+              ]
+          )
+        expectAccepted
+          "higher-kinded pattern matching and unsaturated non-indexed datatype"
+          ( T.unlines
+              [ "module GoodHkt where"
+              , "data List a = Nil | Cons a (List a)"
+              , "data PairF (f : Type -> Type) a = MkPairF (f a) (f a)"
+              , "swap : PairF f a -> PairF f a"
+              , "swap (MkPairF x y) = MkPairF y x"
+              , "wrap : List Nat -> PairF List Nat"
+              , "wrap xs = MkPairF xs xs"
+              ]
+          )
+        expectAccepted
+          "polymorphic class method across call and instance"
+          ( T.unlines
+              [ "module GoodPolyMethod where"
+              , "class Poly a where"
+              , "  tag : a -> b -> a"
+              , "instance Poly Nat where"
+              , "  tag x y = x"
+              , "usePoly : Poly a => a -> b -> a"
+              , "usePoly x y = tag x y"
+              , "test : Nat"
+              , "test = usePoly 3 4"
+              ]
+          )
+        expectAccepted
+          "re-elaboration of hole-typed earlier argument"
+          ( T.unlines
+              [ "module GoodHoleArg where"
+              , "data Bool = False | True"
+              , "data List a = Nil | Cons a (List a)"
+              , "same : List a -> List a -> List a"
+              , "same x y = y"
+              , "test : List Bool"
+              , "test = same Nil (Cons True Nil)"
+              ]
+          )
+        expectAccepted
+          "implicit pattern refinement in function clause"
+          ( T.unlines
+              [ "module GoodIvarsRefine where"
+              , "data Vec (n : Nat) a where"
+              , "  VNil : Vec 0 a"
+              , "  VCons : {n : Nat} -> a -> Vec n a -> Vec (S n) a"
+              , "data Tag {n : Nat} (xs : Vec n Nat) where"
+              , "  MkTag : {n : Nat} -> {xs : Vec n Nat} -> Tag xs"
+              , "echo : {n : Nat} -> {xs : Vec n Nat} -> Tag xs -> Vec n Nat"
+              , "echo {n} {xs} MkTag = xs"
+              ]
+          )
+        expectAccepted
+          "ambiguous constructor disambiguated in dependent constructor argument"
+          ( T.unlines
+              [ "module GoodDepCtor where"
+              , "data A = Z"
+              , "data B = Z"
+              , "data Tag (b : B) where"
+              , "  MkTag : (x : B) -> Tag x"
+              , "ok : Tag B.Z"
+              , "ok = MkTag Z"
+              ]
+          )
+    , testCase "explicit core boundary rejects erased indices, inconsistent constructor indices, forged proofs, and monomorphic polymorphic-method dictionaries" $ do
+        p <- either assertFailure pure prelude
+        let source =
+              T.unlines
+                [ "module CoreSoundness where"
+                , "data Bool = False | True"
+                , "data Vec (n : Nat) a where"
+                , "  VNil : Vec 0 a"
+                , "  VCons : {n : Nat} -> a -> Vec n a -> Vec (S n) a"
+                , "data PLt (m : Nat) (n : Nat) where"
+                , "  PZero : (n : Nat) -> PLt 0 (S n)"
+                , "data Pos (n : Nat) where"
+                , "  MkPos : (n : Nat) -> 0 < n -> Pos n"
+                , "vlen : {n : Nat} -> Vec n Nat -> Nat"
+                , "vlen VNil = 0"
+                , "vlen (VCons x xs) = S (vlen xs)"
+                , "class Poly a where"
+                , "  tag : a -> b -> a"
+                , "instance Poly Nat where"
+                , "  tag x y = x"
+                , "usePoly : Poly a => a -> b -> a"
+                , "usePoly x y = tag x y"
+                , "mono : Nat -> Bool -> Nat"
+                , "mono x b = x"
+                ]
+            checked = checkSource p "core-soundness.px" source
+        errors checked @?= []
+        (knowledge, _) <- maybe (assertFailure "missing checked core") pure (checkedFinal checked)
+        let env = knowEnv knowledge
+            rawProof = R.Located R.noSpan (R.EProof (R.RBy []))
+            -- 1. Erased indexed datatype TData "CoreSoundness.Vec" [TNat] [] rejected in Core.
+            vlenRef = Ref RefFunction (mangleGlobal ["CoreSoundness", "vlen"])
+            erasedCall = Typed TNat [] [(0, IxNat 0)] (apps (Global vlenRef) [Nat 0, Var 0])
+            erasedCtx = [namedBinder "xs" (TData "CoreSoundness.Vec" [TNat] [])]
+        assertBool "erased indexed datatype rejected in Core" (isLeft (SurfaceCore.elaborateNamed env [] erasedCtx erasedCall))
+        -- 2. Constructor runtime argument disagreeing with result index: PZero 3 : PLt 0 (S 5).
+        let pzeroRef = Ref RefConstructor (mangleGlobal ["CoreSoundness", "PLt", "PZero"])
+            badPZero = Typed (TData "CoreSoundness.PLt" [] [IxNat 0, IxNat 6]) [] [(0, IxNat 5)] (App (Global pzeroRef) (Nat 3))
+        assertBool "constructor runtime arg disagreeing with result index rejected" (isLeft (SurfaceCore.elaborate env [] [] badPZero))
+        -- 3. Constructor proof argument with wrong proposition: MkPos 0 (0 = 0) instead of (0 < 0).
+        let mkPosRef = Ref RefConstructor (mangleGlobal ["CoreSoundness", "Pos", "MkPos"])
+            wrongProof = ProofArg (Rel RelEq (Nat 0) (Nat 0)) (Irrelevant rawProof)
+            badMkPos = Typed (TData "CoreSoundness.Pos" [] [IxNat 0]) [] [(0, IxNat 0)] (apps (Global mkPosRef) [Nat 0, wrongProof])
+            goodProof = ProofArg (Rel RelLt (Nat 0) (Nat 1)) (Irrelevant rawProof)
+            goodMkPos = Typed (TData "CoreSoundness.Pos" [] [IxNat 1]) [] [(0, IxNat 1)] (apps (Global mkPosRef) [Nat 1, goodProof])
+        assertBool "forged constructor precondition rejected in Core" (isLeft (SurfaceCore.elaborate env [] [] badMkPos))
+        assertBool "valid constructor precondition accepted in Core" (either (const False) (const True) (SurfaceCore.elaborate env [] [] goodMkPos))
+        -- 4. Monomorphic function passed as polymorphic class method dictionary rejected in Core.
+        let usePolyRef = Ref RefFunction (mangleGlobal ["CoreSoundness", "usePoly"])
+            monoRef = Ref RefStatic (mangleGlobal ["CoreSoundness", "mono"])
+            monoDict = Dictionary (TArrow TNat (TArrow (TData "CoreSoundness.Bool" [] []) TNat)) (Global monoRef)
+            badUsePoly = Typed TNat [TNat, TNat] [] (apps (Global usePolyRef) [Nat 1, Nat 2, monoDict])
+        assertBool "monomorphic dictionary for polymorphic method rejected in Core" (isLeft (SurfaceCore.elaborate env [] [] badUsePoly))
     ]
 
 {- |

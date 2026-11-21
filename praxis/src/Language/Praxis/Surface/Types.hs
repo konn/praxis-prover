@@ -43,6 +43,8 @@ module Language.Praxis.Surface.Types (
   monoScheme,
   TyScope (..),
   emptyScope,
+  tyScope,
+  typedScope,
   renderTy,
   renderTyWith,
   renderTyWithOrder,
@@ -98,9 +100,13 @@ module Language.Praxis.Surface.Types (
   transportIndices,
   matchTy,
   matchTyWith,
+  matchTyStrict,
+  matchTyStrictWith,
   matchIx,
   matchIxWith,
   substScheme,
+  substParams,
+  shiftTypeParams,
 ) where
 
 import Control.Monad (foldM, zipWithM)
@@ -249,6 +255,8 @@ the indices they are — a value parameter of the signature, or a variable.
 -}
 data TyScope = TyScope
   { tsTypes :: ![Text]
+  , tsTypeKinds :: ![Maybe Kind]
+  -- ^ the kinds of the type parameters in scope, by position; @Nothing@ while a declaration's kinds are still being inferred
   , tsValues :: ![(Text, Ix)]
   , tsValueTys :: ![(Text, Ty)]
   -- ^ the types of the values, by name, where known: what the kinds of indices are checked against
@@ -257,7 +265,15 @@ data TyScope = TyScope
 
 -- | No names.
 emptyScope :: TyScope
-emptyScope = TyScope [] [] []
+emptyScope = TyScope [] [] [] []
+
+-- | A scope whose type parameters have unannotated (inferred) kinds.
+tyScope :: [Text] -> [(Text, Ix)] -> [(Text, Ty)] -> TyScope
+tyScope ts = TyScope ts (map (const Nothing) ts)
+
+-- | A scope whose type parameters have known kinds.
+typedScope :: [(Text, Kind)] -> [(Text, Ix)] -> [(Text, Ty)] -> TyScope
+typedScope ts = TyScope (map fst ts) (map (Just . snd) ts)
 
 -- * Telescopes
 
@@ -737,16 +753,29 @@ against a type, one-sided: its parameters, @TParam i@ for @i < n@ and
 @IxParam i@ for @i < m@, take what the type has where they stand, together
 with what they were given before; any other part must agree, indices in
 normal form.  A hole determines nothing.  A parameter of a higher kind
-applied, against a type parameter applied to as many arguments or more,
-takes that parameter applied to those in front; against anything else it is
-opaque, and determines nothing.  Nothing when the types disagree.
+applied, against a type parameter or non-indexed data type applied to as many
+arguments or more, takes that head applied to those in front; against anything
+else it fails.  Nothing when the types disagree.
 -}
 matchTy :: (Int, Int) -> Ty -> Ty -> Assignment -> Maybe Assignment
 matchTy = matchTyWith noUnfold
 
 -- | 'matchTy', its indices matched as 'matchIxWith' matches them, abbreviations unfolded.
 matchTyWith :: Unfold -> (Int, Int) -> Ty -> Ty -> Assignment -> Maybe Assignment
-matchTyWith unfold (n, m) = go
+matchTyWith = matchTyMode True
+
+{- | Like 'matchTy', except an erased data type (with no indices) does not
+silently match an indexed data type. Used at the explicit core boundary.
+-}
+matchTyStrict :: (Int, Int) -> Ty -> Ty -> Assignment -> Maybe Assignment
+matchTyStrict = matchTyStrictWith noUnfold
+
+-- | 'matchTyStrict', its indices matched as 'matchIxWith' matches them, abbreviations unfolded.
+matchTyStrictWith :: Unfold -> (Int, Int) -> Ty -> Ty -> Assignment -> Maybe Assignment
+matchTyStrictWith = matchTyMode False
+
+matchTyMode :: Bool -> Unfold -> (Int, Int) -> Ty -> Ty -> Assignment -> Maybe Assignment
+matchTyMode allowErased unfold (n, m) = go
   where
     go p t s = case (p, t) of
       (_, THole) -> Just s
@@ -755,17 +784,22 @@ matchTyWith unfold (n, m) = go
         Just u -> (\v -> s {asTypes = IM.insert i v (asTypes s)}) <$> mergeTyWith unfold u t
       (TParam i ps, TParam j ts)
         | i < n
+        , not (null ps)
         , length ts >= length ps ->
             let (front, rest) = splitAt (length ts - length ps) ts
              in go (TParam i []) (TParam j front) s >>= \s' -> pairs (zip ps rest) s'
-      (TParam i _, _) | i < n -> Just s
-      (TParam i ps, TParam j ts) | i == j, length ps == length ts -> pairs (zip ps ts) s
+      (TParam i ps, TData d ts [])
+        | i < n
+        , not (null ps)
+        , length ts >= length ps ->
+            let (front, rest) = splitAt (length ts - length ps) ts
+             in go (TParam i []) (TData d front []) s >>= \s' -> pairs (zip ps rest) s'
+      (TParam i ps, TParam j ts) | i >= n, i == j, length ps == length ts -> pairs (zip ps ts) s
       (TData a ps xs, TData b ts ys)
         | a == b
         , length ps == length ts ->
             pairs (zip ps ts) s >>= \s' ->
-              -- An erased type, of no indices, determines none of them.
-              if null xs || null ys
+              if allowErased && (null xs || null ys)
                 then Just s'
                 else if length xs == length ys then foldM (\acc (x, y) -> matchIxWith unfold m x y acc) s' (zip xs ys) else Nothing
       (TNat, TNat) -> Just s
@@ -823,7 +857,7 @@ substScheme (n, m) s = go
             (Nothing, _) -> THole
             (Just u, []) -> u
             (Just (TParam j us), ts') -> TParam j (us <> ts')
-            (Just (TData d us xs), ts') -> TData d (us <> ts') xs
+            (Just (TData d us []), ts') -> TData d (us <> ts') []
             (Just _, _) -> THole
         | otherwise -> TParam i (map go ts)
       THole -> THole
@@ -837,3 +871,18 @@ substScheme (n, m) s = go
       IxFun f xs -> IxFun f (map ix xs)
       IxPartial f arity prefix xs -> IxPartial f arity prefix (map ix xs)
       x -> x
+
+-- | Substitute a list of type arguments for @TParam 0 ..@, preserving higher-kinded applications and value indices.
+substParams :: [Ty] -> Ty -> Ty
+substParams args = substScheme (length args, 0) emptyAssignment {asTypes = IM.fromList (zip [0 ..] args)}
+
+-- | Shift every @TParam@ index in a type by @delta@.
+shiftTypeParams :: Int -> Ty -> Ty
+shiftTypeParams 0 = id
+shiftTypeParams delta = go
+  where
+    go = \case
+      TParam i ts -> TParam (i + delta) (map go ts)
+      TData d ts xs -> TData d (map go ts) xs
+      TArrow a b -> TArrow (go a) (go b)
+      t -> t
