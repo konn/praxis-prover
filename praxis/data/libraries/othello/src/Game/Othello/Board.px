@@ -65,6 +65,13 @@ private
 write : Square -> Cell -> Board -> Board
 write s x (Grid n xs) = Grid n (write-cells (inside n s) (index n s) x xs)
 
+write-inside : (s : Square) -> (x : Cell) -> (n : Nat) -> (xs : List Cell) -> inside n s = B.True -> write s x (Grid n xs) = Grid n (L.update (index n s) x xs)
+write-inside s x n xs h = calc
+  write s x (Grid n xs)
+  = Grid n (write-cells (inside n s) (index n s) x xs)
+  = Grid n (write-cells B.True (index n s) x xs) := cong h
+  = Grid n (L.update (index n s) x xs)
+
 write-size : (s : Square) -> (x : Cell) -> (b : Board) -> size (write s x b) = size b
 write-size s x (Grid n xs) = rfl
 

@@ -12,19 +12,21 @@ From the repository root, with native GHC 9.12.4, Cabal, ghcup, and Node.js:
 ```sh
 cabal run shake-praxis -- toolchain
 cabal run shake-praxis -- browser
-python3 -m http.server 8080 --directory _build/browser
+cabal run praxis-web
 ```
 
-Open `http://localhost:8080`. The HTTP server only serves static files; game
-evaluation happens in a browser Web Worker. The page supports legal-move
-markers, automatic White responses, forced passes, undoing a round, restarting,
-and terminal scores. Black's placement and flips appear first; after a pause,
-White's reply appears. An animation toggle enables immediate updates, and the
-flip effects respect the system's reduced-motion preference. No Python program
-participates in the game or extraction.
+Open `http://localhost:8080` (pass `-- --port PORT` or `-- --directory DIR` to
+customize the `praxis-web` Servant/Warp static server). The HTTP server only
+serves static files; game evaluation happens in a browser Web Worker. The page
+supports legal-move markers, automatic White responses, forced passes, undoing a
+round, restarting, and terminal scores. Black's placement and flips appear
+first; after a pause, White's reply appears. An animation toggle enables
+immediate updates, and the flip effects respect the system's reduced-motion
+preference. No Python program participates in the build, server, game, or
+extraction.
 
-The first browser build checks the complete certificate and can take around
-20 minutes and several GiB of memory. Shake records source dependencies so the
+The first browser build checks the complete certificate in under a minute
+(~310 MiB maximum live residency). Shake records source dependencies so the
 checked extraction is reused until its inputs change. Generated Haskell,
 compiler outputs, the browser bundle, and npm dependencies are ignored by Git.
 

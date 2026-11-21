@@ -1,0 +1,30 @@
+cabal-version: 3.4
+name: praxis-web
+version: 0.1.0.0
+synopsis: Static HTTP server for extracted Praxis browser applications
+description: Servant and Warp HTTP server for the Praxis browser WebAssembly bundle.
+category: Web
+maintainer: konn.jinro_at_gmail.com
+license: BSD-3-Clause
+license-file: LICENSE
+build-type: Simple
+
+executable praxis-web
+  hs-source-dirs: app
+  main-is: Main.hs
+  default-language: GHC2024
+  ghc-options:
+    -Wall
+    -threaded
+    -rtsopts
+
+  build-depends:
+    base >=4.21 && <5,
+    directory,
+    optparse-applicative,
+    servant,
+    servant-server,
+    text,
+    wai,
+    wai-app-static,
+    warp,

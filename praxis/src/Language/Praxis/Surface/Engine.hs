@@ -48,9 +48,17 @@ module Language.Praxis.Surface.Engine (
 
   -- * Proving
   Unfolding (..),
+  UnfoldingIndex,
+  emptyUnfoldingIndex,
+  insertUnfoldings,
+  DecideStep (..),
+  GeneratedDecl (..),
+  generatedDeclName,
+  renderGeneratedDecl,
   Closure (..),
   Knowledge (..),
   proveTheorem,
+  proveTheoremDecls,
   proveClosure,
   membershipProof,
   EngineError (..),
@@ -60,6 +68,7 @@ module Language.Praxis.Surface.Engine (
   SpecProof (..),
   proveSpec,
   usesSharedFacts,
+  usesSharedFactsDecl,
   closureSpec,
   membershipCase,
   equationCase,
@@ -247,6 +256,77 @@ data Unfolding = Unfolding
   , unfoldingRhs :: !CT
   }
 
+-- | Unfolding lemmas indexed by the head symbol of their left-hand side, preserving clause order.
+data UnfoldingIndex = UnfoldingIndex
+  { ufByHead :: !(Map Text [Unfolding])
+  , ufOther :: ![Unfolding]
+  }
+
+emptyUnfoldingIndex :: UnfoldingIndex
+emptyUnfoldingIndex = UnfoldingIndex Map.empty []
+
+insertUnfoldings :: [Unfolding] -> UnfoldingIndex -> UnfoldingIndex
+insertUnfoldings ufs idx =
+  UnfoldingIndex
+    { ufByHead = foldl' addHead (ufByHead idx) ufs
+    , ufOther = ufOther idx <> [uf | uf <- ufs, not (hasHead (unfoldingLhs uf))]
+    }
+  where
+    hasHead (CSym _ _) = True
+    hasHead _ = False
+    addHead m uf = case unfoldingLhs uf of
+      CSym h _ -> Map.insertWith (\new old -> old <> new) h [uf] m
+      _ -> m
+
+lookupUnfoldings :: UnfoldingIndex -> CT -> [Unfolding]
+lookupUnfoldings idx = \case
+  CSym h _ -> Map.findWithDefault [] h (ufByHead idx) <> ufOther idx
+  CNum n | n > 0 -> Map.findWithDefault [] "S" (ufByHead idx) <> ufOther idx
+  _ -> ufOther idx
+
+-- | One tactic step inside an auxiliary closed-reduction theorem.
+data DecideStep
+  = DecideRefl
+  | DecideExact !Text
+  | DecideCong !Text
+  deriving stock (Show, Eq)
+
+-- | A generated core declaration: either rendered PRA text, or a structured closed-reduction theorem.
+data GeneratedDecl
+  = GeneratedText !Text !Text
+  | GeneratedDecide !Text !CT ![(CT, DecideStep)]
+  deriving stock (Show, Eq)
+
+generatedDeclName :: GeneratedDecl -> Text
+generatedDeclName = \case
+  GeneratedText n _ -> n
+  GeneratedDecide n _ _ -> n
+
+renderGeneratedDecl :: GeneratedDecl -> (Text, Text)
+renderGeneratedDecl = \case
+  GeneratedText n t -> (n, t)
+  GeneratedDecide name lhs steps ->
+    let value = case reverse steps of
+          (v, _) : _ -> v
+          [] -> lhs
+     in ( name
+        , runBuilder $
+            "theorem "
+              <> fromText name
+              <> ": |- ("
+              <> render lhs
+              <> " = "
+              <> render value
+              <> ")\nby calc "
+              <> render lhs
+              <> mconcat [" = " <> render t <> " by " <> renderStep s | (t, s) <- steps]
+        )
+  where
+    renderStep = \case
+      DecideRefl -> "refl"
+      DecideExact lemma -> "exact " <> fromText lemma
+      DecideCong lemma -> "cong " <> fromText lemma
+
 {- |
 The closure lemma of a function, @f.#closed@: its core name, and the types
 of its arguments and of its result, over the function's type parameters,
@@ -288,7 +368,7 @@ data Knowledge = Knowledge
   membership checks after the equations of indices, the conjuncts of its
   branch of the inversion after those, and which a clause's pattern names
   -}
-  , knowUnfoldings :: ![Unfolding]
+  , knowUnfoldings :: !UnfoldingIndex
   , knowClosures :: !(Map Text Closure)
   -- ^ the closure lemma of each function which has one, by the function's core name
   , knowVariadic :: !(Set Text)
@@ -795,7 +875,11 @@ The declarations proving a theorem: the auxiliary theorems first, then the
 theorem, each a name and its text.
 -}
 proveTheorem :: Knowledge -> TheoremDef -> Either EngineError [(Text, Text)]
-proveTheorem k td = do
+proveTheorem k td = map renderGeneratedDecl <$> proveTheoremDecls k td
+
+-- | Like 'proveTheorem', retaining structured closed-reduction declarations for direct certification.
+proveTheoremDecls :: Knowledge -> TheoremDef -> Either EngineError [GeneratedDecl]
+proveTheoremDecls k td = do
   let info = tdInfo td
   goal0 <- either (Left . EngineError (tdSpan td) . ("the statement: " <>)) Right (statementGoal (knowMembership k) td)
   (_, obligations) <- either (Left . EngineError (tdSpan td)) Right (Term.prepareProposition (statementInstance td))
@@ -815,7 +899,7 @@ proveTheorem k td = do
           pure (intro <> outTactic out, outAux out)
     pcs -> byClauses k info marked td pcs
   decl <- either (Left . EngineError (tdSpan td) . ("the statement: " <>)) Right (declaration (thmCore info) goal0 (mconcat (map outTactic checks) <> tactic))
-  pure (concatMap outAux checks <> aux <> [(thmCore info, runBuilder decl)])
+  pure (concatMap outAux checks <> aux <> [GeneratedText (thmCore info) (runBuilder decl)])
   where
     isVariable = \case
       PVar _ -> True
@@ -830,7 +914,7 @@ of its result, the specification 'closureSpec'.  Nothing when the result is
 of neither, or when the membership of a body cannot be established, as for a
 field whose type's membership does not constrain it.
 -}
-proveClosure :: Knowledge -> FunDef -> Either EngineError (Maybe (Closure, [(Text, Text)]))
+proveClosure :: Knowledge -> FunDef -> Either EngineError (Maybe (Closure, [GeneratedDecl]))
 proveClosure k fd = case (fdResult fd, lemmaPredicate k fd (fdResult fd)) of
   (result, Just (Pred resultIs ps))
     | closes result ->
@@ -865,7 +949,7 @@ proveClosure k fd = case (fdResult fd, lemmaPredicate k fd (fdResult fd)) of
                       tactic = "have Contract: " <> full <> " { exact " <> fromText (spLemma proof) <> staticArgs params <> blocks <> " }; ConjL on Contract as Member Indices; exact Member"
                       name = functionLemma (fdInfo fd) "#closed"
                   decl <- either (Left . EngineError (fdSpan fd)) Right (declaration name goal tactic)
-                  pure (closeWith proof (spDecls proof <> [(name, runBuilder decl)]))
+                  pure (closeWith proof (spDecls proof <> [GeneratedText name (runBuilder decl)]))
             _ -> either (const Nothing) (\proof -> closeWith proof (spDecls proof)) <$> proveSpec k fd closure
   _ -> Right Nothing
   where
@@ -917,7 +1001,7 @@ data Spec = Spec
 data SpecProof = SpecProof
   { spLemma :: !Text
   , spPremises :: ![Premise]
-  , spDecls :: ![(Text, Text)]
+  , spDecls :: ![GeneratedDecl]
   }
 
 -- | The statement shared by a specification and projections of a contract.
@@ -945,7 +1029,7 @@ proveSpec k fd spec = do
   let applied = functionApplication fd
       done out = do
         decl <- either (Left . EngineError sp) Right (declaration (thmCore thm) g0 (outTactic out))
-        Right (Right (SpecProof (thmCore thm) (map pdPremise pds) (outAux out <> [(thmCore thm, runBuilder decl)])))
+        Right (Right (SpecProof (thmCore thm) (map pdPremise pds) (outAux out <> [GeneratedText (thmCore thm) (runBuilder decl)])))
   case (indexProjection g0, sort columns) of
     (Just tactic, _) -> done (closed tactic)
     (_, []) -> either (Right . Left) (done . closed) (caseProof g0)
@@ -1073,7 +1157,7 @@ shareApplications k core g
       h : rest
         | h `Set.member` seen -> reachable seen rest
         | otherwise -> reachable (Set.insert h seen) (Map.findWithDefault [] h definitions <> rest)
-    definitions = Map.fromListWith (<>) [(h, namesIn (unfoldingRhs uf)) | uf <- knowUnfoldings k, CSym h _ <- [unfoldingLhs uf]]
+    definitions = Map.map (concatMap (namesIn . unfoldingRhs)) (ufByHead (knowUnfoldings k))
     namesIn t = case t of
       CSym h args -> h : concatMap namesIn args
       CStatic h -> [h]
@@ -1138,6 +1222,11 @@ sharedPrefix = "Shared"
 -- | Whether a generated declaration states facts 'shareApplications' shares, the hypotheses it names so.
 usesSharedFacts :: Text -> Bool
 usesSharedFacts = T.isInfixOf ("have " <> sharedPrefix)
+
+usesSharedFactsDecl :: GeneratedDecl -> Bool
+usesSharedFactsDecl = \case
+  GeneratedText _ t -> usesSharedFacts t
+  GeneratedDecide {} -> False
 
 -- | The dictionary of a function's lemmas: its own, then the membership predicate of each type parameter its values are of, parameters of the lemma's rule.
 lemmaDictionary :: FunDef -> [Slot]
@@ -2235,12 +2324,24 @@ substCT m = replaceCT \case
 
 -- | A core term with the successor of a numeral the next numeral, as the core's canonical numerals have it.
 canonical :: CT -> CT
-canonical = \case
-  CSym "S" [t] -> case canonical t of
-    CNum n -> CNum (n + 1)
-    t' -> CSym "S" [t']
-  CSym f ts -> CSym f (map canonical ts)
-  t -> t
+canonical t = fromMaybe t (canonicalChanged t)
+
+-- | Like 'canonical', returning 'Nothing' when no successor of a numeral occurs so untouched subtrees stay shared.
+canonicalChanged :: CT -> Maybe CT
+canonicalChanged = \case
+  CSym "S" [t] -> case canonicalChanged t of
+    Just (CNum n) -> Just (CNum (n + 1))
+    Just t' -> Just (CSym "S" [t'])
+    Nothing -> case t of
+      CNum n -> Just (CNum (n + 1))
+      _ -> Nothing
+  CSym f ts -> CSym f <$> changedList ts
+  _ -> Nothing
+  where
+    changedList [] = Nothing
+    changedList (x : xs) = case canonicalChanged x of
+      Just x' -> Just (x' : map canonical xs)
+      Nothing -> (x :) <$> changedList xs
 
 -- | Match a term against another, one-sided, the variables given taking what the other has there; a successor and a numeral as the successors they are.
 matchCT :: [Text] -> CT -> CT -> Map Text CT -> Maybe (Map Text CT)
@@ -2371,7 +2472,7 @@ rename pairs g = g {goalVars = [(fromMaybe n (lookup n pairs), v) | (n, v) <- go
 -- | A core tactic, and the auxiliary declarations it appeals to, in order.
 data Out = Out
   { outTactic :: !Builder
-  , outAux :: ![(Text, Text)]
+  , outAux :: ![GeneratedDecl]
   }
 
 closed :: Builder -> Out
@@ -2454,7 +2555,7 @@ data Evidence = Evidence
   , evBefore :: !Builder
   , evAfter :: !Builder
   , evEquation :: !(Maybe Builder)
-  , evAux :: ![(Text, Text)]
+  , evAux :: ![GeneratedDecl]
   -- ^ auxiliary declarations used by proofs supplied as term arguments
   , evConclusion :: !(Maybe (Expr Text))
   -- ^ what a lemma concludes at its arguments, where its value parameters are known there
@@ -4308,7 +4409,7 @@ runTactics k info n g0 sp tacs0 = do
                   <> fromText helper
                   <> arguments
                   <> " }"
-          pure (Out tactic (evAux ev <> outAux proof <> [(helper, runBuilder declarationText)]), rest)
+          pure (Out tactic (evAux ev <> outAux proof <> [GeneratedText helper (runBuilder declarationText)]), rest)
         _ -> Left (EngineError tsp "obtain: expected a bounded existential proposition and a witness name")
     existsGoal tsp witnesses g more = do
       source <- finiteView k info g (goalConcl g)
@@ -4500,7 +4601,7 @@ runTactics k info n g0 sp tacs0 = do
                               <> "; exact "
                               <> fromText codeName
                               <> " }"
-                      wrap (Out tactic (outAux out <> [(helper, runBuilder decl)]))
+                      wrap (Out tactic (outAux out <> [GeneratedText helper (runBuilder decl)]))
                 pure (wrapper, extended)
               (Quant Forall _ (Just (rel, bound)) _ body, Nothing) -> do
                 let eigen = freshProofName current ("q_" <> prefix <> T.pack (show i))
@@ -4735,11 +4836,7 @@ rflWith bridge k g sp = case asEquation (goalConcl g) of
   Rel RelEq a b -> do
     l <- ct a
     r <- ct b
-    let ls = reductions l
-        rs = reductions r
-        lEnd = last (l : map snd ls)
-        rEnd = last (r : map snd rs)
-        steps = [(t, tac) | (tac, t) <- ls] <> [(rEnd, bridge) | lEnd /= rEnd] <> reverse [(t, tac) | ((tac, _), t) <- zip rs (r : map snd rs)]
+    let steps = meet l r
     pure case steps of
       [] -> "refl"
       _ -> "calc " <> render l <> mconcat [" = " <> render t <> " by " <> tac | (t, tac) <- steps]
@@ -4747,9 +4844,46 @@ rflWith bridge k g sp = case asEquation (goalConcl g) of
   _ -> Left (EngineError sp "rfl: the goal is not an equation, nor a comparison")
   where
     ct e = either (Left . EngineError sp) Right (termCT CVar e)
-    reductions t = case unfoldStep k t of
-      Nothing -> []
-      Just (lemma, t') -> (lemma, t') : reductions t'
+    -- Unfold both sides step-by-step and stop as soon as their chains meet.
+    meet l0 r0 = go l0 [] (Map.singleton (canonical l0) (l0, [])) r0 [] (Map.singleton (canonical r0) (r0, []))
+      where
+        finish ls lEnd rs rEnd =
+          let down = reverse ls
+              up = [(u, tac) | ((tac, _), u) <- zip rs (drop 1 (map snd rs <> [r0]))]
+           in [(t, tac) | (tac, t) <- down] <> [(rEnd, bridge) | lEnd /= rEnd] <> up
+        finishMet ls lEnd rs rEnd =
+          let down = reverse ls
+              up = [(u, tac) | ((tac, _), u) <- zip rs (drop 1 (map snd rs <> [r0]))]
+           in [(t, tac) | (tac, t) <- down] <> [(rEnd, "refl") | lEnd /= rEnd] <> up
+        go l ls seenL r rs seenR
+          | Just (rAt, rsAt) <- Map.lookup (canonical l) seenR = finishMet ls l rsAt rAt
+          | otherwise =
+              case (unfoldStep k l, unfoldStep k r) of
+                (Nothing, Nothing) -> finish ls l rs r
+                (Just (tacL, l'), Nothing) ->
+                  let ls' = (tacL, l') : ls
+                      cl' = canonical l'
+                   in case Map.lookup cl' seenR of
+                        Just (rAt, rsAt) -> finishMet ls' l' rsAt rAt
+                        Nothing -> go l' ls' seenL r rs seenR
+                (Nothing, Just (tacR, r')) ->
+                  let rs' = (tacR, r') : rs
+                      cr' = canonical r'
+                   in case Map.lookup cr' seenL of
+                        Just (lAt, lsAt) -> finishMet lsAt lAt rs' r'
+                        Nothing -> go l ls seenL r' rs' seenR
+                (Just (tacL, l'), Just (tacR, r')) ->
+                  let ls' = (tacL, l') : ls
+                      cl' = canonical l'
+                   in case Map.lookup cl' seenR of
+                        Just (rAt, rsAt) -> finishMet ls' l' rsAt rAt
+                        Nothing ->
+                          let seenL' = Map.insertWith (\_ old -> old) cl' (l', ls') seenL
+                              rs' = (tacR, r') : rs
+                              cr' = canonical r'
+                           in case Map.lookup cr' seenL' of
+                                Just (lAt, lsAt) -> finishMet lsAt lAt rs' r'
+                                Nothing -> go l' ls' seenL' r' rs' (Map.insertWith (\_ old -> old) cr' (r', rs') seenR)
 
 {- | Prove a closed equation or comparison with shared reduction evidence.
 Open goals keep using the ordinary rewriting and induction tactics.
@@ -4787,71 +4921,82 @@ closedReduction k prefix left right =
       (l, lp) <- normal left
       (r, rp) <- normal right
       pure (l, lp, r, rp)
-    normal :: CT -> State (Map CT (CT, Maybe Text), Int, [(Text, Text)]) (CT, Maybe Text)
-    normal term = do
+    normal :: CT -> State (Map CT (CT, Maybe Text), Int, [GeneratedDecl]) (CT, Maybe Text)
+    normal term0 = do
       (memo, _, _) <- get
-      case Map.lookup term memo <|> (\(value, name) -> (value, Just name)) <$> Map.lookup term (knowReductions k) of
+      case Map.lookup term0 memo <|> (\(value, name) -> (value, Just name)) <$> Map.lookup term0 (knowReductions k) of
         Just answer -> pure answer
+        Nothing -> do
+          (value, revSteps) <- chain 0 term0 []
+          case revSteps of
+            [] -> do
+              modify' (\(memo', count, proofs) -> (Map.insert term0 (term0, Nothing) memo', count, proofs))
+              pure (term0, Nothing)
+            _ -> do
+              (_, count, _) <- get
+              let name = prefix <> "_" <> T.pack (show count)
+                  decl = GeneratedDecide name term0 (reverse revSteps)
+              modify' (\(memo', _, proofs) -> (Map.insert term0 (value, Just name) memo', count + 1, decl : proofs))
+              pure (value, Just name)
+    maxChunk :: Int
+    maxChunk = 6
+    chain :: Int -> CT -> [(CT, DecideStep)] -> State (Map CT (CT, Maybe Text), Int, [GeneratedDecl]) (CT, [(CT, DecideStep)])
+    chain n term acc = do
+      (memo, _, _) <- get
+      case Map.lookup term memo <|> (\(val, nm) -> (val, Just nm)) <$> Map.lookup term (knowReductions k) of
+        Just (val, Just nm) -> pure (val, (val, DecideExact nm) : acc)
+        Just (val, Nothing) -> pure (val, acc)
         Nothing -> case next term of
-          Nothing -> do
-            modify' (\(memo', count, proofs) -> (Map.insert term (term, Nothing) memo', count, proofs))
-            pure (term, Nothing)
+          Nothing -> pure (term, acc)
           Just (redex, step, reduced) -> do
-            (changed, first) <-
+            (changed, firstStep) <-
               if redex == term
                 then pure (reduced, direct step)
                 else do
-                  (value, proof) <- normal redex
-                  pure (replaceCT (\x -> if x == redex then Just value else Nothing) term, maybe "refl" (\name -> "cong " <> fromText name) proof)
-            (value, rest) <- normal changed
-            (_, count, _) <- get
-            let name = prefix <> "_" <> T.pack (show count)
-                proof =
-                  "theorem "
-                    <> fromText name
-                    <> ": |- ("
-                    <> render term
-                    <> " = "
-                    <> render value
-                    <> ")\nby calc "
-                    <> render term
-                    <> " = "
-                    <> render changed
-                    <> " by "
-                    <> first
-                    <> maybe "" (\child -> " = " <> render value <> " by exact " <> fromText child) rest
-            modify' (\(memo', _, proofs) -> (Map.insert term (value, Just name) memo', count + 1, (name, runBuilder proof) : proofs))
-            pure (value, Just name)
+                  (val, proof) <- normal redex
+                  pure (replaceCT (\x -> if x == redex then Just val else Nothing) term, maybe DecideRefl DecideCong proof)
+            let acc' = (changed, firstStep) : acc
+            if n + 1 >= maxChunk
+              then do
+                (finalVal, rest) <- normal changed
+                pure (finalVal, maybe acc' (\child -> (finalVal, DecideExact child) : acc') rest)
+              else chain (n + 1) changed acc'
     -- At the root of an equation the reduction theorem proves precisely
     -- the goal. Avoid a cut and congruence derivation for that direct use.
-    direct step = maybe step (\name -> "exact " <> fromText name) (T.stripPrefix "cong " (runBuilder step))
+    direct = \case
+      DecideCong lemma -> DecideExact lemma
+      other -> other
     -- A projection can expose the tail of a packed environment. Preserve
     -- its cons until the surrounding hd/tl uses the checked projection law.
     next (CSym "cons" _) = Nothing
     next term
-      | normalized <- canonical term, normalized /= term = Just (term, "refl", normalized)
-      | otherwise = unfoldRedex k term
+      | Just normalized <- canonicalChanged term = Just (term, DecideRefl, normalized)
+      | otherwise = (\(u, lemma, u') -> (u, DecideCong lemma, u')) <$> unfoldRedexLemma k term
 
 -- | The term rewritten by an unfolding lemma at its first application, outermost, which one rewrites, with the tactic doing it.
 unfoldStep :: Knowledge -> CT -> Maybe (Builder, CT)
-unfoldStep k t0 = (\(u, lemma, u') -> (lemma, replaceCT (\x -> if x == u then Just u' else Nothing) t0)) <$> unfoldRedex k t0
+unfoldStep k t0 = (\(u, lemma, u') -> ("cong " <> fromText lemma, replaceCT (\x -> if x == u then Just u' else Nothing) t0)) <$> unfoldRedexLemma k t0
 
 -- | The first application, outermost, an unfolding lemma rewrites: it, the tactic doing it, and what it becomes.
 unfoldRedex :: Knowledge -> CT -> Maybe (CT, Builder, CT)
-unfoldRedex k t = projection t <|> redex t
+unfoldRedex k t = (\(u, lemma, u') -> (u, "cong " <> fromText lemma, u')) <$> unfoldRedexLemma k t
+
+-- | The first application, outermost, an unfolding lemma rewrites: it, the lemma name, and what it becomes.
+unfoldRedexLemma :: Knowledge -> CT -> Maybe (CT, Text, CT)
+unfoldRedexLemma k t = projection t <|> redex t
   where
     -- Find tuple projections throughout the term before unfolding anything
     -- else. An environment can occur both as a callback argument and under
     -- a projection: expanding the former's cons would replace both copies
     -- and hide the latter from the certified hdCons/tlCons equations.
-    projection term@(CSym "hd" [CSym "cons" [x, _]]) = Just (term, "cong hdCons", x)
-    projection term@(CSym "tl" [CSym "cons" [_, xs]]) = Just (term, "cong tlCons", xs)
+    projection term@(CSym "hd" [CSym "cons" [x, _]]) = Just (term, "hdCons", x)
+    projection term@(CSym "tl" [CSym "cons" [_, xs]]) = Just (term, "tlCons", xs)
     projection (CSym _ args) = firstJust (map projection args)
     projection (CCallback _ environment) = projection environment
     projection _ = Nothing
-    redex t = case [(t, "cong " <> fromText (unfoldingLemma uf), rhs) | uf <- knowUnfoldings k, Just rhs <- [instanceOf uf t]] of
+    redex term = case [(term, unfoldingLemma uf, rhs) | uf <- lookupUnfoldings (knowUnfoldings k) term, Just rhs <- [instanceOf uf term]] of
       x : _ -> Just x
-      [] -> case t of
+      [] -> case term of
         CSym _ args -> firstJust (map redex args)
         -- Keep packed captures intact until applying their callback exposes
         -- projections. A later closure obligation still needs hdCons/tlCons
@@ -4953,7 +5098,7 @@ natInduction info g sp core = pure ([base, step], finish)
     finish outs = do
       decls <- forM (zip3 [0 ..] [base, step] outs) \(i, cg, o) -> do
         decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
-        pure (outAux o <> [(auxName i, runBuilder decl)])
+        pure (outAux o <> [GeneratedText (auxName i) (runBuilder decl)])
       params <- traverse (either (Left . EngineError sp) Right . ruleParams) [base, step]
       let blocks = mconcat [" { exact " <> fromText (gpName p) <> " }" | p <- goalPremises g]
           appeal i = "exact " <> fromText (auxName i) <> staticArgs (params !! i) <> blocks
@@ -5032,7 +5177,7 @@ tupleInduction k info g sp applied cols positions = do
       finish outs = do
         decls <- forM (zip3 [0 :: Int ..] cases outs) \(i, cg, o) -> do
           decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (outTactic o))
-          pure (outAux o <> [(auxName i, runBuilder decl)])
+          pure (outAux o <> [GeneratedText (auxName i) (runBuilder decl)])
         helpers <- either (Left . EngineError sp) Right helperDecls
         params <- traverse (either (Left . EngineError sp) Right . ruleParams) cases
         let appeal i = appealTo (auxName i) (params !! i)
@@ -5114,7 +5259,7 @@ tupleInduction k info g sp applied cols positions = do
         declareWith atName [] atGoal $
           mconcat ["ImplR as " <> e <> "; " | e <- es]
             <> if ownCode then "ImplR as C1; " <> calcT else "ImplR as HM; reify HM as C1; have C2: ((lt 0 " <> codeComps <> ") = 1) { " <> calcT <> " }; reflect C2 as C3; exact C3"
-      pure [(belowName, runBuilder belowDecl), (atName, runBuilder at')]
+      pure [GeneratedText belowName (runBuilder belowDecl), GeneratedText atName (runBuilder at')]
     declareWith name extras g' tac = do
       hs <- traverse (hypText . snd) (goalHyps g')
       c <- formula (goalConcl g')
@@ -5369,7 +5514,7 @@ dataInduction k info _ g sp v _ = do
       finish outs = do
         auxDecls <- forM (zip3 [0 :: Int ..] (zip cases (map fst opened)) outs) \(i, (cg, intro), o) -> do
           decl <- either (Left . EngineError sp) Right (declaration (auxName i) cg (intro <> outTactic o))
-          pure (outAux o <> [(auxName i, runBuilder decl)])
+          pure (outAux o <> [GeneratedText (auxName i) (runBuilder decl)])
         -- The auxiliary theorems are rules with the goal's premises, which the goal's discharge.
         -- Their parameters are the goal's, given, since a case need not determine them.
         params <- traverse (either (Left . EngineError sp) Right . ruleParams) cases
@@ -5538,7 +5683,7 @@ case, its recursive calls the induction hypotheses.  A clause matches on the
 theorem's implicit values, in braces, and on the values it quantifies over,
 which its statement has in that order: the columns are of both.
 -}
-byClauses :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Builder, [(Text, Text)])
+byClauses :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Builder, [GeneratedDecl])
 byClauses k info g td pcs
   | length columns <= 1 = byClausesSingle k info g td pcs
   | otherwise = do
@@ -5591,7 +5736,7 @@ byClauses k info g td pcs
       _ -> "#" <> T.pack (show j)
 
 -- | Ordinary single-value structural induction, retained for its smaller proofs.
-byClausesSingle :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Builder, [(Text, Text)])
+byClausesSingle :: Knowledge -> TheoremInfo -> Goal -> TheoremDef -> [ProofClause] -> Either EngineError (Builder, [GeneratedDecl])
 byClausesSingle k info g td pcs = do
   let columns = nub [i | pc <- pcs, (i, p) <- zip [0 ..] (patternsOf pc), matchesOn p]
   c <- case columns of
