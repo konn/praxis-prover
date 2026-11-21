@@ -79,7 +79,7 @@ import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Term qualified as Term
-import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), binderTy, normIx, openTelescope)
+import Language.Praxis.Surface.Types (Ix (..), Scheme (..), Ty (..), binderTy, normIx, openTelescope, substParams)
 import Numeric.Natural (Natural)
 import Test.QuickCheck (Gen, Property, chooseInt, conjoin, counterexample, elements, expectFailure, forAll, ioProperty, label, property, scale, sized, (===))
 import Test.Tasty (TestTree, testGroup, withResource)
@@ -385,15 +385,6 @@ tries k g =
   g >>= \case
     Nothing | k > 1 -> tries (k - 1) g
     r -> pure r
-
--- | A constructor's field type at the arguments of its data type.
-substParams :: [Ty] -> Ty -> Ty
-substParams args = \case
-  TParam i [] | i < length args -> args !! i
-  TParam i ts -> TParam i (map (substParams args) ts)
-  TData n ts xs -> TData n (map (substParams args) ts) xs
-  TArrow a b -> TArrow (substParams args a) (substParams args b)
-  t -> t
 
 -- * The reference semantics
 

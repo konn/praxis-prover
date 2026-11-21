@@ -44,6 +44,7 @@ module Language.Praxis.Surface.Env (
   methodIndex,
   methodTypeWith,
   dictionaryMethodType,
+  dictionaryMethodScheme,
   dictionaryIndex,
   dictionaryScope,
   LawInfo (..),
@@ -681,6 +682,24 @@ dictionaryMethodType env slots slot
       ty <- methodTypeWith dependency method
       let scheme = methodScheme method
       pure (substScheme (length (schemeParams scheme), length (schemeValues scheme)) emptyAssignment {asTypes = IM.singleton 0 (TParam (slotParam slot) [])} ty)
+  | otherwise = Left "a dictionary place refers to no method"
+  where
+    dependency q = dictionaryIndex <$> lookup q [(slotMethod s, i) | (i, s) <- zip [0 ..] (valueSlots slots), slotParam s == slotParam slot]
+
+{- | The polymorphic scheme of a dictionary place: the count of method-local
+type parameters @(extra)@ and the method type with those local parameters at
+@TParam 0 .. TParam (extra - 1)@ and the enclosing class parameter shifted to
+@TParam (extra + slotParam slot)@.
+-}
+dictionaryMethodScheme :: Env -> [Slot] -> Slot -> Either String (Int, Ty)
+dictionaryMethodScheme env slots slot
+  | isMembershipSlot slot = Right (0, TArrow (TParam (slotParam slot) []) TNat)
+  | Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env) = do
+      ty <- methodTypeWith dependency method
+      let scheme = methodScheme method
+          extra = max 0 (length (schemeParams scheme) - 1)
+          mapping = IM.fromList ((0, TParam (extra + slotParam slot) []) : [(1 + k, TParam k []) | k <- [0 .. extra - 1]])
+      pure (extra, substScheme (length (schemeParams scheme), length (schemeValues scheme)) emptyAssignment {asTypes = mapping} ty)
   | otherwise = Left "a dictionary place refers to no method"
   where
     dependency q = dictionaryIndex <$> lookup q [(slotMethod s, i) | (i, s) <- zip [0 ..] (valueSlots slots), slotParam s == slotParam slot]
