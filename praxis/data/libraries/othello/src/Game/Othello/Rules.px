@@ -90,6 +90,197 @@ private
 captures-on : Player -> Board -> Square -> Direction -> List (Square)
 captures-on p b s d = captured (scan p b (ray (C.size b) d s))
 
+-- Closed-form capture along rays of length 2 or 3, useful for small boards.
+is-disc : Player -> Cell -> B.Bool
+is-disc p C.Empty = B.False
+is-disc p (C.Disc q) = C.same-player p q
+
+private
+  ray-two-end : B.Bool -> a -> List a
+  ray-two-end B.False s1 = Nil
+  ray-two-end B.True s1 = s1 :: Nil
+
+  ray-two-step : B.Bool -> Player -> a -> Cell -> List a
+  ray-two-step B.False p s1 c2 = Nil
+  ray-two-step B.True p s1 c2 = ray-two-end (is-disc p c2) s1
+
+  ray-three-end : B.Bool -> a -> a -> List a
+  ray-three-end B.False s1 s2 = Nil
+  ray-three-end B.True s1 s2 = s1 :: s2 :: Nil
+
+  ray-three-third : B.Bool -> Player -> a -> a -> Cell -> List a
+  ray-three-third B.False p s1 s2 c3 = Nil
+  ray-three-third B.True p s1 s2 c3 = ray-three-end (is-disc p c3) s1 s2
+
+  ray-three-second : B.Bool -> Player -> a -> a -> Cell -> Cell -> List a
+  ray-three-second B.True p s1 s2 c2 c3 = s1 :: Nil
+  ray-three-second B.False p s1 s2 c2 c3 = ray-three-third (is-disc (C.other p) c2) p s1 s2 c3
+
+  ray-three-first : B.Bool -> Player -> a -> a -> Cell -> Cell -> List a
+  ray-three-first B.False p s1 s2 c2 c3 = Nil
+  ray-three-first B.True p s1 s2 c2 c3 = ray-three-second (is-disc p c2) p s1 s2 c2 c3
+
+ray-two : Player -> a -> Cell -> Cell -> List a
+ray-two p s1 c1 c2 = ray-two-step (is-disc (C.other p) c1) p s1 c2
+
+ray-three : Player -> a -> a -> Cell -> Cell -> Cell -> List a
+ray-three p s1 s2 c1 c2 c3 = ray-three-first (is-disc (C.other p) c1) p s1 s2 c2 c3
+
+private
+  map-ray-two-end : (f : a -> b) -> (ok : B.Bool) -> (s1 : a) -> L.map f (ray-two-end ok s1) = ray-two-end ok (f s1)
+  map-ray-two-end f B.False s1 = rfl
+  map-ray-two-end f B.True s1 = rfl
+
+  map-ray-two-step : (f : a -> b) -> (ok : B.Bool) -> (p : Player) -> (s1 : a) -> (c2 : Cell) -> L.map f (ray-two-step ok p s1 c2) = ray-two-step ok p (f s1) c2
+  map-ray-two-step f B.False p s1 c2 = rfl
+  map-ray-two-step f B.True p s1 c2 = map-ray-two-end f (is-disc p c2) s1
+
+  map-ray-three-end : (f : a -> b) -> (ok : B.Bool) -> (s1 s2 : a) -> L.map f (ray-three-end ok s1 s2) = ray-three-end ok (f s1) (f s2)
+  map-ray-three-end f B.False s1 s2 = rfl
+  map-ray-three-end f B.True s1 s2 = rfl
+
+  map-ray-three-third : (f : a -> b) -> (ok : B.Bool) -> (p : Player) -> (s1 s2 : a) -> (c3 : Cell) -> L.map f (ray-three-third ok p s1 s2 c3) = ray-three-third ok p (f s1) (f s2) c3
+  map-ray-three-third f B.False p s1 s2 c3 = rfl
+  map-ray-three-third f B.True p s1 s2 c3 = map-ray-three-end f (is-disc p c3) s1 s2
+
+  map-ray-three-second : (f : a -> b) -> (ok : B.Bool) -> (p : Player) -> (s1 s2 : a) -> (c2 c3 : Cell) -> L.map f (ray-three-second ok p s1 s2 c2 c3) = ray-three-second ok p (f s1) (f s2) c2 c3
+  map-ray-three-second f B.True p s1 s2 c2 c3 = rfl
+  map-ray-three-second f B.False p s1 s2 c2 c3 = map-ray-three-third f (is-disc (C.other p) c2) p s1 s2 c3
+
+  map-ray-three-first : (f : a -> b) -> (ok : B.Bool) -> (p : Player) -> (s1 s2 : a) -> (c2 c3 : Cell) -> L.map f (ray-three-first ok p s1 s2 c2 c3) = ray-three-first ok p (f s1) (f s2) c2 c3
+  map-ray-three-first f B.False p s1 s2 c2 c3 = rfl
+  map-ray-three-first f B.True p s1 s2 c2 c3 = map-ray-three-second f (is-disc p c2) p s1 s2 c2 c3
+
+map-ray-two : (f : a -> b) -> (p : Player) -> (s1 : a) -> (c1 c2 : Cell) -> L.map f (ray-two p s1 c1 c2) = ray-two p (f s1) c1 c2
+map-ray-two f p s1 c1 c2 = map-ray-two-step f (is-disc (C.other p) c1) p s1 c2
+
+map-ray-three : (f : a -> b) -> (p : Player) -> (s1 s2 : a) -> (c1 c2 c3 : Cell) -> L.map f (ray-three p s1 s2 c1 c2 c3) = ray-three p (f s1) (f s2) c1 c2 c3
+map-ray-three f p s1 s2 c1 c2 c3 = map-ray-three-first f (is-disc (C.other p) c1) p s1 s2 c2 c3
+
+private
+  scan-one-disc : (p q : Player) -> (s1 : Square) -> captured (scan-cell p s1 (C.Disc q) Unbracketed) = Nil
+  scan-one-disc C.Black C.Black s1 = rfl
+  scan-one-disc C.Black C.White s1 = rfl
+  scan-one-disc C.White C.Black s1 = rfl
+  scan-one-disc C.White C.White s1 = rfl
+
+  scan-one-nil : (p : Player) -> (s1 : Square) -> (c1 : Cell) -> captured (scan-cell p s1 c1 Unbracketed) = Nil
+  scan-one-nil p s1 C.Empty = rfl
+  scan-one-nil p s1 (C.Disc q) = scan-one-disc p q s1
+
+  scan-two-dd : (p q1 q2 : Player) -> (s1 s2 : Square) -> captured (scan-cell p s1 (C.Disc q1) (scan-cell p s2 (C.Disc q2) Unbracketed)) = ray-two p s1 (C.Disc q1) (C.Disc q2)
+  scan-two-dd C.Black C.Black C.Black s1 s2 = rfl
+  scan-two-dd C.Black C.Black C.White s1 s2 = rfl
+  scan-two-dd C.Black C.White C.Black s1 s2 = rfl
+  scan-two-dd C.Black C.White C.White s1 s2 = rfl
+  scan-two-dd C.White C.Black C.Black s1 s2 = rfl
+  scan-two-dd C.White C.Black C.White s1 s2 = rfl
+  scan-two-dd C.White C.White C.Black s1 s2 = rfl
+  scan-two-dd C.White C.White C.White s1 s2 = rfl
+
+  scan-two-de : (p q1 : Player) -> (s1 s2 : Square) -> captured (scan-cell p s1 (C.Disc q1) Unbracketed) = ray-two p s1 (C.Disc q1) C.Empty
+  scan-two-de C.Black C.Black s1 s2 = rfl
+  scan-two-de C.Black C.White s1 s2 = rfl
+  scan-two-de C.White C.Black s1 s2 = rfl
+  scan-two-de C.White C.White s1 s2 = rfl
+
+  scan-two-d : (p q1 : Player) -> (s1 s2 : Square) -> (c2 : Cell) -> captured (scan-cell p s1 (C.Disc q1) (scan-cell p s2 c2 Unbracketed)) = ray-two p s1 (C.Disc q1) c2
+  scan-two-d p q1 s1 s2 C.Empty = scan-two-de p q1 s1 s2
+  scan-two-d p q1 s1 s2 (C.Disc q2) = scan-two-dd p q1 q2 s1 s2
+
+  scan-two-eq : (p : Player) -> (s1 s2 : Square) -> (c1 c2 : Cell) -> captured (scan-cell p s1 c1 (scan-cell p s2 c2 Unbracketed)) = ray-two p s1 c1 c2
+  scan-two-eq p s1 s2 C.Empty c2 = rfl
+  scan-two-eq p s1 s2 (C.Disc q1) c2 = scan-two-d p q1 s1 s2 c2
+
+  scan-three-ddd : (p q1 q2 q3 : Player) -> (s1 s2 s3 : Square) -> captured (scan-cell p s1 (C.Disc q1) (scan-cell p s2 (C.Disc q2) (scan-cell p s3 (C.Disc q3) Unbracketed))) = ray-three p s1 s2 (C.Disc q1) (C.Disc q2) (C.Disc q3)
+  scan-three-ddd C.Black C.Black C.Black C.Black s1 s2 s3 = rfl
+  scan-three-ddd C.Black C.Black C.Black C.White s1 s2 s3 = rfl
+  scan-three-ddd C.Black C.Black C.White C.Black s1 s2 s3 = rfl
+  scan-three-ddd C.Black C.Black C.White C.White s1 s2 s3 = rfl
+  scan-three-ddd C.Black C.White C.Black C.Black s1 s2 s3 = rfl
+  scan-three-ddd C.Black C.White C.Black C.White s1 s2 s3 = rfl
+  scan-three-ddd C.Black C.White C.White C.Black s1 s2 s3 = rfl
+  scan-three-ddd C.Black C.White C.White C.White s1 s2 s3 = rfl
+  scan-three-ddd C.White C.Black C.Black C.Black s1 s2 s3 = rfl
+  scan-three-ddd C.White C.Black C.Black C.White s1 s2 s3 = rfl
+  scan-three-ddd C.White C.Black C.White C.Black s1 s2 s3 = rfl
+  scan-three-ddd C.White C.Black C.White C.White s1 s2 s3 = rfl
+  scan-three-ddd C.White C.White C.Black C.Black s1 s2 s3 = rfl
+  scan-three-ddd C.White C.White C.Black C.White s1 s2 s3 = rfl
+  scan-three-ddd C.White C.White C.White C.Black s1 s2 s3 = rfl
+  scan-three-ddd C.White C.White C.White C.White s1 s2 s3 = rfl
+
+  scan-three-dde : (p q1 q2 : Player) -> (s1 s2 s3 : Square) -> captured (scan-cell p s1 (C.Disc q1) (scan-cell p s2 (C.Disc q2) Unbracketed)) = ray-three p s1 s2 (C.Disc q1) (C.Disc q2) C.Empty
+  scan-three-dde C.Black C.Black C.Black s1 s2 s3 = rfl
+  scan-three-dde C.Black C.Black C.White s1 s2 s3 = rfl
+  scan-three-dde C.Black C.White C.Black s1 s2 s3 = rfl
+  scan-three-dde C.Black C.White C.White s1 s2 s3 = rfl
+  scan-three-dde C.White C.Black C.Black s1 s2 s3 = rfl
+  scan-three-dde C.White C.Black C.White s1 s2 s3 = rfl
+  scan-three-dde C.White C.White C.Black s1 s2 s3 = rfl
+  scan-three-dde C.White C.White C.White s1 s2 s3 = rfl
+
+  scan-three-de : (p q1 : Player) -> (s1 s2 s3 : Square) -> (c3 : Cell) -> captured (scan-cell p s1 (C.Disc q1) Unbracketed) = ray-three p s1 s2 (C.Disc q1) C.Empty c3
+  scan-three-de C.Black C.Black s1 s2 s3 c3 = rfl
+  scan-three-de C.Black C.White s1 s2 s3 c3 = rfl
+  scan-three-de C.White C.Black s1 s2 s3 c3 = rfl
+  scan-three-de C.White C.White s1 s2 s3 c3 = rfl
+
+  scan-three-dd : (p q1 q2 : Player) -> (s1 s2 s3 : Square) -> (c3 : Cell) -> captured (scan-cell p s1 (C.Disc q1) (scan-cell p s2 (C.Disc q2) (scan-cell p s3 c3 Unbracketed))) = ray-three p s1 s2 (C.Disc q1) (C.Disc q2) c3
+  scan-three-dd p q1 q2 s1 s2 s3 C.Empty = scan-three-dde p q1 q2 s1 s2 s3
+  scan-three-dd p q1 q2 s1 s2 s3 (C.Disc q3) = scan-three-ddd p q1 q2 q3 s1 s2 s3
+
+  scan-three-d : (p q1 : Player) -> (s1 s2 s3 : Square) -> (c2 c3 : Cell) -> captured (scan-cell p s1 (C.Disc q1) (scan-cell p s2 c2 (scan-cell p s3 c3 Unbracketed))) = ray-three p s1 s2 (C.Disc q1) c2 c3
+  scan-three-d p q1 s1 s2 s3 C.Empty c3 = scan-three-de p q1 s1 s2 s3 c3
+  scan-three-d p q1 s1 s2 s3 (C.Disc q2) c3 = scan-three-dd p q1 q2 s1 s2 s3 c3
+
+  scan-three-eq : (p : Player) -> (s1 s2 s3 : Square) -> (c1 c2 c3 : Cell) -> captured (scan-cell p s1 c1 (scan-cell p s2 c2 (scan-cell p s3 c3 Unbracketed))) = ray-three p s1 s2 c1 c2 c3
+  scan-three-eq p s1 s2 s3 C.Empty c2 c3 = rfl
+  scan-three-eq p s1 s2 s3 (C.Disc q1) c2 c3 = scan-three-d p q1 s1 s2 s3 c2 c3
+
+captures-on-nil : (p : Player) -> (b : Board) -> (s : Square) -> (d : Direction) -> ray (C.size b) d s = Nil -> captures-on p b s d = Nil
+captures-on-nil p b s d h = calc
+  captures-on p b s d
+  = captured (scan p b (ray (C.size b) d s))
+  = captured (scan p b Nil) := cong h
+  = Nil
+
+captures-on-one : (p : Player) -> (b : Board) -> (s : Square) -> (d : Direction) -> (s1 : Square) -> (c1 : Cell) -> ray (C.size b) d s = s1 :: Nil -> C.read s1 b = M.Just c1 -> captures-on p b s d = Nil
+captures-on-one p b s d s1 c1 hr h1 = calc
+  captures-on p b s d
+  = captured (scan p b (ray (C.size b) d s))
+  = captured (scan p b (s1 :: Nil)) := cong hr
+  = captured (scan-read p s1 (C.read s1 b) Unbracketed)
+  = captured (scan-read p s1 (M.Just c1) Unbracketed) := cong h1
+  = captured (scan-cell p s1 c1 Unbracketed)
+  = Nil := scan-one-nil p s1 c1
+
+captures-on-two : (p : Player) -> (b : Board) -> (s : Square) -> (d : Direction) -> (s1 s2 : Square) -> (c1 c2 : Cell) -> ray (C.size b) d s = s1 :: s2 :: Nil -> C.read s1 b = M.Just c1 -> C.read s2 b = M.Just c2 -> captures-on p b s d = ray-two p s1 c1 c2
+captures-on-two p b s d s1 s2 c1 c2 hr h1 h2 = calc
+  captures-on p b s d
+  = captured (scan p b (ray (C.size b) d s))
+  = captured (scan p b (s1 :: s2 :: Nil)) := cong hr
+  = captured (scan-read p s1 (C.read s1 b) (scan-read p s2 (C.read s2 b) Unbracketed))
+  = captured (scan-read p s1 (M.Just c1) (scan-read p s2 (C.read s2 b) Unbracketed)) := cong h1
+  = captured (scan-cell p s1 c1 (scan-read p s2 (C.read s2 b) Unbracketed))
+  = captured (scan-cell p s1 c1 (scan-read p s2 (M.Just c2) Unbracketed)) := cong h2
+  = captured (scan-cell p s1 c1 (scan-cell p s2 c2 Unbracketed))
+  = ray-two p s1 c1 c2 := scan-two-eq p s1 s2 c1 c2
+
+captures-on-three : (p : Player) -> (b : Board) -> (s : Square) -> (d : Direction) -> (s1 s2 s3 : Square) -> (c1 c2 c3 : Cell) -> ray (C.size b) d s = s1 :: s2 :: s3 :: Nil -> C.read s1 b = M.Just c1 -> C.read s2 b = M.Just c2 -> C.read s3 b = M.Just c3 -> captures-on p b s d = ray-three p s1 s2 c1 c2 c3
+captures-on-three p b s d s1 s2 s3 c1 c2 c3 hr h1 h2 h3 = calc
+  captures-on p b s d
+  = captured (scan p b (ray (C.size b) d s))
+  = captured (scan p b (s1 :: s2 :: s3 :: Nil)) := cong hr
+  = captured (scan-read p s1 (C.read s1 b) (scan-read p s2 (C.read s2 b) (scan-read p s3 (C.read s3 b) Unbracketed)))
+  = captured (scan-read p s1 (M.Just c1) (scan-read p s2 (C.read s2 b) (scan-read p s3 (C.read s3 b) Unbracketed))) := cong h1
+  = captured (scan-cell p s1 c1 (scan-read p s2 (C.read s2 b) (scan-read p s3 (C.read s3 b) Unbracketed)))
+  = captured (scan-cell p s1 c1 (scan-read p s2 (M.Just c2) (scan-read p s3 (C.read s3 b) Unbracketed))) := cong h2
+  = captured (scan-cell p s1 c1 (scan-cell p s2 c2 (scan-read p s3 (C.read s3 b) Unbracketed)))
+  = captured (scan-cell p s1 c1 (scan-cell p s2 c2 (scan-read p s3 (M.Just c3) Unbracketed))) := cong h3
+  = captured (scan-cell p s1 c1 (scan-cell p s2 c2 (scan-cell p s3 c3 Unbracketed)))
+  = ray-three p s1 s2 c1 c2 c3 := scan-three-eq p s1 s2 s3 c1 c2 c3
+
 captures : Player -> Board -> Square -> List (Square)
 captures p b s = L.concat (L.map (\d -> captures-on p b s d) directions)
 

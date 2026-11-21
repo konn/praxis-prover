@@ -1,0 +1,1211 @@
+module Game.Othello.Four where
+
+import "base" Data.Bool as B
+import "base" Data.List as L
+import "base" Data.Maybe as M
+import "base" Data.Nat as N
+import "base" Data.Nat.Order as O
+import Game.Othello.Board as C
+import Game.Othello.Rules as R
+import Game.Othello.Initial as I
+import Game.Othello.Certificate as K
+open L using (List, Nil, (::), (<>))
+
+-- Dedicated 4x4 representation with constant-time cell access and
+-- three-ray capture evaluation, proved equivalent to the general rules.
+data I4 = I0 | I1 | I2 | I3
+open I4 public
+
+to-nat4 : I4 -> Nat
+to-nat4 I0 = 0
+to-nat4 I1 = 1
+to-nat4 I2 = 2
+to-nat4 I3 = 3
+
+data Sq4 = At4 I4 I4
+open Sq4 public
+
+to-sq4 : Sq4 -> C.Square
+to-sq4 (At4 r c) = C.At (to-nat4 r) (to-nat4 c)
+
+to-sq4s : List Sq4 -> List C.Square
+to-sq4s Nil = Nil
+to-sq4s (s :: ss) = to-sq4 s :: to-sq4s ss
+
+private
+  to-sq4s-append : (xs ys : List Sq4) -> to-sq4s (xs <> ys) = (to-sq4s xs <> to-sq4s ys)
+  to-sq4s-append Nil ys = rfl
+  to-sq4s-append (x :: xs) ys = cong (to-sq4s-append xs ys)
+
+  to-sq4s-eq-map : (xs : List Sq4) -> L.map to-sq4 xs = to-sq4s xs
+  to-sq4s-eq-map Nil = rfl
+  to-sq4s-eq-map (x :: xs) = calc
+    L.map to-sq4 (x :: xs)
+    = to-sq4 x :: L.map to-sq4 xs
+    = to-sq4 x :: to-sq4s xs := cong (to-sq4s-eq-map xs)
+    = to-sq4s (x :: xs)
+
+data Row4 = MkRow4 C.Cell C.Cell C.Cell C.Cell
+open Row4 public
+
+data Board4 = Grid4 Row4 Row4 Row4 Row4
+open Board4 public
+
+private
+  no-cells : List C.Cell
+  no-cells = Nil
+
+  no-sq4s : List Sq4
+  no-sq4s = Nil
+
+row-cells : Row4 -> List C.Cell -> List C.Cell
+row-cells (MkRow4 c0 c1 c2 c3) rest = c0 :: c1 :: c2 :: c3 :: rest
+
+to-board : Board4 -> C.Board
+to-board (Grid4 r0 r1 r2 r3) = C.Grid 4 (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+
+private
+  row-cells-length : (r : Row4) -> (rest : List C.Cell) -> L.length (row-cells r rest) = S (S (S (S (L.length rest))))
+  row-cells-length (MkRow4 c0 c1 c2 c3) rest = rfl
+
+well-formed-4 : (b : Board4) -> C.well-formed (to-board b) = B.True
+well-formed-4 (Grid4 r0 r1 r2 r3) = calc
+  C.well-formed (to-board (Grid4 r0 r1 r2 r3))
+  = B.equal-nat (L.length (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))) (4 * 4)
+  = B.equal-nat (S (S (S (S (L.length (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))))))) (4 * 4) := cong (row-cells-length r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+  = B.equal-nat (S (S (S (S (S (S (S (S (L.length (row-cells r2 (row-cells r3 no-cells))))))))))) (4 * 4) := cong (row-cells-length r1 (row-cells r2 (row-cells r3 no-cells)))
+  = B.equal-nat (S (S (S (S (S (S (S (S (S (S (S (S (L.length (row-cells r3 no-cells)))))))))))))) (4 * 4) := cong (row-cells-length r2 (row-cells r3 no-cells))
+  = B.equal-nat (S (S (S (S (S (S (S (S (S (S (S (S (S (S (S (S (L.length no-cells))))))))))))))))) (4 * 4) := cong (row-cells-length r3 no-cells)
+  = B.equal-nat 16 (4 * 4)
+  = B.True := by decide
+
+get-row : I4 -> Board4 -> Row4
+get-row I0 (Grid4 r0 r1 r2 r3) = r0
+get-row I1 (Grid4 r0 r1 r2 r3) = r1
+get-row I2 (Grid4 r0 r1 r2 r3) = r2
+get-row I3 (Grid4 r0 r1 r2 r3) = r3
+
+get-cell : I4 -> Row4 -> C.Cell
+get-cell I0 (MkRow4 c0 c1 c2 c3) = c0
+get-cell I1 (MkRow4 c0 c1 c2 c3) = c1
+get-cell I2 (MkRow4 c0 c1 c2 c3) = c2
+get-cell I3 (MkRow4 c0 c1 c2 c3) = c3
+
+read4 : Sq4 -> Board4 -> C.Cell
+read4 (At4 r c) b = get-cell c (get-row r b)
+
+set-row : I4 -> Row4 -> Board4 -> Board4
+set-row I0 r (Grid4 r0 r1 r2 r3) = Grid4 r r1 r2 r3
+set-row I1 r (Grid4 r0 r1 r2 r3) = Grid4 r0 r r2 r3
+set-row I2 r (Grid4 r0 r1 r2 r3) = Grid4 r0 r1 r r3
+set-row I3 r (Grid4 r0 r1 r2 r3) = Grid4 r0 r1 r2 r
+
+set-cell : I4 -> C.Cell -> Row4 -> Row4
+set-cell I0 x (MkRow4 c0 c1 c2 c3) = MkRow4 x c1 c2 c3
+set-cell I1 x (MkRow4 c0 c1 c2 c3) = MkRow4 c0 x c2 c3
+set-cell I2 x (MkRow4 c0 c1 c2 c3) = MkRow4 c0 c1 x c3
+set-cell I3 x (MkRow4 c0 c1 c2 c3) = MkRow4 c0 c1 c2 x
+
+write4 : Sq4 -> C.Cell -> Board4 -> Board4
+write4 (At4 r c) x b = set-row r (set-cell c x (get-row r b)) b
+
+private
+  less-nat-4 : (i : I4) -> B.less-nat (to-nat4 i) 4 = B.True
+  less-nat-4 I0 = rfl
+  less-nat-4 I1 = rfl
+  less-nat-4 I2 = rfl
+  less-nat-4 I3 = rfl
+
+  inside4 : (r c : I4) -> C.inside 4 (C.At (to-nat4 r) (to-nat4 c)) = B.True
+  inside4 r c = calc
+    C.inside 4 (C.At (to-nat4 r) (to-nat4 c))
+    = B.and (B.less-nat (to-nat4 r) 4) (B.less-nat (to-nat4 c) 4)
+    = B.and B.True (B.less-nat (to-nat4 c) 4) := cong (less-nat-4 r)
+    = B.less-nat (to-nat4 c) 4
+    = B.True := less-nat-4 c
+
+  lookup-row0-cells : (c : I4) -> (c0 c1 c2 c3 : C.Cell) -> (rest : List C.Cell) -> L.lookup (to-nat4 c) (row-cells (MkRow4 c0 c1 c2 c3) rest) = M.Just (get-cell c (MkRow4 c0 c1 c2 c3))
+  lookup-row0-cells I0 c0 c1 c2 c3 rest = rfl
+  lookup-row0-cells I1 c0 c1 c2 c3 rest = rfl
+  lookup-row0-cells I2 c0 c1 c2 c3 rest = rfl
+  lookup-row0-cells I3 c0 c1 c2 c3 rest = rfl
+
+  lookup-row0 : (c : I4) -> (r : Row4) -> (rest : List C.Cell) -> L.lookup (to-nat4 c) (row-cells r rest) = M.Just (get-cell c r)
+  lookup-row0 c (MkRow4 c0 c1 c2 c3) rest = lookup-row0-cells c c0 c1 c2 c3 rest
+
+  lookup-skip-row : (n : Nat) -> (r : Row4) -> (rest : List C.Cell) -> L.lookup (S (S (S (S n)))) (row-cells r rest) = L.lookup n rest
+  lookup-skip-row n (MkRow4 c0 c1 c2 c3) rest = rfl
+
+  index4-0 : (c : I4) -> 4 * 0 + to-nat4 c = to-nat4 c
+  index4-0 I0 = rfl
+  index4-0 I1 = rfl
+  index4-0 I2 = rfl
+  index4-0 I3 = rfl
+
+  index4-1 : (c : I4) -> 4 * 1 + to-nat4 c = S (S (S (S (to-nat4 c))))
+  index4-1 I0 = rfl
+  index4-1 I1 = rfl
+  index4-1 I2 = rfl
+  index4-1 I3 = rfl
+
+  index4-2 : (c : I4) -> 4 * 2 + to-nat4 c = S (S (S (S (S (S (S (S (to-nat4 c))))))))
+  index4-2 I0 = rfl
+  index4-2 I1 = rfl
+  index4-2 I2 = rfl
+  index4-2 I3 = rfl
+
+  index4-3 : (c : I4) -> 4 * 3 + to-nat4 c = S (S (S (S (S (S (S (S (S (S (S (S (to-nat4 c))))))))))))
+  index4-3 I0 = rfl
+  index4-3 I1 = rfl
+  index4-3 I2 = rfl
+  index4-3 I3 = rfl
+
+  lookup4-eq : (r c : I4) -> (r0 r1 r2 r3 : Row4) -> L.lookup (C.index 4 (C.At (to-nat4 r) (to-nat4 c))) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) = M.Just (get-cell c (get-row r (Grid4 r0 r1 r2 r3)))
+  lookup4-eq I0 c r0 r1 r2 r3 = calc
+    L.lookup (4 * 0 + to-nat4 c) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = L.lookup (to-nat4 c) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := cong (index4-0 c)
+    = M.Just (get-cell c r0) := lookup-row0 c r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+  lookup4-eq I1 c r0 r1 r2 r3 = calc
+    L.lookup (4 * 1 + to-nat4 c) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = L.lookup (S (S (S (S (to-nat4 c))))) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := cong (index4-1 c)
+    = L.lookup (to-nat4 c) (row-cells r1 (row-cells r2 (row-cells r3 no-cells))) := lookup-skip-row (to-nat4 c) r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+    = M.Just (get-cell c r1) := lookup-row0 c r1 (row-cells r2 (row-cells r3 no-cells))
+  lookup4-eq I2 c r0 r1 r2 r3 = calc
+    L.lookup (4 * 2 + to-nat4 c) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = L.lookup (S (S (S (S (S (S (S (S (to-nat4 c))))))))) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := cong (index4-2 c)
+    = L.lookup (S (S (S (S (to-nat4 c))))) (row-cells r1 (row-cells r2 (row-cells r3 no-cells))) := lookup-skip-row (S (S (S (S (to-nat4 c))))) r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+    = L.lookup (to-nat4 c) (row-cells r2 (row-cells r3 no-cells)) := lookup-skip-row (to-nat4 c) r1 (row-cells r2 (row-cells r3 no-cells))
+    = M.Just (get-cell c r2) := lookup-row0 c r2 (row-cells r3 no-cells)
+  lookup4-eq I3 c r0 r1 r2 r3 = calc
+    L.lookup (4 * 3 + to-nat4 c) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = L.lookup (S (S (S (S (S (S (S (S (S (S (S (S (to-nat4 c))))))))))))) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := cong (index4-3 c)
+    = L.lookup (S (S (S (S (S (S (S (S (to-nat4 c))))))))) (row-cells r1 (row-cells r2 (row-cells r3 no-cells))) := lookup-skip-row (S (S (S (S (S (S (S (S (to-nat4 c))))))))) r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+    = L.lookup (S (S (S (S (to-nat4 c))))) (row-cells r2 (row-cells r3 no-cells)) := lookup-skip-row (S (S (S (S (to-nat4 c))))) r1 (row-cells r2 (row-cells r3 no-cells))
+    = L.lookup (to-nat4 c) (row-cells r3 no-cells) := lookup-skip-row (to-nat4 c) r2 (row-cells r3 no-cells)
+    = M.Just (get-cell c r3) := lookup-row0 c r3 no-cells
+
+  read4-eq-rc : (r c : I4) -> (b : Board4) -> C.read (C.At (to-nat4 r) (to-nat4 c)) (to-board b) = M.Just (get-cell c (get-row r b))
+  read4-eq-rc r c (Grid4 r0 r1 r2 r3) = calc
+    C.read (C.At (to-nat4 r) (to-nat4 c)) (to-board (Grid4 r0 r1 r2 r3))
+    = B.choose (C.inside 4 (C.At (to-nat4 r) (to-nat4 c))) (L.lookup (C.index 4 (C.At (to-nat4 r) (to-nat4 c))) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))) M.Nothing
+    = B.choose B.True (L.lookup (C.index 4 (C.At (to-nat4 r) (to-nat4 c))) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))) M.Nothing := cong (inside4 r c)
+    = L.lookup (C.index 4 (C.At (to-nat4 r) (to-nat4 c))) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = M.Just (get-cell c (get-row r (Grid4 r0 r1 r2 r3))) := lookup4-eq r c r0 r1 r2 r3
+
+read4-eq : (s : Sq4) -> (b : Board4) -> C.read (to-sq4 s) (to-board b) = M.Just (read4 s b)
+read4-eq (At4 r c) b = read4-eq-rc r c b
+
+private
+  update-row0-cells : (c : I4) -> (x c0 c1 c2 c3 : C.Cell) -> (rest : List C.Cell) -> L.update (to-nat4 c) x (row-cells (MkRow4 c0 c1 c2 c3) rest) = row-cells (set-cell c x (MkRow4 c0 c1 c2 c3)) rest
+  update-row0-cells I0 x c0 c1 c2 c3 rest = rfl
+  update-row0-cells I1 x c0 c1 c2 c3 rest = rfl
+  update-row0-cells I2 x c0 c1 c2 c3 rest = rfl
+  update-row0-cells I3 x c0 c1 c2 c3 rest = rfl
+
+  update-row0 : (c : I4) -> (x : C.Cell) -> (r : Row4) -> (rest : List C.Cell) -> L.update (to-nat4 c) x (row-cells r rest) = row-cells (set-cell c x r) rest
+  update-row0 c x (MkRow4 c0 c1 c2 c3) rest = update-row0-cells c x c0 c1 c2 c3 rest
+
+  update-skip-row : (n : Nat) -> (x : C.Cell) -> (r : Row4) -> (rest : List C.Cell) -> L.update (S (S (S (S n)))) x (row-cells r rest) = row-cells r (L.update n x rest)
+  update-skip-row n x (MkRow4 c0 c1 c2 c3) rest = rfl
+
+  update4-eq : (r c : I4) -> (x : C.Cell) -> (r0 r1 r2 r3 : Row4) -> L.update (C.index 4 (C.At (to-nat4 r) (to-nat4 c))) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) = C.cells (to-board (write4 (At4 r c) x (Grid4 r0 r1 r2 r3)))
+  update4-eq I0 c x r0 r1 r2 r3 = calc
+    L.update (4 * 0 + to-nat4 c) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = L.update (to-nat4 c) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := cong (index4-0 c)
+    = row-cells (set-cell c x r0) (row-cells r1 (row-cells r2 (row-cells r3 no-cells))) := update-row0 c x r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+  update4-eq I1 c x r0 r1 r2 r3 = calc
+    L.update (4 * 1 + to-nat4 c) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = L.update (S (S (S (S (to-nat4 c))))) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := cong (index4-1 c)
+    = row-cells r0 (L.update (to-nat4 c) x (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := update-skip-row (to-nat4 c) x r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+    = row-cells r0 (row-cells (set-cell c x r1) (row-cells r2 (row-cells r3 no-cells))) := cong (update-row0 c x r1 (row-cells r2 (row-cells r3 no-cells)))
+  update4-eq I2 c x r0 r1 r2 r3 = calc
+    L.update (4 * 2 + to-nat4 c) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = L.update (S (S (S (S (S (S (S (S (to-nat4 c))))))))) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := cong (index4-2 c)
+    = row-cells r0 (L.update (S (S (S (S (to-nat4 c))))) x (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := update-skip-row (S (S (S (S (to-nat4 c))))) x r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+    = row-cells r0 (row-cells r1 (L.update (to-nat4 c) x (row-cells r2 (row-cells r3 no-cells)))) := cong (update-skip-row (to-nat4 c) x r1 (row-cells r2 (row-cells r3 no-cells)))
+    = row-cells r0 (row-cells r1 (row-cells (set-cell c x r2) (row-cells r3 no-cells))) := cong (update-row0 c x r2 (row-cells r3 no-cells))
+  update4-eq I3 c x r0 r1 r2 r3 = calc
+    L.update (4 * 3 + to-nat4 c) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))
+    = L.update (S (S (S (S (S (S (S (S (S (S (S (S (to-nat4 c))))))))))))) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := cong (index4-3 c)
+    = row-cells r0 (L.update (S (S (S (S (S (S (S (S (to-nat4 c))))))))) x (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := update-skip-row (S (S (S (S (S (S (S (S (to-nat4 c))))))))) x r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+    = row-cells r0 (row-cells r1 (L.update (S (S (S (S (to-nat4 c))))) x (row-cells r2 (row-cells r3 no-cells)))) := cong (update-skip-row (S (S (S (S (to-nat4 c))))) x r1 (row-cells r2 (row-cells r3 no-cells)))
+    = row-cells r0 (row-cells r1 (row-cells r2 (L.update (to-nat4 c) x (row-cells r3 no-cells)))) := cong (update-skip-row (to-nat4 c) x r2 (row-cells r3 no-cells))
+    = row-cells r0 (row-cells r1 (row-cells r2 (row-cells (set-cell c x r3) no-cells))) := cong (update-row0 c x r3 no-cells)
+
+  grid-cells : (b : Board4) -> C.Grid 4 (C.cells (to-board b)) = to-board b
+  grid-cells (Grid4 r0 r1 r2 r3) = rfl
+
+  write4-eq-rc : (r c : I4) -> (x : C.Cell) -> (b : Board4) -> C.write (C.At (to-nat4 r) (to-nat4 c)) x (to-board b) = to-board (write4 (At4 r c) x b)
+  write4-eq-rc r c x (Grid4 r0 r1 r2 r3) = by
+    have hi : C.inside 4 (C.At (to-nat4 r) (to-nat4 c)) = B.True := inside4 r c
+    calc
+      C.write (C.At (to-nat4 r) (to-nat4 c)) x (C.Grid 4 (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))))
+      = C.Grid 4 (L.update (C.index 4 (C.At (to-nat4 r) (to-nat4 c))) x (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells))))) := C.write-inside (C.At (to-nat4 r) (to-nat4 c)) x 4 (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) hi
+      = C.Grid 4 (C.cells (to-board (write4 (At4 r c) x (Grid4 r0 r1 r2 r3)))) := cong (update4-eq r c x r0 r1 r2 r3)
+      = to-board (write4 (At4 r c) x (Grid4 r0 r1 r2 r3)) := grid-cells (write4 (At4 r c) x (Grid4 r0 r1 r2 r3))
+
+write4-eq : (s : Sq4) -> (x : C.Cell) -> (b : Board4) -> C.write (to-sq4 s) x (to-board b) = to-board (write4 s x b)
+write4-eq (At4 r c) x b = write4-eq-rc r c x b
+
+-- Fast disc counting and tournament scoring on Board4.
+row-count : C.Player -> Row4 -> Nat
+row-count p (MkRow4 c0 c1 c2 c3) = C.owned-cell p c0 + (C.owned-cell p c1 + (C.owned-cell p c2 + C.owned-cell p c3))
+
+count4 : C.Player -> Board4 -> Nat
+count4 p (Grid4 r0 r1 r2 r3) = row-count p r0 + (row-count p r1 + (row-count p r2 + row-count p r3))
+
+private
+  sum-row-cells : (p : C.Player) -> (r : Row4) -> (rest : List C.Cell) -> L.sum (L.map (\x -> C.owned-cell p x) (row-cells r rest)) = row-count p r + L.sum (L.map (\x -> C.owned-cell p x) rest)
+  sum-row-cells p (MkRow4 c0 c1 c2 c3) rest = calc
+    C.owned-cell p c0 + (C.owned-cell p c1 + (C.owned-cell p c2 + (C.owned-cell p c3 + L.sum (L.map (\x -> C.owned-cell p x) rest))))
+    = C.owned-cell p c0 + (C.owned-cell p c1 + ((C.owned-cell p c2 + C.owned-cell p c3) + L.sum (L.map (\x -> C.owned-cell p x) rest))) := cong addAssoc
+    = C.owned-cell p c0 + ((C.owned-cell p c1 + (C.owned-cell p c2 + C.owned-cell p c3)) + L.sum (L.map (\x -> C.owned-cell p x) rest)) := cong addAssoc
+    = (C.owned-cell p c0 + (C.owned-cell p c1 + (C.owned-cell p c2 + C.owned-cell p c3))) + L.sum (L.map (\x -> C.owned-cell p x) rest) := cong addAssoc
+
+count4-eq : (p : C.Player) -> (b : Board4) -> C.count p (to-board b) = count4 p b
+count4-eq p (Grid4 r0 r1 r2 r3) = calc
+  C.count p (to-board (Grid4 r0 r1 r2 r3))
+  = L.sum (L.map (\x -> C.owned-cell p x) (row-cells r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))))
+  = row-count p r0 + L.sum (L.map (\x -> C.owned-cell p x) (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))) := sum-row-cells p r0 (row-cells r1 (row-cells r2 (row-cells r3 no-cells)))
+  = row-count p r0 + (row-count p r1 + L.sum (L.map (\x -> C.owned-cell p x) (row-cells r2 (row-cells r3 no-cells)))) := cong (sum-row-cells p r1 (row-cells r2 (row-cells r3 no-cells)))
+  = row-count p r0 + (row-count p r1 + (row-count p r2 + L.sum (L.map (\x -> C.owned-cell p x) (row-cells r3 no-cells)))) := cong (sum-row-cells p r2 (row-cells r3 no-cells))
+  = row-count p r0 + (row-count p r1 + (row-count p r2 + (row-count p r3 + L.sum (L.map (\x -> C.owned-cell p x) no-cells)))) := cong (sum-row-cells p r3 no-cells)
+  = count4 p (Grid4 r0 r1 r2 r3)
+
+white-score4 : Board4 -> Nat
+white-score4 b = B.choose (B.less-nat (count4 C.Black b) (count4 C.White b)) (16 - count4 C.Black b) (B.choose (B.less-nat (count4 C.White b) (count4 C.Black b)) (count4 C.White b) 8)
+
+private
+  div-16-2 : N.(/) (4 * 4) 2 = 8
+  div-16-2 = by decide
+
+  size-to-board : (b : Board4) -> C.size (to-board b) = 4
+  size-to-board (Grid4 r0 r1 r2 r3) = rfl
+
+white-score4-eq : (b : Board4) -> K.white-score (to-board b) = white-score4 b
+white-score4-eq b = calc
+  K.white-score (to-board b)
+  = B.choose (B.less-nat (C.count C.Black (to-board b)) (C.count C.White (to-board b))) (C.size (to-board b) * C.size (to-board b) - C.count C.Black (to-board b)) (B.choose (B.less-nat (C.count C.White (to-board b)) (C.count C.Black (to-board b))) (C.count C.White (to-board b)) (N.(/) (C.size (to-board b) * C.size (to-board b)) 2))
+  = B.choose (B.less-nat (C.count C.Black (to-board b)) (C.count C.White (to-board b))) (4 * 4 - C.count C.Black (to-board b)) (B.choose (B.less-nat (C.count C.White (to-board b)) (C.count C.Black (to-board b))) (C.count C.White (to-board b)) (N.(/) (4 * 4) 2)) := cong (size-to-board b)
+  = B.choose (B.less-nat (C.count C.Black (to-board b)) (C.count C.White (to-board b))) (4 * 4 - C.count C.Black (to-board b)) (B.choose (B.less-nat (C.count C.White (to-board b)) (C.count C.Black (to-board b))) (C.count C.White (to-board b)) 8) := cong div-16-2
+  = B.choose (B.less-nat (C.count C.Black (to-board b)) (C.count C.White (to-board b))) (16 - C.count C.Black (to-board b)) (B.choose (B.less-nat (C.count C.White (to-board b)) (C.count C.Black (to-board b))) (C.count C.White (to-board b)) 8)
+  = B.choose (B.less-nat (count4 C.Black b) (C.count C.White (to-board b))) (16 - count4 C.Black b) (B.choose (B.less-nat (C.count C.White (to-board b)) (count4 C.Black b)) (C.count C.White (to-board b)) 8) := cong (count4-eq C.Black b)
+  = white-score4 b := cong (count4-eq C.White b)
+
+-- Every square on a 4x4 board has exactly 3 rays of length 2 or 3.
+private
+  r2 : C.Player -> Board4 -> Sq4 -> Sq4 -> List Sq4
+  r2 p b s1 s2 = R.ray-two p s1 (read4 s1 b) (read4 s2 b)
+
+  r3 : C.Player -> Board4 -> Sq4 -> Sq4 -> Sq4 -> List Sq4
+  r3 p b s1 s2 s3 = R.ray-three p s1 s2 (read4 s1 b) (read4 s2 b) (read4 s3 b)
+
+  captures4-r0 : C.Player -> Board4 -> I4 -> List Sq4
+  captures4-r0 p b I0 = r3 p b (At4 I0 I1) (At4 I0 I2) (At4 I0 I3) <> (r3 p b (At4 I1 I1) (At4 I2 I2) (At4 I3 I3) <> r3 p b (At4 I1 I0) (At4 I2 I0) (At4 I3 I0))
+  captures4-r0 p b I1 = r2 p b (At4 I0 I2) (At4 I0 I3) <> (r2 p b (At4 I1 I2) (At4 I2 I3) <> r3 p b (At4 I1 I1) (At4 I2 I1) (At4 I3 I1))
+  captures4-r0 p b I2 = r3 p b (At4 I1 I2) (At4 I2 I2) (At4 I3 I2) <> (r2 p b (At4 I1 I1) (At4 I2 I0) <> r2 p b (At4 I0 I1) (At4 I0 I0))
+  captures4-r0 p b I3 = r3 p b (At4 I1 I3) (At4 I2 I3) (At4 I3 I3) <> (r3 p b (At4 I1 I2) (At4 I2 I1) (At4 I3 I0) <> r3 p b (At4 I0 I2) (At4 I0 I1) (At4 I0 I0))
+
+  captures4-r1 : C.Player -> Board4 -> I4 -> List Sq4
+  captures4-r1 p b I0 = r3 p b (At4 I1 I1) (At4 I1 I2) (At4 I1 I3) <> (r2 p b (At4 I2 I1) (At4 I3 I2) <> r2 p b (At4 I2 I0) (At4 I3 I0))
+  captures4-r1 p b I1 = r2 p b (At4 I1 I2) (At4 I1 I3) <> (r2 p b (At4 I2 I2) (At4 I3 I3) <> r2 p b (At4 I2 I1) (At4 I3 I1))
+  captures4-r1 p b I2 = r2 p b (At4 I2 I2) (At4 I3 I2) <> (r2 p b (At4 I2 I1) (At4 I3 I0) <> r2 p b (At4 I1 I1) (At4 I1 I0))
+  captures4-r1 p b I3 = r2 p b (At4 I2 I3) (At4 I3 I3) <> (r2 p b (At4 I2 I2) (At4 I3 I1) <> r3 p b (At4 I1 I2) (At4 I1 I1) (At4 I1 I0))
+
+  captures4-r2 : C.Player -> Board4 -> I4 -> List Sq4
+  captures4-r2 p b I0 = r2 p b (At4 I1 I0) (At4 I0 I0) <> (r2 p b (At4 I1 I1) (At4 I0 I2) <> r3 p b (At4 I2 I1) (At4 I2 I2) (At4 I2 I3))
+  captures4-r2 p b I1 = r2 p b (At4 I1 I1) (At4 I0 I1) <> (r2 p b (At4 I1 I2) (At4 I0 I3) <> r2 p b (At4 I2 I2) (At4 I2 I3))
+  captures4-r2 p b I2 = r2 p b (At4 I1 I2) (At4 I0 I2) <> (r2 p b (At4 I2 I1) (At4 I2 I0) <> r2 p b (At4 I1 I1) (At4 I0 I0))
+  captures4-r2 p b I3 = r2 p b (At4 I1 I3) (At4 I0 I3) <> (r3 p b (At4 I2 I2) (At4 I2 I1) (At4 I2 I0) <> r2 p b (At4 I1 I2) (At4 I0 I1))
+
+  captures4-r3 : C.Player -> Board4 -> I4 -> List Sq4
+  captures4-r3 p b I0 = r3 p b (At4 I2 I0) (At4 I1 I0) (At4 I0 I0) <> (r3 p b (At4 I2 I1) (At4 I1 I2) (At4 I0 I3) <> r3 p b (At4 I3 I1) (At4 I3 I2) (At4 I3 I3))
+  captures4-r3 p b I1 = r3 p b (At4 I2 I1) (At4 I1 I1) (At4 I0 I1) <> (r2 p b (At4 I2 I2) (At4 I1 I3) <> r2 p b (At4 I3 I2) (At4 I3 I3))
+  captures4-r3 p b I2 = r3 p b (At4 I2 I2) (At4 I1 I2) (At4 I0 I2) <> (r2 p b (At4 I3 I1) (At4 I3 I0) <> r2 p b (At4 I2 I1) (At4 I1 I0))
+  captures4-r3 p b I3 = r3 p b (At4 I2 I3) (At4 I1 I3) (At4 I0 I3) <> (r3 p b (At4 I3 I2) (At4 I3 I1) (At4 I3 I0) <> r3 p b (At4 I2 I2) (At4 I1 I1) (At4 I0 I0))
+
+  captures4-at : C.Player -> Board4 -> I4 -> I4 -> List Sq4
+  captures4-at p b I0 c = captures4-r0 p b c
+  captures4-at p b I1 c = captures4-r1 p b c
+  captures4-at p b I2 c = captures4-r2 p b c
+  captures4-at p b I3 c = captures4-r3 p b c
+
+captures4 : C.Player -> Board4 -> Sq4 -> List Sq4
+captures4 p b (At4 r c) = captures4-at p b r c
+
+private
+  eval0 : (p : C.Player) -> (b : Board4) -> (s : Sq4) -> (d : R.Direction) -> R.ray 4 d (to-sq4 s) = Nil -> R.captures-on p (to-board b) (to-sq4 s) d = to-sq4s no-sq4s
+  eval0 p b s d hr = by
+    have hr' : R.ray (C.size (to-board b)) d (to-sq4 s) = Nil := calc
+      R.ray (C.size (to-board b)) d (to-sq4 s)
+      = R.ray 4 d (to-sq4 s) := cong (size-to-board b)
+      = Nil := hr
+    calc
+      R.captures-on p (to-board b) (to-sq4 s) d
+      = Nil := R.captures-on-nil p (to-board b) (to-sq4 s) d hr'
+      = to-sq4s no-sq4s
+
+  eval1 : (p : C.Player) -> (b : Board4) -> (s : Sq4) -> (d : R.Direction) -> (s1 : Sq4) -> R.ray 4 d (to-sq4 s) = to-sq4 s1 :: Nil -> R.captures-on p (to-board b) (to-sq4 s) d = to-sq4s no-sq4s
+  eval1 p b s d s1 hr = by
+    have hr' : R.ray (C.size (to-board b)) d (to-sq4 s) = to-sq4 s1 :: Nil := calc
+      R.ray (C.size (to-board b)) d (to-sq4 s)
+      = R.ray 4 d (to-sq4 s) := cong (size-to-board b)
+      = to-sq4 s1 :: Nil := hr
+    have h1 : C.read (to-sq4 s1) (to-board b) = M.Just (read4 s1 b) := read4-eq s1 b
+    calc
+      R.captures-on p (to-board b) (to-sq4 s) d
+      = Nil := R.captures-on-one p (to-board b) (to-sq4 s) d (to-sq4 s1) (read4 s1 b) hr' h1
+      = to-sq4s no-sq4s
+
+  eval2 : (p : C.Player) -> (b : Board4) -> (s : Sq4) -> (d : R.Direction) -> (s1 s2 : Sq4) -> R.ray 4 d (to-sq4 s) = to-sq4 s1 :: to-sq4 s2 :: Nil -> R.captures-on p (to-board b) (to-sq4 s) d = to-sq4s (r2 p b s1 s2)
+  eval2 p b s d s1 s2 hr = by
+    have hr' : R.ray (C.size (to-board b)) d (to-sq4 s) = to-sq4 s1 :: to-sq4 s2 :: Nil := calc
+      R.ray (C.size (to-board b)) d (to-sq4 s)
+      = R.ray 4 d (to-sq4 s) := cong (size-to-board b)
+      = to-sq4 s1 :: to-sq4 s2 :: Nil := hr
+    have h1 : C.read (to-sq4 s1) (to-board b) = M.Just (read4 s1 b) := read4-eq s1 b
+    have h2 : C.read (to-sq4 s2) (to-board b) = M.Just (read4 s2 b) := read4-eq s2 b
+    calc
+      R.captures-on p (to-board b) (to-sq4 s) d
+      = R.ray-two p (to-sq4 s1) (read4 s1 b) (read4 s2 b) := R.captures-on-two p (to-board b) (to-sq4 s) d (to-sq4 s1) (to-sq4 s2) (read4 s1 b) (read4 s2 b) hr' h1 h2
+      = L.map to-sq4 (R.ray-two p s1 (read4 s1 b) (read4 s2 b)) := cong (R.map-ray-two to-sq4 p s1 (read4 s1 b) (read4 s2 b))
+      = L.map to-sq4 (r2 p b s1 s2)
+      = to-sq4s (r2 p b s1 s2) := to-sq4s-eq-map (r2 p b s1 s2)
+
+  eval3 : (p : C.Player) -> (b : Board4) -> (s : Sq4) -> (d : R.Direction) -> (s1 s2 s3 : Sq4) -> R.ray 4 d (to-sq4 s) = to-sq4 s1 :: to-sq4 s2 :: to-sq4 s3 :: Nil -> R.captures-on p (to-board b) (to-sq4 s) d = to-sq4s (r3 p b s1 s2 s3)
+  eval3 p b s d s1 s2 s3 hr = by
+    have hr' : R.ray (C.size (to-board b)) d (to-sq4 s) = to-sq4 s1 :: to-sq4 s2 :: to-sq4 s3 :: Nil := calc
+      R.ray (C.size (to-board b)) d (to-sq4 s)
+      = R.ray 4 d (to-sq4 s) := cong (size-to-board b)
+      = to-sq4 s1 :: to-sq4 s2 :: to-sq4 s3 :: Nil := hr
+    have h1 : C.read (to-sq4 s1) (to-board b) = M.Just (read4 s1 b) := read4-eq s1 b
+    have h2 : C.read (to-sq4 s2) (to-board b) = M.Just (read4 s2 b) := read4-eq s2 b
+    have h3 : C.read (to-sq4 s3) (to-board b) = M.Just (read4 s3 b) := read4-eq s3 b
+    calc
+      R.captures-on p (to-board b) (to-sq4 s) d
+      = R.ray-three p (to-sq4 s1) (to-sq4 s2) (read4 s1 b) (read4 s2 b) (read4 s3 b) := R.captures-on-three p (to-board b) (to-sq4 s) d (to-sq4 s1) (to-sq4 s2) (to-sq4 s3) (read4 s1 b) (read4 s2 b) (read4 s3 b) hr' h1 h2 h3
+      = L.map to-sq4 (R.ray-three p s1 s2 (read4 s1 b) (read4 s2 b) (read4 s3 b)) := cong (R.map-ray-three to-sq4 p s1 s2 (read4 s1 b) (read4 s2 b) (read4 s3 b))
+      = L.map to-sq4 (r3 p b s1 s2 s3)
+      = to-sq4s (r3 p b s1 s2 s3) := to-sq4s-eq-map (r3 p b s1 s2 s3)
+
+  combine8 : (p : C.Player) -> (b : Board4) -> (s : Sq4) -> (x0 x1 x2 x3 x4 x5 x6 x7 : List Sq4) ->
+    R.captures-on p (to-board b) (to-sq4 s) R.North = to-sq4s x0 ->
+    R.captures-on p (to-board b) (to-sq4 s) R.NorthEast = to-sq4s x1 ->
+    R.captures-on p (to-board b) (to-sq4 s) R.East = to-sq4s x2 ->
+    R.captures-on p (to-board b) (to-sq4 s) R.SouthEast = to-sq4s x3 ->
+    R.captures-on p (to-board b) (to-sq4 s) R.South = to-sq4s x4 ->
+    R.captures-on p (to-board b) (to-sq4 s) R.SouthWest = to-sq4s x5 ->
+    R.captures-on p (to-board b) (to-sq4 s) R.West = to-sq4s x6 ->
+    R.captures-on p (to-board b) (to-sq4 s) R.NorthWest = to-sq4s x7 ->
+    R.captures p (to-board b) (to-sq4 s) = to-sq4s (x0 <> (x1 <> (x2 <> (x3 <> (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s))))))))
+  combine8 p b s x0 x1 x2 x3 x4 x5 x6 x7 h0 h1 h2 h3 h4 h5 h6 h7 = calc
+    R.captures p (to-board b) (to-sq4 s)
+    = R.captures-on p (to-board b) (to-sq4 s) R.North <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthEast <> (R.captures-on p (to-board b) (to-sq4 s) R.East <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthEast <> (R.captures-on p (to-board b) (to-sq4 s) R.South <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthWest <> (R.captures-on p (to-board b) (to-sq4 s) R.West <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthWest <> Nil)))))))
+    = to-sq4s x0 <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthEast <> (R.captures-on p (to-board b) (to-sq4 s) R.East <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthEast <> (R.captures-on p (to-board b) (to-sq4 s) R.South <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthWest <> (R.captures-on p (to-board b) (to-sq4 s) R.West <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthWest <> Nil))))))) := cong h0
+    = to-sq4s x0 <> (to-sq4s x1 <> (R.captures-on p (to-board b) (to-sq4 s) R.East <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthEast <> (R.captures-on p (to-board b) (to-sq4 s) R.South <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthWest <> (R.captures-on p (to-board b) (to-sq4 s) R.West <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthWest <> Nil))))))) := cong h1
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthEast <> (R.captures-on p (to-board b) (to-sq4 s) R.South <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthWest <> (R.captures-on p (to-board b) (to-sq4 s) R.West <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthWest <> Nil))))))) := cong h2
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (R.captures-on p (to-board b) (to-sq4 s) R.South <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthWest <> (R.captures-on p (to-board b) (to-sq4 s) R.West <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthWest <> Nil))))))) := cong h3
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (to-sq4s x4 <> (R.captures-on p (to-board b) (to-sq4 s) R.SouthWest <> (R.captures-on p (to-board b) (to-sq4 s) R.West <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthWest <> Nil))))))) := cong h4
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (to-sq4s x4 <> (to-sq4s x5 <> (R.captures-on p (to-board b) (to-sq4 s) R.West <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthWest <> Nil))))))) := cong h5
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (to-sq4s x4 <> (to-sq4s x5 <> (to-sq4s x6 <> (R.captures-on p (to-board b) (to-sq4 s) R.NorthWest <> Nil))))))) := cong h6
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (to-sq4s x4 <> (to-sq4s x5 <> (to-sq4s x6 <> (to-sq4s x7 <> Nil))))))) := cong h7
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (to-sq4s x4 <> (to-sq4s x5 <> (to-sq4s x6 <> (to-sq4s x7 <> to-sq4s no-sq4s)))))))
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (to-sq4s x4 <> (to-sq4s x5 <> (to-sq4s x6 <> to-sq4s (x7 <> no-sq4s))))))) := cong (to-sq4s-append x7 no-sq4s)
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (to-sq4s x4 <> (to-sq4s x5 <> to-sq4s (x6 <> (x7 <> no-sq4s))))))) := cong (to-sq4s-append x6 (x7 <> no-sq4s))
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> (to-sq4s x4 <> to-sq4s (x5 <> (x6 <> (x7 <> no-sq4s))))))) := cong (to-sq4s-append x5 (x6 <> (x7 <> no-sq4s)))
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> (to-sq4s x3 <> to-sq4s (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s))))))) := cong (to-sq4s-append x4 (x5 <> (x6 <> (x7 <> no-sq4s))))
+    = to-sq4s x0 <> (to-sq4s x1 <> (to-sq4s x2 <> to-sq4s (x3 <> (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s))))))) := cong (to-sq4s-append x3 (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s)))))
+    = to-sq4s x0 <> (to-sq4s x1 <> to-sq4s (x2 <> (x3 <> (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s))))))) := cong (to-sq4s-append x2 (x3 <> (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s))))))
+    = to-sq4s x0 <> to-sq4s (x1 <> (x2 <> (x3 <> (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s))))))) := cong (to-sq4s-append x1 (x2 <> (x3 <> (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s)))))))
+    = to-sq4s (x0 <> (x1 <> (x2 <> (x3 <> (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s)))))))) := cong (to-sq4s-append x0 (x1 <> (x2 <> (x3 <> (x4 <> (x5 <> (x6 <> (x7 <> no-sq4s))))))))
+
+  strip-tail : (a b c : List Sq4) -> to-sq4s (a <> (b <> (c <> no-sq4s))) = to-sq4s (a <> (b <> c))
+  strip-tail a b c = calc
+    to-sq4s (a <> (b <> (c <> no-sq4s)))
+    = to-sq4s (a <> (b <> (c <> Nil)))
+    = to-sq4s (a <> (b <> c)) := cong (L.append-nil c)
+
+  captures4-r0-eq : (p : C.Player) -> (b : Board4) -> (c : I4) -> R.captures p (to-board b) (to-sq4 (At4 I0 c)) = to-sq4s (captures4-r0 p b c)
+  captures4-r0-eq p b I0 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I0 I0)) = Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I0 I0)) = Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I0 I0)) = to-sq4 (At4 I0 I1) :: to-sq4 (At4 I0 I2) :: to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I0 I0)) = to-sq4 (At4 I1 I1) :: to-sq4 (At4 I2 I2) :: to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I0 I0)) = to-sq4 (At4 I1 I0) :: to-sq4 (At4 I2 I0) :: to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I0 I0)) = Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I0 I0)) = Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I0 I0)) = Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I0)) R.North = to-sq4s no-sq4s := eval0 p b (At4 I0 I0) R.North r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I0)) R.NorthEast = to-sq4s no-sq4s := eval0 p b (At4 I0 I0) R.NorthEast r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I0)) R.East = to-sq4s (r3 p b (At4 I0 I1) (At4 I0 I2) (At4 I0 I3)) := eval3 p b (At4 I0 I0) R.East (At4 I0 I1) (At4 I0 I2) (At4 I0 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I0)) R.SouthEast = to-sq4s (r3 p b (At4 I1 I1) (At4 I2 I2) (At4 I3 I3)) := eval3 p b (At4 I0 I0) R.SouthEast (At4 I1 I1) (At4 I2 I2) (At4 I3 I3) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I0)) R.South = to-sq4s (r3 p b (At4 I1 I0) (At4 I2 I0) (At4 I3 I0)) := eval3 p b (At4 I0 I0) R.South (At4 I1 I0) (At4 I2 I0) (At4 I3 I0) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I0)) R.SouthWest = to-sq4s no-sq4s := eval0 p b (At4 I0 I0) R.SouthWest r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I0)) R.West = to-sq4s no-sq4s := eval0 p b (At4 I0 I0) R.West r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I0)) R.NorthWest = to-sq4s no-sq4s := eval0 p b (At4 I0 I0) R.NorthWest r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I0 I0)) = to-sq4s (no-sq4s <> (no-sq4s <> (r3 p b (At4 I0 I1) (At4 I0 I2) (At4 I0 I3) <> (r3 p b (At4 I1 I1) (At4 I2 I2) (At4 I3 I3) <> (r3 p b (At4 I1 I0) (At4 I2 I0) (At4 I3 I0) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I0 I0) no-sq4s no-sq4s (r3 p b (At4 I0 I1) (At4 I0 I2) (At4 I0 I3)) (r3 p b (At4 I1 I1) (At4 I2 I2) (At4 I3 I3)) (r3 p b (At4 I1 I0) (At4 I2 I0) (At4 I3 I0)) no-sq4s no-sq4s no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I0 I0))
+      = to-sq4s (no-sq4s <> (no-sq4s <> (r3 p b (At4 I0 I1) (At4 I0 I2) (At4 I0 I3) <> (r3 p b (At4 I1 I1) (At4 I2 I2) (At4 I3 I3) <> (r3 p b (At4 I1 I0) (At4 I2 I0) (At4 I3 I0) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r3 p b (At4 I0 I1) (At4 I0 I2) (At4 I0 I3) <> (r3 p b (At4 I1 I1) (At4 I2 I2) (At4 I3 I3) <> (r3 p b (At4 I1 I0) (At4 I2 I0) (At4 I3 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r0 p b I0) := strip-tail (r3 p b (At4 I0 I1) (At4 I0 I2) (At4 I0 I3)) (r3 p b (At4 I1 I1) (At4 I2 I2) (At4 I3 I3)) (r3 p b (At4 I1 I0) (At4 I2 I0) (At4 I3 I0))
+  captures4-r0-eq p b I1 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I0 I1)) = Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I0 I1)) = Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I0 I1)) = to-sq4 (At4 I0 I2) :: to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I0 I1)) = to-sq4 (At4 I1 I2) :: to-sq4 (At4 I2 I3) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I0 I1)) = to-sq4 (At4 I1 I1) :: to-sq4 (At4 I2 I1) :: to-sq4 (At4 I3 I1) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I0 I1)) = to-sq4 (At4 I1 I0) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I0 I1)) = to-sq4 (At4 I0 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I0 I1)) = Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I1)) R.North = to-sq4s no-sq4s := eval0 p b (At4 I0 I1) R.North r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I1)) R.NorthEast = to-sq4s no-sq4s := eval0 p b (At4 I0 I1) R.NorthEast r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I1)) R.East = to-sq4s (r2 p b (At4 I0 I2) (At4 I0 I3)) := eval2 p b (At4 I0 I1) R.East (At4 I0 I2) (At4 I0 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I1)) R.SouthEast = to-sq4s (r2 p b (At4 I1 I2) (At4 I2 I3)) := eval2 p b (At4 I0 I1) R.SouthEast (At4 I1 I2) (At4 I2 I3) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I1)) R.South = to-sq4s (r3 p b (At4 I1 I1) (At4 I2 I1) (At4 I3 I1)) := eval3 p b (At4 I0 I1) R.South (At4 I1 I1) (At4 I2 I1) (At4 I3 I1) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I1)) R.SouthWest = to-sq4s no-sq4s := eval1 p b (At4 I0 I1) R.SouthWest (At4 I1 I0) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I1)) R.West = to-sq4s no-sq4s := eval1 p b (At4 I0 I1) R.West (At4 I0 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I1)) R.NorthWest = to-sq4s no-sq4s := eval0 p b (At4 I0 I1) R.NorthWest r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I0 I1)) = to-sq4s (no-sq4s <> (no-sq4s <> (r2 p b (At4 I0 I2) (At4 I0 I3) <> (r2 p b (At4 I1 I2) (At4 I2 I3) <> (r3 p b (At4 I1 I1) (At4 I2 I1) (At4 I3 I1) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I0 I1) no-sq4s no-sq4s (r2 p b (At4 I0 I2) (At4 I0 I3)) (r2 p b (At4 I1 I2) (At4 I2 I3)) (r3 p b (At4 I1 I1) (At4 I2 I1) (At4 I3 I1)) no-sq4s no-sq4s no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I0 I1))
+      = to-sq4s (no-sq4s <> (no-sq4s <> (r2 p b (At4 I0 I2) (At4 I0 I3) <> (r2 p b (At4 I1 I2) (At4 I2 I3) <> (r3 p b (At4 I1 I1) (At4 I2 I1) (At4 I3 I1) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r2 p b (At4 I0 I2) (At4 I0 I3) <> (r2 p b (At4 I1 I2) (At4 I2 I3) <> (r3 p b (At4 I1 I1) (At4 I2 I1) (At4 I3 I1) <> no-sq4s)))
+      = to-sq4s (captures4-r0 p b I1) := strip-tail (r2 p b (At4 I0 I2) (At4 I0 I3)) (r2 p b (At4 I1 I2) (At4 I2 I3)) (r3 p b (At4 I1 I1) (At4 I2 I1) (At4 I3 I1))
+  captures4-r0-eq p b I2 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I0 I2)) = Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I0 I2)) = Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I0 I2)) = to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I0 I2)) = to-sq4 (At4 I1 I3) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I0 I2)) = to-sq4 (At4 I1 I2) :: to-sq4 (At4 I2 I2) :: to-sq4 (At4 I3 I2) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I0 I2)) = to-sq4 (At4 I1 I1) :: to-sq4 (At4 I2 I0) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I0 I2)) = to-sq4 (At4 I0 I1) :: to-sq4 (At4 I0 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I0 I2)) = Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I2)) R.North = to-sq4s no-sq4s := eval0 p b (At4 I0 I2) R.North r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I2)) R.NorthEast = to-sq4s no-sq4s := eval0 p b (At4 I0 I2) R.NorthEast r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I2)) R.East = to-sq4s no-sq4s := eval1 p b (At4 I0 I2) R.East (At4 I0 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I2)) R.SouthEast = to-sq4s no-sq4s := eval1 p b (At4 I0 I2) R.SouthEast (At4 I1 I3) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I2)) R.South = to-sq4s (r3 p b (At4 I1 I2) (At4 I2 I2) (At4 I3 I2)) := eval3 p b (At4 I0 I2) R.South (At4 I1 I2) (At4 I2 I2) (At4 I3 I2) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I2)) R.SouthWest = to-sq4s (r2 p b (At4 I1 I1) (At4 I2 I0)) := eval2 p b (At4 I0 I2) R.SouthWest (At4 I1 I1) (At4 I2 I0) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I2)) R.West = to-sq4s (r2 p b (At4 I0 I1) (At4 I0 I0)) := eval2 p b (At4 I0 I2) R.West (At4 I0 I1) (At4 I0 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I2)) R.NorthWest = to-sq4s no-sq4s := eval0 p b (At4 I0 I2) R.NorthWest r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I0 I2)) = to-sq4s (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r3 p b (At4 I1 I2) (At4 I2 I2) (At4 I3 I2) <> (r2 p b (At4 I1 I1) (At4 I2 I0) <> (r2 p b (At4 I0 I1) (At4 I0 I0) <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I0 I2) no-sq4s no-sq4s no-sq4s no-sq4s (r3 p b (At4 I1 I2) (At4 I2 I2) (At4 I3 I2)) (r2 p b (At4 I1 I1) (At4 I2 I0)) (r2 p b (At4 I0 I1) (At4 I0 I0)) no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I0 I2))
+      = to-sq4s (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r3 p b (At4 I1 I2) (At4 I2 I2) (At4 I3 I2) <> (r2 p b (At4 I1 I1) (At4 I2 I0) <> (r2 p b (At4 I0 I1) (At4 I0 I0) <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r3 p b (At4 I1 I2) (At4 I2 I2) (At4 I3 I2) <> (r2 p b (At4 I1 I1) (At4 I2 I0) <> (r2 p b (At4 I0 I1) (At4 I0 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r0 p b I2) := strip-tail (r3 p b (At4 I1 I2) (At4 I2 I2) (At4 I3 I2)) (r2 p b (At4 I1 I1) (At4 I2 I0)) (r2 p b (At4 I0 I1) (At4 I0 I0))
+  captures4-r0-eq p b I3 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I0 I3)) = Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I0 I3)) = Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I0 I3)) = Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I0 I3)) = Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I0 I3)) = to-sq4 (At4 I1 I3) :: to-sq4 (At4 I2 I3) :: to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I0 I3)) = to-sq4 (At4 I1 I2) :: to-sq4 (At4 I2 I1) :: to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I0 I3)) = to-sq4 (At4 I0 I2) :: to-sq4 (At4 I0 I1) :: to-sq4 (At4 I0 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I0 I3)) = Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I3)) R.North = to-sq4s no-sq4s := eval0 p b (At4 I0 I3) R.North r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I3)) R.NorthEast = to-sq4s no-sq4s := eval0 p b (At4 I0 I3) R.NorthEast r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I3)) R.East = to-sq4s no-sq4s := eval0 p b (At4 I0 I3) R.East r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I3)) R.SouthEast = to-sq4s no-sq4s := eval0 p b (At4 I0 I3) R.SouthEast r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I3)) R.South = to-sq4s (r3 p b (At4 I1 I3) (At4 I2 I3) (At4 I3 I3)) := eval3 p b (At4 I0 I3) R.South (At4 I1 I3) (At4 I2 I3) (At4 I3 I3) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I3)) R.SouthWest = to-sq4s (r3 p b (At4 I1 I2) (At4 I2 I1) (At4 I3 I0)) := eval3 p b (At4 I0 I3) R.SouthWest (At4 I1 I2) (At4 I2 I1) (At4 I3 I0) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I3)) R.West = to-sq4s (r3 p b (At4 I0 I2) (At4 I0 I1) (At4 I0 I0)) := eval3 p b (At4 I0 I3) R.West (At4 I0 I2) (At4 I0 I1) (At4 I0 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I0 I3)) R.NorthWest = to-sq4s no-sq4s := eval0 p b (At4 I0 I3) R.NorthWest r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I0 I3)) = to-sq4s (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r3 p b (At4 I1 I3) (At4 I2 I3) (At4 I3 I3) <> (r3 p b (At4 I1 I2) (At4 I2 I1) (At4 I3 I0) <> (r3 p b (At4 I0 I2) (At4 I0 I1) (At4 I0 I0) <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I0 I3) no-sq4s no-sq4s no-sq4s no-sq4s (r3 p b (At4 I1 I3) (At4 I2 I3) (At4 I3 I3)) (r3 p b (At4 I1 I2) (At4 I2 I1) (At4 I3 I0)) (r3 p b (At4 I0 I2) (At4 I0 I1) (At4 I0 I0)) no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I0 I3))
+      = to-sq4s (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r3 p b (At4 I1 I3) (At4 I2 I3) (At4 I3 I3) <> (r3 p b (At4 I1 I2) (At4 I2 I1) (At4 I3 I0) <> (r3 p b (At4 I0 I2) (At4 I0 I1) (At4 I0 I0) <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r3 p b (At4 I1 I3) (At4 I2 I3) (At4 I3 I3) <> (r3 p b (At4 I1 I2) (At4 I2 I1) (At4 I3 I0) <> (r3 p b (At4 I0 I2) (At4 I0 I1) (At4 I0 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r0 p b I3) := strip-tail (r3 p b (At4 I1 I3) (At4 I2 I3) (At4 I3 I3)) (r3 p b (At4 I1 I2) (At4 I2 I1) (At4 I3 I0)) (r3 p b (At4 I0 I2) (At4 I0 I1) (At4 I0 I0))
+
+  captures4-r1-eq : (p : C.Player) -> (b : Board4) -> (c : I4) -> R.captures p (to-board b) (to-sq4 (At4 I1 c)) = to-sq4s (captures4-r1 p b c)
+  captures4-r1-eq p b I0 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I1 I0)) = to-sq4 (At4 I0 I0) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I1 I0)) = to-sq4 (At4 I0 I1) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I1 I0)) = to-sq4 (At4 I1 I1) :: to-sq4 (At4 I1 I2) :: to-sq4 (At4 I1 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I1 I0)) = to-sq4 (At4 I2 I1) :: to-sq4 (At4 I3 I2) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I1 I0)) = to-sq4 (At4 I2 I0) :: to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I1 I0)) = Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I1 I0)) = Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I1 I0)) = Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I0)) R.North = to-sq4s no-sq4s := eval1 p b (At4 I1 I0) R.North (At4 I0 I0) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I0)) R.NorthEast = to-sq4s no-sq4s := eval1 p b (At4 I1 I0) R.NorthEast (At4 I0 I1) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I0)) R.East = to-sq4s (r3 p b (At4 I1 I1) (At4 I1 I2) (At4 I1 I3)) := eval3 p b (At4 I1 I0) R.East (At4 I1 I1) (At4 I1 I2) (At4 I1 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I0)) R.SouthEast = to-sq4s (r2 p b (At4 I2 I1) (At4 I3 I2)) := eval2 p b (At4 I1 I0) R.SouthEast (At4 I2 I1) (At4 I3 I2) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I0)) R.South = to-sq4s (r2 p b (At4 I2 I0) (At4 I3 I0)) := eval2 p b (At4 I1 I0) R.South (At4 I2 I0) (At4 I3 I0) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I0)) R.SouthWest = to-sq4s no-sq4s := eval0 p b (At4 I1 I0) R.SouthWest r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I0)) R.West = to-sq4s no-sq4s := eval0 p b (At4 I1 I0) R.West r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I0)) R.NorthWest = to-sq4s no-sq4s := eval0 p b (At4 I1 I0) R.NorthWest r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I1 I0)) = to-sq4s (no-sq4s <> (no-sq4s <> (r3 p b (At4 I1 I1) (At4 I1 I2) (At4 I1 I3) <> (r2 p b (At4 I2 I1) (At4 I3 I2) <> (r2 p b (At4 I2 I0) (At4 I3 I0) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I1 I0) no-sq4s no-sq4s (r3 p b (At4 I1 I1) (At4 I1 I2) (At4 I1 I3)) (r2 p b (At4 I2 I1) (At4 I3 I2)) (r2 p b (At4 I2 I0) (At4 I3 I0)) no-sq4s no-sq4s no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I1 I0))
+      = to-sq4s (no-sq4s <> (no-sq4s <> (r3 p b (At4 I1 I1) (At4 I1 I2) (At4 I1 I3) <> (r2 p b (At4 I2 I1) (At4 I3 I2) <> (r2 p b (At4 I2 I0) (At4 I3 I0) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r3 p b (At4 I1 I1) (At4 I1 I2) (At4 I1 I3) <> (r2 p b (At4 I2 I1) (At4 I3 I2) <> (r2 p b (At4 I2 I0) (At4 I3 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r1 p b I0) := strip-tail (r3 p b (At4 I1 I1) (At4 I1 I2) (At4 I1 I3)) (r2 p b (At4 I2 I1) (At4 I3 I2)) (r2 p b (At4 I2 I0) (At4 I3 I0))
+  captures4-r1-eq p b I1 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I1 I1)) = to-sq4 (At4 I0 I1) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I1 I1)) = to-sq4 (At4 I0 I2) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I1 I1)) = to-sq4 (At4 I1 I2) :: to-sq4 (At4 I1 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I1 I1)) = to-sq4 (At4 I2 I2) :: to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I1 I1)) = to-sq4 (At4 I2 I1) :: to-sq4 (At4 I3 I1) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I1 I1)) = to-sq4 (At4 I2 I0) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I1 I1)) = to-sq4 (At4 I1 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I1 I1)) = to-sq4 (At4 I0 I0) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I1)) R.North = to-sq4s no-sq4s := eval1 p b (At4 I1 I1) R.North (At4 I0 I1) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I1)) R.NorthEast = to-sq4s no-sq4s := eval1 p b (At4 I1 I1) R.NorthEast (At4 I0 I2) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I1)) R.East = to-sq4s (r2 p b (At4 I1 I2) (At4 I1 I3)) := eval2 p b (At4 I1 I1) R.East (At4 I1 I2) (At4 I1 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I1)) R.SouthEast = to-sq4s (r2 p b (At4 I2 I2) (At4 I3 I3)) := eval2 p b (At4 I1 I1) R.SouthEast (At4 I2 I2) (At4 I3 I3) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I1)) R.South = to-sq4s (r2 p b (At4 I2 I1) (At4 I3 I1)) := eval2 p b (At4 I1 I1) R.South (At4 I2 I1) (At4 I3 I1) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I1)) R.SouthWest = to-sq4s no-sq4s := eval1 p b (At4 I1 I1) R.SouthWest (At4 I2 I0) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I1)) R.West = to-sq4s no-sq4s := eval1 p b (At4 I1 I1) R.West (At4 I1 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I1)) R.NorthWest = to-sq4s no-sq4s := eval1 p b (At4 I1 I1) R.NorthWest (At4 I0 I0) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I1 I1)) = to-sq4s (no-sq4s <> (no-sq4s <> (r2 p b (At4 I1 I2) (At4 I1 I3) <> (r2 p b (At4 I2 I2) (At4 I3 I3) <> (r2 p b (At4 I2 I1) (At4 I3 I1) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I1 I1) no-sq4s no-sq4s (r2 p b (At4 I1 I2) (At4 I1 I3)) (r2 p b (At4 I2 I2) (At4 I3 I3)) (r2 p b (At4 I2 I1) (At4 I3 I1)) no-sq4s no-sq4s no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I1 I1))
+      = to-sq4s (no-sq4s <> (no-sq4s <> (r2 p b (At4 I1 I2) (At4 I1 I3) <> (r2 p b (At4 I2 I2) (At4 I3 I3) <> (r2 p b (At4 I2 I1) (At4 I3 I1) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r2 p b (At4 I1 I2) (At4 I1 I3) <> (r2 p b (At4 I2 I2) (At4 I3 I3) <> (r2 p b (At4 I2 I1) (At4 I3 I1) <> no-sq4s)))
+      = to-sq4s (captures4-r1 p b I1) := strip-tail (r2 p b (At4 I1 I2) (At4 I1 I3)) (r2 p b (At4 I2 I2) (At4 I3 I3)) (r2 p b (At4 I2 I1) (At4 I3 I1))
+  captures4-r1-eq p b I2 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I1 I2)) = to-sq4 (At4 I0 I2) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I1 I2)) = to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I1 I2)) = to-sq4 (At4 I1 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I1 I2)) = to-sq4 (At4 I2 I3) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I1 I2)) = to-sq4 (At4 I2 I2) :: to-sq4 (At4 I3 I2) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I1 I2)) = to-sq4 (At4 I2 I1) :: to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I1 I2)) = to-sq4 (At4 I1 I1) :: to-sq4 (At4 I1 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I1 I2)) = to-sq4 (At4 I0 I1) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I2)) R.North = to-sq4s no-sq4s := eval1 p b (At4 I1 I2) R.North (At4 I0 I2) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I2)) R.NorthEast = to-sq4s no-sq4s := eval1 p b (At4 I1 I2) R.NorthEast (At4 I0 I3) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I2)) R.East = to-sq4s no-sq4s := eval1 p b (At4 I1 I2) R.East (At4 I1 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I2)) R.SouthEast = to-sq4s no-sq4s := eval1 p b (At4 I1 I2) R.SouthEast (At4 I2 I3) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I2)) R.South = to-sq4s (r2 p b (At4 I2 I2) (At4 I3 I2)) := eval2 p b (At4 I1 I2) R.South (At4 I2 I2) (At4 I3 I2) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I2)) R.SouthWest = to-sq4s (r2 p b (At4 I2 I1) (At4 I3 I0)) := eval2 p b (At4 I1 I2) R.SouthWest (At4 I2 I1) (At4 I3 I0) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I2)) R.West = to-sq4s (r2 p b (At4 I1 I1) (At4 I1 I0)) := eval2 p b (At4 I1 I2) R.West (At4 I1 I1) (At4 I1 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I2)) R.NorthWest = to-sq4s no-sq4s := eval1 p b (At4 I1 I2) R.NorthWest (At4 I0 I1) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I1 I2)) = to-sq4s (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r2 p b (At4 I2 I2) (At4 I3 I2) <> (r2 p b (At4 I2 I1) (At4 I3 I0) <> (r2 p b (At4 I1 I1) (At4 I1 I0) <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I1 I2) no-sq4s no-sq4s no-sq4s no-sq4s (r2 p b (At4 I2 I2) (At4 I3 I2)) (r2 p b (At4 I2 I1) (At4 I3 I0)) (r2 p b (At4 I1 I1) (At4 I1 I0)) no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I1 I2))
+      = to-sq4s (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r2 p b (At4 I2 I2) (At4 I3 I2) <> (r2 p b (At4 I2 I1) (At4 I3 I0) <> (r2 p b (At4 I1 I1) (At4 I1 I0) <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r2 p b (At4 I2 I2) (At4 I3 I2) <> (r2 p b (At4 I2 I1) (At4 I3 I0) <> (r2 p b (At4 I1 I1) (At4 I1 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r1 p b I2) := strip-tail (r2 p b (At4 I2 I2) (At4 I3 I2)) (r2 p b (At4 I2 I1) (At4 I3 I0)) (r2 p b (At4 I1 I1) (At4 I1 I0))
+  captures4-r1-eq p b I3 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I1 I3)) = to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I1 I3)) = Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I1 I3)) = Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I1 I3)) = Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I1 I3)) = to-sq4 (At4 I2 I3) :: to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I1 I3)) = to-sq4 (At4 I2 I2) :: to-sq4 (At4 I3 I1) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I1 I3)) = to-sq4 (At4 I1 I2) :: to-sq4 (At4 I1 I1) :: to-sq4 (At4 I1 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I1 I3)) = to-sq4 (At4 I0 I2) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I3)) R.North = to-sq4s no-sq4s := eval1 p b (At4 I1 I3) R.North (At4 I0 I3) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I3)) R.NorthEast = to-sq4s no-sq4s := eval0 p b (At4 I1 I3) R.NorthEast r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I3)) R.East = to-sq4s no-sq4s := eval0 p b (At4 I1 I3) R.East r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I3)) R.SouthEast = to-sq4s no-sq4s := eval0 p b (At4 I1 I3) R.SouthEast r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I3)) R.South = to-sq4s (r2 p b (At4 I2 I3) (At4 I3 I3)) := eval2 p b (At4 I1 I3) R.South (At4 I2 I3) (At4 I3 I3) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I3)) R.SouthWest = to-sq4s (r2 p b (At4 I2 I2) (At4 I3 I1)) := eval2 p b (At4 I1 I3) R.SouthWest (At4 I2 I2) (At4 I3 I1) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I3)) R.West = to-sq4s (r3 p b (At4 I1 I2) (At4 I1 I1) (At4 I1 I0)) := eval3 p b (At4 I1 I3) R.West (At4 I1 I2) (At4 I1 I1) (At4 I1 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I1 I3)) R.NorthWest = to-sq4s no-sq4s := eval1 p b (At4 I1 I3) R.NorthWest (At4 I0 I2) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I1 I3)) = to-sq4s (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r2 p b (At4 I2 I3) (At4 I3 I3) <> (r2 p b (At4 I2 I2) (At4 I3 I1) <> (r3 p b (At4 I1 I2) (At4 I1 I1) (At4 I1 I0) <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I1 I3) no-sq4s no-sq4s no-sq4s no-sq4s (r2 p b (At4 I2 I3) (At4 I3 I3)) (r2 p b (At4 I2 I2) (At4 I3 I1)) (r3 p b (At4 I1 I2) (At4 I1 I1) (At4 I1 I0)) no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I1 I3))
+      = to-sq4s (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r2 p b (At4 I2 I3) (At4 I3 I3) <> (r2 p b (At4 I2 I2) (At4 I3 I1) <> (r3 p b (At4 I1 I2) (At4 I1 I1) (At4 I1 I0) <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r2 p b (At4 I2 I3) (At4 I3 I3) <> (r2 p b (At4 I2 I2) (At4 I3 I1) <> (r3 p b (At4 I1 I2) (At4 I1 I1) (At4 I1 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r1 p b I3) := strip-tail (r2 p b (At4 I2 I3) (At4 I3 I3)) (r2 p b (At4 I2 I2) (At4 I3 I1)) (r3 p b (At4 I1 I2) (At4 I1 I1) (At4 I1 I0))
+
+  captures4-r2-eq : (p : C.Player) -> (b : Board4) -> (c : I4) -> R.captures p (to-board b) (to-sq4 (At4 I2 c)) = to-sq4s (captures4-r2 p b c)
+  captures4-r2-eq p b I0 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I2 I0)) = to-sq4 (At4 I1 I0) :: to-sq4 (At4 I0 I0) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I2 I0)) = to-sq4 (At4 I1 I1) :: to-sq4 (At4 I0 I2) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I2 I0)) = to-sq4 (At4 I2 I1) :: to-sq4 (At4 I2 I2) :: to-sq4 (At4 I2 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I2 I0)) = to-sq4 (At4 I3 I1) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I2 I0)) = to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I2 I0)) = Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I2 I0)) = Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I2 I0)) = Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I0)) R.North = to-sq4s (r2 p b (At4 I1 I0) (At4 I0 I0)) := eval2 p b (At4 I2 I0) R.North (At4 I1 I0) (At4 I0 I0) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I0)) R.NorthEast = to-sq4s (r2 p b (At4 I1 I1) (At4 I0 I2)) := eval2 p b (At4 I2 I0) R.NorthEast (At4 I1 I1) (At4 I0 I2) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I0)) R.East = to-sq4s (r3 p b (At4 I2 I1) (At4 I2 I2) (At4 I2 I3)) := eval3 p b (At4 I2 I0) R.East (At4 I2 I1) (At4 I2 I2) (At4 I2 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I0)) R.SouthEast = to-sq4s no-sq4s := eval1 p b (At4 I2 I0) R.SouthEast (At4 I3 I1) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I0)) R.South = to-sq4s no-sq4s := eval1 p b (At4 I2 I0) R.South (At4 I3 I0) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I0)) R.SouthWest = to-sq4s no-sq4s := eval0 p b (At4 I2 I0) R.SouthWest r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I0)) R.West = to-sq4s no-sq4s := eval0 p b (At4 I2 I0) R.West r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I0)) R.NorthWest = to-sq4s no-sq4s := eval0 p b (At4 I2 I0) R.NorthWest r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I2 I0)) = to-sq4s (r2 p b (At4 I1 I0) (At4 I0 I0) <> (r2 p b (At4 I1 I1) (At4 I0 I2) <> (r3 p b (At4 I2 I1) (At4 I2 I2) (At4 I2 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I2 I0) (r2 p b (At4 I1 I0) (At4 I0 I0)) (r2 p b (At4 I1 I1) (At4 I0 I2)) (r3 p b (At4 I2 I1) (At4 I2 I2) (At4 I2 I3)) no-sq4s no-sq4s no-sq4s no-sq4s no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I2 I0))
+      = to-sq4s (r2 p b (At4 I1 I0) (At4 I0 I0) <> (r2 p b (At4 I1 I1) (At4 I0 I2) <> (r3 p b (At4 I2 I1) (At4 I2 I2) (At4 I2 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r2 p b (At4 I1 I0) (At4 I0 I0) <> (r2 p b (At4 I1 I1) (At4 I0 I2) <> (r3 p b (At4 I2 I1) (At4 I2 I2) (At4 I2 I3) <> no-sq4s)))
+      = to-sq4s (captures4-r2 p b I0) := strip-tail (r2 p b (At4 I1 I0) (At4 I0 I0)) (r2 p b (At4 I1 I1) (At4 I0 I2)) (r3 p b (At4 I2 I1) (At4 I2 I2) (At4 I2 I3))
+  captures4-r2-eq p b I1 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I2 I1)) = to-sq4 (At4 I1 I1) :: to-sq4 (At4 I0 I1) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I2 I1)) = to-sq4 (At4 I1 I2) :: to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I2 I1)) = to-sq4 (At4 I2 I2) :: to-sq4 (At4 I2 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I2 I1)) = to-sq4 (At4 I3 I2) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I2 I1)) = to-sq4 (At4 I3 I1) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I2 I1)) = to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I2 I1)) = to-sq4 (At4 I2 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I2 I1)) = to-sq4 (At4 I1 I0) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I1)) R.North = to-sq4s (r2 p b (At4 I1 I1) (At4 I0 I1)) := eval2 p b (At4 I2 I1) R.North (At4 I1 I1) (At4 I0 I1) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I1)) R.NorthEast = to-sq4s (r2 p b (At4 I1 I2) (At4 I0 I3)) := eval2 p b (At4 I2 I1) R.NorthEast (At4 I1 I2) (At4 I0 I3) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I1)) R.East = to-sq4s (r2 p b (At4 I2 I2) (At4 I2 I3)) := eval2 p b (At4 I2 I1) R.East (At4 I2 I2) (At4 I2 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I1)) R.SouthEast = to-sq4s no-sq4s := eval1 p b (At4 I2 I1) R.SouthEast (At4 I3 I2) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I1)) R.South = to-sq4s no-sq4s := eval1 p b (At4 I2 I1) R.South (At4 I3 I1) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I1)) R.SouthWest = to-sq4s no-sq4s := eval1 p b (At4 I2 I1) R.SouthWest (At4 I3 I0) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I1)) R.West = to-sq4s no-sq4s := eval1 p b (At4 I2 I1) R.West (At4 I2 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I1)) R.NorthWest = to-sq4s no-sq4s := eval1 p b (At4 I2 I1) R.NorthWest (At4 I1 I0) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I2 I1)) = to-sq4s (r2 p b (At4 I1 I1) (At4 I0 I1) <> (r2 p b (At4 I1 I2) (At4 I0 I3) <> (r2 p b (At4 I2 I2) (At4 I2 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I2 I1) (r2 p b (At4 I1 I1) (At4 I0 I1)) (r2 p b (At4 I1 I2) (At4 I0 I3)) (r2 p b (At4 I2 I2) (At4 I2 I3)) no-sq4s no-sq4s no-sq4s no-sq4s no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I2 I1))
+      = to-sq4s (r2 p b (At4 I1 I1) (At4 I0 I1) <> (r2 p b (At4 I1 I2) (At4 I0 I3) <> (r2 p b (At4 I2 I2) (At4 I2 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r2 p b (At4 I1 I1) (At4 I0 I1) <> (r2 p b (At4 I1 I2) (At4 I0 I3) <> (r2 p b (At4 I2 I2) (At4 I2 I3) <> no-sq4s)))
+      = to-sq4s (captures4-r2 p b I1) := strip-tail (r2 p b (At4 I1 I1) (At4 I0 I1)) (r2 p b (At4 I1 I2) (At4 I0 I3)) (r2 p b (At4 I2 I2) (At4 I2 I3))
+  captures4-r2-eq p b I2 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I2 I2)) = to-sq4 (At4 I1 I2) :: to-sq4 (At4 I0 I2) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I2 I2)) = to-sq4 (At4 I1 I3) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I2 I2)) = to-sq4 (At4 I2 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I2 I2)) = to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I2 I2)) = to-sq4 (At4 I3 I2) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I2 I2)) = to-sq4 (At4 I3 I1) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I2 I2)) = to-sq4 (At4 I2 I1) :: to-sq4 (At4 I2 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I2 I2)) = to-sq4 (At4 I1 I1) :: to-sq4 (At4 I0 I0) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I2)) R.North = to-sq4s (r2 p b (At4 I1 I2) (At4 I0 I2)) := eval2 p b (At4 I2 I2) R.North (At4 I1 I2) (At4 I0 I2) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I2)) R.NorthEast = to-sq4s no-sq4s := eval1 p b (At4 I2 I2) R.NorthEast (At4 I1 I3) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I2)) R.East = to-sq4s no-sq4s := eval1 p b (At4 I2 I2) R.East (At4 I2 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I2)) R.SouthEast = to-sq4s no-sq4s := eval1 p b (At4 I2 I2) R.SouthEast (At4 I3 I3) r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I2)) R.South = to-sq4s no-sq4s := eval1 p b (At4 I2 I2) R.South (At4 I3 I2) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I2)) R.SouthWest = to-sq4s no-sq4s := eval1 p b (At4 I2 I2) R.SouthWest (At4 I3 I1) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I2)) R.West = to-sq4s (r2 p b (At4 I2 I1) (At4 I2 I0)) := eval2 p b (At4 I2 I2) R.West (At4 I2 I1) (At4 I2 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I2)) R.NorthWest = to-sq4s (r2 p b (At4 I1 I1) (At4 I0 I0)) := eval2 p b (At4 I2 I2) R.NorthWest (At4 I1 I1) (At4 I0 I0) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I2 I2)) = to-sq4s (r2 p b (At4 I1 I2) (At4 I0 I2) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r2 p b (At4 I2 I1) (At4 I2 I0) <> (r2 p b (At4 I1 I1) (At4 I0 I0) <> no-sq4s)))))))) := combine8 p b (At4 I2 I2) (r2 p b (At4 I1 I2) (At4 I0 I2)) no-sq4s no-sq4s no-sq4s no-sq4s no-sq4s (r2 p b (At4 I2 I1) (At4 I2 I0)) (r2 p b (At4 I1 I1) (At4 I0 I0)) c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I2 I2))
+      = to-sq4s (r2 p b (At4 I1 I2) (At4 I0 I2) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r2 p b (At4 I2 I1) (At4 I2 I0) <> (r2 p b (At4 I1 I1) (At4 I0 I0) <> no-sq4s)))))))) := h
+      = to-sq4s (r2 p b (At4 I1 I2) (At4 I0 I2) <> (r2 p b (At4 I2 I1) (At4 I2 I0) <> (r2 p b (At4 I1 I1) (At4 I0 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r2 p b I2) := strip-tail (r2 p b (At4 I1 I2) (At4 I0 I2)) (r2 p b (At4 I2 I1) (At4 I2 I0)) (r2 p b (At4 I1 I1) (At4 I0 I0))
+  captures4-r2-eq p b I3 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I2 I3)) = to-sq4 (At4 I1 I3) :: to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I2 I3)) = Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I2 I3)) = Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I2 I3)) = Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I2 I3)) = to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I2 I3)) = to-sq4 (At4 I3 I2) :: Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I2 I3)) = to-sq4 (At4 I2 I2) :: to-sq4 (At4 I2 I1) :: to-sq4 (At4 I2 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I2 I3)) = to-sq4 (At4 I1 I2) :: to-sq4 (At4 I0 I1) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I3)) R.North = to-sq4s (r2 p b (At4 I1 I3) (At4 I0 I3)) := eval2 p b (At4 I2 I3) R.North (At4 I1 I3) (At4 I0 I3) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I3)) R.NorthEast = to-sq4s no-sq4s := eval0 p b (At4 I2 I3) R.NorthEast r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I3)) R.East = to-sq4s no-sq4s := eval0 p b (At4 I2 I3) R.East r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I3)) R.SouthEast = to-sq4s no-sq4s := eval0 p b (At4 I2 I3) R.SouthEast r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I3)) R.South = to-sq4s no-sq4s := eval1 p b (At4 I2 I3) R.South (At4 I3 I3) r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I3)) R.SouthWest = to-sq4s no-sq4s := eval1 p b (At4 I2 I3) R.SouthWest (At4 I3 I2) r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I3)) R.West = to-sq4s (r3 p b (At4 I2 I2) (At4 I2 I1) (At4 I2 I0)) := eval3 p b (At4 I2 I3) R.West (At4 I2 I2) (At4 I2 I1) (At4 I2 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I2 I3)) R.NorthWest = to-sq4s (r2 p b (At4 I1 I2) (At4 I0 I1)) := eval2 p b (At4 I2 I3) R.NorthWest (At4 I1 I2) (At4 I0 I1) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I2 I3)) = to-sq4s (r2 p b (At4 I1 I3) (At4 I0 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r3 p b (At4 I2 I2) (At4 I2 I1) (At4 I2 I0) <> (r2 p b (At4 I1 I2) (At4 I0 I1) <> no-sq4s)))))))) := combine8 p b (At4 I2 I3) (r2 p b (At4 I1 I3) (At4 I0 I3)) no-sq4s no-sq4s no-sq4s no-sq4s no-sq4s (r3 p b (At4 I2 I2) (At4 I2 I1) (At4 I2 I0)) (r2 p b (At4 I1 I2) (At4 I0 I1)) c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I2 I3))
+      = to-sq4s (r2 p b (At4 I1 I3) (At4 I0 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r3 p b (At4 I2 I2) (At4 I2 I1) (At4 I2 I0) <> (r2 p b (At4 I1 I2) (At4 I0 I1) <> no-sq4s)))))))) := h
+      = to-sq4s (r2 p b (At4 I1 I3) (At4 I0 I3) <> (r3 p b (At4 I2 I2) (At4 I2 I1) (At4 I2 I0) <> (r2 p b (At4 I1 I2) (At4 I0 I1) <> no-sq4s)))
+      = to-sq4s (captures4-r2 p b I3) := strip-tail (r2 p b (At4 I1 I3) (At4 I0 I3)) (r3 p b (At4 I2 I2) (At4 I2 I1) (At4 I2 I0)) (r2 p b (At4 I1 I2) (At4 I0 I1))
+
+  captures4-r3-eq : (p : C.Player) -> (b : Board4) -> (c : I4) -> R.captures p (to-board b) (to-sq4 (At4 I3 c)) = to-sq4s (captures4-r3 p b c)
+  captures4-r3-eq p b I0 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I3 I0)) = to-sq4 (At4 I2 I0) :: to-sq4 (At4 I1 I0) :: to-sq4 (At4 I0 I0) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I3 I0)) = to-sq4 (At4 I2 I1) :: to-sq4 (At4 I1 I2) :: to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I3 I0)) = to-sq4 (At4 I3 I1) :: to-sq4 (At4 I3 I2) :: to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I3 I0)) = Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I3 I0)) = Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I3 I0)) = Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I3 I0)) = Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I3 I0)) = Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I0)) R.North = to-sq4s (r3 p b (At4 I2 I0) (At4 I1 I0) (At4 I0 I0)) := eval3 p b (At4 I3 I0) R.North (At4 I2 I0) (At4 I1 I0) (At4 I0 I0) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I0)) R.NorthEast = to-sq4s (r3 p b (At4 I2 I1) (At4 I1 I2) (At4 I0 I3)) := eval3 p b (At4 I3 I0) R.NorthEast (At4 I2 I1) (At4 I1 I2) (At4 I0 I3) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I0)) R.East = to-sq4s (r3 p b (At4 I3 I1) (At4 I3 I2) (At4 I3 I3)) := eval3 p b (At4 I3 I0) R.East (At4 I3 I1) (At4 I3 I2) (At4 I3 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I0)) R.SouthEast = to-sq4s no-sq4s := eval0 p b (At4 I3 I0) R.SouthEast r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I0)) R.South = to-sq4s no-sq4s := eval0 p b (At4 I3 I0) R.South r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I0)) R.SouthWest = to-sq4s no-sq4s := eval0 p b (At4 I3 I0) R.SouthWest r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I0)) R.West = to-sq4s no-sq4s := eval0 p b (At4 I3 I0) R.West r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I0)) R.NorthWest = to-sq4s no-sq4s := eval0 p b (At4 I3 I0) R.NorthWest r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I3 I0)) = to-sq4s (r3 p b (At4 I2 I0) (At4 I1 I0) (At4 I0 I0) <> (r3 p b (At4 I2 I1) (At4 I1 I2) (At4 I0 I3) <> (r3 p b (At4 I3 I1) (At4 I3 I2) (At4 I3 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I3 I0) (r3 p b (At4 I2 I0) (At4 I1 I0) (At4 I0 I0)) (r3 p b (At4 I2 I1) (At4 I1 I2) (At4 I0 I3)) (r3 p b (At4 I3 I1) (At4 I3 I2) (At4 I3 I3)) no-sq4s no-sq4s no-sq4s no-sq4s no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I3 I0))
+      = to-sq4s (r3 p b (At4 I2 I0) (At4 I1 I0) (At4 I0 I0) <> (r3 p b (At4 I2 I1) (At4 I1 I2) (At4 I0 I3) <> (r3 p b (At4 I3 I1) (At4 I3 I2) (At4 I3 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r3 p b (At4 I2 I0) (At4 I1 I0) (At4 I0 I0) <> (r3 p b (At4 I2 I1) (At4 I1 I2) (At4 I0 I3) <> (r3 p b (At4 I3 I1) (At4 I3 I2) (At4 I3 I3) <> no-sq4s)))
+      = to-sq4s (captures4-r3 p b I0) := strip-tail (r3 p b (At4 I2 I0) (At4 I1 I0) (At4 I0 I0)) (r3 p b (At4 I2 I1) (At4 I1 I2) (At4 I0 I3)) (r3 p b (At4 I3 I1) (At4 I3 I2) (At4 I3 I3))
+  captures4-r3-eq p b I1 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I3 I1)) = to-sq4 (At4 I2 I1) :: to-sq4 (At4 I1 I1) :: to-sq4 (At4 I0 I1) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I3 I1)) = to-sq4 (At4 I2 I2) :: to-sq4 (At4 I1 I3) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I3 I1)) = to-sq4 (At4 I3 I2) :: to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I3 I1)) = Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I3 I1)) = Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I3 I1)) = Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I3 I1)) = to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I3 I1)) = to-sq4 (At4 I2 I0) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I1)) R.North = to-sq4s (r3 p b (At4 I2 I1) (At4 I1 I1) (At4 I0 I1)) := eval3 p b (At4 I3 I1) R.North (At4 I2 I1) (At4 I1 I1) (At4 I0 I1) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I1)) R.NorthEast = to-sq4s (r2 p b (At4 I2 I2) (At4 I1 I3)) := eval2 p b (At4 I3 I1) R.NorthEast (At4 I2 I2) (At4 I1 I3) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I1)) R.East = to-sq4s (r2 p b (At4 I3 I2) (At4 I3 I3)) := eval2 p b (At4 I3 I1) R.East (At4 I3 I2) (At4 I3 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I1)) R.SouthEast = to-sq4s no-sq4s := eval0 p b (At4 I3 I1) R.SouthEast r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I1)) R.South = to-sq4s no-sq4s := eval0 p b (At4 I3 I1) R.South r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I1)) R.SouthWest = to-sq4s no-sq4s := eval0 p b (At4 I3 I1) R.SouthWest r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I1)) R.West = to-sq4s no-sq4s := eval1 p b (At4 I3 I1) R.West (At4 I3 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I1)) R.NorthWest = to-sq4s no-sq4s := eval1 p b (At4 I3 I1) R.NorthWest (At4 I2 I0) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I3 I1)) = to-sq4s (r3 p b (At4 I2 I1) (At4 I1 I1) (At4 I0 I1) <> (r2 p b (At4 I2 I2) (At4 I1 I3) <> (r2 p b (At4 I3 I2) (At4 I3 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := combine8 p b (At4 I3 I1) (r3 p b (At4 I2 I1) (At4 I1 I1) (At4 I0 I1)) (r2 p b (At4 I2 I2) (At4 I1 I3)) (r2 p b (At4 I3 I2) (At4 I3 I3)) no-sq4s no-sq4s no-sq4s no-sq4s no-sq4s c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I3 I1))
+      = to-sq4s (r3 p b (At4 I2 I1) (At4 I1 I1) (At4 I0 I1) <> (r2 p b (At4 I2 I2) (At4 I1 I3) <> (r2 p b (At4 I3 I2) (At4 I3 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> no-sq4s)))))))) := h
+      = to-sq4s (r3 p b (At4 I2 I1) (At4 I1 I1) (At4 I0 I1) <> (r2 p b (At4 I2 I2) (At4 I1 I3) <> (r2 p b (At4 I3 I2) (At4 I3 I3) <> no-sq4s)))
+      = to-sq4s (captures4-r3 p b I1) := strip-tail (r3 p b (At4 I2 I1) (At4 I1 I1) (At4 I0 I1)) (r2 p b (At4 I2 I2) (At4 I1 I3)) (r2 p b (At4 I3 I2) (At4 I3 I3))
+  captures4-r3-eq p b I2 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I3 I2)) = to-sq4 (At4 I2 I2) :: to-sq4 (At4 I1 I2) :: to-sq4 (At4 I0 I2) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I3 I2)) = to-sq4 (At4 I2 I3) :: Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I3 I2)) = to-sq4 (At4 I3 I3) :: Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I3 I2)) = Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I3 I2)) = Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I3 I2)) = Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I3 I2)) = to-sq4 (At4 I3 I1) :: to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I3 I2)) = to-sq4 (At4 I2 I1) :: to-sq4 (At4 I1 I0) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I2)) R.North = to-sq4s (r3 p b (At4 I2 I2) (At4 I1 I2) (At4 I0 I2)) := eval3 p b (At4 I3 I2) R.North (At4 I2 I2) (At4 I1 I2) (At4 I0 I2) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I2)) R.NorthEast = to-sq4s no-sq4s := eval1 p b (At4 I3 I2) R.NorthEast (At4 I2 I3) r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I2)) R.East = to-sq4s no-sq4s := eval1 p b (At4 I3 I2) R.East (At4 I3 I3) r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I2)) R.SouthEast = to-sq4s no-sq4s := eval0 p b (At4 I3 I2) R.SouthEast r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I2)) R.South = to-sq4s no-sq4s := eval0 p b (At4 I3 I2) R.South r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I2)) R.SouthWest = to-sq4s no-sq4s := eval0 p b (At4 I3 I2) R.SouthWest r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I2)) R.West = to-sq4s (r2 p b (At4 I3 I1) (At4 I3 I0)) := eval2 p b (At4 I3 I2) R.West (At4 I3 I1) (At4 I3 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I2)) R.NorthWest = to-sq4s (r2 p b (At4 I2 I1) (At4 I1 I0)) := eval2 p b (At4 I3 I2) R.NorthWest (At4 I2 I1) (At4 I1 I0) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I3 I2)) = to-sq4s (r3 p b (At4 I2 I2) (At4 I1 I2) (At4 I0 I2) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r2 p b (At4 I3 I1) (At4 I3 I0) <> (r2 p b (At4 I2 I1) (At4 I1 I0) <> no-sq4s)))))))) := combine8 p b (At4 I3 I2) (r3 p b (At4 I2 I2) (At4 I1 I2) (At4 I0 I2)) no-sq4s no-sq4s no-sq4s no-sq4s no-sq4s (r2 p b (At4 I3 I1) (At4 I3 I0)) (r2 p b (At4 I2 I1) (At4 I1 I0)) c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I3 I2))
+      = to-sq4s (r3 p b (At4 I2 I2) (At4 I1 I2) (At4 I0 I2) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r2 p b (At4 I3 I1) (At4 I3 I0) <> (r2 p b (At4 I2 I1) (At4 I1 I0) <> no-sq4s)))))))) := h
+      = to-sq4s (r3 p b (At4 I2 I2) (At4 I1 I2) (At4 I0 I2) <> (r2 p b (At4 I3 I1) (At4 I3 I0) <> (r2 p b (At4 I2 I1) (At4 I1 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r3 p b I2) := strip-tail (r3 p b (At4 I2 I2) (At4 I1 I2) (At4 I0 I2)) (r2 p b (At4 I3 I1) (At4 I3 I0)) (r2 p b (At4 I2 I1) (At4 I1 I0))
+  captures4-r3-eq p b I3 = by
+    have r0 : R.ray 4 R.North (to-sq4 (At4 I3 I3)) = to-sq4 (At4 I2 I3) :: to-sq4 (At4 I1 I3) :: to-sq4 (At4 I0 I3) :: Nil := by decide
+    have r1 : R.ray 4 R.NorthEast (to-sq4 (At4 I3 I3)) = Nil := by decide
+    have r2e : R.ray 4 R.East (to-sq4 (At4 I3 I3)) = Nil := by decide
+    have r3e : R.ray 4 R.SouthEast (to-sq4 (At4 I3 I3)) = Nil := by decide
+    have r4 : R.ray 4 R.South (to-sq4 (At4 I3 I3)) = Nil := by decide
+    have r5 : R.ray 4 R.SouthWest (to-sq4 (At4 I3 I3)) = Nil := by decide
+    have r6 : R.ray 4 R.West (to-sq4 (At4 I3 I3)) = to-sq4 (At4 I3 I2) :: to-sq4 (At4 I3 I1) :: to-sq4 (At4 I3 I0) :: Nil := by decide
+    have r7 : R.ray 4 R.NorthWest (to-sq4 (At4 I3 I3)) = to-sq4 (At4 I2 I2) :: to-sq4 (At4 I1 I1) :: to-sq4 (At4 I0 I0) :: Nil := by decide
+    have c0 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I3)) R.North = to-sq4s (r3 p b (At4 I2 I3) (At4 I1 I3) (At4 I0 I3)) := eval3 p b (At4 I3 I3) R.North (At4 I2 I3) (At4 I1 I3) (At4 I0 I3) r0
+    have c1 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I3)) R.NorthEast = to-sq4s no-sq4s := eval0 p b (At4 I3 I3) R.NorthEast r1
+    have c2 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I3)) R.East = to-sq4s no-sq4s := eval0 p b (At4 I3 I3) R.East r2e
+    have c3 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I3)) R.SouthEast = to-sq4s no-sq4s := eval0 p b (At4 I3 I3) R.SouthEast r3e
+    have c4 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I3)) R.South = to-sq4s no-sq4s := eval0 p b (At4 I3 I3) R.South r4
+    have c5 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I3)) R.SouthWest = to-sq4s no-sq4s := eval0 p b (At4 I3 I3) R.SouthWest r5
+    have c6 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I3)) R.West = to-sq4s (r3 p b (At4 I3 I2) (At4 I3 I1) (At4 I3 I0)) := eval3 p b (At4 I3 I3) R.West (At4 I3 I2) (At4 I3 I1) (At4 I3 I0) r6
+    have c7 : R.captures-on p (to-board b) (to-sq4 (At4 I3 I3)) R.NorthWest = to-sq4s (r3 p b (At4 I2 I2) (At4 I1 I1) (At4 I0 I0)) := eval3 p b (At4 I3 I3) R.NorthWest (At4 I2 I2) (At4 I1 I1) (At4 I0 I0) r7
+    have h : R.captures p (to-board b) (to-sq4 (At4 I3 I3)) = to-sq4s (r3 p b (At4 I2 I3) (At4 I1 I3) (At4 I0 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r3 p b (At4 I3 I2) (At4 I3 I1) (At4 I3 I0) <> (r3 p b (At4 I2 I2) (At4 I1 I1) (At4 I0 I0) <> no-sq4s)))))))) := combine8 p b (At4 I3 I3) (r3 p b (At4 I2 I3) (At4 I1 I3) (At4 I0 I3)) no-sq4s no-sq4s no-sq4s no-sq4s no-sq4s (r3 p b (At4 I3 I2) (At4 I3 I1) (At4 I3 I0)) (r3 p b (At4 I2 I2) (At4 I1 I1) (At4 I0 I0)) c0 c1 c2 c3 c4 c5 c6 c7
+    calc
+      R.captures p (to-board b) (to-sq4 (At4 I3 I3))
+      = to-sq4s (r3 p b (At4 I2 I3) (At4 I1 I3) (At4 I0 I3) <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (no-sq4s <> (r3 p b (At4 I3 I2) (At4 I3 I1) (At4 I3 I0) <> (r3 p b (At4 I2 I2) (At4 I1 I1) (At4 I0 I0) <> no-sq4s)))))))) := h
+      = to-sq4s (r3 p b (At4 I2 I3) (At4 I1 I3) (At4 I0 I3) <> (r3 p b (At4 I3 I2) (At4 I3 I1) (At4 I3 I0) <> (r3 p b (At4 I2 I2) (At4 I1 I1) (At4 I0 I0) <> no-sq4s)))
+      = to-sq4s (captures4-r3 p b I3) := strip-tail (r3 p b (At4 I2 I3) (At4 I1 I3) (At4 I0 I3)) (r3 p b (At4 I3 I2) (At4 I3 I1) (At4 I3 I0)) (r3 p b (At4 I2 I2) (At4 I1 I1) (At4 I0 I0))
+
+  captures4-at-eq : (p : C.Player) -> (b : Board4) -> (r c : I4) -> R.captures p (to-board b) (to-sq4 (At4 r c)) = to-sq4s (captures4-at p b r c)
+  captures4-at-eq p b I0 c = captures4-r0-eq p b c
+  captures4-at-eq p b I1 c = captures4-r1-eq p b c
+  captures4-at-eq p b I2 c = captures4-r2-eq p b c
+  captures4-at-eq p b I3 c = captures4-r3-eq p b c
+
+captures4-eq : (p : C.Player) -> (b : Board4) -> (s : Sq4) -> R.captures p (to-board b) (to-sq4 s) = to-sq4s (captures4 p b s)
+captures4-eq p b (At4 r c) = captures4-at-eq p b r c
+
+-- Fast paint, place, placements, moves, terminal, and successor on Board4.
+paint4 : C.Player -> List Sq4 -> Board4 -> Board4
+paint4 p Nil b = b
+paint4 p (s :: ss) b = write4 s (C.Disc p) (paint4 p ss b)
+
+paint4-eq : (p : C.Player) -> (ss : List Sq4) -> (b : Board4) -> R.paint p (to-sq4s ss) (to-board b) = to-board (paint4 p ss b)
+paint4-eq p Nil b = rfl
+paint4-eq p (s :: ss) b = calc
+  R.paint p (to-sq4 s :: to-sq4s ss) (to-board b)
+  = C.write (to-sq4 s) (C.Disc p) (R.paint p (to-sq4s ss) (to-board b))
+  = C.write (to-sq4 s) (C.Disc p) (to-board (paint4 p ss b)) := cong (paint4-eq p ss b)
+  = to-board (write4 s (C.Disc p) (paint4 p ss b)) := write4-eq s (C.Disc p) (paint4 p ss b)
+
+place4 : C.Player -> Board4 -> Sq4 -> Board4
+place4 p b s = write4 s (C.Disc p) (paint4 p (captures4 p b s) b)
+
+private
+  unfold-place : (p : C.Player) -> (board : C.Board) -> (s : C.Square) -> R.place p board s = C.write s (C.Disc p) (R.paint p (R.captures p board s) board)
+  unfold-place p board s = rfl
+
+place4-eq : (p : C.Player) -> (b : Board4) -> (s : Sq4) -> R.place p (to-board b) (to-sq4 s) = to-board (place4 p b s)
+place4-eq p b s = calc
+  R.place p (to-board b) (to-sq4 s)
+  = C.write (to-sq4 s) (C.Disc p) (R.paint p (R.captures p (to-board b) (to-sq4 s)) (to-board b)) := unfold-place p (to-board b) (to-sq4 s)
+  = C.write (to-sq4 s) (C.Disc p) (R.paint p (to-sq4s (captures4 p b s)) (to-board b)) := cong (captures4-eq p b s)
+  = C.write (to-sq4 s) (C.Disc p) (to-board (paint4 p (captures4 p b s) b)) := cong (paint4-eq p (captures4 p b s) b)
+  = to-board (place4 p b s) := write4-eq s (C.Disc p) (paint4 p (captures4 p b s) b)
+
+private
+  nonempty-to-sq4s : (xs : List Sq4) -> R.nonempty (to-sq4s xs) = R.nonempty xs
+  nonempty-to-sq4s Nil = rfl
+  nonempty-to-sq4s (x :: xs) = rfl
+
+  legal-on-cell : C.Cell -> C.Player -> Board4 -> Sq4 -> B.Bool
+  legal-on-cell (C.Disc q) p b s = B.False
+  legal-on-cell C.Empty p b s = R.nonempty (captures4 p b s)
+
+legal-placement4 : C.Player -> Board4 -> Sq4 -> B.Bool
+legal-placement4 p b s = legal-on-cell (read4 s b) p b s
+
+private
+  legal-on-cell-eq : (c : C.Cell) -> (p : C.Player) -> (b : Board4) -> (s : Sq4) -> B.and (C.is-empty c) (R.nonempty (captures4 p b s)) = legal-on-cell c p b s
+  legal-on-cell-eq C.Empty p b s = rfl
+  legal-on-cell-eq (C.Disc q) p b s = rfl
+
+  unfold-legal-placement : (p : C.Player) -> (board : C.Board) -> (s : C.Square) -> R.legal-placement p board s = B.and (C.well-formed board) (B.and (C.empty-cell (C.read s board)) (R.nonempty (R.captures p board s)))
+  unfold-legal-placement p board s = rfl
+
+  and-true-left : (x : B.Bool) -> B.and B.True x = x
+  and-true-left x = rfl
+
+  empty-cell-just : (c : C.Cell) -> C.empty-cell (M.Just c) = C.is-empty c
+  empty-cell-just c = rfl
+
+legal-placement4-eq : (p : C.Player) -> (b : Board4) -> (s : Sq4) -> R.legal-placement p (to-board b) (to-sq4 s) = legal-placement4 p b s
+legal-placement4-eq p b s = calc
+  R.legal-placement p (to-board b) (to-sq4 s)
+  = B.and (C.well-formed (to-board b)) (B.and (C.empty-cell (C.read (to-sq4 s) (to-board b))) (R.nonempty (R.captures p (to-board b) (to-sq4 s)))) := unfold-legal-placement p (to-board b) (to-sq4 s)
+  = B.and B.True (B.and (C.empty-cell (C.read (to-sq4 s) (to-board b))) (R.nonempty (R.captures p (to-board b) (to-sq4 s)))) := cong (well-formed-4 b)
+  = B.and (C.empty-cell (C.read (to-sq4 s) (to-board b))) (R.nonempty (R.captures p (to-board b) (to-sq4 s))) := and-true-left (B.and (C.empty-cell (C.read (to-sq4 s) (to-board b))) (R.nonempty (R.captures p (to-board b) (to-sq4 s))))
+  = B.and (C.empty-cell (M.Just (read4 s b))) (R.nonempty (R.captures p (to-board b) (to-sq4 s))) := cong (read4-eq s b)
+  = B.and (C.is-empty (read4 s b)) (R.nonempty (R.captures p (to-board b) (to-sq4 s))) := cong (empty-cell-just (read4 s b))
+  = B.and (C.is-empty (read4 s b)) (R.nonempty (to-sq4s (captures4 p b s))) := cong (captures4-eq p b s)
+  = B.and (C.is-empty (read4 s b)) (R.nonempty (captures4 p b s)) := cong (nonempty-to-sq4s (captures4 p b s))
+  = legal-placement4 p b s := legal-on-cell-eq (read4 s b) p b s
+
+private
+  cons-if : B.Bool -> Sq4 -> List Sq4 -> List Sq4
+  cons-if B.False s rest = rest
+  cons-if B.True s rest = s :: rest
+
+  cons-if-eq : (ok : B.Bool) -> (s : Sq4) -> (rest : List Sq4) -> (B.choose ok (L.singleton (to-sq4 s)) Nil <> to-sq4s rest) = to-sq4s (cons-if ok s rest)
+  cons-if-eq B.False s rest = rfl
+  cons-if-eq B.True s rest = rfl
+
+  placements-in4 : C.Player -> Board4 -> List Sq4 -> List Sq4
+  placements-in4 p b Nil = Nil
+  placements-in4 p b (s :: ss) = cons-if (legal-placement4 p b s) s (placements-in4 p b ss)
+
+  placements-in4-eq : (p : C.Player) -> (b : Board4) -> (board : C.Board) -> (ss : List Sq4) -> board = to-board b -> L.concat (L.map (\s -> B.choose (R.legal-placement p board s) (L.singleton s) Nil) (to-sq4s ss)) = to-sq4s (placements-in4 p b ss)
+  placements-in4-eq p b board Nil hb = rfl
+  placements-in4-eq p b board (s :: ss) hb = by
+    have hleg : R.legal-placement p board (to-sq4 s) = legal-placement4 p b s := calc
+      R.legal-placement p board (to-sq4 s)
+      = R.legal-placement p (to-board b) (to-sq4 s) := cong hb
+      = legal-placement4 p b s := legal-placement4-eq p b s
+    have hrest : L.concat (L.map (\u -> B.choose (R.legal-placement p board u) (L.singleton u) Nil) (to-sq4s ss)) = to-sq4s (placements-in4 p b ss) := placements-in4-eq p b board ss
+    calc
+      L.concat (L.map (\u -> B.choose (R.legal-placement p board u) (L.singleton u) Nil) (to-sq4 s :: to-sq4s ss))
+      = (B.choose (R.legal-placement p board (to-sq4 s)) (L.singleton (to-sq4 s)) Nil <> L.concat (L.map (\u -> B.choose (R.legal-placement p board u) (L.singleton u) Nil) (to-sq4s ss)))
+      = (B.choose (legal-placement4 p b s) (L.singleton (to-sq4 s)) Nil <> L.concat (L.map (\u -> B.choose (R.legal-placement p board u) (L.singleton u) Nil) (to-sq4s ss))) := cong hleg
+      = (B.choose (legal-placement4 p b s) (L.singleton (to-sq4 s)) Nil <> to-sq4s (placements-in4 p b ss)) := cong hrest
+      = to-sq4s (cons-if (legal-placement4 p b s) s (placements-in4 p b ss)) := cons-if-eq (legal-placement4 p b s) s (placements-in4 p b ss)
+
+squares4 : List Sq4
+squares4 = At4 I0 I0 :: At4 I0 I1 :: At4 I0 I2 :: At4 I0 I3 :: At4 I1 I0 :: At4 I1 I1 :: At4 I1 I2 :: At4 I1 I3 :: At4 I2 I0 :: At4 I2 I1 :: At4 I2 I2 :: At4 I2 I3 :: At4 I3 I0 :: At4 I3 I1 :: At4 I3 I2 :: At4 I3 I3 :: Nil
+
+private
+  squares4-eq : C.squares 4 = to-sq4s squares4
+  squares4-eq = by decide
+
+placements4 : C.Player -> Board4 -> List Sq4
+placements4 p (Grid4 r0 r1 r2 r3) = placements-in4 p (Grid4 r0 r1 r2 r3) squares4
+
+private
+  placements4-eq-board : (p : C.Player) -> (b : Board4) -> (board : C.Board) -> board = to-board b -> R.placements p board = to-sq4s (placements4 p b)
+  placements4-eq-board p (Grid4 r0 r1 r2 r3) board hb = calc
+    R.placements p board
+    = L.concat (L.map (\s -> B.choose (R.legal-placement p board s) (L.singleton s) Nil) (C.squares (C.size board)))
+    = L.concat (L.map (\s -> B.choose (R.legal-placement p board s) (L.singleton s) Nil) (C.squares (C.size (to-board (Grid4 r0 r1 r2 r3))))) := cong hb
+    = L.concat (L.map (\s -> B.choose (R.legal-placement p board s) (L.singleton s) Nil) (C.squares 4)) := cong (size-to-board (Grid4 r0 r1 r2 r3))
+    = L.concat (L.map (\s -> B.choose (R.legal-placement p board s) (L.singleton s) Nil) (to-sq4s squares4)) := cong squares4-eq
+    = to-sq4s (placements-in4 p (Grid4 r0 r1 r2 r3) squares4) := placements-in4-eq p (Grid4 r0 r1 r2 r3) board squares4 hb
+    = to-sq4s (placements4 p (Grid4 r0 r1 r2 r3))
+
+placements4-eq : (p : C.Player) -> (b : Board4) -> R.placements p (to-board b) = to-sq4s (placements4 p b)
+placements4-eq p b = by
+  have hb : to-board b = to-board b := rfl
+  exact placements4-eq-board p b (to-board b) hb
+
+has-placement4 : C.Player -> Board4 -> B.Bool
+has-placement4 p b = R.nonempty (placements4 p b)
+
+private
+  unfold-has-placement : (p : C.Player) -> (board : C.Board) -> R.has-placement p board = R.nonempty (R.placements p board)
+  unfold-has-placement p board = rfl
+
+has-placement4-eq : (p : C.Player) -> (b : Board4) -> R.has-placement p (to-board b) = has-placement4 p b
+has-placement4-eq p b = calc
+  R.has-placement p (to-board b)
+  = R.nonempty (R.placements p (to-board b)) := unfold-has-placement p (to-board b)
+  = R.nonempty (to-sq4s (placements4 p b)) := cong (placements4-eq p b)
+  = R.nonempty (placements4 p b) := nonempty-to-sq4s (placements4 p b)
+
+terminal4 : Board4 -> B.Bool
+terminal4 b = B.not (B.or (has-placement4 C.Black b) (has-placement4 C.White b))
+
+private
+  unfold-terminal : (board : C.Board) -> R.terminal board = B.and (C.well-formed board) (B.not (B.or (R.has-placement C.Black board) (R.has-placement C.White board)))
+  unfold-terminal board = rfl
+
+terminal4-eq : (b : Board4) -> R.terminal (to-board b) = terminal4 b
+terminal4-eq b = calc
+  R.terminal (to-board b)
+  = B.and (C.well-formed (to-board b)) (B.not (B.or (R.has-placement C.Black (to-board b)) (R.has-placement C.White (to-board b)))) := unfold-terminal (to-board b)
+  = B.and B.True (B.not (B.or (R.has-placement C.Black (to-board b)) (R.has-placement C.White (to-board b)))) := cong (well-formed-4 b)
+  = B.not (B.or (R.has-placement C.Black (to-board b)) (R.has-placement C.White (to-board b))) := and-true-left (B.not (B.or (R.has-placement C.Black (to-board b)) (R.has-placement C.White (to-board b))))
+  = B.not (B.or (has-placement4 C.Black b) (R.has-placement C.White (to-board b))) := cong (has-placement4-eq C.Black b)
+  = terminal4 b := cong (has-placement4-eq C.White b)
+
+pass-allowed4 : C.Player -> Board4 -> B.Bool
+pass-allowed4 p b = B.and (B.not (has-placement4 p b)) (has-placement4 (C.other p) b)
+
+private
+  unfold-pass-allowed : (p : C.Player) -> (board : C.Board) -> R.pass-allowed p board = B.and (B.not (R.has-placement p board)) (R.has-placement (C.other p) board)
+  unfold-pass-allowed p board = rfl
+
+pass-allowed4-eq : (p : C.Player) -> (b : Board4) -> R.pass-allowed p (to-board b) = pass-allowed4 p b
+pass-allowed4-eq p b = calc
+  R.pass-allowed p (to-board b)
+  = B.and (B.not (R.has-placement p (to-board b))) (R.has-placement (C.other p) (to-board b)) := unfold-pass-allowed p (to-board b)
+  = B.and (B.not (has-placement4 p b)) (R.has-placement (C.other p) (to-board b)) := cong (has-placement4-eq p b)
+  = pass-allowed4 p b := cong (has-placement4-eq (C.other p) b)
+
+data Move4 = Place4 Sq4 | Pass4
+open Move4 public
+
+to-move4 : Move4 -> R.Move
+to-move4 (Place4 s) = R.Place (to-sq4 s)
+to-move4 Pass4 = R.Pass
+
+to-moves4 : List Move4 -> List R.Move
+to-moves4 Nil = Nil
+to-moves4 (m :: ms) = to-move4 m :: to-moves4 ms
+
+place-moves4 : List Sq4 -> List Move4
+place-moves4 Nil = Nil
+place-moves4 (s :: ss) = Place4 s :: place-moves4 ss
+
+private
+  moves4-from : C.Player -> Board4 -> List Sq4 -> List Move4
+  moves4-from p b Nil = B.choose (has-placement4 (C.other p) b) (L.singleton Pass4) Nil
+  moves4-from p b (s :: ss) = place-moves4 (s :: ss)
+
+moves4 : C.Player -> Board4 -> List Move4
+moves4 p b = moves4-from p b (placements4 p b)
+
+private
+  map-place-compose : (ss : List Sq4) -> L.map (\s -> R.Place s) (to-sq4s ss) = to-moves4 (place-moves4 ss)
+  map-place-compose Nil = rfl
+  map-place-compose (s :: ss) = calc
+    L.map (\u -> R.Place u) (to-sq4 s :: to-sq4s ss)
+    = R.Place (to-sq4 s) :: L.map (\u -> R.Place u) (to-sq4s ss)
+    = R.Place (to-sq4 s) :: to-moves4 (place-moves4 ss) := cong (map-place-compose ss)
+    = to-moves4 (place-moves4 (s :: ss))
+
+  choose-pass-eq : (ok : B.Bool) -> B.choose ok (L.singleton R.Pass) Nil = to-moves4 (B.choose ok (L.singleton Pass4) Nil)
+  choose-pass-eq B.False = rfl
+  choose-pass-eq B.True = rfl
+
+  moves4-from-eq : (p : C.Player) -> (b : Board4) -> (ps : List Sq4) -> (L.map (\s -> R.Place s) (to-sq4s ps) <> B.choose (B.and (B.not (R.nonempty ps)) (has-placement4 (C.other p) b)) (L.singleton R.Pass) Nil) = to-moves4 (moves4-from p b ps)
+  moves4-from-eq p b Nil = choose-pass-eq (has-placement4 (C.other p) b)
+  moves4-from-eq p b (s :: ss) = calc
+    (R.Place (to-sq4 s) :: L.map (\u -> R.Place u) (to-sq4s ss)) <> Nil
+    = R.Place (to-sq4 s) :: L.map (\u -> R.Place u) (to-sq4s ss) := L.append-nil (R.Place (to-sq4 s) :: L.map (\u -> R.Place u) (to-sq4s ss))
+    = to-moves4 (place-moves4 (s :: ss)) := map-place-compose (s :: ss)
+
+  unfold-moves : (p : C.Player) -> (board : C.Board) -> R.moves p board = (L.map (\s -> R.Place s) (R.placements p board) <> B.choose (R.pass-allowed p board) (L.singleton R.Pass) Nil)
+  unfold-moves p board = rfl
+
+moves4-eq : (p : C.Player) -> (b : Board4) -> R.moves p (to-board b) = to-moves4 (moves4 p b)
+moves4-eq p b = calc
+  R.moves p (to-board b)
+  = (L.map (\s -> R.Place s) (R.placements p (to-board b)) <> B.choose (R.pass-allowed p (to-board b)) (L.singleton R.Pass) Nil) := unfold-moves p (to-board b)
+  = (L.map (\s -> R.Place s) (to-sq4s (placements4 p b)) <> B.choose (R.pass-allowed p (to-board b)) (L.singleton R.Pass) Nil) := cong (placements4-eq p b)
+  = (L.map (\s -> R.Place s) (to-sq4s (placements4 p b)) <> B.choose (pass-allowed4 p b) (L.singleton R.Pass) Nil) := cong (pass-allowed4-eq p b)
+  = to-moves4 (moves4 p b) := moves4-from-eq p b (placements4 p b)
+
+data Pos4 = Turn4 C.Player Board4
+open Pos4 public
+
+to-pos4 : Pos4 -> R.Position
+to-pos4 (Turn4 p b) = R.Turn p (to-board b)
+
+private
+  play4-place : B.Bool -> C.Player -> Board4 -> Sq4 -> M.Maybe Board4
+  play4-place B.False p b s = M.Nothing
+  play4-place B.True p b s = M.Just (place4 p b s)
+
+  play4-pass : B.Bool -> Board4 -> M.Maybe Board4
+  play4-pass B.False b = M.Nothing
+  play4-pass B.True b = M.Just b
+
+play4 : C.Player -> Board4 -> Move4 -> M.Maybe Board4
+play4 p b (Place4 s) = play4-place (legal-placement4 p b s) p b s
+play4 p b Pass4 = play4-pass (pass-allowed4 p b) b
+
+private
+  map-board : M.Maybe Board4 -> M.Maybe C.Board
+  map-board M.Nothing = M.Nothing
+  map-board (M.Just b) = M.Just (to-board b)
+
+  play4-place-eq : (ok : B.Bool) -> (p : C.Player) -> (b : Board4) -> (s : Sq4) -> B.choose ok (M.Just (R.place p (to-board b) (to-sq4 s))) M.Nothing = map-board (play4-place ok p b s)
+  play4-place-eq B.False p b s = rfl
+  play4-place-eq B.True p b s = cong (place4-eq p b s)
+
+  play4-pass-eq : (ok : B.Bool) -> (b : Board4) -> B.choose ok (M.Just (to-board b)) M.Nothing = map-board (play4-pass ok b)
+  play4-pass-eq B.False b = rfl
+  play4-pass-eq B.True b = rfl
+
+  unfold-play-place : (p : C.Player) -> (board : C.Board) -> (s : C.Square) -> R.play p board (R.Place s) = B.choose (R.legal-placement p board s) (M.Just (R.place p board s)) M.Nothing
+  unfold-play-place p board s = rfl
+
+  unfold-play-pass : (p : C.Player) -> (board : C.Board) -> R.play p board R.Pass = B.choose (R.pass-allowed p board) (M.Just board) M.Nothing
+  unfold-play-pass p board = rfl
+
+  play4-eq : (p : C.Player) -> (b : Board4) -> (m : Move4) -> R.play p (to-board b) (to-move4 m) = map-board (play4 p b m)
+  play4-eq p b (Place4 s) = calc
+    R.play p (to-board b) (R.Place (to-sq4 s))
+    = B.choose (R.legal-placement p (to-board b) (to-sq4 s)) (M.Just (R.place p (to-board b) (to-sq4 s))) M.Nothing := unfold-play-place p (to-board b) (to-sq4 s)
+    = B.choose (legal-placement4 p b s) (M.Just (R.place p (to-board b) (to-sq4 s))) M.Nothing := cong (legal-placement4-eq p b s)
+    = map-board (play4-place (legal-placement4 p b s) p b s) := play4-place-eq (legal-placement4 p b s) p b s
+  play4-eq p b Pass4 = calc
+    R.play p (to-board b) R.Pass
+    = B.choose (R.pass-allowed p (to-board b)) (M.Just (to-board b)) M.Nothing := unfold-play-pass p (to-board b)
+    = B.choose (pass-allowed4 p b) (M.Just (to-board b)) M.Nothing := cong (pass-allowed4-eq p b)
+    = map-board (play4-pass (pass-allowed4 p b) b) := play4-pass-eq (pass-allowed4 p b) b
+
+  turn-maybe : C.Player -> M.Maybe Board4 -> M.Maybe Pos4
+  turn-maybe p M.Nothing = M.Nothing
+  turn-maybe p (M.Just b) = M.Just (Turn4 p b)
+
+  map-pos4 : M.Maybe Pos4 -> M.Maybe R.Position
+  map-pos4 M.Nothing = M.Nothing
+  map-pos4 (M.Just pos) = M.Just (to-pos4 pos)
+
+successor4 : Pos4 -> Move4 -> M.Maybe Pos4
+successor4 (Turn4 p b) m = turn-maybe (C.other p) (play4 p b m)
+
+private
+  map-turn-board : (p : C.Player) -> (mb : M.Maybe Board4) -> M.map (\next -> R.Turn (C.other p) next) (map-board mb) = map-pos4 (turn-maybe (C.other p) mb)
+  map-turn-board p M.Nothing = rfl
+  map-turn-board p (M.Just b) = rfl
+
+  unfold-successor : (p : C.Player) -> (board : C.Board) -> (m : R.Move) -> R.successor (R.Turn p board) m = M.map (\next -> R.Turn (C.other p) next) (R.play p board m)
+  unfold-successor p board m = rfl
+
+  successor4-eq : (pos : Pos4) -> (m : Move4) -> R.successor (to-pos4 pos) (to-move4 m) = map-pos4 (successor4 pos m)
+  successor4-eq (Turn4 p b) m = calc
+    R.successor (R.Turn p (to-board b)) (to-move4 m)
+    = M.map (\next -> R.Turn (C.other p) next) (R.play p (to-board b) (to-move4 m)) := unfold-successor p (to-board b) (to-move4 m)
+    = M.map (\next -> R.Turn (C.other p) next) (map-board (play4 p b m)) := cong (play4-eq p b m)
+    = map-pos4 (turn-maybe (C.other p) (play4 p b m)) := map-turn-board p (play4 p b m)
+
+-- Standard 4x4 opening in Board4 representation.
+initial4 : Board4
+initial4 = Grid4 (MkRow4 C.Empty C.Empty C.Empty C.Empty) (MkRow4 C.Empty (C.Disc C.White) (C.Disc C.Black) C.Empty) (MkRow4 C.Empty (C.Disc C.Black) (C.Disc C.White) C.Empty) (MkRow4 C.Empty C.Empty C.Empty C.Empty)
+
+opening4 : Pos4
+opening4 = Turn4 C.Black initial4
+
+opening4-eq : to-pos4 opening4 = I.four-opening
+opening4-eq = by decide
+
+
+next-board4 : Board4 -> M.Maybe Board4 -> Board4
+next-board4 b M.Nothing = b
+next-board4 b (M.Just nb) = nb
+
+-- Order helper and certified Board4 constructors into K.Derivation.
+le-nat : Nat -> Nat -> B.Bool
+le-nat 0 0 = B.True
+le-nat 0 (S m) = B.True
+le-nat (S n) 0 = B.False
+le-nat (S n) (S m) = le-nat n m
+
+private
+  le-nat-sound : (n m : Nat) -> le-nat n m = B.True -> n <= m
+  le-nat-sound 0 0 h = O.zero-le
+  le-nat-sound 0 (S m) h = O.zero-le
+  le-nat-sound (S n) 0 h = by contradiction
+  le-nat-sound (S n) (S m) h = by
+    have h' : le-nat n m = B.True := h
+    have ih : n <= m := le-nat-sound n m
+    exact O.succ-le-succ ih
+
+  le-rewrite : (a b c : Nat) -> a <= b -> c = b -> a <= c
+  le-rewrite a b c h eq = by
+    have h1 : a + (b - a) = b := by exact leAddSub
+    have h2 : a + (b - a) = c := calc
+      a + (b - a)
+      = b := h1
+      = c := cong eq
+    exact leOfAdd
+
+  pos4-turn-all-moves : (p : C.Player) -> (b : Board4) -> (v : Nat) -> (ms : List Move4) -> K.AllMoves K.Lower (to-pos4 (Turn4 p b)) v (to-moves4 ms) = K.AllMoves K.Lower (R.Turn p (to-board b)) v (to-moves4 ms)
+  pos4-turn-all-moves p b v ms = rfl
+
+  successor4-of-play : (p : C.Player) -> (b : Board4) -> (m : Move4) -> (nb : Board4) -> play4 p b m = M.Just nb -> R.successor (R.Turn p (to-board b)) (to-move4 m) = M.Just (to-pos4 (Turn4 (C.other p) (next-board4 b (play4 p b m))))
+  successor4-of-play p b m nb hp = calc
+    R.successor (R.Turn p (to-board b)) (to-move4 m)
+    = map-pos4 (successor4 (Turn4 p b) m) := successor4-eq (Turn4 p b) m
+    = map-pos4 (turn-maybe (C.other p) (play4 p b m))
+    = map-pos4 (turn-maybe (C.other p) (M.Just nb)) := cong hp
+    = M.Just (to-pos4 (Turn4 (C.other p) nb))
+    = M.Just (to-pos4 (Turn4 (C.other p) (next-board4 b (M.Just nb))))
+    = M.Just (to-pos4 (Turn4 (C.other p) (next-board4 b (play4 p b m)))) := cong hp
+
+mk-leaf : {p : C.Player} -> {b : Board4} -> {v : Nat} -> terminal4 b = B.True -> le-nat v (white-score4 b) = B.True -> K.Derivation (K.AtBound K.Lower (to-pos4 (Turn4 p b)) v)
+mk-leaf {p} {b} {v} ht hs = K.Derivation.LeafLower {p} {to-board b} {v}
+  (calc
+    R.terminal (to-board b)
+    = terminal4 b := terminal4-eq b
+    = B.True := ht)
+  (by
+    have hle : v <= white-score4 b := le-nat-sound v (white-score4 b) hs
+    have hws : K.white-score (to-board b) = white-score4 b := white-score4-eq b
+    exact le-rewrite v (white-score4 b) (K.white-score (to-board b)) hle hws)
+
+mk-choice : {b : Board4} -> {v : Nat} -> {m : Move4} -> {nb : Board4} -> play4 C.White b m = M.Just nb -> K.Derivation (K.AtBound K.Lower (to-pos4 (Turn4 C.Black (next-board4 b (play4 C.White b m)))) v) -> K.Derivation (K.AtBound K.Lower (to-pos4 (Turn4 C.White b)) v)
+mk-choice {b} {v} {m} {nb} hp child = K.Derivation.Choice {K.Lower} {C.White} {to-board b} {v} {to-move4 m} {to-pos4 (Turn4 C.Black (next-board4 b (play4 C.White b m)))}
+  (well-formed-4 b)
+  rfl
+  (successor4-of-play C.White b m nb hp)
+  child
+
+mk-replies : {b : Board4} -> {v : Nat} -> terminal4 b = B.False -> K.Derivation (K.AllMoves K.Lower (to-pos4 (Turn4 C.Black b)) v (to-moves4 (moves4 C.Black b))) -> K.Derivation (K.AtBound K.Lower (to-pos4 (Turn4 C.Black b)) v)
+mk-replies {b} {v} hnt cs = K.Derivation.Replies {K.Lower} {C.Black} {to-board b} {v} {to-moves4 (moves4 C.Black b)}
+  (well-formed-4 b)
+  (calc
+    R.terminal (to-board b)
+    = terminal4 b := terminal4-eq b
+    = B.False := hnt)
+  rfl
+  (calc
+    to-moves4 (moves4 C.Black b)
+    = R.moves C.Black (to-board b) := cong (moves4-eq C.Black b))
+  (K.cast {K.AllMoves K.Lower (to-pos4 (Turn4 C.Black b)) v (to-moves4 (moves4 C.Black b))} {K.AllMoves K.Lower (R.Turn C.Black (to-board b)) v (to-moves4 (moves4 C.Black b))} (pos4-turn-all-moves C.Black b v (moves4 C.Black b)) cs)
+
+mk-no-moves : {pos : Pos4} -> {v : Nat} -> K.Derivation (K.AllMoves K.Lower (to-pos4 pos) v Nil)
+mk-no-moves {pos} {v} = K.Derivation.NoMoves {K.Lower} {to-pos4 pos} {v} {Nil} rfl
+
+mk-reply : {b : Board4} -> {v : Nat} -> {m : Move4} -> {ms : List Move4} -> {nb : Board4} -> play4 C.Black b m = M.Just nb -> K.Derivation (K.AtBound K.Lower (to-pos4 (Turn4 C.White (next-board4 b (play4 C.Black b m)))) v) -> K.Derivation (K.AllMoves K.Lower (to-pos4 (Turn4 C.Black b)) v (to-moves4 ms)) -> K.Derivation (K.AllMoves K.Lower (to-pos4 (Turn4 C.Black b)) v (to-moves4 (m :: ms)))
+mk-reply {b} {v} {m} {ms} {nb} hp dc ds = K.cast {K.AllMoves K.Lower (to-pos4 (Turn4 C.Black b)) v (to-move4 m :: to-moves4 ms)} {K.AllMoves K.Lower (to-pos4 (Turn4 C.Black b)) v (to-moves4 (m :: ms))} rfl
+  (K.Derivation.Reply {K.Lower} {to-pos4 (Turn4 C.Black b)} {v} {to-move4 m} {to-moves4 ms} {to-pos4 (Turn4 C.White (next-board4 b (play4 C.Black b m)))}
+    (successor4-of-play C.Black b m nb hp)
+    dc
+    ds)
+
+data Check4 (j : K.Judgement) (ok : B.Bool) where
+  Invalid4 : {j : K.Judgement} -> Check4 j B.False
+  Valid4 : {j : K.Judgement} -> K.Derivation j -> Check4 j B.True
+open Check4 public
+
+cast-check4 : {j : K.Judgement} -> {a b : B.Bool} -> a = b -> Check4 j a -> Check4 j b
+cast-check4 {j} {a} {b} eq c = c
+
+extract4 : {j : K.Judgement} -> Check4 j B.True -> K.Derivation j
+extract4 (Valid4 d) = d
