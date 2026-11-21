@@ -62,7 +62,19 @@ data Value o ctx t where
   Apply :: Signature args t -> List (Value o ctx) args -> [o] -> Value o ctx t
   Dictionary :: SType t -> Tm.Term Int -> Set Text -> Value o ctx t
   Callback :: SType t -> Tm.Term Int -> Set Text -> Value o ctx t
-  Invoke :: SType t -> Value o ctx u -> List (Value o ctx) args -> Set Text -> Value o ctx t
+  Invoke ::
+    -- | Checked return type of the callback application.
+    SType t ->
+    -- | Checked callback value (schema parameter or closure).
+    Value o ctx u ->
+    -- | Checked argument values passed to the callback.
+    List (Value o ctx) args ->
+    {- | Core names of projection functions unfolded by 'normalizeTypeIndices'
+    when comparing callback domains/result against actual/expected types;
+    collected by 'indexDependencies' as declaration prerequisites.
+    -}
+    Set Text ->
+    Value o ctx t
   Transport :: SType t -> Value o ctx u -> [o] -> Set Text -> Value o ctx t
   Absurd :: SType t -> o -> Value o ctx t
 
