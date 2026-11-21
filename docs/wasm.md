@@ -12,12 +12,11 @@ From the repository root, with native GHC 9.12.4, Cabal, ghcup, and Node.js:
 ```sh
 cabal run shake-praxis -- toolchain
 cabal run shake-praxis -- browser
-cabal run shake-praxis -- serve
+cabal run praxis-web
 ```
 
-Open `http://localhost:8080` (pass `--port=PORT` or `--directory=DIR` to
-customize the Servant/Warp static server; `serve` also builds `browser`
-automatically when `_build/browser` is not yet present). The HTTP server only
+Open `http://localhost:8080` (pass `-- --port PORT` or `-- --directory DIR` to
+customize the `praxis-web` Servant/Warp static server). The HTTP server only
 serves static files; game evaluation happens in a browser Web Worker. The page
 supports legal-move markers, automatic White responses, forced passes, undoing a
 round, restarting, and terminal scores. Black's placement and flips appear

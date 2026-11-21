@@ -3,10 +3,9 @@
 ## Play the checked 4×4 strategy
 
 From the repository root, run `cabal run shake-praxis -- browser`, then serve
-`_build/browser` over HTTP with Servant and Warp:
-`cabal run shake-praxis -- serve` serves it at `http://localhost:8080` (and
-builds `browser` automatically if `_build/browser` does not exist yet; pass
-`--port=PORT` or `--directory=DIR` to customize).
+`_build/browser` over HTTP with the `praxis-web` Servant and Warp executable:
+`cabal run praxis-web` serves it at `http://localhost:8080` (pass
+`-- --port PORT` or `-- --directory DIR` to customize).
 
 `Game.Othello.Interactive` eliminates the checked strategy witness in Praxis;
 `Game.Othello.Browser.play` follows the user's move history through that
