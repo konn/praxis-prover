@@ -75,7 +75,7 @@ import Language.Praxis.Surface.Check (Build, Checked (..), Report (..), Severity
 import Language.Praxis.Surface.Env (QualName)
 import Language.Praxis.Surface.Parser (parseModule)
 import Language.Praxis.Surface.Prelude (Prelude)
-import Language.Praxis.Surface.Rename (moduleImports)
+import Language.Praxis.Surface.Rename (ImportError (..), moduleImports)
 import Language.Praxis.Surface.Syntax.Raw (Located (..), Segment (Ident), Span (..), segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, listDirectory)
@@ -309,7 +309,7 @@ type Reader = FilePath -> IO Text
 data Parsed = Parsed
   { pdFile :: !ModuleFile
   , pdSource :: !Text
-  , pdImports :: ![((Maybe Text, QualName), Either String QualName)]
+  , pdImports :: ![((Maybe Text, QualName), Either ImportError QualName)]
   -- ^ each import as written, and the full name of the module it names
   , pdHeaderReport :: !(Maybe Report)
   }
@@ -377,18 +377,18 @@ planComponents reader loaded comps target = go Map.empty [] (zip [1 :: Int ..] c
     -- The module an import names: of the library itself, or of the dependency named, or of the one dependency exposing it.
     resolveImport c deps known own lib q = case lib of
       Just l -> case parseComponentRef l of
-        Left err -> Left ("not a library: " <> err)
+        Left err -> Left (ImportInvalidLibrary err)
         Right ref -> case [d | d <- c : deps, refPackage ref == packageName (compPackage d), refLibrary ref == libraryName (compLibrary d)] of
           d : _
             | q `elem` Map.findWithDefault [] (componentId d) known -> Right (R.Component (componentId d) : q)
-            | otherwise -> Left ("no module " <> render q <> " in the library " <> T.unpack l)
-          [] -> Left ("no dependency " <> T.unpack l <> " of the library " <> T.unpack (componentPath c) <> (if null deps then "" else "; its dependencies are " <> T.unpack (T.intercalate ", " (map componentId deps))))
+            | otherwise -> Left (ImportModuleNotInLibrary q l)
+          [] -> Left (ImportUnknownDependency l (componentPath c) (map componentId deps))
       Nothing
         | q `elem` own -> Right (R.Component (componentId c) : q)
         | otherwise -> case [d | d <- deps, q `elem` Map.findWithDefault [] (componentId d) known] of
             [d] -> Right (R.Component (componentId d) : q)
-            [] -> Left ("no module " <> render q <> " in the library " <> T.unpack (componentPath c) <> (if null deps then ", which has no dependencies" else ", nor in its dependencies " <> T.unpack (T.intercalate ", " (map componentId deps))))
-            ds -> Left ("ambiguous: the module " <> render q <> " is exposed by " <> T.unpack (T.intercalate " and " (map componentId ds)) <> "; write import \"" <> T.unpack (T.intercalate "\" or \"" (map componentId ds)) <> "\" " <> render q)
+            [] -> Left (ImportUnknownModule q (componentPath c) (map componentId deps))
+            ds -> Left (ImportAmbiguousModule q (map componentId ds))
 
     -- The modules of a library in the order of their imports within it, and those importing one another, directly or through others, which are refused at their imports.
     orderImports c parsed =
@@ -410,21 +410,20 @@ checkPlanned initial planned = let (results, build) = foldl step ([], initial) p
   where
     step (results, build) (Planned c cycleNames pd) =
       let name = R.Component (componentId c) : mfName (pdFile pd)
-          cycleMessage = "the modules " <> T.unpack (T.intercalate ", " (map (T.intercalate "." . map segmentText) cycleNames)) <> " import one another, directly or through others"
           cyclic = [R.Component (componentId c) : n | n <- cycleNames]
-          imports = Map.fromList [(written, exportsFor build cyclic cycleMessage target') | (written, target') <- pdImports pd]
+          imports = Map.fromList [(written, exportsFor build cyclic cycleNames target') | (written, target') <- pdImports pd]
           (checked, build') = checkModule (\_ _ -> []) build imports (Just name) (mfPath (pdFile pd)) (pdSource pd)
           checked' = checked {checkedReports = maybe [] pure (pdHeaderReport pd) <> checkedReports checked}
        in (ModuleResult c (mfName (pdFile pd)) (mfPath (pdFile pd)) checked' : results, build')
 
     -- What an import takes: the exports of the module it names, once checked; a module of a cycle, or one not checked, cannot be imported.
-    exportsFor build cyclic cycleMessage = \case
+    exportsFor build cyclic cycleNames = \case
       Left why -> Left why
       Right full
-        | full `elem` cyclic -> Left cycleMessage
+        | full `elem` cyclic -> Left (ImportCyclicModules cycleNames)
         | otherwise -> case Map.lookup full (buildExports build) of
             Just e -> Right e
-            Nothing -> Left ("the module " <> T.unpack (T.intercalate "." (map segmentText (drop 1 full))) <> " was not checked before this one: it did not parse")
+            Nothing -> Left (ImportModuleNotChecked (drop 1 full))
 
 {- |
 Check the libraries given, in the order given, each module after those it
@@ -496,7 +495,7 @@ What checking a module laid out reads of it, by which a prefix is told to
 stand: its library, the cycle it is in, its name and its path, its source,
 its imports resolved, and the report on its header.
 -}
-type ModuleKey = (Text, [QualName], QualName, FilePath, Text, [((Maybe Text, QualName), Either String QualName)], Maybe Report)
+type ModuleKey = (Text, [QualName], QualName, FilePath, Text, [((Maybe Text, QualName), Either ImportError QualName)], Maybe Report)
 
 moduleKey :: Planned -> ModuleKey
 moduleKey (Planned c cyclic pd) = (componentId c, cyclic, mfName (pdFile pd), mfPath (pdFile pd), pdSource pd, pdImports pd, pdHeaderReport pd)

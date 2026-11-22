@@ -64,18 +64,18 @@ import Language.Praxis.PRA.Equality (evalTermIn)
 import Language.Praxis.PRA.Signature (Signature, signatureKernelEnv)
 import Language.Praxis.PRA.Syntax.Parser (parseTerm, plainScope)
 import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..), checkSource, headerName)
-import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
-import Language.Praxis.Surface.CoreText (CT (..), isParameter, termCT)
+import Language.Praxis.Surface.Compile (Compiled (..), compileFunction, renderCompileError)
+import Language.Praxis.Surface.CoreText (CT (..), isParameter, renderCoreTextError, termCT)
 import Language.Praxis.Surface.Elab (ElabError (..), FunClause (..), FunDef (..), Item (..), TheoremDef (..), elabModule, fcBody)
 import Language.Praxis.Surface.Encode (Encoded (..), encodeData)
-import Language.Praxis.Surface.Engine (theoremStatement)
+import Language.Praxis.Surface.Engine (renderProofError, theoremStatement)
 import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), DataInfo (..), FunInfo (..), Role (..), TeleEntry (..), TheoremInfo (..), constructorIndices, emptyEnv, indexFunctionCores, renderQualName)
 import Language.Praxis.Surface.Eval qualified as Runtime
 import Language.Praxis.Surface.Fixity (moduleFixities, renderFixityError)
 import Language.Praxis.Surface.Lexer (renderSyntaxError)
 import Language.Praxis.Surface.Mangle (demangle, mangleVariable)
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
+import Language.Praxis.Surface.Prelude (Prelude (..), prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Term qualified as Term
@@ -129,7 +129,7 @@ runtimeAdequacy = withResource prepare (const (pure ())) $ \get ->
     path = "test/data/runtime-adequacy.px"
     prepare = do
       ld <- load path
-      p <- either assertFailure pure prelude
+      p <- either (assertFailure . renderPreludeError) pure prelude
       source <- TIO.readFile path
       let checked = checkSource p path source
       [reportMessage r | r <- checkedReports checked, reportSeverity r == SevError] @?= []
@@ -139,7 +139,7 @@ runtimeAdequacy = withResource prepare (const (pure ())) $ \get ->
 
 certifies :: TestTree
 certifies = testCase "adequacy.px: its data types and functions certify, with an introduction lemma for each constructor; its statements are left to sorry" do
-  p <- either assertFailure pure prelude
+  p <- either (assertFailure . renderPreludeError) pure prelude
   let path = "test/data/adequacy.px"
   src <- TIO.readFile path
   let c = checkSource p path src
@@ -177,7 +177,7 @@ data Loaded = Loaded
 -- | A module, elaborated, and its functions compiled; its lemmas are certified by the checker, not here.
 load :: FilePath -> IO Loaded
 load path = do
-  p <- either assertFailure pure prelude
+  p <- either (assertFailure . renderPreludeError) pure prelude
   builtin <- kernelBuiltin (preludeSignature p)
   src <- TIO.readFile path
   m <- either (assertFailure . renderSyntaxError) pure (parseModule path src)
@@ -197,7 +197,7 @@ load path = do
   case [msg | IFailed (ElabError _ msg) <- items] of
     [] -> pure ()
     errs -> assertFailure (unlines errs)
-  unfoldings <- traverse (\fd -> either (assertFailure . ((T.unpack (funCore (fdInfo fd)) <> ": ") <>)) (\c -> pure (funCore (fdInfo fd), [(l, r) | (_, l, r) <- compiledUnfoldings c])) (compileFunction env fd)) funs
+  unfoldings <- traverse (\fd -> either (assertFailure . ((T.unpack (funCore (fdInfo fd)) <> ": ") <>) . renderCompileError) (\c -> pure (funCore (fdInfo fd), [(l, r) | (_, l, r) <- compiledUnfoldings c])) (compileFunction env fd)) funs
   pure
     Loaded
       { ldFuns = Map.fromList [(funCore (fdInfo fd), fd) | fd <- funs]
@@ -509,7 +509,7 @@ truthCore ld env = go
               Forall -> all at range
               Exists -> any at range
       e -> error ("not a proposition of the fragment: " <> show (fmap (const ()) e))
-    term e = either (\why -> error ("a term of a precondition does not lower: " <> why)) (evalCore ld env) (termCT CVar e)
+    term e = either (\why -> error ("a term of a precondition does not lower: " <> renderCoreTextError why)) (evalCore ld env) (termCT CVar e)
     numeral = \case
       CN n -> n
       c -> error ("a code where a numeral is expected: " <> show c)
@@ -767,7 +767,7 @@ propStatement ld td
   | otherwise = propertyOf (theoremStatement (ldMembership ld) td)
   where
     propertyOf result = case result of
-      Left err -> counterexample ("no statement: " <> err) False
+      Left err -> counterexample ("no statement: " <> renderProofError err) False
       Right text -> case parse sequentP "" text of
         Left err -> counterexample (errorBundlePretty err) False
         Right (hyps, concl) ->
@@ -841,7 +841,7 @@ parameterModels ld = case dataCtors (ldDatas ld Map.! "Adequacy.Color") of
 membershipTruth :: Loaded -> Text -> Value -> IO Bool
 membershipTruth ld name value = do
   td <- maybe (assertFailure ("missing statement " <> T.unpack name)) pure (find ((== name) . renderQualName . thmQual . tdInfo) (ldTheorems ld))
-  text <- either assertFailure pure (theoremStatement (ldMembership ld) td)
+  text <- either (assertFailure . renderProofError) pure (theoremStatement (ldMembership ld) td)
   (hyps, _) <- either (assertFailure . errorBundlePretty) pure (parse sequentP "" text)
   let memberships = filter (isMembership ld) hyps
   case (tdValues td <> openTelescope (tdBinders td), memberships) of

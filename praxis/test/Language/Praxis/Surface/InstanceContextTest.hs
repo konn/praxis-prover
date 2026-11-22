@@ -10,7 +10,7 @@ import Language.Praxis.Surface.Elab (instanceClassContext)
 import Language.Praxis.Surface.Engine (Knowledge (..))
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.FiniteFixtures
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Language.Praxis.Surface.Types (Ty (..))
 import Test.Tasty
@@ -21,7 +21,7 @@ instanceContextTests =
   testGroup
     "instance proof contexts"
     [ testCase "a class with only laws remains a required instance context" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked = checkSource p "context.px" (source <> "bad : ∀ (x : Box Nat), x = x\nbad = by intro x; rfl\n")
         assertBool "the conditional retraction itself did not certify" ("FiniteQ.Finite-Box.decode-code" `elem` checkedTheorems checked)
         assertBool "a missing law-only context certified finite syntax" ("FiniteQ.bad" `notElem` checkedTheorems checked)
@@ -31,7 +31,7 @@ instanceContextTests =
         instClassContext selected @?= [([Ident "FiniteQ", Ident "Impossible"], 0)]
         instanceClassContext selected (TData "FiniteQ.Box" [TNat] []) @?= Right [([Ident "FiniteQ", Ident "Impossible"], TNat)]
     , testCase "generic and inherited law-only contexts and a valid empty instance work" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked =
               checkSource
                 p
@@ -51,7 +51,7 @@ instanceContextTests =
         errors checked @?= []
         mapM_ (\name -> assertBool ("missing " <> T.unpack name) (name `elem` checkedTheorems checked)) ["FiniteQ.generic", "FiniteQ.inherited", "FiniteQ.concrete"]
     , testCase "imported conditional instances retain their canonical law context" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let (checked, build) = checkModule (\_ _ -> []) (initialBuild p) Map.empty Nothing "FiniteQ.px" (source <> validVoid)
         errors checked @?= []
         exports <- maybe (assertFailure "missing exports") pure (Map.lookup [Ident "FiniteQ"] (buildExports build))

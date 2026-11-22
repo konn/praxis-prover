@@ -8,6 +8,8 @@ and the generated PRA definitions and certificates remain authoritative.
 module Language.Praxis.Surface.Eval (
   Value (..),
   EvalResult (..),
+  EvalError (..),
+  renderEvalError,
   evaluateEntry,
   evaluateEntryWithNats,
   renderValue,
@@ -17,6 +19,7 @@ module Language.Praxis.Surface.Eval (
   renderValueWith,
 ) where
 
+import Data.Bifunctor (first)
 import Data.Char (isAlphaNum)
 import Data.List (isSuffixOf)
 import Data.Map.Strict qualified as Map
@@ -29,7 +32,7 @@ import Language.Praxis.Runtime qualified as Runtime
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Engine (Knowledge (..))
 import Language.Praxis.Surface.Env
-import Language.Praxis.Surface.Extract (extractProgram)
+import Language.Praxis.Surface.Extract (ExtractError, extractProgram, renderExtractError)
 import Language.Praxis.Surface.Fixity (Fixities, Fixity (..), undeclaredFixity)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Syntax.Raw (Assoc (..), Segment (..), segmentRaw)
@@ -43,15 +46,27 @@ data EvalResult = EvalResult
   }
   deriving stock (Show, Eq)
 
+-- | Structured errors raised when extracting and evaluating a checked surface entry point.
+data EvalError
+  = EvalExtractError !ExtractError
+  | EvalRuntimeError !String
+  deriving stock (Eq, Show)
+
+-- | Render an 'EvalError' as a diagnostic message.
+renderEvalError :: EvalError -> String
+renderEvalError = \case
+  EvalExtractError err -> renderExtractError err
+  EvalRuntimeError msg -> msg
+
 -- | The same checked Surface runtime used by the Haskell WASM target.
-evaluateEntry :: Int -> Text -> Checked -> Either String EvalResult
+evaluateEntry :: Int -> Text -> Checked -> Either EvalError EvalResult
 evaluateEntry fuel entry = evaluateEntryWithNats fuel entry []
 
 -- | Natural inputs still undergo the exported signature's domain checks.
-evaluateEntryWithNats :: Int -> Text -> [Natural] -> Checked -> Either String EvalResult
+evaluateEntryWithNats :: Int -> Text -> [Natural] -> Checked -> Either EvalError EvalResult
 evaluateEntryWithNats fuel entry arguments checked = do
-  program <- extractProgram entry checked
-  result <- Runtime.evaluate fuel program (map NatValue arguments)
+  program <- first EvalExtractError (extractProgram entry checked)
+  result <- first EvalRuntimeError (Runtime.evaluate fuel program (map NatValue arguments))
   pure (EvalResult (Runtime.resultValue result) (Runtime.resultCalls result) (Runtime.resultNodes result))
 
 -- * Display

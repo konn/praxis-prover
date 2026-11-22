@@ -11,12 +11,12 @@ import Language.Praxis.Surface.Check qualified as Check
 import Language.Praxis.Surface.Core qualified as Core
 import Language.Praxis.Surface.Desugar
 import Language.Praxis.Surface.Elab
-import Language.Praxis.Surface.Engine (Spec (..))
+import Language.Praxis.Surface.Engine (ProofError (..), Spec (..))
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity
 import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Parser
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
@@ -46,7 +46,7 @@ projectionIndexTests =
             recovered = Typed TNat [] [] (App (Global (Ref RefFunction (funCore project))) (Typed actual [] [] (Var 0)))
             call index = Typed (box index) [] [(0, index)] (App (Global (Ref RefFunction (funCore make))) recovered)
             check = Core.elaborateNamed env [] [namedBinder "value" actual]
-        body <- either assertFailure pure (check (call (IxFree (Named "n"))))
+        body <- either (assertFailure . Core.renderCoreError) pure (check (call (IxFree (Named "n"))))
         Core.indexDependencies body @?= Set.singleton (funCore card)
         Core.indexDependencies (Core.mapComputation id (Core.mapObligations id body)) @?= Core.indexDependencies body
         assertBool "a projection authorized a different index" (isLeft (check (call (IxNat 7))))
@@ -74,12 +74,12 @@ projectionIndexTests =
         assertBool "pruning erased its projection prerequisite" (CertifiedDeclaration (funCore card) `elem` map requirementDependency (requirements (funRequirements decode)))
         assertBool "a generic application was not elaborated" (any (\case IFun definition -> last (funQual (fdInfo definition)) == Ident "use"; _ -> False) items)
     , testCase "a symbolic indexed retraction and its generic use pass the kernel checker" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked = Check.checkSource p "projection.px" checkedRetraction
         errors checked @?= []
         mapM_ (\name -> assertBool ("missing certificate " <> T.unpack name) (name `elem` Check.checkedTheorems checked)) ["Projection.Finite-Fin.code.#index", "Projection.Finite-Fin.decode.#index", "Projection.Finite-Fin.decode-code", "Projection.roundtrip-law", "Projection.use.#index", "Projection.symbolic"]
     , testCase "a failed provider cannot authorize recovery after its body was defined" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked = Check.checkSourceWith failedCard p "projection-failed.px" checkedRetraction
         (_, core) <- maybe (assertFailure "the module did not elaborate") pure (Check.checkedFinal checked)
         assertBool "the test did not reach the post-definition failure" (Map.member (mangleGlobal ["Projection", "Finite-Fin", "card"]) (Check.coreBodies core))
@@ -93,7 +93,7 @@ projectionIndexTests =
     errors = map Check.reportMessage . filter ((== Check.SevError) . Check.reportSeverity) . Check.checkedReports
     failedCard _ definition
       | last (funQual (fdInfo definition)) == Ident "card" =
-          [Spec "#failed-contract" (const []) (\_ _ -> Bottom) (\_ _ -> []) (\_ _ -> Left "a deliberately failed post-definition contract")]
+          [Spec "#failed-contract" (const []) (\_ _ -> Bottom) (\_ _ -> []) (\_ _ -> Left (ProofEquationFailed "a deliberately failed post-definition contract"))]
       | otherwise = []
 
 checkedRetraction :: Text

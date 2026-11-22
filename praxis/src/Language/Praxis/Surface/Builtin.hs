@@ -13,6 +13,8 @@ representations of finite ordinals without trusting constructor names.
 -}
 module Language.Praxis.Surface.Builtin (
   BuiltinRole (..),
+  BuiltinError (..),
+  renderBuiltinError,
   BuiltinRegistry,
   BuiltinBinding (..),
   builtinRoleName,
@@ -78,10 +80,32 @@ builtinRoleName = \case
   BuiltinFiniteCode -> "FINITE_CODE"
   BuiltinFiniteDecodeCode -> "FINITE_DECODE_CODE"
 
-parseBuiltinRole :: Text -> Either String BuiltinRole
+-- | Errors raised while parsing or validating @BUILTIN@ pragma registrations.
+data BuiltinError
+  = UnknownBuiltinRole !Text
+  | BuiltinAlreadyRegistered !BuiltinRole !QualName
+  | BuiltinAlreadyBound !BuiltinRole !QualName
+  | BuiltinMissingPrerequisite !BuiltinRole !BuiltinRole
+  | BuiltinUnavailablePrerequisite !BuiltinRole !QualName
+  | BuiltinUnknownDeclaration !BuiltinRole !QualName
+  | BuiltinRequirementFailed !BuiltinRole !String
+  deriving stock (Eq, Show)
+
+-- | Render a 'BuiltinError' as a diagnostic message.
+renderBuiltinError :: BuiltinError -> String
+renderBuiltinError = \case
+  UnknownBuiltinRole name -> "unknown BUILTIN role " <> T.unpack name
+  BuiltinAlreadyRegistered role _ -> "BUILTIN " <> T.unpack (builtinRoleName role) <> " is already registered"
+  BuiltinAlreadyBound role previous -> "BUILTIN " <> T.unpack (builtinRoleName role) <> " is already bound to " <> T.unpack (displayQualName previous) <> " and cannot be rebound"
+  BuiltinMissingPrerequisite role wanted -> "BUILTIN " <> T.unpack (builtinRoleName role) <> " requires an earlier " <> T.unpack (builtinRoleName wanted) <> " registration"
+  BuiltinUnavailablePrerequisite role _ -> "BUILTIN " <> T.unpack (builtinRoleName role) <> " refers to an unavailable prerequisite"
+  BuiltinUnknownDeclaration role _ -> "BUILTIN " <> T.unpack (builtinRoleName role) <> " names no declaration"
+  BuiltinRequirementFailed role desc -> "BUILTIN " <> T.unpack (builtinRoleName role) <> " requires " <> desc
+
+parseBuiltinRole :: Text -> Either BuiltinError BuiltinRole
 parseBuiltinRole name = case [role | role <- [minBound .. maxBound], builtinRoleName role == name] of
   [role] -> Right role
-  _ -> Left ("unknown BUILTIN role " <> T.unpack name)
+  _ -> Left (UnknownBuiltinRole name)
 
 -- | Required earlier registrations. These are dependencies, not new axioms.
 rolePrerequisites :: BuiltinRole -> [BuiltinRole]
@@ -104,7 +128,7 @@ rolePrerequisites = \case
 requiresCertificate :: BuiltinRole -> Bool
 requiresCertificate role = role `elem` [BuiltinFinToNatBound, BuiltinFinFromToNat, BuiltinFinToFromNat]
 
-registerBuiltin :: BuiltinRegistry -> Env -> Text -> QualName -> Either String (BuiltinRegistry, BuiltinBinding)
+registerBuiltin :: BuiltinRegistry -> Env -> Text -> QualName -> Either BuiltinError (BuiltinRegistry, BuiltinBinding)
 registerBuiltin registry env name target = do
   role <- parseBuiltinRole name
   binding <- validateBuiltin registry env role target
@@ -114,15 +138,15 @@ registerBuiltin registry env name target = do
 proof certificate or a declaration dependency graph; the module checker
 must do both before storing the returned binding.
 -}
-validateBuiltin :: BuiltinRegistry -> Env -> BuiltinRole -> QualName -> Either String BuiltinBinding
+validateBuiltin :: BuiltinRegistry -> Env -> BuiltinRole -> QualName -> Either BuiltinError BuiltinBinding
 validateBuiltin registry env role target = do
   case Map.lookup roleName registry of
     Just previous
-      | previous == target -> reject "is already registered"
-      | otherwise -> reject ("is already bound to " <> T.unpack (displayQualName previous) <> " and cannot be rebound")
+      | previous == target -> Left (BuiltinAlreadyRegistered role target)
+      | otherwise -> Left (BuiltinAlreadyBound role previous)
     Nothing -> pure ()
   prerequisites <- traverse registered (rolePrerequisites role)
-  declaration <- maybe (reject "names no declaration") Right (Map.lookup target (envGlobals env))
+  declaration <- maybe (Left (BuiltinUnknownDeclaration role target)) Right (Map.lookup target (envGlobals env))
   case role of
     BuiltinFin -> do
       d <- datatype declaration
@@ -183,7 +207,7 @@ validateBuiltin registry env role target = do
       code <- registered BuiltinFiniteCode
       l <- case declaration of
         GLaw l -> pure l
-        _ -> reject "requires a class law"
+        _ -> require "a class law"
       expect "a law of the registered FINITE class, over exactly one value of its parameter" $
         lawClass l == cls && map snd (lawBinders l) == [TParam 0 []]
       decodeRef <- lawMethod l decode
@@ -193,20 +217,20 @@ validateBuiltin registry env role target = do
   pure (BuiltinBinding role target prerequisites)
   where
     roleName = builtinRoleName role
-    reject :: String -> Either String a
-    reject message = Left ("BUILTIN " <> T.unpack roleName <> " " <> message)
-    expect description ok = unless ok (reject ("requires " <> description))
-    registered wanted = maybe (reject ("requires an earlier " <> T.unpack (builtinRoleName wanted) <> " registration")) Right (Map.lookup (builtinRoleName wanted) registry)
+    require :: String -> Either BuiltinError a
+    require desc = Left (BuiltinRequirementFailed role desc)
+    expect description ok = unless ok (require description)
+    registered wanted = maybe (Left (BuiltinMissingPrerequisite role wanted)) Right (Map.lookup (builtinRoleName wanted) registry)
     typeName wanted = renderQualName <$> registered wanted
     datatype = \case
       GData d -> pure d
-      _ -> reject "requires an inductive data type"
+      _ -> require "an inductive data type"
     function = \case
       GFun f -> pure f
-      _ -> reject "requires an ordinary function"
+      _ -> require "an ordinary function"
     registeredFunction wanted = do
       q <- registered wanted
-      maybe (reject "refers to an unavailable prerequisite") function (Map.lookup q (envGlobals env))
+      maybe (Left (BuiltinUnavailablePrerequisite role q)) function (Map.lookup q (envGlobals env))
     expectFunction f kinds values ty arity = do
       let sch = funScheme f
       expect "the registered protocol's exact dependent function signature" $
@@ -222,7 +246,7 @@ validateBuiltin registry env role target = do
       cls <- registered BuiltinFinite
       m <- case declaration of
         GMethod m -> pure m
-        _ -> reject "requires a method of the registered FINITE class"
+        _ -> require "a method of the registered FINITE class"
       let sch = methodScheme m
       expect "the registered FINITE class's exact dependent method signature" $
         methodClass m == cls
@@ -237,7 +261,7 @@ validateBuiltin registry env role target = do
       fromNat <- if role == BuiltinFinToNatBound then pure toNat else registeredFunction BuiltinFinFromNat
       t <- case declaration of
         GTheorem t -> pure t
-        _ -> reject "requires a theorem whose proof has been certified"
+        _ -> require "a theorem whose proof has been certified"
       let (membered, proposition) = expected fin fromNat toNat
       expect "the bridge theorem's exact value binders without extra hypotheses or dictionaries" $
         length (thmValues t) == valueCount
@@ -245,11 +269,11 @@ validateBuiltin registry env role target = do
           && thmMembered t == membered
           && null (thmSlots t)
           && null (thmPremises t)
-      p <- maybe (reject "requires an explicit bridge theorem statement") Right (thmProp t)
+      p <- maybe (require "an explicit bridge theorem statement") Right (thmProp t)
       expect "the registered numeric bridge's exact proposition" (open p == proposition)
     lawMethod law name = case [ref | (slot, ref) <- zip (lawSlots law) (dictionaryRefs (lawSlots law)), slotMethod slot == name, slotParam slot == 0, Just (GMethod method) <- [Map.lookup name (envGlobals env)], slotArity slot == methodArity method] of
       [ref] -> pure ref
-      _ -> reject "requires every finite method to refer to its own class dictionary"
+      _ -> require "every finite method to refer to its own class dictionary"
 
 -- | The class elaborator uses this stable name in dependent method signatures.
 cardIndex :: QualName -> Ix

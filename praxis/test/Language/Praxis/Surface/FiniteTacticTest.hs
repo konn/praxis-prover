@@ -7,7 +7,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.FiniteQuantifierTest (finitePrelude)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -241,7 +241,7 @@ finiteTacticTests =
         , "bad = all 3"
         ]
     , testCase "identical spans in imported theorems keep their source scopes" $ do
-        library <- either assertFailure pure prelude
+        library <- either (assertFailure . renderPreludeError) pure prelude
         let check build imports file source = checkModule (\_ _ -> []) build imports Nothing file source
             errors checked = [message | Report _ SevError message <- checkedReports checked]
             (domain, firstBuild) = check (initialBuild library) Map.empty "Domain.px" ("module Domain where\n" <> finitePrelude)
@@ -279,12 +279,12 @@ finiteTacticTests =
     ]
   where
     succeeds label declarations = testCase label $ do
-      library <- either assertFailure pure prelude
+      library <- either (assertFailure . renderPreludeError) pure prelude
       let checked = checkSource library "finite-tactics.px" ("module FiniteQ where\n" <> finitePrelude <> T.unlines declarations)
       [message | Report _ SevError message <- checkedReports checked] @?= ([] :: [Text])
 
     rejects label declarations = testCase label $ do
-      library <- either assertFailure pure prelude
+      library <- either (assertFailure . renderPreludeError) pure prelude
       let checked = checkSource library "finite-tactics.px" ("module FiniteQ where\n" <> finitePrelude <> T.unlines declarations)
       assertBool "the source theorem failed" ("FiniteQ.all" `elem` checkedTheorems checked)
       assertBool "the invalid application was certified" ("FiniteQ.bad" `notElem` checkedTheorems checked)

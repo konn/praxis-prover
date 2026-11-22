@@ -25,16 +25,17 @@ builtinTests =
     "builtin protocol"
     [ testCase "every documented role parses and unknown roles are rejected" $ do
         forM_ roles $ \role -> parseBuiltinRole (builtinRoleName role) @?= Right role
+        parseBuiltinRole "FINITE_ENUMERATON" @?= Left (UnknownBuiltinRole "FINITE_ENUMERATON")
         rejected "unknown BUILTIN role" (parseBuiltinRole "FINITE_ENUMERATON")
     , testCase "complete, coherent signatures and bridge propositions register" $ do
-        registry <- either assertFailure pure (registerAll fixture)
+        registry <- either (assertFailure . renderBuiltinError) pure (registerAll fixture)
         Map.size registry @?= length roles
     , testCase "finite retractions do not require a vector registration" $ do
         let withoutVectors = filter (`notElem` [BuiltinVec, BuiltinVecLookup]) roles
-        registry <- either assertFailure pure (foldM (\known role -> fst <$> registerBuiltin known fixture (builtinRoleName role) (target role)) Map.empty withoutVectors)
+        registry <- either (assertFailure . renderBuiltinError) pure (foldM (\known role -> fst <$> registerBuiltin known fixture (builtinRoleName role) (target role)) Map.empty withoutVectors)
         Map.size registry @?= length withoutVectors
     , testCase "registrations retain their proof dependencies" $ do
-        binding <- either assertFailure pure (validate BuiltinFiniteDecodeCode fixture)
+        binding <- either (assertFailure . renderBuiltinError) pure (validate BuiltinFiniteDecodeCode fixture)
         builtinDependencies binding @?= map target (rolePrerequisites BuiltinFiniteDecodeCode)
         assertBool "bound requires a certified theorem" (requiresCertificate BuiltinFinToNatBound)
         assertBool "inverse requires a certified theorem" (requiresCertificate BuiltinFinFromToNat)
@@ -83,17 +84,19 @@ builtinTests =
 roles :: [BuiltinRole]
 roles = [minBound .. maxBound]
 
-registerAll :: Env -> Either String BuiltinRegistry
+registerAll :: Env -> Either BuiltinError BuiltinRegistry
 registerAll env = foldM (\registry role -> fst <$> registerBuiltin registry env (builtinRoleName role) (target role)) Map.empty roles
 
-validate :: BuiltinRole -> Env -> Either String BuiltinBinding
+validate :: BuiltinRole -> Env -> Either BuiltinError BuiltinBinding
 validate role env = validateBuiltin prerequisites env role (target role)
   where
     prerequisites = Map.fromList [(builtinRoleName r, target r) | r <- roles, r /= role]
 
-rejected :: Text -> Either String a -> Assertion
+rejected :: Text -> Either BuiltinError a -> Assertion
 rejected message = \case
-  Left err -> assertBool ("expected " <> T.unpack message <> " in: " <> err) (message `T.isInfixOf` T.pack err)
+  Left err ->
+    let rendered = renderBuiltinError err
+     in assertBool ("expected " <> T.unpack message <> " in: " <> rendered) (message `T.isInfixOf` T.pack rendered)
   Right _ -> assertFailure "malformed BUILTIN declaration was accepted"
 
 target :: BuiltinRole -> QualName

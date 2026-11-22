@@ -41,6 +41,8 @@ module Language.Praxis.Surface.Index (
   unifyIxNamedWith,
   unifyAllWith,
   unifyAllRankedWith,
+  IndexRefineError (..),
+  renderIndexRefineError,
   refineEqualities,
   hintIndex,
 
@@ -222,12 +224,21 @@ unifyAllRanked names rank pairs s0 = foldl step (Unified s0) pairs
       Unified s -> unifyIxRanked names rank x y s
       other -> other
 
+-- | Why refining a set of branch index equalities proved the branch impossible.
+data IndexRefineError
+  = IndexEqualityClash !Ix !Ix !String
+  deriving stock (Eq, Show)
+
+-- | Render an 'IndexRefineError' as a diagnostic message.
+renderIndexRefineError :: IndexRefineError -> String
+renderIndexRefineError (IndexEqualityClash _ _ why) = why
+
 {- | Refine a branch using its given equalities. Solvable equations produce
 substitutions; undecided equations remain assumptions. Retry those after
 other equations refine the variables. Only constructors are decomposed:
 equal applications of an arbitrary function do not imply equal arguments.
 -}
-refineEqualities :: Unfold -> [Text] -> (Key -> Maybe Int) -> [(Ix, Ix)] -> Subst -> Either String (Subst, [(Ix, Ix)])
+refineEqualities :: Unfold -> [Text] -> (Key -> Maybe Int) -> [(Ix, Ix)] -> Subst -> Either IndexRefineError (Subst, [(Ix, Ix)])
 refineEqualities unfold names rank equations initial = pass initial [] equations
   where
     pass s pending []
@@ -238,7 +249,7 @@ refineEqualities unfold names rank equations initial = pass initial [] equations
           b = applyIx s y
        in case unifyIxRankedWith unfold names rank a b s of
             Unified solved -> pass solved pending rest
-            Clash why -> Left why
+            Clash why -> Left (IndexEqualityClash a b why)
             Stuck _ -> case (a, b) of
               (IxCon c xs, IxCon d ys) | c == d, length xs == length ys -> pass s pending (zip xs ys <> rest)
               (IxSucc u, IxSucc v) -> pass s pending ((u, v) : rest)

@@ -20,6 +20,8 @@ raw term — rather than appended piece by piece.
 module Language.Praxis.Surface.CoreText (
   -- * Core terms
   CT (..),
+  CoreTextError (..),
+  renderCoreTextError,
   render,
   isParameter,
   applyCallback,
@@ -58,6 +60,7 @@ module Language.Praxis.Surface.CoreText (
 
 import Bound (Var (..), abstract, fromScope)
 import Control.Monad (unless)
+import Data.Bifunctor (first)
 import Data.Char (isAlphaNum)
 import Data.List (elemIndex, intersperse, mapAccumL, nub, partition)
 import Data.Text (Text)
@@ -128,20 +131,52 @@ render = \case
      in "{λ " <> unwordsB (map render ys) <> ". " <> render (CSym f (prefix <> ys <> suffix)) <> "}"
   CClosure params body _ -> "{λ " <> unwordsB (map fromText params) <> ". " <> render body <> "}"
 
+-- | Errors raised while lowering surface terms or propositions into PRA core text.
+data CoreTextError
+  = CoreTextTermError !Term.TermError
+  | InvalidFixedCallbackCode !CT
+  | NonCallbackApplicationHead !CT
+  | UncapturedCallbackDictionaryValue !Int
+  | InvalidClosedCallbackBinder
+  | InvalidClosedPredicateBinder
+  | MissingDictionaryPosition !Text
+  | NegativeDictionaryPosition !Int
+  | DictionaryValueApplied !Text
+  | InvalidIndexedPartialSchema !Text !Int !Int !Int
+  | CoreTextUnboundedQuantifier
+  | CoreTextNotAProposition
+  deriving stock (Eq, Show)
+
+-- | Render a 'CoreTextError' as a diagnostic message.
+renderCoreTextError :: CoreTextError -> String
+renderCoreTextError = \case
+  CoreTextTermError err -> Term.renderTermError err
+  InvalidFixedCallbackCode _ -> "an invalid fixed callback code"
+  NonCallbackApplicationHead _ -> "an application whose head is no fixed callback"
+  UncapturedCallbackDictionaryValue _ -> "a callback dictionary value was not captured"
+  InvalidClosedCallbackBinder -> "an invalid closed callback binder"
+  InvalidClosedPredicateBinder -> "an invalid closed predicate binder"
+  MissingDictionaryPosition _ -> "internal: a value of the dictionary at no position"
+  NegativeDictionaryPosition _ -> "internal: a negative dictionary position"
+  DictionaryValueApplied _ -> "a dictionary value applied to arguments"
+  InvalidIndexedPartialSchema {} -> "an invalid indexed partial schema"
+  CoreTextUnboundedQuantifier -> "an unbounded quantifier"
+  CoreTextNotAProposition -> "not a proposition"
+
 -- | The ordinary runtime argument of a fixed callback: its packed environment.
 callbackEnvironment :: CT -> CT
 callbackEnvironment (CCallback _ environment) = environment
 callbackEnvironment term = term
 
 -- | Apply the fixed code of a callback to its environment and source arguments.
-applyCallback :: CT -> [CT] -> Either String CT
+applyCallback :: CT -> [CT] -> Either CoreTextError CT
 applyCallback (CCallback code environment) arguments = case code of
   CStatic name -> Right (CSym name (environment : arguments))
   CClosure binders body []
     | length binders == 1 + length arguments ->
         Right (replaceCT (\case CVar name -> lookup name (zip binders (environment : arguments)); _ -> Nothing) body)
-  _ -> Left "an invalid fixed callback code"
-applyCallback _ _ = Left "an application whose head is no fixed callback"
+  _ -> Left (InvalidFixedCallbackCode code)
+applyCallback headTerm _ = Left (NonCallbackApplicationHead headTerm)
 
 -- | Whether a term stands as the parameter of a schema.
 isParameter :: CT -> Bool
@@ -214,25 +249,25 @@ The core term of a surface term: constructors and functions by their core
 symbols, @S@ and the arithmetic of @Nat@ by the builtin ones.  Only
 first-order applications of globals reach the core.
 -}
-termCT :: (a -> CT) -> Expr a -> Either String CT
+termCT :: (a -> CT) -> Expr a -> Either CoreTextError CT
 termCT var e = do
-  prepared <- Term.prepareTerm e
-  t <- Term.withoutObligations prepared
-  lowerTermWith (standardLowering var) t
+  prepared <- first CoreTextTermError (Term.prepareTerm e)
+  t <- first CoreTextTermError (Term.withoutObligations prepared)
+  lowerTermWith id (standardLowering var) t
 
 {- | The context-dependent parts of lowering. Application arguments retain
 their computational syntax alongside the core term, for structural recursion
 checks. Proof erasure has already produced a 'Term.PendingTerm'; these hooks
 cannot encounter or discard proof arguments.
 -}
-data TermLowering a = TermLowering
+data TermLowering e a = TermLowering
   { lowerVariable :: a -> CT
-  , lowerDictionaryValue :: Int -> Either String CT
-  , lowerApplication :: Ref -> [(Term.Term a, CT)] -> Either String CT
+  , lowerDictionaryValue :: Int -> Either e CT
+  , lowerApplication :: Ref -> [(Term.Term a, CT)] -> Either e CT
   }
 
 -- | Ordinary applications and the dictionary variables used in statements.
-standardLowering :: (a -> CT) -> TermLowering a
+standardLowering :: (a -> CT) -> TermLowering e a
 standardLowering var =
   TermLowering
     { lowerVariable = var
@@ -241,8 +276,8 @@ standardLowering var =
     }
 
 -- | The shared lowering traversal for statements, proof terms and function bodies.
-lowerTermWith :: TermLowering a -> Term.Term a -> Either String CT
-lowerTermWith lowering = go
+lowerTermWith :: (CoreTextError -> e) -> TermLowering e a -> Term.Term a -> Either e CT
+lowerTermWith liftErr lowering = go
   where
     go = \case
       Term.Variable v -> Right (lowerVariable lowering v)
@@ -262,37 +297,37 @@ lowerTermWith lowering = go
             positions = zip dictionary [length captured ..]
             dictionaryValue index = case lookup index positions of
               Just position -> Right (fieldT position environment)
-              Nothing -> Left "a callback dictionary value was not captured"
+              Nothing -> Left (liftErr (UncapturedCallbackDictionaryValue index))
         dictionaryCaptured <- traverse (lowerDictionaryValue lowering) dictionary
-        code <- lowerTermWith (standardLowering variable) {lowerDictionaryValue = dictionaryValue} closed
+        code <- lowerTermWith liftErr (standardLowering variable) {lowerDictionaryValue = dictionaryValue} closed
         pure (CCallback (CClosure ("schema_env" : parameters) code []) (consSeq 0 (captured <> dictionaryCaptured)))
       Term.PackedClosure hints body environment -> do
         let parameters = map hintText hints
             arity = length parameters
         unless (arity >= 2 && length (nub parameters) == arity && all (\i -> i >= 0 && i < arity) body) $
-          Left "an invalid closed callback binder"
-        code <- lowerTermWith (standardLowering (CVar . (parameters !!))) body
+          Left (liftErr InvalidClosedCallbackBinder)
+        code <- lowerTermWith liftErr (standardLowering (CVar . (parameters !!))) body
         CCallback (CClosure parameters code []) <$> go environment
       Term.PackedPredicate hints body captures -> do
         let parameters = map hintText hints
             arity = length parameters
         unless (arity == 1 + length captures && length (nub parameters) == arity && all (\i -> i >= 0 && i < arity) body) $
-          Left "an invalid closed predicate binder"
-        code <- lowerTermWith (standardLowering (CVar . (parameters !!))) body
+          Left (liftErr InvalidClosedPredicateBinder)
+        code <- lowerTermWith liftErr (standardLowering (CVar . (parameters !!))) body
         CClosure parameters code <$> traverse go captures
       Term.Invoke callback arguments -> do
         code <- go callback
         values <- traverse go arguments
-        applyCallback code values
+        first liftErr (applyCallback code values)
       Term.Call r@(Ref kind core) args -> case (kind, args) of
         (RefStatic, []) -> Right (CStatic core)
         (RefValueParam, []) -> do
-          i <- maybe (Left "internal: a value of the dictionary at no position") Right (readMaybe (T.unpack core))
-          if i < 0 then Left "internal: a negative dictionary position" else lowerDictionaryValue lowering i
-        (RefValueParam, _) -> Left "a dictionary value applied to arguments"
+          i <- maybe (Left (liftErr (MissingDictionaryPosition core))) Right (readMaybe (T.unpack core))
+          if i < 0 then Left (liftErr (NegativeDictionaryPosition i)) else lowerDictionaryValue lowering i
+        (RefValueParam, _) -> Left (liftErr (DictionaryValueApplied core))
         (RefPartial n, _) -> (\dict -> CPartial core dict n) <$> traverse go args
         (RefIndexedPartial n prefixCount, _) -> do
-          unless (n > 0 && prefixCount >= 0 && prefixCount <= length args) $ Left "an invalid indexed partial schema"
+          unless (n > 0 && prefixCount >= 0 && prefixCount <= length args) $ Left (liftErr (InvalidIndexedPartialSchema core n prefixCount (length args)))
           (\captures -> CIndexedPartial core captures n prefixCount) <$> traverse go args
         _ -> do
           translated <- traverse go args
@@ -317,14 +352,14 @@ The text of a core formula for a surface proposition. Quantifier names start
 with the supplied hint and are freshened against free names and enclosing
 binders before their scopes are rendered.
 -}
-propText :: (Text -> Text) -> (a -> CT) -> Expr a -> Either String Builder
+propText :: (Text -> Text) -> (a -> CT) -> Expr a -> Either CoreTextError Builder
 propText fresh var expression = go mentioned var expression
   where
     -- Reserve free names and names embedded in raw generated terms. Each
     -- recursive scope also reserves its enclosing quantifier binders.
     mentioned = foldMap (identifiers . runBuilder . render . var) expression <> concatMap (identifiers . refName) (globalsOf expression)
     identifiers = filter (not . T.null) . T.split (\c -> not (isAlphaNum c || c == '_' || c == '\''))
-    go :: [Text] -> (b -> CT) -> Expr b -> Either String Builder
+    go :: [Text] -> (b -> CT) -> Expr b -> Either CoreTextError Builder
     go occupied v = \case
       At _ e -> go occupied v e
       Rel r a b -> do
@@ -349,7 +384,7 @@ propText fresh var expression = go mentioned var expression
       Top -> Right "(0 = 0)"
       Bottom -> Right "_|_"
       Quant q (Hint h) (Just (rel, bound)) _ body -> do
-        let name = head [candidate | candidate <- iterate (<> "'") (fresh h), candidate `notElem` occupied]
+        let name = until (`notElem` occupied) (<> "'") (fresh h)
         b <- render <$> termCT v bound
         inner <- go (name : occupied) (\case B () -> CVar name; F x -> v x) (fromScope body)
         let limit = case rel of
@@ -359,8 +394,8 @@ propText fresh var expression = go mentioned var expression
               Forall -> "∀"
               Exists -> "∃"
         pure (paren (sym <> " " <> fromText name <> " < " <> limit <> ". " <> inner))
-      Quant {} -> Left "an unbounded quantifier"
-      _ -> Left "not a proposition"
+      Quant {} -> Left CoreTextUnboundedQuantifier
+      _ -> Left CoreTextNotAProposition
     paren t = "(" <> t <> ")"
 
 {- |
@@ -376,10 +411,10 @@ closure ('predicateOver'), as the core closes the λ of a quantifier it
 reads.  So the code is the one the core's @reify@ gives the formula, and
 @reflect@ reads the formula back from.
 -}
-propCode :: (a -> CT) -> Expr a -> Either String CT
+propCode :: (a -> CT) -> Expr a -> Either CoreTextError CT
 propCode = go (0 :: Int)
   where
-    go :: Int -> (b -> CT) -> Expr b -> Either String CT
+    go :: Int -> (b -> CT) -> Expr b -> Either CoreTextError CT
     go depth v = \case
       At _ e -> go depth v e
       Rel r a b -> do
@@ -417,8 +452,8 @@ propCode = go (0 :: Int)
         pure case q of
           Forall -> applySchema "holdsBelow" [closure] [limit]
           Exists -> CSym "lt" [applySchema "mu" [closure] [limit], limit]
-      Quant {} -> Left "an unbounded quantifier"
-      _ -> Left "not a proposition"
+      Quant {} -> Left CoreTextUnboundedQuantifier
+      _ -> Left CoreTextNotAProposition
     -- An atom's code: of @c = 1@, the code @c@ when it reads as a formula of its own, and of @0 < u@ the term @u@ when it does not.
     equationCode s t
       | t == CNum 1, Just u <- positive s, not (codeIsFormula u) = u

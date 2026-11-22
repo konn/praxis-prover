@@ -11,7 +11,7 @@ import Data.Text.IO qualified as TIO
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Eval
 import Language.Praxis.Surface.Mangle (mangleGlobal)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -42,7 +42,7 @@ glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
         assertBool "the classical proof was accepted intuitionistically" (isLeft (proofConclusion "Intuitionistic" input))
         assertBool "unexpectedly large evaluator allocation" (evalNodes result < 100000)
     , testCase "malformed MP, classical-to-intuitionistic casts and misused hypotheses are rejected" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         source <- TIO.readFile sourcePath
         let declarations = fst (T.breakOn "-- Proof schemata built by construction tactics" source)
             machinery = fst (T.breakOn "-- The double-negation lemmas Glivenko's algorithm uses" source)
@@ -56,12 +56,12 @@ glivenkoTests = withResource load (const (pure ())) $ \getChecked ->
   where
     sourcePath = "data/libraries/logic/src/Logic/Glivenko.px"
     load = do
-      p <- either assertFailure pure prelude
+      p <- either (assertFailure . renderPreludeError) pure prelude
       source <- TIO.readFile sourcePath
       let checked = fst (checkModule (\_ _ -> []) (initialBuild p) {buildRetainGeneratedText = False} Map.empty Nothing sourcePath source)
       [reportMessage r | r <- checkedReports checked, reportSeverity r == SevError] @?= []
       pure checked
-    run checked name = either assertFailure pure (evaluateEntryWithNats 1000000 ("Logic.Glivenko." <> name) [0, 1] checked)
+    run checked name = either (assertFailure . renderEvalError) pure (evaluateEntryWithNats 1000000 ("Logic.Glivenko." <> name) [0, 1] checked)
 
 formula :: Text -> [Value] -> Value
 formula name = DataValue ("Logic.Glivenko.Formula." <> name)

@@ -11,7 +11,7 @@ import Language.Praxis.Surface.Desugar
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Evidence
 import Language.Praxis.Surface.FiniteFixtures
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..))
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -27,7 +27,7 @@ classAdmissionTests =
         assertBool "an ordinary certificate admitted a class" (either (const True) (const False) (validateRequirements evidence needed))
         validateRequirements evidence {evidenceDeclarations = Set.singleton (classEvidenceName [Ident "A", Ident "Trusted"])} needed @?= Right ()
     , testCase "failed classes cannot justify erased constraints or instance contexts" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let declarations =
               T.unlines
                 [ "use : Trusted a => a -> 0 = 0"
@@ -49,7 +49,7 @@ classAdmissionTests =
         assertBool "a zero-method failed class certified a theorem" ("A.use" `notElem` checkedTheorems checked)
         mapM_ (notAdmitted build) [[Ident "A", Ident "discard"], [Ident "A", Ident "instantiated"], [Ident "A", Ident "Safe-Box", Ident "out"], [Ident "A", Ident "Child"]]
     , testCase "failed class admission survives qualified imports and renaming" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let (_, build) = checkModule (\_ _ -> []) (initialBuild p) Map.empty Nothing "A.px" (source False)
         exports <- maybe (assertFailure "missing exports") pure (Map.lookup [Ident "A"] (buildExports build))
         let imports = Map.singleton (Nothing, [Ident "A"]) (Right exports)
@@ -57,7 +57,7 @@ classAdmissionTests =
         assertBool "an imported failed class was accepted" ("B.use" `notElem` checkedTheorems checked)
         assertBool "canonical class name was lost at import" (any (T.isInfixOf "successfully checked class A.Trusted") (errors checked))
     , testCase "admitted class laws work generically, concretely, and through imports" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let declarations =
               T.unlines
                 [ "instance Trusted Bool where"

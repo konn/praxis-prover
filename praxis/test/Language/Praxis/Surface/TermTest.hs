@@ -49,19 +49,19 @@ termTests =
         let first = Rel RelEq (Var "x") (Nat 0)
             second = Rel RelEq (Var "y") (Var "x")
             input = call "f" [proof first 1, call "g" [Var "x", proof second 2], Nat 3]
-        prepared <- either assertFailure pure (Term.prepareTerm input)
+        prepared <- either (assertFailure . Term.renderTermError) pure (Term.prepareTerm input)
         Term.computation prepared @?= Term.Call (Ref RefFunction "f") [Term.Call (Ref RefFunction "g") [Term.Variable "x"], Term.Literal 3]
         Term.obligations prepared @?= [(first, raw 1), (second, raw 2)]
     , testCase "bottom elimination occupies a value argument slot" $ do
         let input = call "f" [proof Top 1, Absurd (Irrelevant (raw 2)), Var "x"]
-        prepared <- either assertFailure pure (Term.prepareTerm input)
+        prepared <- either (assertFailure . Term.renderTermError) pure (Term.prepareTerm input)
         Term.computation prepared @?= Term.Call (Ref RefFunction "f") [Term.Literal 0, Term.Variable "x"]
         Term.obligations prepared @?= [(Top, raw 1), (Bottom, raw 2)]
     , testCase "ordinary statement lowering refuses pending proof obligations at every depth" $
         forM_ [proof Top 1, call "f" [proof Top 1], call "f" [call "g" [proof Top 1]], Absurd (Irrelevant (raw 1)), call "f" [Absurd (Irrelevant (raw 1))]] $ \e ->
           assertBool "an unproved argument was erased" (isLeft (termCT CVar e))
     , testCase "rewriting an unused computation does not discard its obligations" $ do
-        prepared <- either assertFailure pure (Term.prepareTerm (call "f" [proof (Rel RelEq (Var "x") (Nat 0)) 1]))
+        prepared <- either (assertFailure . Term.renderTermError) pure (Term.prepareTerm (call "f" [proof (Rel RelEq (Var "x") (Nat 0)) 1]))
         let rewritten = Term.mapComputation (const (Term.Literal 0)) prepared
         Term.obligations rewritten @?= Term.obligations prepared
         assertBool "rewriting made a pending term unconditional" (isLeft (Term.withoutObligations rewritten))
@@ -69,7 +69,7 @@ termTests =
         let body = Term.Call (Ref RefValueParam "0") [] :: Term.Term (Var Int Text)
             callback = Term.Closure 1 body
             lowering = (standardLowering CVar) {lowerDictionaryValue = \_ -> Right (CVar "emptyValue")}
-        lowerTermWith lowering callback
+        lowerTermWith id lowering callback
           @?= Right (CCallback (CClosure ["schema_env", "schema_x0"] (fieldT 0 (CVar "schema_env")) []) (consSeq 0 [CVar "emptyValue"]))
     , testCase "reconstructed callbacks do not capture names from their packed environment" $ do
         let callback = CCallback (CClosure ["schema_env", "schema_x0"] (CSym "add" [CVar "schema_x0", fieldT 0 (CVar "schema_env")]) []) (consSeq 0 [CVar "schema_x0"])
@@ -92,7 +92,7 @@ termTests =
         assertBool "a predicate with missing captures was lowered" (isLeft (termCT CVar (packed (Var (B 0)) [])))
         assertBool "a predicate erased an unproved code argument" (isLeft (termCT CVar (packed (Absurd (Irrelevant (raw 1))) [Nat 0])))
         let input = packed (Var (B 0)) [Absurd (Irrelevant (raw 2))]
-        prepared <- either assertFailure pure (Term.prepareTerm input)
+        prepared <- either (assertFailure . Term.renderTermError) pure (Term.prepareTerm input)
         Term.obligations prepared @?= [(Bottom, raw 2)]
         assertBool "a predicate erased an unproved capture" (isLeft (termCT CVar input))
     , testCase "reconstructed nested callbacks retain their fixed code" $ do
@@ -123,7 +123,7 @@ termTests =
           _ -> assertFailure "substitution lost its enclosing binder"
     , testCase "a schema's captured values retain their proof obligations" $ do
         let input = apps (Global (Ref (RefPartial 1) "f")) [Global (Ref RefStatic "g"), Absurd (Irrelevant (raw 1))] :: Expr Text
-        prepared <- either assertFailure pure (Term.prepareTerm input)
+        prepared <- either (assertFailure . Term.renderTermError) pure (Term.prepareTerm input)
         Term.obligations prepared @?= [(Bottom, raw 1)]
         termCT CVar (Term.toExpr (Term.computation prepared)) @?= Right (CPartial "f" [CStatic "g", CNum 0] 1)
     ]

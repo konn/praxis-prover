@@ -10,8 +10,8 @@ import Data.Text.IO qualified as TIO
 import Data.Version (showVersion)
 import Language.Praxis.Package.Build
 import Language.Praxis.Surface.Check
-import Language.Praxis.Surface.Eval (EvalResult (..), displayOf, evaluateEntryWithNats, renderValueWith)
-import Language.Praxis.Surface.Extract (extractProgram, haskellModule)
+import Language.Praxis.Surface.Eval (EvalResult (..), displayOf, evaluateEntryWithNats, renderEvalError, renderValueWith)
+import Language.Praxis.Surface.Extract (extractProgram, haskellModule, renderExtractError)
 import Language.Praxis.Surface.Prelude
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
 import Numeric.Natural (Natural)
@@ -35,7 +35,7 @@ data CheckOptions = CheckOptions
 main :: IO ()
 main = do
   requested <- execParser (info (commandP <**> versionP <**> helper) (fullDesc <> header "praxis - a finitistic prover over primitive recursive arithmetic"))
-  p <- either (\e -> hPutStrLn stderr ("the prelude did not certify: " <> e) *> exitFailure) pure prelude
+  p <- either (\e -> hPutStrLn stderr ("the prelude did not certify: " <> renderPreludeError e) *> exitFailure) pure prelude
   case requested of
     Check CheckOptions {..} -> do
       oks <- mapM (checkTarget p dumpCore dumpPra alone) (if null targets then ["."] else targets)
@@ -44,13 +44,13 @@ main = do
       checked <- loadChecked p source
       hPutStrLn stderr ("Evaluating " <> entry <> "...")
       case evaluateEntryWithNats fuel (T.pack entry) arguments checked of
-        Left err -> hPutStrLn stderr err *> exitFailure
+        Left err -> hPutStrLn stderr (renderEvalError err) *> exitFailure
         Right result -> do
           TIO.putStrLn (renderValueWith (displayOf checked) depth (evalValue result))
           hPutStrLn stderr ("Evaluated " <> show (evalCalls result) <> " distinct calls; " <> show (evalNodes result) <> " shared value nodes.")
     Extract source entry output -> do
       checked <- loadChecked p source
-      program <- either (\err -> hPutStrLn stderr err *> exitFailure) pure (extractProgram (T.pack entry) checked)
+      program <- either (\err -> hPutStrLn stderr (renderExtractError err) *> exitFailure) pure (extractProgram (T.pack entry) checked)
       createDirectoryIfMissing True (takeDirectory output)
       TIO.writeFile output (haskellModule program)
       hPutStrLn stderr ("Extracted " <> entry <> " to " <> output)

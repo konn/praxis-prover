@@ -11,6 +11,8 @@ module Language.Praxis.Surface.Core.Types (
   SIndex (..),
   List (..),
   SomeType (..),
+  ReflectError (..),
+  renderReflectError,
   reflectType,
   forgetType,
   sameType,
@@ -19,6 +21,7 @@ module Language.Praxis.Surface.Core.Types (
 
 import Data.Kind qualified as K
 import Data.Proxy (Proxy (..))
+import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Type.Equality ((:~:) (..))
 import GHC.TypeLits (KnownSymbol, SomeSymbol (..), Symbol, sameSymbol, someSymbolVal, symbolVal)
@@ -88,7 +91,35 @@ listMap :: (forall t. f t -> a) -> List f ts -> [a]
 listMap _ Nil = []
 listMap f (Cons t ts) = f t : listMap f ts
 
-reflectList :: (a -> Either String (Some f)) -> [a] -> Either String (SomeList f)
+-- | Why a surface type or index cannot be reflected into the explicit core.
+data ReflectError
+  = UnresolvedTypeHole
+  | NegativeTypeParameter !Int
+  | UnresolvedIndexHole
+  | NegativeIndexParameter !Int
+  | NegativeBoundIndex !Int !Int
+  | NegativeMetaIndex !Int
+  | OpenVariableInCore !S.Atom
+  | NegativeDictionaryIndex !Int
+  | UnresolvedDependentMember !Text
+  | InvalidPartialSchema !Text !Int !Int !Int
+  deriving stock (Eq, Show)
+
+-- | Render a 'ReflectError' as a diagnostic message.
+renderReflectError :: ReflectError -> String
+renderReflectError = \case
+  UnresolvedTypeHole -> "an unresolved type hole at the explicit core boundary"
+  NegativeTypeParameter _ -> "a negative type parameter at the explicit core boundary"
+  UnresolvedIndexHole -> "an unresolved index hole at the explicit core boundary"
+  NegativeIndexParameter _ -> "a negative index parameter at the explicit core boundary"
+  NegativeBoundIndex _ _ -> "a negative bound index at the explicit core boundary"
+  NegativeMetaIndex _ -> "a negative index variable at the explicit core boundary"
+  OpenVariableInCore _ -> "an open variable at the explicit core boundary: a clause is closed before it is checked"
+  NegativeDictionaryIndex _ -> "a negative dictionary index at the explicit core boundary"
+  UnresolvedDependentMember _ -> "an unresolved dependent member at the explicit core boundary"
+  InvalidPartialSchema {} -> "an invalid partial schema in a type index"
+
+reflectList :: (a -> Either ReflectError (Some f)) -> [a] -> Either ReflectError (SomeList f)
 reflectList _ [] = Right (SomeList Nil)
 reflectList f (x : xs) = do
   Some t <- f x
@@ -98,15 +129,15 @@ reflectList f (x : xs) = do
 data Some f where
   Some :: f t -> Some f
 
-reflectType :: S.Ty -> Either String SomeType
+reflectType :: S.Ty -> Either ReflectError SomeType
 reflectType = go
   where
     types ts = reflectList (\t -> do SomeType st <- go t; pure (Some st)) ts
     indices is = reflectList (\i -> do SomeIndex si <- reflectIndex i; pure (Some si)) is
     go S.TNat = Right (SomeType SNatural)
-    go S.THole = Left "an unresolved type hole at the explicit core boundary"
+    go S.THole = Left UnresolvedTypeHole
     go (S.TParam n ts)
-      | n < 0 = Left "a negative type parameter at the explicit core boundary"
+      | n < 0 = Left (NegativeTypeParameter n)
       | otherwise = do
           SomeList sts <- types ts
           case someNatVal (fromIntegral n) of
@@ -121,31 +152,31 @@ reflectType = go
       SomeType sb <- go b
       pure (SomeType (SFunction sa sb))
 
-reflectIndex :: S.Ix -> Either String SomeIndex
+reflectIndex :: S.Ix -> Either ReflectError SomeIndex
 reflectIndex = go . S.normIx
   where
     indices xs = reflectList (\i -> do SomeIndex si <- go i; pure (Some si)) xs
-    go S.IxHole = Left "an unresolved index hole at the explicit core boundary"
+    go S.IxHole = Left UnresolvedIndexHole
     go (S.IxParam n)
-      | n < 0 = Left "a negative index parameter at the explicit core boundary"
+      | n < 0 = Left (NegativeIndexParameter n)
       | otherwise = case someNatVal (fromIntegral n) of
           SomeNat p -> Right (SomeIndex (SParameterIndex p))
     go (S.IxBound d j)
-      | d < 0 || j < 0 = Left "a negative bound index at the explicit core boundary"
+      | d < 0 || j < 0 = Left (NegativeBoundIndex d j)
       | otherwise = case (someNatVal (fromIntegral d), someNatVal (fromIntegral j)) of
           (SomeNat pd, SomeNat pj) -> Right (SomeIndex (SBoundIndex pd pj))
     go (S.IxMeta m _)
-      | m < 0 = Left "a negative index variable at the explicit core boundary"
+      | m < 0 = Left (NegativeMetaIndex m)
       | otherwise = case someNatVal (fromIntegral m) of
           SomeNat p -> Right (SomeIndex (SMetaIndex p))
     go (S.IxFree (S.Named name)) = case someSymbolVal (T.unpack name) of
       SomeSymbol p -> Right (SomeIndex (SFreeIndex p))
-    go (S.IxFree (S.Fresh _ _)) = Left "an open variable at the explicit core boundary: a clause is closed before it is checked"
+    go (S.IxFree atom@(S.Fresh _ _)) = Left (OpenVariableInCore atom)
     go (S.IxDict i)
-      | i < 0 = Left "a negative dictionary index at the explicit core boundary"
+      | i < 0 = Left (NegativeDictionaryIndex i)
       | otherwise = case someNatVal (fromIntegral i) of
           SomeNat p -> Right (SomeIndex (SDictionaryIndex p))
-    go (S.IxMethod _) = Left "an unresolved dependent member at the explicit core boundary"
+    go (S.IxMethod q) = Left (UnresolvedDependentMember q)
     go (S.IxNat n) = case someNatVal n of
       SomeNat p -> Right (SomeIndex (SNumberIndex p))
     go (S.IxSucc i) = do
@@ -162,7 +193,7 @@ reflectIndex = go . S.normIx
     go (S.IxSchema name) = case someSymbolVal (T.unpack name) of
       SomeSymbol p -> Right (SomeIndex (SSchemaIndex p))
     go (S.IxPartial name arity prefix xs)
-      | arity <= 0 || prefix < 0 || prefix > length xs = Left "an invalid partial schema in a type index"
+      | arity <= 0 || prefix < 0 || prefix > length xs = Left (InvalidPartialSchema name arity prefix (length xs))
       | otherwise = do
           SomeList sis <- indices xs
           case (someSymbolVal (T.unpack name), someNatVal (fromIntegral arity), someNatVal (fromIntegral prefix)) of

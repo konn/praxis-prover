@@ -9,7 +9,7 @@ import Data.Text.Builder.Linear (runBuilder)
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.CoreText
 import Language.Praxis.Surface.FiniteFixtures (finiteOrdinals)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Syntax
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -34,7 +34,7 @@ quantifierCaptureTests =
             expression = Quant Exists (Hint "x") (Just (Below, Nat 2)) Nothing (toScope (Rel RelEq (Var (B ())) (Global (Ref RefBuiltin "(add q 1)"))))
         rendered expression @?= Right "(∃ q' < 2. (q' = (add q 1)))"
     , testCase "numeric and finite shadowing retain the outer decoder bound" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked = checkSource p "capture.px" ("module Capture where\n" <> finiteOrdinals <> source)
         [message | Report _ SevError message <- checkedReports checked] @?= ([] :: [Text])
         assertBool "the theorem did not certify" ("Capture.shadow" `elem` checkedTheorems checked)

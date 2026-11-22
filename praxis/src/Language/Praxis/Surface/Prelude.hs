@@ -18,6 +18,8 @@ scope, when the prelude is first needed.
 -}
 module Language.Praxis.Surface.Prelude (
   Prelude (..),
+  PreludeError (..),
+  renderPreludeError,
   preludeLemmas,
   prelude,
   preludeDefinitions,
@@ -85,29 +87,53 @@ data Prelude = Prelude
 preludeLemmas :: Prelude -> Map String (Lemma SchemaName)
 preludeLemmas = fmap certificateLemma . preludeCertificates
 
+-- | Why certifying the built-in Surface prelude failed.
+data PreludeError
+  = PreludeEquationParseError !String
+  | PreludeCompileError !String
+  | PreludeExtendEnvError !String
+  | PreludeSignatureEnvError !String
+  | PreludeLibraryError !String
+  | PreludeUnfoldingError !String
+  | PreludeDeclParseError !String
+  | PreludeCertificateError !String !String
+  deriving stock (Eq, Show)
+
+-- | Render a 'PreludeError' as a diagnostic message.
+renderPreludeError :: PreludeError -> String
+renderPreludeError = \case
+  PreludeEquationParseError err -> err
+  PreludeCompileError err -> err
+  PreludeExtendEnvError err -> err
+  PreludeSignatureEnvError err -> err
+  PreludeLibraryError err -> err
+  PreludeUnfoldingError err -> err
+  PreludeDeclParseError err -> err
+  PreludeCertificateError name err -> name <> ": " <> err
+
 {- |
 The prelude, certified: its definitions compiled over 'builtin', and each of
 its lemmas checked by the engine with those before it in scope.  A lemma
 which does not certify is reported by name.
 -}
-prelude :: Either String Prelude
+prelude :: Either PreludeError Prelude
 prelude = do
-  equations <- first displayException (parseEquations (T.pack preludeDefinitions))
-  block <- first displayException (compileDefinitions base equations)
-  compiled <- first displayException (extendEnvironment base block)
+  equations <- first (PreludeEquationParseError . displayException) (parseEquations (T.pack preludeDefinitions))
+  block <- first (PreludeCompileError . displayException) (compileDefinitions base equations)
+  compiled <- first (PreludeExtendEnvError . displayException) (extendEnvironment base block)
   let sig = environmentSignature compiled
-  env <- first displayException (signatureEnv sig)
-  library <- libraryCertificates
-  unfolding <- unfoldingCertificates sig
+  env <- first (PreludeSignatureEnvError . displayException) (signatureEnv sig)
+  library <- first PreludeLibraryError libraryCertificates
+  unfolding <- first PreludeUnfoldingError (unfoldingCertificates sig)
   let known = Map.union library unfolding
-  decls <- first displayException (parseDeclsIn (fmap (map snd . lemmaMetas . certificateLemma) known) (schemaScope sig) preludeProofs)
+  decls <- first (PreludeDeclParseError . displayException) (parseDeclsIn (fmap (map snd . lemmaMetas . certificateLemma) known) (schemaScope sig) preludeProofs)
   lemmas <- foldM (certify env sig) known decls
   pure (Prelude compiled sig env lemmas)
   where
     base = compiledEnvironment builtin
     certify env sig known d = case checkCertificate env known d of
       Right lemma -> Right (Map.insert (declName d) lemma known)
-      Left err -> Left (declName d <> ": " <> renderSchemaTacticError sig err)
+      Left err -> Left (PreludeCertificateError (declName d) (renderSchemaTacticError sig err))
 
 {- |
 The unfolding lemmas of the prelude's definitions and of 'builtin', by name,

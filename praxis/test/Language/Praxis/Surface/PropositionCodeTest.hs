@@ -19,8 +19,8 @@ import Language.Praxis.PRA.Reflection (CodeView (..), codeView, encodeFormula)
 import Language.Praxis.PRA.Syntax (canonicalise)
 import Language.Praxis.PRA.Syntax.Parser (parseFormula, parseTerm, plainScope)
 import Language.Praxis.PRA.Syntax.Pretty (renderTerm)
-import Language.Praxis.Surface.CoreText (CT (..), codeIsFormula, propCode, propText, render)
-import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
+import Language.Praxis.Surface.CoreText (CT (..), codeIsFormula, propCode, propText, render, renderCoreTextError)
+import Language.Praxis.Surface.Prelude (Prelude (..), prelude, renderPreludeError)
 import Language.Praxis.Surface.Syntax
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -34,13 +34,13 @@ propositionCodeTests =
 -- | The encoding's code of a proposition is the core's code of the formula written for it, and reads as a formula exactly when the core reads it so.
 agrees :: Expr Text -> Assertion
 agrees prop = do
-  p <- either assertFailure pure prelude
+  p <- either (assertFailure . renderPreludeError) pure prelude
   let sig = preludeSignature p
       sc = plainScope sig
-  text <- either assertFailure pure (propText (\h -> "b_" <> h) CVar prop)
+  text <- either (assertFailure . renderCoreTextError) pure (propText (\h -> "b_" <> h) CVar prop)
   formula <- either (assertFailure . displayException) pure (parseFormula sc (T.unpack (runBuilder text)))
   expected <- either assertFailure pure (encodeFormula sig (const False) formula)
-  code <- either assertFailure pure (propCode CVar prop)
+  code <- either (assertFailure . renderCoreTextError) pure (propCode CVar prop)
   actual <- either (assertFailure . displayException) pure (parseTerm sc (T.unpack (runBuilder (render code))))
   assertEqual ("the code of " <> T.unpack (runBuilder text) <> ": the core reads " <> renderTerm sig id expected <> ", the encoding writes " <> renderTerm sig id actual) (canonicalise expected) (canonicalise actual)
   assertEqual ("whether the code of " <> T.unpack (runBuilder text) <> " reads as a formula") (codeView sig expected /= CodeOther) (codeIsFormula code)

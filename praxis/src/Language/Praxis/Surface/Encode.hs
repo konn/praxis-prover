@@ -52,6 +52,8 @@ normalisation does not terminate in reasonable time.
 -}
 module Language.Praxis.Surface.Encode (
   Encoded (..),
+  EncodeError (..),
+  renderEncodeError,
   FieldPred (..),
   ParamPred (..),
   encodeData,
@@ -277,7 +279,28 @@ proposition back from that truth, by @reflect@.  A proposition mentioning
 an entry the code does not determine, or quantifying without a bound, has no
 code, with why: 'validateEncoding' then refuses the encoding.
 -}
-ctorPropositions :: (Text -> Maybe [Text]) -> CtorInfo -> [Either String (S.Expr Text, CT)]
+
+-- | Why a datatype's constructors or preconditions cannot be encoded into a PRA membership predicate.
+data EncodeError
+  = EncodePropositionError !S.PropositionError
+  | EncodeUndeterminedEntry
+  | EncodeCoreTextError !CoreTextError
+  | EncodeCtorPrecondition !QualName !EncodeError
+  | EncodeMissingIndexFunctions !QualName !Text
+  | EncodeUndeterminedFieldIndices !QualName !Text
+  deriving stock (Eq, Show)
+
+-- | Render an 'EncodeError' as a diagnostic message.
+renderEncodeError :: EncodeError -> String
+renderEncodeError = \case
+  EncodePropositionError err -> S.renderPropositionError err
+  EncodeUndeterminedEntry -> "it mentions an entry the code does not determine"
+  EncodeCoreTextError err -> renderCoreTextError err
+  EncodeCtorPrecondition ctor err -> T.unpack (displayQualName ctor) <> ": a proof field's proposition cannot be checked by the PRA membership predicate: " <> renderEncodeError err
+  EncodeMissingIndexFunctions ctor _ -> T.unpack (displayQualName ctor) <> ": a field's index functions are unavailable to its PRA membership predicate"
+  EncodeUndeterminedFieldIndices ctor _ -> T.unpack (displayQualName ctor) <> ": a field's indices are not determined by its numerical representation"
+
+ctorPropositions :: (Text -> Maybe [Text]) -> CtorInfo -> [Either EncodeError (S.Expr Text, CT)]
 ctorPropositions indexFns c = [proposition p | (_, p) <- constructorProofs (ctorSignature c)]
   where
     entry e = maybe (S.Var "?") fromCT (entryTerm indexFns c e)
@@ -286,9 +309,9 @@ ctorPropositions indexFns c = [proposition p | (_, p) <- constructorProofs (ctor
             fromScope p >>= \case
               B e -> entry e
               F v -> absurd v
-      S.boundedProposition prop
-      when ("?" `elem` prop) $ Left "it mentions an entry the code does not determine"
-      code <- propCode CVar prop
+      either (Left . EncodePropositionError) Right (S.boundedProposition prop)
+      when ("?" `elem` prop) $ Left EncodeUndeterminedEntry
+      code <- either (Left . EncodeCoreTextError) Right (propCode CVar prop)
       pure (prop, code)
 
 -- | A proposition over the positions of a code, at the terms the function gives them, as 'atPositions' takes a term there.
@@ -297,16 +320,15 @@ propositionAt at prop = prop >>= \v -> maybe (S.Var v) (fromCT . at) (position v
 
 -- | The formula of a precondition, as the generated lemmas state it; one 'ctorPropositions' admitted always has one.
 propositionText :: S.Expr Text -> Builder
-propositionText prop = either (\why -> error ("internal: a precondition admitted has no formula: " <> why)) id (propText (\h -> "b_" <> mangleVariable h) CVar prop)
+propositionText prop = either (\why -> error ("internal: a precondition admitted has no formula: " <> renderCoreTextError why)) id (propText (\h -> "b_" <> mangleVariable h) CVar prop)
 
 {- | Refuse an encoding which would silently omit a logical condition. A
 missing membership predicate is an explicitly weaker representation; a
 missing constructor precondition or index equation is never eliminable.
 -}
-validateEncoding :: (Text -> Maybe [Text]) -> DataInfo -> Either String ()
+validateEncoding :: (Text -> Maybe [Text]) -> DataInfo -> Either EncodeError ()
 validateEncoding indexFns d = forM_ (dataCtors d) $ \c -> do
   let signature = ctorSignature c
-      failure why = Left (T.unpack (displayQualName (ctorQual c)) <> ": " <> why)
       knownIndex = \case
         IxParam i -> maybe False (const True) (entryTerm indexFns c i)
         IxNat _ -> True
@@ -317,14 +339,14 @@ validateEncoding indexFns d = forM_ (dataCtors d) $ \c -> do
         IxPartial _ _ _ xs -> all knownIndex xs
         _ -> False
   forM_ (ctorPropositions indexFns c) $ \case
-    Left why -> failure ("a proof field's proposition cannot be checked by the PRA membership predicate: " <> why)
+    Left err -> Left (EncodeCtorPrecondition (ctorQual c) err)
     Right _ -> pure ()
   forM_ (zip [0 ..] (constructorTele signature)) $ \(i, entry) -> case teType entry of
     TData name _ indices@(_ : _) -> do
       unless (maybe False ((== length indices) . length) (indexFns name)) $
-        failure "a field's index functions are unavailable to its PRA membership predicate"
+        Left (EncodeMissingIndexFunctions (ctorQual c) name)
       unless (maybe False (const True) (entryTerm indexFns c i) && all knownIndex indices) $
-        failure "a field's indices are not determined by its numerical representation"
+        Left (EncodeUndeterminedFieldIndices (ctorQual c) name)
     _ -> pure ()
 
 -- | The codes a constructor's branch checks after the memberships of its fields, at a code: those given over the positions of its code, at the fields of the code.

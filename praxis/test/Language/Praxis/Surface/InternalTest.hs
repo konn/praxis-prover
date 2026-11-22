@@ -8,9 +8,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Core qualified as Core
-import Language.Praxis.Surface.Eval (EvalResult (..), Value (..), evaluateEntryWithNats)
+import Language.Praxis.Surface.Eval (EvalResult (..), Value (..), evaluateEntryWithNats, renderEvalError)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename (Imports, ModuleExports (..), RDecl (..), Renamed (..))
 import Language.Praxis.Surface.Syntax.Raw
 import Language.Praxis.Surface.Types (Ty (..))
@@ -98,7 +98,7 @@ internalTests = withResource fixtures (const (pure ())) $ \getFixtures ->
             assertFamily core "before" "Intuitionistic"
             assertFamily core "after" "Intuitionistic"
             assertFamily core "classical" "Classical"
-            evaluated <- either assertFailure pure (evaluateEntryWithNats 100 "Internal.successor" [2] checked)
+            evaluated <- either (assertFailure . renderEvalError) pure (evaluateEntryWithNats 100 "Internal.successor" [2] checked)
             evalValue evaluated @?= NatValue 3
         , testCase "qualified family aliases keep declarations in their enclosing namespaces" $ do
             (checked, build) <-
@@ -299,7 +299,7 @@ exportOf build name = maybe (assertFailure "missing module exports") pure (Map.l
 
 fixtures :: IO (Build, Imports)
 fixtures = do
-  p <- either assertFailure pure prelude
+  p <- either (assertFailure . renderPreludeError) pure prelude
   let source =
         T.unlines
           [ "module InternalFixtures where"

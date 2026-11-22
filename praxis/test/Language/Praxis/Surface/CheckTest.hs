@@ -20,13 +20,13 @@ import Language.Praxis.Surface.Core qualified as SurfaceCore
 import Language.Praxis.Surface.CoreText (CT (..), Pred (..), membershipText, predicateOver, predicateParam)
 import Language.Praxis.Surface.Elab (FunDef (..), Item (..), TheoremDef (..), elabModule)
 import Language.Praxis.Surface.Encode (natInductionLemma)
-import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), Spec (..), equationCase, initialSourceBindings, membershipProof, theoremStatement)
+import Language.Praxis.Surface.Engine (Goal (..), Hyp (..), Knowledge (..), ProofError (..), Spec (..), equationCase, initialSourceBindings, membershipProof, renderProofError, theoremStatement)
 import Language.Praxis.Surface.Env (ConstructorSignature (..), CtorInfo (..), Env (..), FunInfo (..), Global (..), TeleEntry (..), constructorIndices, constructorsNamed, emptyEnv, resolve)
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Index (Unified (..), emptySubst, unifyIx)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (Prelude (..), prelude)
+import Language.Praxis.Surface.Prelude (Prelude (..), prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), Irrelevant (..), Ref (..), RefKind (..), RelOp (..), apps)
 import Language.Praxis.Surface.Syntax.Raw (QName (..), Segment (..), Span (..), segmentText)
@@ -40,7 +40,7 @@ checkTests =
   testGroup
     "checker"
     [ testCase "successor names overload in terms, patterns and datatype indices" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source =
               T.unlines
                 [ "module Overloaded where"
@@ -84,7 +84,7 @@ checkTests =
         forM_ ["boxed", "boxed-alias", "numeric", "selected", "selected-nat", "constructed"] $ \name ->
           assertBool (T.unpack name <> " did not certify") (("Overloaded." <> name) `elem` checkedTheorems checked)
     , testCase "natural type and constructor names follow declared and opened scope" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         forM_ ["Nat", "nat"] $ \name -> do
           let source =
                 T.unlines
@@ -107,7 +107,7 @@ checkTests =
           errors checked @?= []
           assertBool "opened constructor did not certify" ("Shadow.copied" `elem` checkedTheorems checked)
     , testCase "a declared successor name shadows arithmetic, and local binders shadow it" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source =
               T.unlines
                 [ "module ShadowFunction where"
@@ -126,15 +126,15 @@ checkTests =
         errors checked @?= []
         assertBool "declared name did not shadow successor" ("ShadowFunction.declared" `elem` checkedTheorems checked)
     , testCase "a successor with no determining type is ambiguous with a user constructor" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked = checkSource p "ambiguous-successor.px" "data Box = S Nat\nbad : S 0 = S 0\nbad = rfl\n"
         assertBool "successor silently won constructor ambiguity" (any (isInfixOf "ambiguous constructor S") (errors checked))
     , testCase "an unvalidated builtin pragma is never silently ignored" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked = checkSource p "builtin.px" "data T = C\n{-# BUILTIN NOT_A_ROLE T #-}\n"
         assertBool "the pragma must be rejected" (any (T.isInfixOf "BUILTIN" . T.pack) (errors checked))
     , testCase "constructor membership preserves repeated antecedents" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module RepeatedMembership where", "data Fm = Atom Nat | Imp Fm Fm", "diagonal : Fm -> Fm", "diagonal a = Imp a a"]
             checked = checkSource p "repeated-membership.px" source
         errors checked @?= []
@@ -143,7 +143,7 @@ checkTests =
         cert <- maybe (assertFailure "missing closure certificate") pure (Map.lookup name (coreCertificates core))
         either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal name [] [] MS.empty) [])
     , testCase "indexed functions project their certified joint contract" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source =
               T.unlines
                 [ "module ContractProjection where"
@@ -168,7 +168,7 @@ checkTests =
         cert <- maybe (assertFailure "missing projected index certificate") pure (Map.lookup replayName (coreCertificates core))
         either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal replayName [] [] MS.empty) [])
     , testCase "ordinary and indexed syntax share a constructor telescope" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module Uniform where", "data Plain a = plain a", "data Explicit a where", "  explicit : a -> Explicit a"]
             checked = checkSource p "uniform.px" source
         errors checked @?= []
@@ -209,14 +209,14 @@ checkTests =
         either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) certificate (Appeal "u_ClosedComputation_sarithmetic" [] [] MS.empty) [])
         assertBool "constructor proof arguments have no checked membership contract" (Map.member "u_ClosedComputation_sverified" (knowClosures k))
     , testCase "cached computation hints cannot certify an incorrect equation" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let initial = initialBuild p
             poisoned = initial {buildCore = (buildCore initial) {coreReductions = Map.singleton (CNum 1) (CNum 2, "oneNonzero")}}
             (checked, _) = checkModule (\_ _ -> []) poisoned Map.empty Nothing "poisoned-computation.px" "module PoisonedComputation where\nbad : 1 = 2\nbad = by decide\n"
         assertBool "a false cached result was certified" (not (null (errors checked)))
         assertBool "the rejected theorem was admitted" ("PoisonedComputation.bad" `notElem` checkedTheorems checked)
     , testCase "omitting generated text retains certificates, replay and rejection" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = "module OutputRetention where\ngood : 2 + 3 = 5\ngood = by decide\nbad : 2 + 3 = 6\nbad = by decide\n"
             run keep = checkModule (\_ _ -> []) (initialBuild p) {buildRetainGeneratedText = keep} Map.empty Nothing "output-retention.px" source
             (kept, _) = run True
@@ -234,21 +234,21 @@ checkTests =
         cert <- maybe (assertFailure "certificate was discarded with its text") pure (Map.lookup name (coreCertificates omittedCore))
         either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv omittedCore) cert (Appeal name [] [] MS.empty) [])
     , testCase "closed computation rejects a wrong answer and an open goal" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         source <- TIO.readFile "test/data/closed-computation.px"
         let wrong = checkSource p "wrong-computation.px" (source <> "\nwrong : sum (add-all 3 xs) = 10\nwrong = by decide\n")
             open = checkSource p "open-computation.px" "module OpenComputation where\nopen-goal : (n : Nat) -> n = n\nopen-goal n = by decide\n"
         assertBool "a wrong result was certified" (not (null (errors wrong)))
         assertBool "an open goal was accepted" (any (T.isInfixOf "only closed equations and comparisons" . reportMessage) (checkedReports open))
     , testCase "nested vector updates reject changes to the row length" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         source <- TIO.readFile "test/data/nested-update.px"
         let bad = source <> "\nbad : Fin n -> Vec n (Vec m Nat) -> Vec n (Vec m Nat)\nbad r b = modify (\\row -> Cons 0 row) r b\n"
             c = checkSource p "bad-nested-update.px" bad
         assertBool "a callback changed the matrix width" (not (null (errors c)))
         assertBool "the invalid update was certified" ("NestedUpdate.bad.#closed" `notElem` checkedTheorems c)
     , testCase "type synonyms reject cycles, invalid arguments and forward binder dependencies" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let prefix = "module BadAlias where\ndata Vec n a where\n  Nil : Vec 0 a\n"
         forM_
           [ ("type Loop a = Loop a", "recursive type synonyms")
@@ -268,7 +268,7 @@ checkTests =
             let c = checkSource p "bad-alias.px" (prefix <> declaration <> "\n")
             assertBool (T.unpack declaration <> ": " <> show (errors c)) (any (expected `T.isInfixOf`) (map T.pack (errors c)))
     , testCase "type synonyms retain their telescopes across imports and renaming" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = "module A where\ndata Vec n a where\n  Nil : Vec 0 a\ntype Board n a = Vec n (Vec n a)\n"
             (a, build) = checkModule (\_ _ -> []) (initialBuild p) Map.empty Nothing "A.px" source
         errors a @?= []
@@ -304,14 +304,14 @@ checkTests =
         cert <- maybe (assertFailure "missing local induction certificate") pure (Map.lookup "u_Have_szero_dadd" (coreCertificates core))
         either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal "u_Have_szero_dadd" [] [] MS.empty) [])
     , testCase "have rejects invalid proofs even when its fact is unused" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         forM_ ["0 = 1", "0 < 0"] $ \proposition -> do
           let source = T.unlines ["module BadHave where", "bad : 0 = 0", "bad = by", "  have h : " <> proposition <> " := rfl", "  rfl"]
               c = checkSource p "bad-have.px" source
           assertBool "an invalid local proof was discarded" (not (null (errors c)))
           assertBool "the invalid theorem was certified" ("BadHave.bad" `notElem` checkedTheorems c)
     , testCase "intros cannot strengthen an equality reverted by nested induction" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module BadIntro where", "data Box = box Nat", "value : Box -> Nat", "value (box n) = n", "bad : (x y : Box) -> value x = value y -> x = box 0", "bad x y = by", "  induction x", "  { intros n", "    induction y", "    { intros m eq", "      have normalized := eq", "      cong normalized", "    }", "  }"]
             c = checkSource p "bad-intro.px" source
         assertBool "the false strengthened conclusion was accepted" (not (null (errors c)))
@@ -326,7 +326,7 @@ checkTests =
         errors c @?= []
         forM_ ["MultiCong.pair-cong", "MultiCong.nested-cong", "MultiCong.reverse-cong", "MultiCong.unchanged-field"] $ \name ->
           assertBool (T.unpack name) (name `elem` checkedTheorems c)
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let bad = checkSource p "bad-cong.px" "module BadCong where\ndata Pair = Mk Nat Nat\nbad : (a b : Nat) -> a = b -> Mk a 0 = Mk b 1\nbad a b h = by cong\n"
         assertBool "congruence ignored a differing field" (not (null (errors bad)))
     , testCase "index transport preserves checked equality evidence in the typed core" $ do
@@ -344,7 +344,7 @@ checkTests =
           Just [body] -> length (SurfaceCore.obligations body) @?= 2
           _ -> assertFailure "missing two-index cast core"
     , testCase "index transport cannot erase invalid casts through ignored values or proofs" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let prefix = T.unlines ["module BadTransport where", "data Vec n a where", "  Nil : Vec 0 a", "  Cons : a -> Vec n a -> Vec (S n) a", "cast : {n m : Nat} -> n = m -> Vec n a -> Vec m a", "cast {n} {m} h xs = xs", "ignore : Vec n a -> Nat", "ignore xs = 0", "same : (n : Nat) -> n = n", "same n = rfl"]
         forM_
           [ "bad : Vec n a -> Vec m a\nbad xs = xs"
@@ -373,7 +373,7 @@ checkTests =
           ]
           $ \fragment -> assertBool (T.unpack fragment) (fragment `T.isInfixOf` output)
     , testCase "interleaved binders reject forward dependencies and misplaced arguments" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let prefix = "module BadOrder where\ndata Vec (n : Nat) (a : Type) where\n  Nil : Vec 0 a\n"
         forM_
           [ ("data Bad (n : Nat) (xs : Vec n a) (a : Type)", "not a type: a")
@@ -388,7 +388,7 @@ checkTests =
             let c = checkSource p "bad-order.px" (prefix <> declaration <> "\n")
             assertBool (T.unpack declaration <> ": " <> show (errors c)) (any (expected `T.isInfixOf`) (map T.pack (errors c)))
     , testCase "core dumps preserve elaborated clauses and named evidence" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module Dump where", "data Witness where", "  Mk : (n : Nat) -> n = 0 -> Witness", "repack : Witness -> Witness", "repack (Mk n h) = Mk n h", "data Box a = box a", "pack : Witness -> Box Witness", "pack p = box p", "choose : {n : Nat} -> n = 0 -> Witness -> Witness", "choose {n} h p = p", "use : Witness -> Witness", "use p = choose {0} rfl p"]
             c = checkSource p "dump.px" source
         errors c @?= []
@@ -399,7 +399,7 @@ checkTests =
         forM_ ["TData", "TNat", "RefFunction", "u_Dump", "[proofs:"] $ \raw ->
           assertBool ("no raw AST syntax: " <> T.unpack raw) (not (raw `T.isInfixOf` output))
     , testCase "core dumps include data declarations even without user functions" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source =
               T.unlines
                 [ "module DataDump where"
@@ -446,13 +446,13 @@ checkTests =
         let output = T.unlines (surfaceCore core)
         assertBool "dictionary parameters are explicit" ("[dict dict1 :" `T.isInfixOf` output)
         assertBool "dictionary arguments are explicit" ("[dict (" `T.isInfixOf` output)
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let impossible = checkSource p "empty.px" "module Empty where\ndata Result = R\ndata OnlyOne n where\n  One : OnlyOne 1\nf : OnlyOne 0 -> Result\nf ()\n"
         errors impossible @?= []
         (_, empty) <- maybe (assertFailure "missing impossible body") pure (checkedFinal impossible)
         assertBool "an impossible branch is not printed as zero" ("Empty.f () =\n  unreachable" `T.isInfixOf` T.unlines (surfaceCore empty))
     , testCase "implicit indices are recovered when converting by constructors alone" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         source <- TIO.readFile "test/data/natural.px"
         let before = fst (T.breakOn "elt-of-plt {0} {0}" source)
             simple = before <> "elt-of-plt (Zero m) = delta m (zero-add {S m})\nelt-of-plt (Succ p) = succ-elt (elt-of-plt p)\n"
@@ -467,7 +467,7 @@ checkTests =
           Nothing -> assertFailure "missing final core"
           Just (k, _) -> mapM_ (\name -> assertBool "a polymorphic closure is certified" (Map.member name (knowClosures k))) ["u_MixedPatterns_stake", "u_MixedPatterns_szip"]
     , testCase "mixed patterns reject missing cases, overlaps and nondecreasing recursion" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let prefix = "module BadMixed where\ndata List = Nil | Cons Nat List\nf : Nat -> List -> Nat\n"
         forM_
           [ ("f 0 xs = 0\nf (S n) Nil = 0\n", "miss a possible")
@@ -478,7 +478,7 @@ checkTests =
             let c = checkSource p "bad-mixed.px" (prefix <> body)
             assertBool (T.unpack message) (any (message `T.isInfixOf`) (map T.pack (errors c)))
     , testCase "GADT transitivity certifies with explicit or inferred constructor indices" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         source <- TIO.readFile "test/data/gadt-order.px"
         forM_
           [ source
@@ -494,7 +494,7 @@ checkTests =
           Just (_, core) -> forM_ ["u_Arith_sOrder_sGADTs_splt_dtrans_s_x23_contract", "u_Arith_sOrder_sGADTs_slt_dtrans"] $ \name ->
             assertBool ("retained checked certificate " <> name) (Map.member name (coreCertificates core))
     , testCase "implicit constructor patterns are checked rather than discarded" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let prefix = "module BadImplicits where\ndata Box (n : Nat) where\n  Mk : {n : Nat} -> Box n\nf : {n m : Nat} -> Box n -> Box m -> Nat\n"
         forM_
           [ "f (Mk {n} {m}) q = 0"
@@ -508,11 +508,11 @@ checkTests =
             recovered = "module BadRecovered where\ndata Box (n : Nat) where\n  Mk : {n : Nat} -> Box n\ndata Wrap (n : Nat) where\n  wrap : {n : Nat} -> Box n -> Wrap n\nf : {n m : Nat} -> Wrap n -> Wrap m -> Nat\nf (wrap {q} x) (wrap {q} y) = 0\n"
         mapM_ (\program -> assertBool "invalid implicit syntax is rejected" (not (null (errors (checkSource p "bad-implicit.px" program))))) [late, natural, recovered]
     , testCase "inferring indices from proofs still checks every proof obligation" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module BadProofHint where", "data Witness (n : Nat) where", "  Mk : {n : Nat} -> n = 0 -> Witness n", "bad : {n : Nat} -> n = 1 -> Witness n", "bad h = Mk h"]
         assertBool "a proof of a different proposition cannot be repacked" (not (null (errors (checkSource p "bad-proof-hint.px" source))))
     , testCase "invalid constructor evidence does not establish membership" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module InvalidEvidence where", "data Witness where", "  Mk : (n : nat) -> n = 0 -> Witness", "bad : Witness", "bad = Mk 1 rfl"]
             c = checkSource p "invalid-evidence.px" source
         assertBool "invalid proof was checked" (not (null (errors c)))
@@ -520,7 +520,7 @@ checkTests =
           Nothing -> pure ()
           Just (k, _) -> assertBool "no result membership is published" (Map.notMember "u_InvalidEvidence_sbad" (knowClosures k))
     , testCase "surface theorems retain independently replayable certificates" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module Replay where", "same : (x : Nat) -> x ≡ x", "same x = rfl", "again : 0 ≡ 0", "again = same 0"]
             result = checkSource p "Replay.px" source
         errors result @?= []
@@ -614,7 +614,7 @@ checkTests =
         cert <- maybe (assertFailure "missing instantiated schema certificate") pure (Map.lookup "u_FunctionSchemas_sapplied_dglobal" (coreCertificates core))
         either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal "u_FunctionSchemas_sapplied_dglobal" [] [] MS.empty) [])
     , testCase "fixed schemas cannot become values, change under recursion or erase lambda evidence" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let prefix = T.unlines ["module BadSchema where", "apply : (Nat -> Nat) -> Nat -> Nat", "apply f x = f x", "unsafe : 0 = 1 -> Nat", "unsafe h = 0", "ignore : Nat -> Nat", "ignore x = 0", "data Box a = Mk a"]
         errors (checkSource p "schema-prefix.px" prefix) @?= []
         forM_
@@ -638,31 +638,31 @@ checkTests =
         mapM_ (\(n, l) -> assertBool ("an error for " <> n) (any ((== l) . fst) errs)) [("Box", 9 :: Int), ("apply", 12), ("fun-refl", 16), ("partly", 20)]
         assertBool "the partial application is named" (any (("applied to 1 of its 2 arguments" `T.isInfixOf`) . snd) errs)
     , testCase "theorem clauses support simultaneous structural induction" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module TupleTheorems where", "", "data Chain = End | Next Chain", "", "both : Chain -> Chain -> Nat", "both End End = 0", "both End (Next ys) = 0", "both (Next xs) End = 0", "both (Next xs) (Next ys) = S (both xs ys)", "", "both-comm : (xs ys : Chain) -> both xs ys = both ys xs", "both-comm End End = rfl", "both-comm End (Next ys) = rfl", "both-comm (Next xs) End = rfl", "both-comm (Next xs) (Next ys) = calc", "  both (Next xs) (Next ys)", "  = S (both xs ys)", "  = S (both ys xs) := cong (both-comm xs ys)", "  = both (Next ys) (Next xs)", "", "both-zero : (xs ys : Chain) -> both xs ys = 0 -> both ys xs = 0", "both-zero End End h = rfl", "both-zero End (Next ys) h = rfl", "both-zero (Next xs) End h = rfl", "both-zero (Next xs) (Next ys) h = by", "  have comm := both-comm (Next xs) (Next ys)", "  cong"]
             c = checkSource p "tuple-theorems.px" source
         errors c @?= []
         checkedTheorems c @?= ["TupleTheorems.both-comm", "TupleTheorems.both-zero"]
     , testCase "simultaneous induction retains named proof arguments in calculations" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module TupleGuardedCalc where", "", "bounded : {m n : Nat} -> m < n -> Nat", "bounded {m} {n} h = m", "", "bounded-id : {m n : Nat} -> m < n -> bounded {m} {n} (by assumption) = m", "bounded-id {0} {S n} h = rfl", "bounded-id {S m} {S n} h = calc", "  bounded {S m} {S n} h", "  = S (bounded {m} {n} h)", "  = S m := cong (bounded-id {m} {n})", "bounded-id {m} {0} h = absurd h"]
             c = checkSource p "tuple-guarded-calc.px" source
         errors c @?= []
         checkedTheorems c @?= ["TupleGuardedCalc.bounded-id"]
     , testCase "a proved precondition specializes guarded induction hypotheses" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module HaveSpecializesIH where", "", "bounded : {n p : Nat} -> n <= p -> Nat", "bounded {n} {p} h = n", "", "bounded-id : {n p : Nat} -> n <= p -> bounded {n} {p} (by assumption) = n", "bounded-id {0} {p} h = rfl", "bounded-id {S n} {p} h = by", "  have successor : n <= S n := by exact leSucc", "  have smaller : n <= p := by exact leTrans", "  calc", "    bounded {S n} {p} h", "    = S (bounded {n} {p} smaller)", "    = S n := cong (bounded-id {n} {p})"]
             c = checkSource p "have-specializes-ih.px" source
         errors c @?= []
         checkedTheorems c @?= ["HaveSpecializesIH.bounded-id"]
     , testCase "simultaneous induction rejects unchanged recursive tuples" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module TupleBad where", "", "data Chain = End | Next Chain", "", "bad : (xs ys : Chain) -> 0 = 1", "bad End End = rfl", "bad End (Next ys) = rfl", "bad (Next xs) End = rfl", "bad (Next xs) (Next ys) = bad (Next xs) (Next ys)"]
             c = checkSource p "tuple-bad.px" source
         assertBool "the unchanged tuple was rejected" (any (T.isInfixOf "a recursive call must be at a field" . T.pack) (errors c))
         assertBool "the invalid theorem was not certified" ("TupleBad.bad" `notElem` checkedTheorems c)
     , testCase "statement proof arguments are certified under their leading antecedents" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source = T.unlines ["module StatementEvidence where", "bounded : {k n : Nat} -> k < n -> Nat", "bounded {k} {n} h = k", "bound-law : (k n : Nat) -> k < n -> bounded {k} {n} (by assumption) = k", "bound-law k n h = rfl", "closed : bounded {0} {1} (by rfl) = 0", "closed = rfl"]
             c = checkSource p "statement-evidence.px" source
         errors c @?= []
@@ -672,7 +672,7 @@ checkTests =
         cert <- maybe (assertFailure "missing statement evidence certificate") pure (Map.lookup "u_StatementEvidence_sclosed" (coreCertificates core))
         either (assertFailure . show) (const (pure ())) (replayCertificate (coreEnv core) cert (Appeal "u_StatementEvidence_sclosed" [] [] MS.empty) [])
     , testCase "proof arguments cannot be erased from statements without checking" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         mapM_
           ( \statement -> do
               let src = T.unlines ["module Unchecked where", "f : (0 ≡ 1) -> Nat", "f h = 0", "bad : " <> statement, "bad = rfl"]
@@ -688,7 +688,7 @@ checkTests =
           , "(f rfl = 0) /\\ (0 = 0)"
           ]
     , testCase "proof arguments in theorem applications and calculations are certified before erasure" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let bodies = ["same (f rfl)", "calc\n  0\n  = f rfl := rfl\n  = 0 := rfl"]
         mapM_
           ( \body -> do
@@ -707,7 +707,7 @@ checkTests =
           )
           bodies
     , testCase "instance method bodies retain the same proof obligations as ordinary functions" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let src = T.unlines ["module Obligations where", "class Pointed a where", "  point : a", "instance Pointed Nat where", "  point = absurd rfl"]
             c = checkSource p "obligations.px" src
         assertBool "the nonexistent proof of bottom was rejected" (not (null (errors c)))
@@ -717,7 +717,7 @@ checkTests =
         errors good @?= []
         assertBool "the valid method's obligation certified" (any ("#obligation" `T.isInfixOf`) (checkedTheorems good))
     , testCase "bottom elimination retains value slots in functions and constructors" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let src =
               T.unlines
                 [ "module BottomValues where"
@@ -733,7 +733,7 @@ checkTests =
         errors c @?= []
         length (filter ("#obligation" `T.isInfixOf`) (checkedTheorems c)) @?= 2
     , testCase "unused nested values still require their supplied proofs" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source proposition =
               T.unlines
                 [ "module NestedObligations where"
@@ -750,7 +750,7 @@ checkTests =
         errors good @?= []
         assertBool "the nested obligation was certified" (any ("#obligation" `T.isInfixOf`) (checkedTheorems good))
     , testCase "recursive clauses retain obligations under their own hypotheses" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let src =
               T.unlines
                 [ "module RecursiveObligations where"
@@ -780,7 +780,7 @@ checkTests =
         assertBool "distinct binders do not prove the false equation" (any ("DuplicateBinders.distinct" `T.isInfixOf`) messages)
         assertBool "a rejected theorem is unavailable" (any ("not a hypothesis or a lemma: DuplicateBinders.bad" `T.isInfixOf`) messages)
     , testCase "grouped and consecutive theorem binders must also be distinct" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         mapM_
           ( \signature -> do
               let src = T.unlines ["module Duplicate where", signature, "bad a b = by rfl"]
@@ -800,7 +800,7 @@ checkTests =
         case reverse [td | ITheorem td <- items] of
           td : _ -> do
             let colliding = td {tdBinders = [namedBinder "x" (binderTy b) | b <- tdBinders td]}
-            theoremStatement Map.empty colliding @?= Left "a theorem's value binders must have distinct names"
+            theoremStatement Map.empty colliding @?= Left ProofDuplicateValueBinders
           [] -> assertFailure "expected the ordinary theorem at the end of the fixture"
     , testCase "induction eigenvariables stay apart from surface binders" $ do
         c <- checkFile "test/data/induction-names.px"
@@ -887,7 +887,7 @@ checkTests =
         case Map.lookup (mangleGlobal ["Abbreviations", "lift"]) (coreBodies core) of
           Just [body] -> assertBool "lift is transported needlessly" (not ("transport" `T.isInfixOf` SurfaceCore.dump body))
           _ -> assertFailure "lift has no single body"
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         source <- TIO.readFile "test/data/abbreviations.px"
         forM_
           [ ("a mismatch through an abbreviation", "wrong : Pf a -> Pf (neg a)\nwrong p = dni :@ p\n", "type mismatch")
@@ -918,7 +918,7 @@ checkTests =
           Just [body] -> assertBool (T.unpack name <> " needs certified index transport") ("transport" `T.isInfixOf` SurfaceCore.dump body)
           _ -> assertFailure (T.unpack name <> " has no single body")
     , testCase "GADT equality constraints reject false constructions and do not assume function injectivity" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         source <- TIO.readFile "test/data/gadt-computation.px"
         forM_
           [ "wrong : Id (plus 0 0) 1\nwrong = Refl\n"
@@ -930,7 +930,7 @@ checkTests =
           $ \bad -> assertBool ("accepted: " <> T.unpack bad) (not (null (errors (checkSource p "bad-gadt-computation.px" (source <> bad)))))
     , -- Found at once: 3.7 s here, 10-19 s on the shared CI runners, whose speed varies; an exponential unfolding would take far longer than the minute allowed.
       localOption (mkTimeout 60000000) $ testCase "indices differing under many nested abbreviations are compared once unfolded, not unfolded at every level: the mismatch is found at once" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         source <- TIO.readFile "test/data/abbreviations.px"
         let nested v = T.replicate 18 "dup (" <> v <> T.replicate 18 ")"
             deep = "dup : Formula -> Formula\ndup a = a :=> a\n\ndeep : Pf (" <> nested "a" <> ") -> Pf (" <> nested "b" <> ")\ndeep {a} {b} p = p\n"
@@ -972,14 +972,14 @@ checkTests =
         let lines' = [l | Report (Span (l, _) _) SevError _ <- checkedReports c]
         mapM_ (\(n, ls) -> assertBool ("an error for " <> n) (any (`elem` lines') ls)) [("one-lt", [4, 5, 6]), ("prop-arg", [9, 10]), ("not-absurd", [17, 18]), ("absurd-rhs", [21, 22]), ("no-rhs", [25, 26]), ("unit-term", [29, 30]), ("match-implicit", [33, 34]), ("too-many", [37, 38]), ("match-index", [41, 42])]
     , testCase "a function's specifications are proved by the skeleton of its lemmas, each case by the specification's prover" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         src <- TIO.readFile "test/data/specs.px"
         let c = checkSourceWith specs p "test/data/specs.px" src
             messages = [m | Report _ SevError m <- checkedReports c]
         checkedTheorems c @?= ["Specs.copy.#spec", "Specs.app.#spec"]
         assertBool "the false specification is refused, and nothing else" (length messages == 1 && any ("Specs.copy.#wrong" `T.isInfixOf`) messages)
     , testCase "a membership predicate of one parameter is variadic: at a closure capturing a variable, the type's lemmas and a function's closure lemma apply" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         src <- TIO.readFile "test/data/specs.px"
         (k, core) <- maybe (assertFailure "the module did not elaborate") pure (checkedFinal (checkSource p "test/data/specs.px" src))
         let env = knowEnv k
@@ -997,12 +997,12 @@ checkTests =
             g = Goal [("H1", HMember below "a"), ("H2", HMember lists "xs")] Top [] [] [] [] [] (initialSourceBindings []) mempty []
             hyps = membershipText below (CVar "a") <> ", " <> membershipText lists (CVar "xs")
             prove name t = do
-              tactic <- either assertFailure pure (membershipProof k g lists t)
-              either assertFailure pure (certifyDecl (runBuilder ("theorem " <> name <> " : " <> hyps <> " |- " <> membershipText lists t <> "\nby " <> tactic)) core)
+              tactic <- either (assertFailure . renderProofError) pure (membershipProof k g lists t)
+              either (assertFailure . renderCheckCoreError) pure (certifyDecl (runBuilder ("theorem " <> name <> " : " <> hyps <> " |- " <> membershipText lists t <> "\nby " <> tactic)) core)
         -- Through the introduction of (:), and through the closure lemma of copy.
         mapM_ (uncurry prove) [("consBelow", CSym cons [CVar "a", CVar "xs"]), ("copyBelow", CSym copy [CVar "xs"])]
     , testCase "surface type system soundness regressions: HKT, kinds, index types, scoping, superclasses, and polymorphism" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let expectRejected label src =
               case errors (checkSource p "regression-bad.px" src) of
                 [] -> assertFailure (label <> " was unexpectedly accepted")
@@ -1213,7 +1213,7 @@ checkTests =
               ]
           )
     , testCase "explicit core boundary rejects erased indices, inconsistent constructor indices, forged proofs, and monomorphic polymorphic-method dictionaries" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source =
               T.unlines
                 [ "module CoreSoundness where"
@@ -1265,6 +1265,74 @@ checkTests =
             monoDict = Dictionary (TArrow TNat (TArrow (TData "CoreSoundness.Bool" [] []) TNat)) (Global monoRef)
             badUsePoly = Typed TNat [TNat, TNat] [] (apps (Global usePolyRef) [Nat 1, Nat 2, monoDict])
         assertBool "monomorphic dictionary for polymorphic method rejected in Core" (isLeft (SurfaceCore.elaborate env [] [] badUsePoly))
+    , testCase "nested recovered dependent indices certify their projection contracts automatically" $ do
+        p <- either (assertFailure . renderPreludeError) pure prelude
+        let source =
+              T.unlines
+                [ "module NestedRecovered where"
+                , "data Vec a (n : Nat) where"
+                , "  VNil : Vec a 0"
+                , "  VCons : {n : Nat} -> a -> Vec a n -> Vec a (S n)"
+                , "data SameVec {a} {n} {m} (l : Vec a n) (r : Vec a m) where"
+                , "  BothNil : SameVec VNil VNil"
+                , "  BothCons : {x : a} -> {xs : Vec a n} -> {ys : Vec a m} -> SameVec xs ys -> SameVec (VCons x xs) (VCons x ys)"
+                , "getConcrete : {xs : Vec Nat 2} -> {ys : Vec Nat 2} -> SameVec xs ys -> Vec Nat 2"
+                , "getConcrete p = xs"
+                ]
+            checked = checkSource p "nested-recovered.px" source
+        errors checked @?= []
+        assertBool "projection #index contract certified" ("NestedRecovered.SameVec.#idx-2.#index" `elem` checkedTheorems checked)
+        assertBool "getConcrete #index contract certified" ("NestedRecovered.getConcrete.#index" `elem` checkedTheorems checked)
+    , testCase "proof-only dependent class methods rewrite dictionary indices and reject forged instances in Core" $ do
+        p <- either (assertFailure . renderPreludeError) pure prelude
+        let source =
+              T.unlines
+                [ "module ProofOnlyDep where"
+                , "data Unit = Mk"
+                , "data Bool = False | True"
+                , "data Vec (n : Nat) a where"
+                , "  VNil : Vec 0 a"
+                , "  VCons : {n : Nat} -> a -> Vec n a -> Vec (S n) a"
+                , "data Fin (n : Nat) where"
+                , "  FZero : {n : Nat} -> Fin (S n)"
+                , "  FSucc : {n : Nat} -> Fin n -> Fin (S n)"
+                , "class Sized a where"
+                , "  card : Nat"
+                , "  enumeration : Vec card a"
+                , "  pick : a -> Fin (S card)"
+                , "instance Sized Unit where"
+                , "  card = 0"
+                , "  enumeration = VNil"
+                , "  pick Mk = FZero"
+                , "instance Sized Bool where"
+                , "  card = 2"
+                , "  enumeration = VCons False (VCons True VNil)"
+                , "  pick False = FZero"
+                , "  pick True = FSucc FZero"
+                , "needEnum : Sized a => a -> enumeration = enumeration -> Nat"
+                , "needEnum x h = 0"
+                , "needPick : Sized a => {v : a} -> a -> pick v = pick v -> Nat"
+                , "needPick x h = 0"
+                , "callUnit : Nat"
+                , "callUnit = needEnum Mk rfl + needPick {Mk} Mk rfl"
+                , "callBool : Nat"
+                , "callBool = needEnum True rfl + needPick {False} True rfl"
+                , "callPoly : Sized a => Sized b => {v : b} -> a -> b -> Nat"
+                , "callPoly {v} x y = needEnum y rfl + needPick {v} y rfl"
+                , "fakeEnum : Vec 0 Unit"
+                , "fakeEnum = VNil"
+                ]
+            checked = checkSource p "proof-only-dep.px" source
+        errors checked @?= []
+        (knowledge, _) <- maybe (assertFailure "missing checked core") pure (checkedFinal checked)
+        let env = knowEnv knowledge
+            rawProof = R.Located R.noSpan (R.EProof (R.RBy []))
+            needEnumRef = Ref RefFunction (mangleGlobal ["ProofOnlyDep", "needEnum"])
+            mkExpr = Typed (TData "ProofOnlyDep.Unit" [] []) [] [] (Global (Ref RefConstructor (mangleGlobal ["ProofOnlyDep", "Unit", "Mk"])))
+            fakeEnumRef = Global (Ref RefFunction (mangleGlobal ["ProofOnlyDep", "fakeEnum"]))
+            forgedProof = ProofArg (Rel RelEq fakeEnumRef fakeEnumRef) (Irrelevant rawProof)
+            forgedCall = Typed TNat [TData "ProofOnlyDep.Unit" [] []] [] (apps (Global needEnumRef) [mkExpr, forgedProof])
+        assertBool "non-instance function forged for proof-only dependent method rejected in Core" (isLeft (SurfaceCore.elaborate env [] [] forgedCall))
     ]
 
 {- |
@@ -1288,7 +1356,7 @@ specs env fd = case map segmentText (funQual (fdInfo fd)) of
 
 checkFile :: FilePath -> IO Checked
 checkFile path = do
-  p <- either assertFailure pure prelude
+  p <- either (assertFailure . renderPreludeError) pure prelude
   src <- TIO.readFile path
   pure (check p path src)
   where

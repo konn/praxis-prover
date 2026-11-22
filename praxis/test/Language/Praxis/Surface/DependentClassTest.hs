@@ -13,7 +13,7 @@ import Language.Praxis.Surface.Elab (ElabError (..), Item (..), elabModule)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax (Expr (..), Ref (..), RefKind (..))
 import Language.Praxis.Surface.Syntax.Raw (Segment (..), Span (..))
@@ -40,7 +40,7 @@ dependentClassTests =
         (_, items) <- elaborate (types <> "class Sized a where\n  enumeration : Vec card a\n  card : Nat\n")
         assertBool "the forward dependency was accepted" (not (null (failures items)))
     , testCase "nullary methods use a determining class dictionary" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked = checkSource p "dependent.px" (declaration <> "count : Sized a => a -> Nat\ncount x = card\n")
         errors checked @?= []
     , testCase "a nullary method cannot choose between two dictionaries" $ do
@@ -51,7 +51,7 @@ dependentClassTests =
         let slots = [Slot cardName 0 0, Slot enumerationName 0 0]
             value ty = Typed ty [] [] (Global (Ref RefValueParam "1"))
             check = Core.elaborate env slots []
-        _ <- either assertFailure pure (check (value (vector (dictionaryIndex 0))))
+        _ <- either (assertFailure . Core.renderCoreError) pure (check (value (vector (dictionaryIndex 0))))
         assertBool "a forged cardinality was accepted" (isLeft (check (value (vector (IxNat 99)))))
         assertBool "another dictionary value was accepted as cardinality" (isLeft (check (value (vector (dictionaryIndex 1)))))
         assertBool "an absent dependency was silently erased" (isLeft (dictionaryMethodType env [Slot enumerationName 0 0] (Slot enumerationName 0 0)))
@@ -62,7 +62,7 @@ dependentClassTests =
           Just (GFun function) -> funSlots function @?= [Slot cardName 0 0, Slot enumerationName 0 0]
           _ -> assertFailure "the dependent function was not elaborated"
     , testCase "unfolding supplies a dependent index without local hypotheses" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let source bound = declaration <> "data Unit = Mk\ninstance Sized Unit where\n  card = " <> bound <> "\n  enumeration = Nil\n"
         errors (checkSource p "dependent-valid.px" (source "0")) @?= []
         (_, items) <- elaborate (source "0" <> "copy : Sized a => Vec card a\ncopy = enumeration\nunit-copy : Vec 0 Unit\nunit-copy = copy\n")

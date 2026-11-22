@@ -17,7 +17,7 @@ import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Engine (Knowledge (..))
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.FiniteFixtures
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Test.Tasty
@@ -131,7 +131,7 @@ finiteQuantifierTests =
 
 check :: Text -> IO Checked
 check source = do
-  p <- either assertFailure pure prelude
+  p <- either (assertFailure . renderPreludeError) pure prelude
   pure (checkSource p "finite-quantifier.px" ("module FiniteQ where\n" <> source))
 
 errors :: Checked -> [Text]
