@@ -729,7 +729,7 @@ classTypeFromPredicate k g predicate
   | Just parameter <- ownParam g predicate = Right (TParam parameter [])
   | Pred name parameters <- predicate
   , (dn, used) : _ <- [(dn, used) | (dn, (core, used)) <- Map.toList (knowMembership k), core == name]
-  , [dat] <- [d | GData d <- Map.elems (envGlobals (knowEnv k)), renderQualName (dataQual d) == dn] = do
+  , Just dat <- lookupDataByName (knowEnv k) dn = do
       unless (null (dataIndices dat)) $ Left "an indexed class type cannot be recovered from its erased membership predicate"
       types <- forM [0 .. length (dataParams dat) - 1] \i -> case lookup i (zip used parameters) of
         Just value -> classTypeFromPredicate k g (parameterPredicate value)
@@ -1276,8 +1276,7 @@ functionValueAt env info argTypes args i = case lookup i runtime of
     defined =
       [ CSym (funCore fn) [core position]
       | (position, TData dn _ xs) <- zip [0 ..] argTypes
-      , GData dat <- Map.elems (envGlobals env)
-      , renderQualName (dataQual dat) == dn
+      , Just dat <- [lookupDataByName env dn]
       , (q, x) <- zip (dataIndexFns dat) xs
       , normIx x == IxParam i
       , Just (GFun fn) <- [Map.lookup q (envGlobals env)]
@@ -1394,7 +1393,7 @@ indexSpecOf k fd
     values = map fst (schemeValues (funScheme info))
     paramCore i = mangleVariable ("#" <> (values !! i))
     cores = [mangleVariable ("x" <> T.pack (show i)) | i <- [0 .. length (fdArgs fd) - 1]]
-    fnsOf dn = [funCore f | GData dd <- Map.elems (envGlobals env), renderQualName (dataQual dd) == dn, q <- dataIndexFns dd, Just (GFun f) <- [Map.lookup q (envGlobals env)]]
+    fnsOf dn = maybe [] (\dd -> [funCore f | q <- dataIndexFns dd, Just (GFun f) <- [Map.lookup q (envGlobals env)]]) (lookupDataByName env dn)
     pres0 = [(fn, a, x) | (a, TData dn _ xs@(_ : _)) <- zip [0 ..] (fdArgs fd), (fn, x) <- zip (fnsOf dn) xs]
     posts0 = case fdResult fd of
       TData dn _ xs@(_ : _) -> zip (fnsOf dn) xs

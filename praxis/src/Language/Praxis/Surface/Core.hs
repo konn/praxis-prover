@@ -317,8 +317,8 @@ validateTyWithKind env expected = \case
     validateTyWithKind env Ty.KType b
   Ty.TParam _ ts ->
     traverse_ (validateTyAnyKind env) ts
-  Ty.TData dn ts is -> case [d | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn] of
-    d : _ -> do
+  Ty.TData dn ts is -> case lookupDataByName env dn of
+    Just d -> do
       let paramKinds = map snd (dataParams d)
       when (length ts > length paramKinds) $
         Left ("too many type arguments to " <> T.unpack dn <> " in explicit core")
@@ -334,7 +334,7 @@ validateTyWithKind env expected = \case
         else
           unless (null is && null (dataIndices d)) $
             Left ("indexed datatype " <> T.unpack dn <> " cannot be partially applied in explicit core")
-    [] -> traverse_ (validateTyAnyKind env) ts
+    Nothing -> traverse_ (validateTyAnyKind env) ts
   Ty.THole -> Right ()
 
 validateTyAnyKind :: Env -> Ty.Ty -> Either String ()
@@ -342,8 +342,8 @@ validateTyAnyKind env = \case
   Ty.TNat -> Right ()
   Ty.TArrow a b -> validateTyWithKind env Ty.KType a *> validateTyWithKind env Ty.KType b
   Ty.TParam _ ts -> traverse_ (validateTyAnyKind env) ts
-  Ty.TData dn ts is -> case [d | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn] of
-    d : _ -> do
+  Ty.TData dn ts is -> case lookupDataByName env dn of
+    Just d -> do
       let paramKinds = map snd (dataParams d)
       when (length ts > length paramKinds) $
         Left ("too many type arguments to " <> T.unpack dn <> " in explicit core")
@@ -356,7 +356,7 @@ validateTyAnyKind env = \case
         else
           unless (null is && null (dataIndices d)) $
             Left ("indexed datatype " <> T.unpack dn <> " cannot be partially applied in explicit core")
-    [] -> traverse_ (validateTyAnyKind env) ts
+    Nothing -> traverse_ (validateTyAnyKind env) ts
   Ty.THole -> Right ()
 
 placeSlots :: [Slot] -> [(Slot, S.Ref)]
@@ -410,6 +410,10 @@ data ProofSlotInfo
   = BoundSlot (S.Expr Int) Int
   | ProofOnlySlot Slot Int Ty.Ty
 
+data ProofSlotSource
+  = ProofSlotCaller Slot
+  | ProofSlotInstance InstanceInfo FunInfo [S.Expr Int] [S.Expr Int]
+
 -- Check global applications against the declaration environment before making
 -- an intrinsically typed signature. In particular an annotation alone cannot
 -- turn a numeral operation or an arbitrary name into a value of any type.
@@ -418,8 +422,8 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
   S.RefBuiltin | S.refName ref == "S" -> check 0 (0, 0) [] [Ty.TNat] Ty.TNat
   S.RefBuiltin | S.refName ref `elem` ["add", "sub", "mul", "pow"] -> check 0 (0, 0) [] [Ty.TNat, Ty.TNat] Ty.TNat
   S.RefFunction -> case [f | GFun f <- globals, funCore f == S.refName ref] of
-    f : _ -> case [(d, j) | GData d <- globals, (j, q) <- zip [0 ..] (dataIndexFns d), q == funQual f] of
-      (d, j) : _ -> do
+    f : _ -> case lookupIndexFnOwner env (funQual f) of
+      Just (d, j) -> do
         unless (null proofs) $ Left ("core evidence arity mismatch for " <> show ref)
         case actual of
           [Ty.TData dn ts indices]
@@ -437,7 +441,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                 unless (Ty.firstOrder result) $ Left "a global value cannot return a fixed callback"
                 pure (map complete ts, [], depsProj <> depsRes)
           _ -> Left ("core index projection argument mismatch for " <> show ref)
-      [] -> do
+      Nothing -> do
         let scheme = funScheme f
             baseParams = length (Ty.schemeParams scheme)
             valCount = length (Ty.schemeValues scheme)
@@ -582,7 +586,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
         sequence
           [ do
               (expectedProp, idxDeps) <- instantiateProp assignment prop
-              matchDeps <- matchProofExpr Map.empty expectedProp actualProp
+              matchDeps <- matchProofExpr [] [] Map.empty expectedProp actualProp
               pure (idxDeps <> matchDeps)
           | ((_, prop), (actualProp, _)) <- zip (constructorProofs sig) proofs
           ]
@@ -612,7 +616,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
         sequence
           [ do
               (expectedProp, idxDeps) <- instantiateProp assignment prop
-              matchDeps <- matchProofExpr slotTable expectedProp actualProp
+              matchDeps <- matchProofExpr proofSlots boundMap slotTable expectedProp actualProp
               pure (idxDeps <> matchDeps)
           | ((_, prop), (actualProp, _)) <- zip (funProofs f) proofs
           ]
@@ -629,7 +633,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
           (nub [i | B i <- toList (fromScope prop)])
       let (terms, deps) = unzip pairs
       pure (instantiate (fromMaybe S.Hole . (`lookup` terms)) (fmap absurd prop), Set.unions deps)
-    matchProofExpr slotTable = go Just id slotTable
+    matchProofExpr proofSlots boundMap slotTable = go Just id slotTable
       where
         unwrap = \case
           S.At _ e -> unwrap e
@@ -684,7 +688,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                               | Just callerSlot <- lookup target [(r, s) | (s, r) <- places]
                               , slotMethod callerSlot == slotMethod slot
                               , length actArgs == slotArity slot -> do
-                                  let dictTy = rewriteProofSlotDict env slots Nothing expectedMethodTy
+                                  dictTy <- rewriteProofSlotDict proofSlots boundMap (ProofSlotCaller callerSlot) expectedMethodTy
                                   d0 <- validateDictionary env slots variables dictTy (S.Global target)
                                   ds <- sequence (zipWith (go toOuter liftOuter table) expArgs actArgs)
                                   pure (Set.unions (d0 : ds))
@@ -703,14 +707,25 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                                         | runtimeCount > 0 = S.Ref (S.RefIndexedPartial arity runtimeCount) fnCore
                                         | not (null suffixOuter) = S.Ref (S.RefPartial arity) fnCore
                                         | otherwise = S.Ref S.RefStatic fnCore
-                                      dictTy = rewriteProofSlotDict env slots (Just (inst, prefixOuter, suffixOuter)) expectedMethodTy
+                                  dictTy <- rewriteProofSlotDict proofSlots boundMap (ProofSlotInstance inst g prefixOuter suffixOuter) expectedMethodTy
                                   d0 <- validateDictionary env slots variables dictTy (S.apps (S.Global dictRef) (prefixOuter <> suffixOuter))
                                   ds <- sequence (zipWith (go toOuter liftOuter table) expArgs actMid)
                                   pure (Set.unions (d0 : ds))
                             _ -> Left ("proof precondition dictionary mismatch for " <> show ref)
                         | null expArgs -> do
                             actualOuter <- maybe (Left "proof precondition dictionary escapes scope") Right (traverse toOuter actualExpr)
-                            let dictTy = rewriteProofSlotDict env slots Nothing expectedMethodTy
+                            source <- case S.spine actualOuter of
+                              (S.Global target, [])
+                                | Just callerSlot <- lookup target [(r, s) | (s, r) <- places]
+                                , slotMethod callerSlot == slotMethod slot ->
+                                    Right (ProofSlotCaller callerSlot)
+                              (S.Global (S.Ref _ fnCore), captures)
+                                | g : _ <- [g | GFun g <- globals, funCore g == fnCore]
+                                , inst : _ <- [inst | inst <- Map.elems (envInstances env), fmap funQual (Map.lookup (slotMethod slot) (instFunctions inst)) == Just (funQual g)] ->
+                                    let (prefixOuter, suffixOuter) = splitAt (length (funRuntime g)) captures
+                                     in Right (ProofSlotInstance inst g prefixOuter suffixOuter)
+                              _ -> Left ("proof precondition dictionary mismatch for " <> show ref)
+                            dictTy <- rewriteProofSlotDict proofSlots boundMap source expectedMethodTy
                             validateDictionary env slots variables dictTy actualOuter
                         | otherwise -> Left ("invalid dictionary slot arity in precondition for " <> show ref)
                 _ -> case (expected, actualExpr) of
@@ -760,7 +775,46 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                   (S.ProofArg p1 _, S.ProofArg p2 _) -> go toOuter liftOuter table p1 p2
                   (S.Absurd _, S.Absurd _) -> Right Set.empty
                   _ -> fallback
-    rewriteProofSlotDict _ _ _ ty = ty
+    rewriteProofSlotDict proofSlots boundMap source ty =
+      let used = nub (concatMap Ty.ixDicts (Ty.tyIndices ty))
+          nullaryProof = valueSlots proofSlots
+          nullaryCaller = valueSlots slots
+          resolveDict j = do
+            depSlot <- maybe (Left "invalid dependent dictionary index in precondition") Right (listToMaybe (drop j nullaryProof))
+            case lookup depSlot boundMap of
+              Just dictExpr ->
+                maybe (Left "dependent dictionary argument has no scoped index") Right (expressionIndex env variables dictExpr)
+              Nothing -> case source of
+                ProofSlotCaller callerSlot ->
+                  case [k | (k, cs) <- zip [0 ..] nullaryCaller, slotMethod cs == slotMethod depSlot, slotParam cs == slotParam callerSlot] of
+                    k : _ -> Right (Ty.IxDict k)
+                    [] -> Left "proof precondition depends on a nullary class method missing from caller dictionary"
+                ProofSlotInstance inst g prefixOuter suffixOuter -> do
+                  depFun <- maybe (Left "proof precondition depends on a nullary class method missing from instance") Right (Map.lookup (slotMethod depSlot) (instFunctions inst))
+                  depRuntime <-
+                    traverse
+                      ( \rIdx -> case lookup rIdx (zip (funRuntime g) prefixOuter) of
+                          Just expr -> maybe (Left "instance dependent method runtime capture has no scoped index") Right (expressionIndex env variables expr)
+                          Nothing -> Left "instance dependent method runtime capture missing from proof precondition"
+                      )
+                      (funRuntime depFun)
+                  depDicts <-
+                    traverse
+                      ( \dSlot -> case lookup dSlot (zip (funSlots g) suffixOuter) of
+                          Just expr -> maybe (Left "instance dependent method dictionary capture has no scoped index") Right (expressionIndex env variables expr)
+                          Nothing -> Left "instance dependent method dictionary capture missing from proof precondition"
+                      )
+                      (funSlots depFun)
+                  Right (Ty.IxFun (funCore depFun) (depRuntime <> depDicts))
+       in do
+            replacements <- traverse (\j -> (j,) <$> resolveDict j) used
+            let rewrite original@(Ty.IxDict j) = fromMaybe original (lookup j replacements)
+                rewrite (Ty.IxSucc x) = Ty.IxSucc (rewrite x)
+                rewrite (Ty.IxCon name xs) = Ty.IxCon name (map rewrite xs)
+                rewrite (Ty.IxFun name xs) = Ty.IxFun name (map rewrite xs)
+                rewrite (Ty.IxPartial name arity prefix xs) = Ty.IxPartial name arity prefix (map rewrite xs)
+                rewrite x = x
+            pure (Ty.mapIx rewrite ty)
 
 -- Dictionary entries retain their runtime index captures in the current
 -- value context. Check every captured value and dependent result against
@@ -976,7 +1030,7 @@ traverseObligations f (Body ctx t value optimize) = (\v -> Body ctx t v optimize
       Dictionary ty code dependencies -> pure (Dictionary ty code dependencies)
       Callback ty code dependencies -> pure (Callback ty code dependencies)
       Invoke ty callback values used -> (\c vs -> Invoke ty c vs used) <$> go callback <*> args values
-      Transport ty child os dependencies -> (\value proofs -> Transport ty value proofs dependencies) <$> go child <*> traverse f os
+      Transport ty child os dependencies -> (\child' proofs -> Transport ty child' proofs dependencies) <$> go child <*> traverse f os
       Absurd ty o -> Absurd ty <$> f o
     args :: List (Value o ctx) ts -> f (List (Value p ctx) ts)
     args Nil = pure Nil

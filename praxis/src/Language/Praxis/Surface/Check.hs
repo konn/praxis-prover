@@ -83,7 +83,7 @@ import Language.Praxis.Surface.CoreText (CT (..))
 import Language.Praxis.Surface.Elab
 import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
 import Language.Praxis.Surface.Engine (Closure, DecideStep (..), EngineError (..), GeneratedDecl (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), UnfoldingIndex, emptyUnfoldingIndex, generatedDeclName, indexSpec, indexSpecOf, insertUnfoldings, proveClosure, proveSpec, proveTheoremDecls, renderGeneratedDecl, statementGoal, usesSharedFactsDecl)
-import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), classEvidenceName, displayQualName, emptyEnv, indexFunctionCores, renderQualName)
+import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), classEvidenceName, displayQualName, emptyEnv, indexFunctionCores, lookupDataByName, renderQualName)
 import Language.Praxis.Surface.Evidence qualified as Evidence
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
 import Language.Praxis.Surface.Internal qualified as Internal
@@ -625,8 +625,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
           || ( name `notElem` seen
                  && or
                    [ not (null (constructorProofs (ctorSignature c))) || any (requiresEvidence (name : seen)) (ctorFields c)
-                   | GData d <- Map.elems (envGlobals env)
-                   , renderQualName (dataQual d) == name
+                   | Just d <- [lookupDataByName env name]
                    , c <- dataCtors d
                    ]
              )

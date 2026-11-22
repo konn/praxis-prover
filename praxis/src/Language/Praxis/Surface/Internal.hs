@@ -58,7 +58,7 @@ The first interface conservatively excludes parameterized field types.
 validateInternalEncoding :: Env -> Set QualName -> Map Text [(Int, FieldPred)] -> DataInfo -> Either String ()
 validateInternalEncoding env checked members root = visit Set.empty root >> pure ()
   where
-    datatypes = Map.fromList [(renderQualName (dataQual d), d) | GData d <- Map.elems (envGlobals env)]
+    datatypes = envDataByName env
     visit seen d
       | dataQual d `Set.member` seen = Right seen
       | otherwise = do

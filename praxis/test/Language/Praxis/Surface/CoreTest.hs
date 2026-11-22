@@ -69,7 +69,10 @@ coreTests =
             ref = Ref RefStatic "f_1"
             (declared, box) = addData emptyEnv (R.Ident "Box") [("a", KType)] [(R.Ident "Mk", [TParam 0 []])]
             env = declared {envSchemas = [("f", ref, callbackTy)]}
-            ctor = Ref RefConstructor (ctorCore (head (dataCtors box)))
+        boxCtor <- case dataCtors box of
+          c : _ -> pure c
+          [] -> assertFailure "missing Box constructor"
+        let ctor = Ref RefConstructor (ctorCore boxCtor)
             callback = SchemaParameter callbackTy ref (Var 0)
             forged = Typed (TData "Box" [callbackTy] []) [] [] (App (Global ctor) callback)
         assertBool "function-valued field" (isLeft (Core.elaborateNamed env [] [namedBinder "f" callbackTy] forged))

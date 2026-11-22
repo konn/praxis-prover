@@ -1265,6 +1265,74 @@ checkTests =
             monoDict = Dictionary (TArrow TNat (TArrow (TData "CoreSoundness.Bool" [] []) TNat)) (Global monoRef)
             badUsePoly = Typed TNat [TNat, TNat] [] (apps (Global usePolyRef) [Nat 1, Nat 2, monoDict])
         assertBool "monomorphic dictionary for polymorphic method rejected in Core" (isLeft (SurfaceCore.elaborate env [] [] badUsePoly))
+    , testCase "nested recovered dependent indices certify their projection contracts automatically" $ do
+        p <- either assertFailure pure prelude
+        let source =
+              T.unlines
+                [ "module NestedRecovered where"
+                , "data Vec a (n : Nat) where"
+                , "  VNil : Vec a 0"
+                , "  VCons : {n : Nat} -> a -> Vec a n -> Vec a (S n)"
+                , "data SameVec {a} {n} {m} (l : Vec a n) (r : Vec a m) where"
+                , "  BothNil : SameVec VNil VNil"
+                , "  BothCons : {x : a} -> {xs : Vec a n} -> {ys : Vec a m} -> SameVec xs ys -> SameVec (VCons x xs) (VCons x ys)"
+                , "getConcrete : {xs : Vec Nat 2} -> {ys : Vec Nat 2} -> SameVec xs ys -> Vec Nat 2"
+                , "getConcrete p = xs"
+                ]
+            checked = checkSource p "nested-recovered.px" source
+        errors checked @?= []
+        assertBool "projection #index contract certified" ("NestedRecovered.SameVec.#idx-2.#index" `elem` checkedTheorems checked)
+        assertBool "getConcrete #index contract certified" ("NestedRecovered.getConcrete.#index" `elem` checkedTheorems checked)
+    , testCase "proof-only dependent class methods rewrite dictionary indices and reject forged instances in Core" $ do
+        p <- either assertFailure pure prelude
+        let source =
+              T.unlines
+                [ "module ProofOnlyDep where"
+                , "data Unit = Mk"
+                , "data Bool = False | True"
+                , "data Vec (n : Nat) a where"
+                , "  VNil : Vec 0 a"
+                , "  VCons : {n : Nat} -> a -> Vec n a -> Vec (S n) a"
+                , "data Fin (n : Nat) where"
+                , "  FZero : {n : Nat} -> Fin (S n)"
+                , "  FSucc : {n : Nat} -> Fin n -> Fin (S n)"
+                , "class Sized a where"
+                , "  card : Nat"
+                , "  enumeration : Vec card a"
+                , "  pick : a -> Fin (S card)"
+                , "instance Sized Unit where"
+                , "  card = 0"
+                , "  enumeration = VNil"
+                , "  pick Mk = FZero"
+                , "instance Sized Bool where"
+                , "  card = 2"
+                , "  enumeration = VCons False (VCons True VNil)"
+                , "  pick False = FZero"
+                , "  pick True = FSucc FZero"
+                , "needEnum : Sized a => a -> enumeration = enumeration -> Nat"
+                , "needEnum x h = 0"
+                , "needPick : Sized a => {v : a} -> a -> pick v = pick v -> Nat"
+                , "needPick x h = 0"
+                , "callUnit : Nat"
+                , "callUnit = needEnum Mk rfl + needPick {Mk} Mk rfl"
+                , "callBool : Nat"
+                , "callBool = needEnum True rfl + needPick {False} True rfl"
+                , "callPoly : Sized a => Sized b => {v : b} -> a -> b -> Nat"
+                , "callPoly {v} x y = needEnum y rfl + needPick {v} y rfl"
+                , "fakeEnum : Vec 0 Unit"
+                , "fakeEnum = VNil"
+                ]
+            checked = checkSource p "proof-only-dep.px" source
+        errors checked @?= []
+        (knowledge, _) <- maybe (assertFailure "missing checked core") pure (checkedFinal checked)
+        let env = knowEnv knowledge
+            rawProof = R.Located R.noSpan (R.EProof (R.RBy []))
+            needEnumRef = Ref RefFunction (mangleGlobal ["ProofOnlyDep", "needEnum"])
+            mkExpr = Typed (TData "ProofOnlyDep.Unit" [] []) [] [] (Global (Ref RefConstructor (mangleGlobal ["ProofOnlyDep", "Unit", "Mk"])))
+            fakeEnumRef = Global (Ref RefFunction (mangleGlobal ["ProofOnlyDep", "fakeEnum"]))
+            forgedProof = ProofArg (Rel RelEq fakeEnumRef fakeEnumRef) (Irrelevant rawProof)
+            forgedCall = Typed TNat [TData "ProofOnlyDep.Unit" [] []] [] (apps (Global needEnumRef) [mkExpr, forgedProof])
+        assertBool "non-instance function forged for proof-only dependent method rejected in Core" (isLeft (SurfaceCore.elaborate env [] [] forgedCall))
     ]
 
 {- |

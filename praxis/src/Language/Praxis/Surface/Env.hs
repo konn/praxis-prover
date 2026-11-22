@@ -96,6 +96,8 @@ module Language.Praxis.Surface.Env (
   resolve,
   constructorsNamed,
   dataOfCtor,
+  lookupDataByName,
+  lookupIndexFnOwner,
   indexFunctionCores,
   Local (..),
   Ctx,
@@ -782,6 +784,10 @@ data Env = Env
   { envModule :: !QualName
   -- ^ the module the declaration being elaborated belongs to: its library first, when it has one
   , envGlobals :: !(Map QualName Global)
+  , envDataByName :: !(Map Text DataInfo)
+  -- ^ declared datatypes indexed by their canonical rendered name
+  , envIndexFnOwner :: !(Map QualName (DataInfo, Int))
+  -- ^ generated index functions indexed by qualified name to their owning datatype and index position
   , envNamespaces :: !(Map QualName (Map Segment QualName))
   -- ^ each namespace by its owner, with its members
   , envVisible :: ![QualName]
@@ -812,7 +818,7 @@ data Env = Env
 
 -- | No module, and nothing known: what a build starts from.
 emptyEnv :: Env
-emptyEnv = Env [] Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty [] [] [] emptyScope 0
+emptyEnv = Env [] Map.empty Map.empty Map.empty Map.empty [] Map.empty Map.empty Map.empty Map.empty [] [] [] emptyScope 0
 
 {- |
 The environment a module of the name given is elaborated in, with the
@@ -845,6 +851,8 @@ addIndexedData env name params indices binders indexFns ctors = (env', info)
     env' =
       env
         { envGlobals = Map.insert q (GData info) (foldr (\c -> Map.insert (ctorQual c) (GCtor c)) (envGlobals env) (dataCtors info))
+        , envDataByName = Map.insert (renderQualName q) info (envDataByName env)
+        , envIndexFnOwner = foldr (\(j, qIdx) -> Map.insert qIdx (info, j)) (envIndexFnOwner env) (zip [0 ..] indexFns)
         , envNamespaces = Map.insertWith Map.union q members (envNamespaces env)
         , envDisplay = Map.union (Map.fromList ((dataIs info, displayQualName (q <> [Ident "is"])) : [(ctorCore c, segmentText (last (ctorQual c))) | c <- dataCtors info])) (envDisplay env)
         }
@@ -859,9 +867,7 @@ implicitPositions = map dbParameter . filter dbImplicit . dataBinders
 
 -- | The source order for a canonical datatype name; empty when unknown.
 dataParameterOrder :: Env -> Text -> [Parameter]
-dataParameterOrder env name = case [d | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == name] of
-  d : _ -> map dbParameter (dataBinders d)
-  [] -> []
+dataParameterOrder env name = maybe [] (map dbParameter . dataBinders) (lookupDataByName env name)
 
 -- | A diagnostic type, using each datatype's declared argument order.
 renderType :: Env -> [Text] -> [Text] -> Ty -> String
@@ -1021,11 +1027,17 @@ dataOfCtor env c = case Map.lookup (ctorData c) (envGlobals env) of
   Just (GData d) -> Just d
   _ -> Nothing
 
+-- | Look up a declared datatype by its canonical rendered name in O(log n).
+lookupDataByName :: Env -> Text -> Maybe DataInfo
+lookupDataByName env name = Map.lookup name (envDataByName env)
+
+-- | Look up the owning datatype and index position of a generated index function.
+lookupIndexFnOwner :: Env -> QualName -> Maybe (DataInfo, Int)
+lookupIndexFnOwner env q = Map.lookup q (envIndexFnOwner env)
+
 -- | The core names of a data type's index functions, in order, by its qualified name: none for a type with no indices; Nothing for no data type, or one whose index functions are not all declared.
 indexFunctionCores :: Env -> Text -> Maybe [Text]
-indexFunctionCores env dn = case [d | GData d <- Map.elems (envGlobals env), renderQualName (dataQual d) == dn] of
-  d : _ -> traverse core (dataIndexFns d)
-  [] -> Nothing
+indexFunctionCores env dn = traverse core . dataIndexFns =<< lookupDataByName env dn
   where
     core q = case Map.lookup q (envGlobals env) of
       Just (GFun f) -> Just (funCore f)
