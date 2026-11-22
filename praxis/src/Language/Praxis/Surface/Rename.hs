@@ -37,6 +37,8 @@ each failing the declaration it is in.
 module Language.Praxis.Surface.Rename (
   -- * Modules
   ModuleExports (..),
+  ImportError (..),
+  renderImportError,
   Imports,
   moduleImports,
 
@@ -73,13 +75,37 @@ data ModuleExports = ModuleExports
   }
   deriving stock (Show)
 
+-- | Why a module import could not be resolved by the package builder.
+data ImportError
+  = ImportInvalidLibrary !String
+  | ImportModuleNotInLibrary !QualName !Text
+  | ImportUnknownDependency !Text !Text ![Text]
+  | ImportUnknownModule !QualName !Text ![Text]
+  | ImportAmbiguousModule !QualName ![Text]
+  | ImportCyclicModules ![QualName]
+  | ImportModuleNotChecked !QualName
+  deriving stock (Eq, Ord, Show)
+
+-- | Render an 'ImportError' as a diagnostic message.
+renderImportError :: ImportError -> String
+renderImportError = \case
+  ImportInvalidLibrary err -> "not a library: " <> err
+  ImportModuleNotInLibrary q lib -> "no module " <> render q <> " in the library " <> T.unpack lib
+  ImportUnknownDependency lib comp deps -> "no dependency " <> T.unpack lib <> " of the library " <> T.unpack comp <> (if null deps then "" else "; its dependencies are " <> T.unpack (T.intercalate ", " deps))
+  ImportUnknownModule q comp deps -> "no module " <> render q <> " in the library " <> T.unpack comp <> (if null deps then ", which has no dependencies" else ", nor in its dependencies " <> T.unpack (T.intercalate ", " deps))
+  ImportAmbiguousModule q libs -> "ambiguous: the module " <> render q <> " is exposed by " <> T.unpack (T.intercalate " and " libs) <> "; write import \"" <> T.unpack (T.intercalate "\" or \"" libs) <> "\" " <> render q
+  ImportCyclicModules mods -> "the modules " <> T.unpack (T.intercalate ", " (map (T.intercalate "." . map segmentText) mods)) <> " import one another, directly or through others"
+  ImportModuleNotChecked q -> "the module " <> render q <> " was not checked before this one: it did not parse"
+  where
+    render = T.unpack . T.intercalate "." . map segmentText
+
 {- |
 The modules a file's imports may refer to, each by the library written
 before it, if any, and its name: its exports, or why it cannot be imported.
 A build resolves them before the file is renamed; a file checked on its own
 has none.
 -}
-type Imports = Map (Maybe Text, QualName) (Either String ModuleExports)
+type Imports = Map (Maybe Text, QualName) (Either ImportError ModuleExports)
 
 -- | The imports of a file, at any depth, in order: where each is, the library written, and the module.
 moduleImports :: Module -> [(Span, Maybe Text, QualName)]
@@ -737,7 +763,7 @@ importInto :: Ctx -> Scope -> Import -> RM (Scope, ModuleExports)
 importInto cx sc imp@(Import lib (Located msp mq) alias dirs) =
   case Map.lookup (unLocated <$> lib, qnameSegments mq) (cxImports cx) of
     Nothing -> Left (ScopeError msp ("no module " <> T.unpack (qnameText mq) <> " to import: the file is checked on its own, outside a package"))
-    Just (Left why) -> Left (ScopeError msp why)
+    Just (Left why) -> Left (ScopeError msp (renderImportError why))
     Just (Right exports) -> do
       view <- applyDirectives dirs (meMembers exports)
       let names = (msp, meName exports) : [(asp, meName exports) | Just (Located asp _) <- [alias]] <> directiveNames dirs (meMembers exports)

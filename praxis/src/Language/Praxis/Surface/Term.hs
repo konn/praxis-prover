@@ -3,6 +3,8 @@
 -- | First-order computational terms, with the obligations of proof erasure.
 module Language.Praxis.Surface.Term (
   Term (..),
+  TermError (..),
+  renderTermError,
   PendingTerm,
   ProofArgument,
   prepareTerm,
@@ -39,13 +41,37 @@ data Term a
 -- | A proposition to prove, in the term's variable scope, and its source proof.
 type ProofArgument a = (Expr a, R.Located R.Expr)
 
+-- | Why a surface expression cannot be lowered into the first-order term fragment.
+data TermError
+  = ProofArgumentsUnsupportedInStatement
+  | UncheckedProofObligations
+  | SchemaClosureRequiresLambda
+  | CallbackLambdaHasObligations
+  | VariableAppliedToArguments
+  | ProofArgumentAsTerm
+  | NotFirstOrderTerm
+  | TransportMissingEvidence
+  deriving stock (Eq, Show)
+
+-- | Render a 'TermError' as a diagnostic message.
+renderTermError :: TermError -> String
+renderTermError = \case
+  ProofArgumentsUnsupportedInStatement -> "proof arguments in a statement are supported only in its final relation after proof-free implications"
+  UncheckedProofObligations -> "proof arguments require their obligations to be checked before erasure"
+  SchemaClosureRequiresLambda -> "a schema closure must contain a lambda"
+  CallbackLambdaHasObligations -> "proof obligations inside a callback lambda are not supported"
+  VariableAppliedToArguments -> "a variable applied to arguments"
+  ProofArgumentAsTerm -> "a proof argument used as a computational term"
+  NotFirstOrderTerm -> "no first-order computational term for this expression"
+  TransportMissingEvidence -> "an index transport without equality evidence"
+
 {- | Prepare a theorem statement without losing its erased evidence. Only
 the final relation after proof-free implications may contain proof arguments:
 those obligations are certified under exactly the preceding antecedents.
 Evidence under other logical connectives or quantifiers needs a scoped proof
 and is rejected until that scope can be retained by the theorem checker.
 -}
-prepareProposition :: Expr a -> Either String (Expr a, [ProofArgument a])
+prepareProposition :: Expr a -> Either TermError (Expr a, [ProofArgument a])
 prepareProposition = go
   where
     go (At span' p) = do
@@ -61,7 +87,7 @@ prepareProposition = go
       pure (Rel relation (toExpr (computation l)) (toExpr (computation r)), obligations l <> obligations r)
     go other = (other, []) <$ rejectEvidence other
     rejectEvidence p
-      | hasEvidence p = Left "proof arguments in a statement are supported only in its final relation after proof-free implications"
+      | hasEvidence p = Left ProofArgumentsUnsupportedInStatement
       | otherwise = Right ()
     hasEvidence :: Expr b -> Bool
     hasEvidence = \case
@@ -115,19 +141,19 @@ traverseObligations :: (Applicative m) => (o -> m p) -> PendingTerm o a -> m (Pe
 traverseObligations f (PendingTerm t os) = PendingTerm t <$> traverse f os
 
 -- | Use a term in a context which cannot discharge proof obligations.
-withoutObligations :: PendingTerm o a -> Either String (Term a)
+withoutObligations :: PendingTerm o a -> Either TermError (Term a)
 withoutObligations (PendingTerm t []) = Right t
-withoutObligations _ = Left "proof arguments require their obligations to be checked before erasure"
+withoutObligations _ = Left UncheckedProofObligations
 
 {- | Resolve a first-order expression into its computation and proof obligations.
 A proof supplied as an argument has no runtime slot. Elimination of bottom
 occupies a value slot and computes as zero, retaining the proof of bottom
 as an obligation. Unsupported syntax is rejected, never skipped.
 -}
-prepareTerm :: Expr a -> Either String (PendingTerm (ProofArgument a) a)
+prepareTerm :: Expr a -> Either TermError (PendingTerm (ProofArgument a) a)
 prepareTerm = go
   where
-    go :: Expr b -> Either String (PendingTerm (ProofArgument b) b)
+    go :: Expr b -> Either TermError (PendingTerm (ProofArgument b) b)
     go e = case spine e of
       (Var v, []) -> Right (PendingTerm (Variable v) [])
       (Nat n, []) -> Right (PendingTerm (Literal n) [])
@@ -143,7 +169,7 @@ prepareTerm = go
           PendingTerm closed os <- go (fromScope body)
           unlessEmpty os
           applied (Closure (length hs) closed) args
-        _ -> Left "a schema closure must contain a lambda"
+        _ -> Left SchemaClosureRequiresLambda
       (SchemaPacked hs body environment, args) -> do
         PendingTerm code codeProofs <- go (instantiate Var (fmap absurd body))
         unlessEmpty codeProofs
@@ -160,18 +186,18 @@ prepareTerm = go
         evidence <- traverse transportProof proofs
         pure (PendingTerm t (os <> evidence))
       (Absurd (Irrelevant raw), []) -> Right (PendingTerm (Literal 0) [(Bottom, raw)])
-      (Var _, _ : _) -> Left "a variable applied to arguments"
-      (ProofArg {}, _) -> Left "a proof argument used as a computational term"
-      _ -> Left "no first-order computational term for this expression"
+      (Var _, _ : _) -> Left VariableAppliedToArguments
+      (ProofArg {}, _) -> Left ProofArgumentAsTerm
+      _ -> Left NotFirstOrderTerm
     unlessEmpty [] = Right ()
-    unlessEmpty _ = Left "proof obligations inside a callback lambda are not supported"
+    unlessEmpty _ = Left CallbackLambdaHasObligations
     applied value [] = Right (PendingTerm value [])
     applied value args = do
       translated <- traverse go args
       pure (PendingTerm (Invoke value (map computation translated)) (concatMap obligations translated))
     transportProof e = case stripLocations e of
       ProofArg p (Irrelevant raw) -> Right (p, raw)
-      _ -> Left "an index transport without equality evidence"
+      _ -> Left TransportMissingEvidence
     argument e = case stripLocations e of
       ProofArg p (Irrelevant raw) -> Right (Nothing, [(p, raw)])
       _ -> do

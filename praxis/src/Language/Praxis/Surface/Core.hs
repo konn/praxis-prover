@@ -9,6 +9,8 @@ its evidence. The PRA checker remains the authority for that evidence.
 -}
 module Language.Praxis.Surface.Core (
   Body,
+  CoreError (..),
+  renderCoreError,
   elaborate,
   elaborateNamed,
   emptyBranch,
@@ -98,21 +100,176 @@ data Body o where
   Body :: List SType ctx -> SType t -> Value o ctx t -> (Tm.Term Int -> Tm.Term Int) -> Body o
   EmptyBranch :: SType t -> Body o
 
+-- | Structured errors raised when checking terms against the explicit value core boundary.
+data CoreError
+  = CoreReflectError !ReflectError !(Maybe Ty.Ty)
+  | CoreEnvError !EnvError
+  | CoreTermError !Tm.TermError
+  | CoreTypeMismatch !Ty.Ty !Ty.Ty
+  | CoreNatExpectedHigherKind !Ty.Kind
+  | CoreArrowExpectedHigherKind !Ty.Kind
+  | CoreTooManyTypeArguments !Text !Int !Int
+  | CoreDataKindMismatch !Text !Ty.Kind !Ty.Kind
+  | CoreIndexArityMismatch !Text !Int !Int
+  | CorePartialIndexedData !Text
+  | CoreOutOfScopeVariable !Int
+  | CoreNegativeVariable !Int
+  | CoreOutOfScopeEvidence
+  | CoreEscapingMethodTypeParameter !Int
+  | CoreUncheckedValue
+  | CoreNonFirstOrderValue
+  | CoreTransportChangesStructure !Ty.Ty !Ty.Ty
+  | CoreTransportUnscopedIndex !Ty.Ix
+  | CoreTransportEvidenceMismatch
+  | CoreTransportInvalidProof
+  | CoreCallbackNeedsFunctionSignature !Ty.Ty
+  | CoreCallbackNotFirstOrder !Ty.Ty
+  | CoreCallbackVariableRequiresSchema
+  | CoreCallbackEnvironmentNotVariable
+  | CoreCallbackWrongSignature !Ty.Ty !Ty.Ty
+  | CoreCallbackUnknownParameter !S.Ref
+  | CoreInternalPackedCallback
+  | CoreInternalPackedPredicate
+  | CoreCallbackRequiresLambda
+  | CoreCallbackWrongArity !Int !Int
+  | CoreCallbackLambdaHasObligations
+  | CoreCallbackLambdaWrongResult !Ty.Ty !Ty.Ty
+  | CoreCallbackInvocationProofs
+  | CoreCallbackInvocationMismatch
+  | CoreUnknownReference !S.Ref
+  | CoreEvidenceArityMismatch !S.Ref !Int !Int
+  | CoreApplicationArityMismatch !S.Ref !Int !Int
+  | CoreApplicationTypeMismatch !S.Ref !Ty.Ty !Ty.Ty
+  | CoreIndexProjectionTypeMismatch !S.Ref !Ty.Ty !Ty.Ty
+  | CoreIndexProjectionArgMismatch !S.Ref
+  | CoreRuntimeArgNoScopedIndex !S.Ref
+  | CoreRuntimeArgIndexDisagreement !Int !Ty.Ix !Ty.Ix
+  | CoreNonFirstOrderTypeParameter !S.Ref
+  | CoreNonFirstOrderResult !S.Ref !Ty.Ty
+  | CoreLostFunctionSignature !S.Ref
+  | CorePolymorphicDictNotParametric !S.Ref
+  | CorePolymorphicDictConflatesParams !S.Ref
+  | CoreConstructorIndexArgMissing !S.Ref
+  | CorePreconditionIndexUndetermined !S.Ref !Int
+  | CorePreconditionIndexUnscoped !S.Ref !Ty.Ix
+  | CorePreconditionMismatch !S.Ref
+  | CorePreconditionQuantifierBoundMismatch !S.Ref
+  | CorePreconditionQuantifierAnnotationMismatch !S.Ref
+  | CorePreconditionInvalidSlotArity !S.Ref
+  | CorePreconditionCaptureEscapes !S.Ref
+  | CorePreconditionDictMismatch !S.Ref
+  | CorePreconditionInvalidDepDictIndex !Int
+  | CorePreconditionDepDictNoScopedIndex
+  | CorePreconditionMissingCallerDepMethod
+  | CorePreconditionMissingInstanceDepMethod
+  | CorePreconditionMissingInstanceRuntimeCapture
+  | CorePreconditionMissingInstanceDictCapture
+  | CorePreconditionInstanceCaptureNoIndex
+  | CoreDictPlaceCannotCapture !S.Ref
+  | CoreDictWrongStaticArity !S.Ref
+  | CoreDictOpenStaticCapture !S.Ref
+  | CoreDictRuntimeCaptureNoIndex !S.Ref
+  | CoreDictWrongType !S.Ref !Ty.Ty !Ty.Ty
+  | CoreDictRuntimeCaptureWrongType !S.Ref !Ty.Ty !Ty.Ty
+  | CoreDictLostSignature !S.Ref
+  | CoreUnknownDictRef !S.Ref
+  | CoreDictMustBeResolvedRef
+  | CoreDependentDictNoIndex !Int
+  deriving stock (Eq, Show)
+
+-- | Render a 'CoreError' as a diagnostic message.
+renderCoreError :: CoreError -> String
+renderCoreError = \case
+  CoreReflectError err Nothing -> renderReflectError err
+  CoreReflectError err (Just t) -> renderReflectError err <> " in " <> show t
+  CoreEnvError err -> renderEnvError err
+  CoreTermError err -> Tm.renderTermError err
+  CoreTypeMismatch expected actual -> "core type mismatch: expected " <> show expected <> ", got " <> show actual
+  CoreNatExpectedHigherKind _ -> "Nat used where a higher-kinded type was expected in explicit core"
+  CoreArrowExpectedHigherKind _ -> "function type used where a higher-kinded type was expected in explicit core"
+  CoreTooManyTypeArguments dn _ _ -> "too many type arguments to " <> T.unpack dn <> " in explicit core"
+  CoreDataKindMismatch dn _ _ -> "kind mismatch for " <> T.unpack dn <> " in explicit core"
+  CoreIndexArityMismatch dn _ _ -> "index arity mismatch for " <> T.unpack dn <> " in explicit core"
+  CorePartialIndexedData dn -> "indexed datatype " <> T.unpack dn <> " cannot be partially applied in explicit core"
+  CoreOutOfScopeVariable _ -> "an out-of-scope core variable"
+  CoreNegativeVariable _ -> "a negative core variable"
+  CoreOutOfScopeEvidence -> "an out-of-scope variable in core evidence"
+  CoreEscapingMethodTypeParameter _ -> "escaping method type parameter in explicit core"
+  CoreUncheckedValue -> "a value without a checked type at the explicit core boundary"
+  CoreNonFirstOrderValue -> "a non-first-order value at the explicit core boundary"
+  CoreTransportChangesStructure _ _ -> "an index transport changes the type structure"
+  CoreTransportUnscopedIndex _ -> "an index transport has no scoped index term"
+  CoreTransportEvidenceMismatch -> "index transport evidence does not match its index equalities"
+  CoreTransportInvalidProof -> "an index transport without scoped equality evidence"
+  CoreCallbackNeedsFunctionSignature _ -> "a callback needs a function signature"
+  CoreCallbackNotFirstOrder _ -> "callbacks take and return first-order values"
+  CoreCallbackVariableRequiresSchema -> "a callback variable requires its fixed schema identity"
+  CoreCallbackEnvironmentNotVariable -> "a callback parameter must keep its original environment variable"
+  CoreCallbackWrongSignature _ _ -> "a callback environment has the wrong source signature"
+  CoreCallbackUnknownParameter _ -> "an unknown callback parameter at the explicit core boundary"
+  CoreInternalPackedCallback -> "an internal packed callback cannot be supplied as a source term"
+  CoreInternalPackedPredicate -> "an internal predicate cannot be supplied as a source term"
+  CoreCallbackRequiresLambda -> "a callback closure must contain a lambda"
+  CoreCallbackWrongArity _ _ -> "a callback lambda has the wrong arity"
+  CoreCallbackLambdaHasObligations -> "proof obligations inside a callback lambda are not supported"
+  CoreCallbackLambdaWrongResult _ _ -> "a callback lambda returns the wrong type"
+  CoreCallbackInvocationProofs -> "a callback application cannot take proof arguments"
+  CoreCallbackInvocationMismatch -> "a callback application disagrees with its checked signature"
+  CoreUnknownReference ref -> "an unknown value reference in the explicit core: " <> show ref
+  CoreEvidenceArityMismatch ref _ _ -> "core evidence arity mismatch for " <> show ref
+  CoreApplicationArityMismatch ref _ _ -> "core application arity mismatch for " <> show ref
+  CoreApplicationTypeMismatch ref a b -> "core application type mismatch for " <> show ref <> ": " <> show a <> " against " <> show b
+  CoreIndexProjectionTypeMismatch ref a b -> "core index projection type mismatch for " <> show ref <> ": " <> show a <> " against " <> show b
+  CoreIndexProjectionArgMismatch ref -> "core index projection argument mismatch for " <> show ref
+  CoreRuntimeArgNoScopedIndex _ -> "a runtime argument has no scoped index"
+  CoreRuntimeArgIndexDisagreement {} -> "a runtime argument disagrees with its stated index"
+  CoreNonFirstOrderTypeParameter _ -> "type parameters cannot contain fixed callbacks"
+  CoreNonFirstOrderResult _ _ -> "a global value cannot return a fixed callback"
+  CoreLostFunctionSignature _ -> "a dictionary lost its function signature"
+  CorePolymorphicDictNotParametric ref -> "polymorphic dictionary method is not parametric for " <> show ref
+  CorePolymorphicDictConflatesParams ref -> "polymorphic dictionary method conflates distinct type parameters for " <> show ref
+  CoreConstructorIndexArgMissing _ -> "a constructor index argument has no scoped index"
+  CorePreconditionIndexUndetermined ref _ -> "a precondition index is undetermined for " <> show ref
+  CorePreconditionIndexUnscoped ref _ -> "a precondition index has no scoped term for " <> show ref
+  CorePreconditionMismatch ref -> "core precondition mismatch for " <> show ref
+  CorePreconditionQuantifierBoundMismatch ref -> "core precondition quantifier bound mismatch for " <> show ref
+  CorePreconditionQuantifierAnnotationMismatch ref -> "core precondition quantifier annotation mismatch for " <> show ref
+  CorePreconditionInvalidSlotArity ref -> "invalid dictionary slot arity in precondition for " <> show ref
+  CorePreconditionCaptureEscapes _ -> "proof precondition dictionary capture escapes scope"
+  CorePreconditionDictMismatch ref -> "proof precondition dictionary mismatch for " <> show ref
+  CorePreconditionInvalidDepDictIndex _ -> "invalid dependent dictionary index in precondition"
+  CorePreconditionDepDictNoScopedIndex -> "dependent dictionary argument has no scoped index"
+  CorePreconditionMissingCallerDepMethod -> "proof precondition depends on a nullary class method missing from caller dictionary"
+  CorePreconditionMissingInstanceDepMethod -> "proof precondition depends on a nullary class method missing from instance"
+  CorePreconditionMissingInstanceRuntimeCapture -> "instance dependent method runtime capture missing from proof precondition"
+  CorePreconditionMissingInstanceDictCapture -> "instance dependent method dictionary capture missing from proof precondition"
+  CorePreconditionInstanceCaptureNoIndex -> "instance dependent method capture has no scoped index"
+  CoreDictPlaceCannotCapture _ -> "a dictionary place cannot capture arguments"
+  CoreDictWrongStaticArity _ -> "a dictionary has the wrong static arity"
+  CoreDictOpenStaticCapture _ -> "a static dictionary cannot capture scoped runtime values; pass a method whose runtime captures are closed"
+  CoreDictRuntimeCaptureNoIndex _ -> "a dictionary runtime capture has no first-order index"
+  CoreDictWrongType {} -> "a dictionary implementation has the wrong type"
+  CoreDictRuntimeCaptureWrongType {} -> "a dictionary runtime capture has the wrong type"
+  CoreDictLostSignature _ -> "a dictionary lost its implementation signature"
+  CoreUnknownDictRef ref -> "an unknown dictionary reference: " <> show ref
+  CoreDictMustBeResolvedRef -> "a dictionary entry must be a resolved reference"
+  CoreDependentDictNoIndex _ -> "a dependent dictionary value has no checked index term"
+
 {- | A clause with a checked impossible pattern has no value term. Its result
 type is retained, and PRA lowering must discharge the pattern's impossible
 membership case. Zero is only the total numerical implementation of that
 unreachable branch, never an inhabitant of its source result type.
 -}
-emptyBranch :: Ty.Ty -> Either String (Body o)
+emptyBranch :: Ty.Ty -> Either CoreError (Body o)
 emptyBranch ty = do
-  SomeType result <- reflectType (complete ty)
+  SomeType result <- first (`CoreReflectError` Just ty) (reflectType (complete ty))
   pure (EmptyBranch result)
 
 {- | Check annotations at the explicit boundary. Unconstrained, computationally
 irrelevant type arguments are instantiated at Nat; value indices must be
 determined. This instantiation is recorded in the core signature.
 -}
-elaborate :: Env -> [Slot] -> [Ty.Ty] -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
+elaborate :: Env -> [Slot] -> [Ty.Ty] -> S.Expr Int -> Either CoreError (Body (Tm.ProofArgument Int))
 elaborate env slots tys = elaborateNamed env slots [Ty.hiddenBinder ("v" <> T.pack (show i)) ty | (i, ty) <- zip [0 :: Int ..] tys]
 
 {- | Check a closed body over the telescope binding it: the clause's variables,
@@ -121,7 +278,7 @@ the clause being one binder group, the k-th variable is @IxBound 0 k@ at the
 top of the body.  The telescope identifies the terms denoted by source type
 indices by position; its hints are for display only.
 -}
-elaborateNamed :: Env -> [Slot] -> Ty.Telescope -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
+elaborateNamed :: Env -> [Slot] -> Ty.Telescope -> S.Expr Int -> Either CoreError (Body (Tm.ProofArgument Int))
 elaborateNamed env slots telescope = elaborateScoped env slots [(Ty.IxBound 0 k, b) | (k, b) <- zip [0 ..] telescope]
 
 {- | A variable context as the body's positions see it: at each position, the
@@ -133,7 +290,7 @@ group further out.
 -}
 type Scoped = [(Ty.Ix, Ty.Binder)]
 
-elaborateScoped :: Env -> [Slot] -> Scoped -> S.Expr Int -> Either String (Body (Tm.ProofArgument Int))
+elaborateScoped :: Env -> [Slot] -> Scoped -> S.Expr Int -> Either CoreError (Body (Tm.ProofArgument Int))
 elaborateScoped env slots variables expression = do
   Context ctx <- context (map (Ty.binderTy . snd) variables)
   SomeValue ty value <- infer ctx expression
@@ -142,13 +299,13 @@ elaborateScoped env slots variables expression = do
     reflectChecked t = do
       let completed = complete t
       validateTy env completed
-      first (\message -> message <> " in " <> show t) (reflectType completed)
+      first (`CoreReflectError` Just t) (reflectType completed)
     context [] = Right (Context Nil)
     context (t : ts) = do
       SomeType ty <- reflectChecked t
       Context rest <- context ts
       pure (Context (Cons ty rest))
-    infer :: List SType ctx -> S.Expr Int -> Either String (SomeValue (Tm.ProofArgument Int) ctx)
+    infer :: List SType ctx -> S.Expr Int -> Either CoreError (SomeValue (Tm.ProofArgument Int) ctx)
     infer ctx (S.At _ e) = infer ctx e
     infer ctx (S.Typed t ts is e) = do
       SomeType ty <- reflectChecked t
@@ -157,7 +314,7 @@ elaborateScoped env slots variables expression = do
     infer ctx (S.Transport target child proofs) = do
       SomeType ty <- reflectChecked target
       SomeValue actual value <- infer ctx child
-      pairs <- maybe (Left "an index transport changes the type structure") Right (Ty.transportIndices (forgetType actual) (forgetType ty))
+      pairs <- maybe (Left (CoreTransportChangesStructure (forgetType actual) (forgetType ty))) Right (Ty.transportIndices (forgetType actual) (forgetType ty))
       converted <-
         traverse
           ( \(x, y) -> do
@@ -168,74 +325,68 @@ elaborateScoped env slots variables expression = do
           pairs
       let (expected, dependencies) = unzip converted
       evidence <- traverse transportProof proofs
-      unless (map fst evidence == expected) $ Left "index transport evidence does not match its index equalities"
+      unless (map fst evidence == expected) $ Left CoreTransportEvidenceMismatch
       pure (SomeValue ty (Transport ty value evidence (Set.unions dependencies)))
     infer ctx (S.SchemaParameter source ref child) = do
       SomeType ty <- reflectChecked source
       _ <- callbackSignature source
       i <- case S.stripLocations child of
         S.Var position -> Right position
-        _ -> Left "a callback parameter must keep its original environment variable"
+        _ -> Left CoreCallbackEnvironmentNotVariable
       SomeVariable actual _ <- variable ctx i
-      unless (forgetType ty == forgetType actual) $ Left "a callback environment has the wrong source signature"
-      -- The schema parameters are registered by the names the source writes for them, with their signatures as the
-      -- clause's telescope states them: the variable holding the environment must be the one written by the name the
-      -- reference is registered under, of that signature seen from here — under as many lambdas as its reference counts.
+      unless (forgetType ty == forgetType actual) $ Left (CoreCallbackWrongSignature (forgetType ty) (forgetType actual))
       let (reference, binder) = variables !! i
           depth = case reference of
             Ty.IxBound d _ -> d
             _ -> 0
           seen signature = iterate (Ty.mapIx Ty.liftIx) signature !! depth
       unless (any (\(name, known, signature) -> known == ref && Ty.writtenName binder == Just name && complete (seen signature) == forgetType ty) (envSchemas env)) $
-        Left "an unknown callback parameter at the explicit core boundary"
+        Left (CoreCallbackUnknownParameter ref)
       pure (SomeValue ty (Callback ty (Tm.Parameter ref (Tm.Variable i)) Set.empty))
-    infer _ S.SchemaPacked {} = Left "an internal packed callback cannot be supplied as a source term"
-    infer _ S.PredicatePacked {} = Left "an internal predicate cannot be supplied as a source term"
+    infer _ S.SchemaPacked {} = Left CoreInternalPackedCallback
+    infer _ S.PredicatePacked {} = Left CoreInternalPackedPredicate
     infer _ (S.SchemaClosure source child) = do
       SomeType ty <- reflectChecked source
       (domains, result) <- callbackSignature source
       (hints, scope) <- case S.stripLocations child of
         S.Lam hs body -> Right (hs, body)
-        _ -> Left "a callback closure must contain a lambda"
+        _ -> Left CoreCallbackRequiresLambda
       let count = length domains
-      unless (length hints == count) $ Left "a callback lambda has the wrong arity"
-      -- Under the lambda, its parameters are the innermost binder group, at the positions in front, and the
-      -- enclosing variables are one group further out, their types seen from under it.
+      unless (length hints == count) $ Left (CoreCallbackWrongArity count (length hints))
       let under = Ty.mapIx Ty.liftIx
           binders = [(Ty.IxBound 0 i, Ty.hiddenBinder (S.hintText hint) (under domain)) | (i, (hint, domain)) <- zip [0 ..] (zip hints domains)]
           outer = [(Ty.liftIx ref, b {Ty.binderTy = under (Ty.binderTy b)}) | (ref, b) <- variables]
           opened = fmap (\case B i -> i; F i -> count + i) (fromScope scope)
       body <- elaborateScoped env slots (binders <> outer) opened
-      unless (null (obligations body)) $ Left "proof obligations inside a callback lambda are not supported"
-      -- The result as seen from under the lambda: the enclosing variables are one binder group further out there.
-      unless (bodyType body == complete (under result)) $ Left "a callback lambda returns the wrong type"
+      unless (null (obligations body)) $ Left CoreCallbackLambdaHasObligations
+      unless (bodyType body == complete (under result)) $ Left (CoreCallbackLambdaWrongResult (complete (under result)) (bodyType body))
       let closed = fmap (\i -> if i < count then B i else F (i - count)) (computation body)
       pure (SomeValue ty (Callback ty (Tm.Closure count closed) (indexDependencies body)))
     infer _ (S.Nat n) = Right (SomeValue SNatural (Literal n))
     infer ctx (S.Var i) = do
       SomeVariable t v <- variable ctx i
-      unless (Ty.firstOrder (forgetType t)) $ Left "a callback variable requires its fixed schema identity"
+      unless (Ty.firstOrder (forgetType t)) $ Left CoreCallbackVariableRequiresSchema
       pure (SomeValue t (Variable v))
     infer _ (S.Dictionary t e) = do
       SomeType ty <- reflectChecked t
-      p <- Tm.prepareTerm e
-      code <- Tm.withoutObligations p
+      p <- first CoreTermError (Tm.prepareTerm e)
+      code <- first CoreTermError (Tm.withoutObligations p)
       dependencies <- validateDictionary env slots variables (forgetType ty) e
       pure (SomeValue ty (Dictionary ty code dependencies))
-    infer _ _ = Left "a value without a checked type at the explicit core boundary"
+    infer _ _ = Left CoreUncheckedValue
     callbackSignature source = case arrows source of
-      ([], _) -> Left "a callback needs a function signature"
+      ([], _) -> Left (CoreCallbackNeedsFunctionSignature source)
       (domains, result)
         | all Ty.firstOrder (result : domains) -> Right (domains, result)
-        | otherwise -> Left "callbacks take and return first-order values"
+        | otherwise -> Left (CoreCallbackNotFirstOrder source)
     arrows (Ty.TArrow a b) = let (rest, result) = arrows b in (a : rest, result)
     arrows t = ([], t)
-    indexTerm ix = maybe (Left "an index transport has no scoped index term") Right (indexTermInWithDependencies env (scopedCtx variables) ix)
+    indexTerm ix = maybe (Left (CoreTransportUnscopedIndex ix)) Right (indexTermInWithDependencies env (scopedCtx variables) ix)
     transportProof e = case S.stripLocations e of
       S.ProofArg prop (S.Irrelevant raw)
         | all (\i -> i >= 0 && i < length variables) (toList prop) -> Right (prop, raw)
-      _ -> Left "an index transport without scoped equality evidence"
-    check :: List SType ctx -> SType t -> [Ty.Ty] -> [(Int, Ty.Ix)] -> S.Expr Int -> Either String (Value (Tm.ProofArgument Int) ctx t)
+      _ -> Left CoreTransportInvalidProof
+    check :: List SType ctx -> SType t -> [Ty.Ty] -> [(Int, Ty.Ix)] -> S.Expr Int -> Either CoreError (Value (Tm.ProofArgument Int) ctx t)
     check ctx ty _types is e = case S.spine e of
       (transport@S.Transport {}, []) -> do
         SomeValue actual value <- infer ctx transport
@@ -244,22 +395,21 @@ elaborateScoped env slots variables expression = do
       (callback@S.SchemaClosure {}, args) -> invocation ctx ty callback args
       (S.Var i, []) -> do
         SomeVariable actual v <- variable ctx i
-        unless (Ty.firstOrder (forgetType actual)) $ Left "a callback variable requires its fixed schema identity"
+        unless (Ty.firstOrder (forgetType actual)) $ Left CoreCallbackVariableRequiresSchema
         equal ty actual (Variable v)
       (S.Nat n, []) -> equal ty SNatural (Literal n)
       (S.Absurd (S.Irrelevant raw), []) -> pure (Absurd ty (S.Bottom, raw))
       (S.Global ref, args) -> do
         (Arguments domains values, proofs) <- arguments ctx args
-        -- Reflection checks that explicit instantiations contain no index holes.
-        _ <- traverse (reflectType . Ty.TData "#index" [] . pure . snd) is
+        _ <- traverse (\(_, ix) -> first (`CoreReflectError` Nothing) (reflectType (Ty.TData "#index" [] [ix]))) is
         let compArgs = [argument | argument <- args, not (proofArgument argument)]
         (types, indices, dependencies) <- validateGlobal env slots variables ref proofs is compArgs (mapTypes forgetType domains) (forgetType ty)
         pure (Apply (Signature ref types indices dependencies domains ty) values proofs)
-      _ -> Left "a non-first-order value at the explicit core boundary"
+      _ -> Left CoreNonFirstOrderValue
     proofArgument argument = case S.stripLocations argument of
       S.ProofArg {} -> True
       _ -> False
-    invocation :: List SType ctx -> SType t -> S.Expr Int -> [S.Expr Int] -> Either String (Value (Tm.ProofArgument Int) ctx t)
+    invocation :: List SType ctx -> SType t -> S.Expr Int -> [S.Expr Int] -> Either CoreError (Value (Tm.ProofArgument Int) ctx t)
     invocation ctx expected callback [] = do
       SomeValue actual value <- infer ctx callback
       equal expected actual value
@@ -267,7 +417,7 @@ elaborateScoped env slots variables expression = do
       SomeValue callbackTy value <- infer ctx callback
       (domains, result) <- callbackSignature (forgetType callbackTy)
       (Arguments actual values, proofs) <- arguments ctx args
-      unless (null proofs) $ Left "a callback application cannot take proof arguments"
+      unless (null proofs) $ Left CoreCallbackInvocationProofs
       let actualTys = mapTypes forgetType actual
           expectedTy = forgetType expected
           resultTy = complete result
@@ -276,14 +426,14 @@ elaborateScoped env slots variables expression = do
           (normResult, depsResult) = normalizeTypeIndices env resultTy
           (normExpected, depsExpected) = normalizeTypeIndices env expectedTy
       unless (normDomains == normActual && normResult == normExpected) $
-        Left "a callback application disagrees with its checked signature"
+        Left CoreCallbackInvocationMismatch
       let deps = Set.unions (depsResult : depsExpected : depsDomains <> depsActual)
       pure (Invoke expected value values deps)
-    equal :: SType t -> SType u -> Value o ctx u -> Either String (Value o ctx t)
+    equal :: SType t -> SType u -> Value o ctx u -> Either CoreError (Value o ctx t)
     equal expected actual v = case sameType expected actual of
       Just Refl -> Right v
-      Nothing -> Left ("core type mismatch: expected " <> show (forgetType expected) <> ", got " <> show (forgetType actual))
-    arguments :: List SType ctx -> [S.Expr Int] -> Either String (Arguments (Tm.ProofArgument Int) ctx, [Tm.ProofArgument Int])
+      Nothing -> Left (CoreTypeMismatch (forgetType expected) (forgetType actual))
+    arguments :: List SType ctx -> [S.Expr Int] -> Either CoreError (Arguments (Tm.ProofArgument Int) ctx, [Tm.ProofArgument Int])
     arguments _ [] = Right (Arguments Nil Nil, [])
     arguments ctx (a : as) = do
       (Arguments domains values, proofs) <- arguments ctx as
@@ -291,28 +441,31 @@ elaborateScoped env slots variables expression = do
         S.ProofArg prop (S.Irrelevant raw)
           | all (\i -> i >= 0 && i < length (mapTypes (const ()) ctx)) (toList prop) ->
               pure (Arguments domains values, (prop, raw) : proofs)
-          | otherwise -> Left "an out-of-scope variable in core evidence"
+          | otherwise -> Left CoreOutOfScopeEvidence
         _ -> do
           SomeValue ty v <- infer ctx a
           pure (Arguments (Cons ty domains) (Cons v values), proofs)
-    variable :: List SType ctx -> Int -> Either String (SomeVariable ctx)
-    variable Nil _ = Left "an out-of-scope core variable"
-    variable (Cons t _) 0 = Right (SomeVariable t Here)
-    variable (Cons _ ts) i | i > 0 = do
-      SomeVariable t v <- variable ts (i - 1)
-      pure (SomeVariable t (There v))
-    variable _ _ = Left "a negative core variable"
+    variable :: List SType ctx -> Int -> Either CoreError (SomeVariable ctx)
+    variable ctx0 i0 = go ctx0 i0
+      where
+        go :: List SType ctx' -> Int -> Either CoreError (SomeVariable ctx')
+        go Nil _ = Left (CoreOutOfScopeVariable i0)
+        go (Cons t _) 0 = Right (SomeVariable t Here)
+        go (Cons _ ts) i | i > 0 = do
+          SomeVariable t v <- go ts (i - 1)
+          pure (SomeVariable t (There v))
+        go _ i = Left (CoreNegativeVariable i)
 
 -- Check well-kindedness and index-arity of declared datatypes in the explicit core.
-validateTy :: Env -> Ty.Ty -> Either String ()
+validateTy :: Env -> Ty.Ty -> Either CoreError ()
 validateTy env = validateTyWithKind env Ty.KType
 
-validateTyWithKind :: Env -> Ty.Kind -> Ty.Ty -> Either String ()
+validateTyWithKind :: Env -> Ty.Kind -> Ty.Ty -> Either CoreError ()
 validateTyWithKind env expected = \case
   Ty.TNat ->
-    unless (expected == Ty.KType) $ Left "Nat used where a higher-kinded type was expected in explicit core"
+    unless (expected == Ty.KType) $ Left (CoreNatExpectedHigherKind expected)
   Ty.TArrow a b -> do
-    unless (expected == Ty.KType) $ Left "function type used where a higher-kinded type was expected in explicit core"
+    unless (expected == Ty.KType) $ Left (CoreArrowExpectedHigherKind expected)
     validateTyWithKind env Ty.KType a
     validateTyWithKind env Ty.KType b
   Ty.TParam _ ts ->
@@ -321,23 +474,23 @@ validateTyWithKind env expected = \case
     Just d -> do
       let paramKinds = map snd (dataParams d)
       when (length ts > length paramKinds) $
-        Left ("too many type arguments to " <> T.unpack dn <> " in explicit core")
+        Left (CoreTooManyTypeArguments dn (length paramKinds) (length ts))
       let (appliedKinds, remainingKinds) = splitAt (length ts) paramKinds
       sequence_ [validateTyWithKind env k t | (k, t) <- zip appliedKinds ts]
       let remaining = foldr Ty.KArrow Ty.KType remainingKinds
       unless (remaining == expected) $
-        Left ("kind mismatch for " <> T.unpack dn <> " in explicit core")
+        Left (CoreDataKindMismatch dn expected remaining)
       if expected == Ty.KType
         then
           unless (length is == length (dataIndices d)) $
-            Left ("index arity mismatch for " <> T.unpack dn <> " in explicit core")
+            Left (CoreIndexArityMismatch dn (length (dataIndices d)) (length is))
         else
           unless (null is && null (dataIndices d)) $
-            Left ("indexed datatype " <> T.unpack dn <> " cannot be partially applied in explicit core")
+            Left (CorePartialIndexedData dn)
     Nothing -> traverse_ (validateTyAnyKind env) ts
   Ty.THole -> Right ()
 
-validateTyAnyKind :: Env -> Ty.Ty -> Either String ()
+validateTyAnyKind :: Env -> Ty.Ty -> Either CoreError ()
 validateTyAnyKind env = \case
   Ty.TNat -> Right ()
   Ty.TArrow a b -> validateTyWithKind env Ty.KType a *> validateTyWithKind env Ty.KType b
@@ -346,16 +499,16 @@ validateTyAnyKind env = \case
     Just d -> do
       let paramKinds = map snd (dataParams d)
       when (length ts > length paramKinds) $
-        Left ("too many type arguments to " <> T.unpack dn <> " in explicit core")
+        Left (CoreTooManyTypeArguments dn (length paramKinds) (length ts))
       let (appliedKinds, remainingKinds) = splitAt (length ts) paramKinds
       sequence_ [validateTyWithKind env k t | (k, t) <- zip appliedKinds ts]
       if null remainingKinds
         then
           unless (length is == length (dataIndices d)) $
-            Left ("index arity mismatch for " <> T.unpack dn <> " in explicit core")
+            Left (CoreIndexArityMismatch dn (length (dataIndices d)) (length is))
         else
           unless (null is && null (dataIndices d)) $
-            Left ("indexed datatype " <> T.unpack dn <> " cannot be partially applied in explicit core")
+            Left (CorePartialIndexedData dn)
     Nothing -> traverse_ (validateTyAnyKind env) ts
   Ty.THole -> Right ()
 
@@ -381,13 +534,13 @@ ixParamsOf = \case
   Ty.IxPartial _ _ _ xs -> concatMap ixParamsOf xs
   _ -> []
 
-unshiftTypeParams :: Int -> Ty.Ty -> Either String Ty.Ty
+unshiftTypeParams :: Int -> Ty.Ty -> Either CoreError Ty.Ty
 unshiftTypeParams 0 t = Right t
 unshiftTypeParams d t = go t
   where
     go (Ty.TParam i ts)
       | i >= d = Ty.TParam (i - d) <$> traverse go ts
-      | otherwise = Left "escaping method type parameter in explicit core"
+      | otherwise = Left (CoreEscapingMethodTypeParameter i)
     go (Ty.TData n ts is) = (\ts' -> Ty.TData n ts' is) <$> traverse go ts
     go (Ty.TArrow a b) = Ty.TArrow <$> go a <*> go b
     go other = Right other
@@ -417,14 +570,14 @@ data ProofSlotSource
 -- Check global applications against the declaration environment before making
 -- an intrinsically typed signature. In particular an annotation alone cannot
 -- turn a numeral operation or an arbitrary name into a value of any type.
-validateGlobal :: Env -> [Slot] -> Scoped -> S.Ref -> [Tm.ProofArgument Int] -> [(Int, Ty.Ix)] -> [S.Expr Int] -> [Ty.Ty] -> Ty.Ty -> Either String ([Ty.Ty], [(Int, Ty.Ix)], Set Text)
+validateGlobal :: Env -> [Slot] -> Scoped -> S.Ref -> [Tm.ProofArgument Int] -> [(Int, Ty.Ix)] -> [S.Expr Int] -> [Ty.Ty] -> Ty.Ty -> Either CoreError ([Ty.Ty], [(Int, Ty.Ix)], Set Text)
 validateGlobal env slots variables ref proofs explicitIndices compArgs actual result = case S.refKind ref of
   S.RefBuiltin | S.refName ref == "S" -> check 0 (0, 0) [] [Ty.TNat] Ty.TNat
   S.RefBuiltin | S.refName ref `elem` ["add", "sub", "mul", "pow"] -> check 0 (0, 0) [] [Ty.TNat, Ty.TNat] Ty.TNat
   S.RefFunction -> case [f | GFun f <- globals, funCore f == S.refName ref] of
     f : _ -> case lookupIndexFnOwner env (funQual f) of
       Just (d, j) -> do
-        unless (null proofs) $ Left ("core evidence arity mismatch for " <> show ref)
+        unless (null proofs) $ Left (CoreEvidenceArityMismatch ref 0 (length proofs))
         case actual of
           [Ty.TData dn ts indices]
             | dn == renderQualName (dataQual d)
@@ -436,11 +589,11 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                     (normProj, depsProj) = normalizeTypeIndices env projected
                     (normRes, depsRes) = normalizeTypeIndices env result
                 unless (normProj == normRes) $
-                  Left ("core index projection type mismatch for " <> show ref <> ": " <> show normProj <> " against " <> show normRes)
-                unless (all Ty.firstOrder ts) $ Left "type parameters cannot contain fixed callbacks"
-                unless (Ty.firstOrder result) $ Left "a global value cannot return a fixed callback"
+                  Left (CoreIndexProjectionTypeMismatch ref normProj normRes)
+                unless (all Ty.firstOrder ts) $ Left (CoreNonFirstOrderTypeParameter ref)
+                unless (Ty.firstOrder result) $ Left (CoreNonFirstOrderResult ref result)
                 pure (map complete ts, [], depsProj <> depsRes)
-          _ -> Left ("core index projection argument mismatch for " <> show ref)
+          _ -> Left (CoreIndexProjectionArgMismatch ref)
       Nothing -> do
         let scheme = funScheme f
             baseParams = length (Ty.schemeParams scheme)
@@ -448,7 +601,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
             runtime = [snd (Ty.schemeValues scheme !! i) | i <- funRuntime f]
             offset = length runtime + funArity f
             dictArgs = drop offset compArgs
-        rawSlots <- traverse (dictionaryMethodScheme env (funSlots f)) (funSlots f)
+        rawSlots <- first CoreEnvError (traverse (dictionaryMethodScheme env (funSlots f)) (funSlots f))
         let (slotRanges, remappedDicts, totalParams) =
               foldl
                 ( \(ranges, tys, next) (slot, (extra, rawTy)) ->
@@ -460,7 +613,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
             slotKinds = concat [methodExtraKinds env slot | slot <- funSlots f]
             allKinds = map snd (Ty.schemeParams scheme) <> slotKinds
         instantiated <- instantiateDictionary (funSlots f) (drop offset actualValues) (Ty.schemeType scheme : remappedDicts)
-        captured <- sequence [maybe (Left "a runtime argument has no scoped index") (Right . (i,)) value | (i, value) <- zip (funRuntime f) actualValues]
+        captured <- sequence [maybe (Left (CoreRuntimeArgNoScopedIndex ref)) (Right . (i,)) value | (i, value) <- zip (funRuntime f) actualValues]
         case instantiated of
           signature : entries -> do
             let (args, r) = arrows signature
@@ -476,17 +629,17 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                     traverse
                       ( \j -> case IM.lookup j (Ty.asTypes assignment) of
                           Just (Ty.TParam p []) | p `notElem` forbidden -> Right p
-                          _ -> Left ("polymorphic dictionary method is not parametric for " <> show ref)
+                          _ -> Left (CorePolymorphicDictNotParametric ref)
                       )
                       [start .. start + extra - 1]
                   unless (length params == length (nub params)) $
-                    Left ("polymorphic dictionary method conflates distinct type parameters for " <> show ref)
+                    Left (CorePolymorphicDictConflatesParams ref)
               | (slot, start, extra) <- slotRanges
               , extra > 0
               ]
             proofDeps <- verifyFunctionProofs f assignment funTypes dictArgs
             pure (funTypes, indices, deps <> proofDeps)
-          [] -> Left "a dictionary lost its function signature"
+          [] -> Left (CoreLostFunctionSignature ref)
     [] -> missing
   S.RefConstructor -> case [c | GCtor c <- globals, ctorCore c == S.refName ref] of
     c : _
@@ -513,7 +666,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
           captured <-
             sequence
               [ maybe
-                  (Left "a constructor index argument has no scoped index")
+                  (Left (CoreConstructorIndexArgMissing ref))
                   (Right . (i,))
                   (listToMaybe (drop pos actualValues) >>= id)
               | (i, pos) <- runtimePositions
@@ -542,39 +695,39 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
   where
     globals = Map.elems (envGlobals env)
     actualValues = map (expressionIndex env variables) compArgs
-    missing = Left ("an unknown value reference in the explicit core: " <> show ref)
+    missing = Left (CoreUnknownReference ref)
     places = placeSlots slots
     check required n kinds ds r = do
       (types, indices, _, deps) <- checkWithSolve [] required n kinds ds r actual result
       pure (types, indices, deps)
     checkWithSolve captured required n kinds ds r actualTys resultTy = do
-      unless (length proofs == required) $ Left ("core evidence arity mismatch for " <> show ref)
-      unless (length ds == length actualTys) $ Left ("core application arity mismatch for " <> show ref)
+      unless (length proofs == required) $ Left (CoreEvidenceArityMismatch ref required (length proofs))
+      unless (length ds == length actualTys) $ Left (CoreApplicationArityMismatch ref (length ds) (length actualTys))
       let normalizedType = fst . normalizeTypeIndices env
           normalizedIndex = fst . normalizeIndex env
           dependencies = Set.unions (map (snd . normalizeTypeIndices env) (r : resultTy : ds <> actualTys) <> map (snd . normalizeIndex env . snd) (explicitIndices <> captured))
-          match a b s = maybe (Left ("core application type mismatch for " <> show ref <> ": " <> show a <> " against " <> show b)) Right (Ty.matchTyStrict n (normalizedType a) (normalizedType b) s)
+          match a b s = maybe (Left (CoreApplicationTypeMismatch ref a b)) Right (Ty.matchTyStrict n (normalizedType a) (normalizedType b) s)
       let stated = IM.fromList [(i, normalizedIndex x) | (i, x) <- explicitIndices, i >= 0, i < snd n]
       indices <-
         foldM
           ( \known (i, x) -> case IM.lookup i known of
               Nothing -> Right (IM.insert i x known)
-              Just y -> maybe (Left "a runtime argument disagrees with its stated index") (\value -> Right (IM.insert i value known)) (Ty.mergeIx x y)
+              Just y -> maybe (Left (CoreRuntimeArgIndexDisagreement i x y)) (\value -> Right (IM.insert i value known)) (Ty.mergeIx x y)
           )
           stated
           [(i, normalizedIndex x) | (i, x) <- captured]
       let seed = Ty.emptyAssignment {Ty.asValues = indices}
       initial <- match r resultTy seed
       assignment <- foldM (\s (a, b) -> match a b s) initial (zip ds actualTys)
-      unless (all Ty.firstOrder (IM.elems (Ty.asTypes assignment))) $ Left "type parameters cannot contain fixed callbacks"
-      unless (Ty.firstOrder resultTy) $ Left "a global value cannot return a fixed callback"
+      unless (all Ty.firstOrder (IM.elems (Ty.asTypes assignment))) $ Left (CoreNonFirstOrderTypeParameter ref)
+      unless (Ty.firstOrder resultTy) $ Left (CoreNonFirstOrderResult ref resultTy)
       let solvedTypes = [complete (Ty.substScheme n assignment (Ty.TParam i [])) | i <- [0 .. fst n - 1]]
       sequence_ [validateTyWithKind env k t | (k, t) <- zip kinds solvedTypes]
       pure (solvedTypes, IM.toList (Ty.asValues assignment), assignment, dependencies)
     arrows (Ty.TArrow a b) = let (as, r) = arrows b in (a : as, r)
     arrows t = ([], t)
     checkSlot slot = do
-      (extra, ty) <- dictionaryMethodScheme env slots slot
+      (extra, ty) <- first CoreEnvError (dictionaryMethodScheme env slots slot)
       let (domains, r) = arrows ty
           shiftedActual = map (Ty.shiftTypeParams extra) actual
           shiftedResult = Ty.shiftTypeParams extra result
@@ -600,7 +753,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
           [ case lookup slot boundMap of
               Just dictExpr -> Right (slotRef, BoundSlot dictExpr (slotArity slot))
               Nothing -> do
-                (extra, rawTy) <- dictionaryMethodScheme env proofSlots slot
+                (extra, rawTy) <- first CoreEnvError (dictionaryMethodScheme env proofSlots slot)
                 let mapping =
                       IM.fromList
                         ( [(k, Ty.TParam (freshBase + k) []) | k <- [0 .. extra - 1]]
@@ -625,9 +778,9 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
       pairs <-
         traverse
           ( \i -> case IM.lookup i (Ty.asValues assignment) of
-              Nothing -> Left ("a precondition index is undetermined for " <> show ref)
+              Nothing -> Left (CorePreconditionIndexUndetermined ref i)
               Just ix -> case indexTermInWithDependencies env (scopedCtx variables) ix of
-                Nothing -> Left ("a precondition index has no scoped term for " <> show ref)
+                Nothing -> Left (CorePreconditionIndexUnscoped ref ix)
                 Just (term, deps) -> Right ((i, term), deps)
           )
           (nub [i | B i <- toList (fromScope prop)])
@@ -641,7 +794,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
           S.Dictionary _ e -> unwrap e
           S.Transport _ e _ -> unwrap e
           e -> e
-        go :: forall a. (Eq a) => (a -> Maybe Int) -> (S.Expr Int -> S.Expr a) -> Map.Map S.Ref ProofSlotInfo -> S.Expr a -> S.Expr a -> Either String (Set Text)
+        go :: forall a. (Eq a) => (a -> Maybe Int) -> (S.Expr Int -> S.Expr a) -> Map.Map S.Ref ProofSlotInfo -> S.Expr a -> S.Expr a -> Either CoreError (Set Text)
         go toOuter liftOuter table expected0 actual0 =
           let expected = unwrap expected0
               actualExpr = unwrap actual0
@@ -653,8 +806,8 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                         (n2, d2) = normalizeIndex env ix2
                   , n1 == n2 ->
                       Right (d1 <> d2)
-                _ -> Left ("core precondition mismatch for " <> show ref)
-              goScoped :: forall b. (Eq b) => Scope b S.Expr a -> Scope b S.Expr a -> Either String (Set Text)
+                _ -> Left (CorePreconditionMismatch ref)
+              goScoped :: forall b. (Eq b) => Scope b S.Expr a -> Scope b S.Expr a -> Either CoreError (Set Text)
               goScoped s1 s2 = go (\case B _ -> Nothing; F x -> toOuter x) (fmap F . liftOuter) table (fromScope s1) (fromScope s2)
            in case S.spine expected of
                 (S.Global headRef, expArgs)
@@ -681,7 +834,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                                         _ -> fallback
                             _ -> fallback
                         | null expArgs -> go toOuter liftOuter Map.empty (liftOuter dictExpr) actualExpr
-                        | otherwise -> Left ("invalid dictionary slot arity in precondition for " <> show ref)
+                        | otherwise -> Left (CorePreconditionInvalidSlotArity ref)
                       ProofOnlySlot slot _ expectedMethodTy
                         | length expArgs == slotArity slot && slotArity slot > 0 -> case S.spine actualExpr of
                             (S.Global target, actArgs)
@@ -701,8 +854,8 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                               , length actArgs == runtimeCount + arity + length (funSlots g) -> do
                                   let (actPrefix, rest) = splitAt runtimeCount actArgs
                                       (actMid, actSuffix) = splitAt arity rest
-                                  prefixOuter <- maybe (Left "proof precondition dictionary capture escapes scope") Right (traverse (traverse toOuter) actPrefix)
-                                  suffixOuter <- maybe (Left "proof precondition dictionary capture escapes scope") Right (traverse (traverse toOuter) actSuffix)
+                                  prefixOuter <- maybe (Left (CorePreconditionCaptureEscapes ref)) Right (traverse (traverse toOuter) actPrefix)
+                                  suffixOuter <- maybe (Left (CorePreconditionCaptureEscapes ref)) Right (traverse (traverse toOuter) actSuffix)
                                   let dictRef
                                         | runtimeCount > 0 = S.Ref (S.RefIndexedPartial arity runtimeCount) fnCore
                                         | not (null suffixOuter) = S.Ref (S.RefPartial arity) fnCore
@@ -711,9 +864,9 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                                   d0 <- validateDictionary env slots variables dictTy (S.apps (S.Global dictRef) (prefixOuter <> suffixOuter))
                                   ds <- sequence (zipWith (go toOuter liftOuter table) expArgs actMid)
                                   pure (Set.unions (d0 : ds))
-                            _ -> Left ("proof precondition dictionary mismatch for " <> show ref)
+                            _ -> Left (CorePreconditionDictMismatch ref)
                         | null expArgs -> do
-                            actualOuter <- maybe (Left "proof precondition dictionary escapes scope") Right (traverse toOuter actualExpr)
+                            actualOuter <- maybe (Left (CorePreconditionCaptureEscapes ref)) Right (traverse toOuter actualExpr)
                             source <- case S.spine actualOuter of
                               (S.Global target, [])
                                 | Just callerSlot <- lookup target [(r, s) | (s, r) <- places]
@@ -724,10 +877,10 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                                 , inst : _ <- [inst | inst <- Map.elems (envInstances env), fmap funQual (Map.lookup (slotMethod slot) (instFunctions inst)) == Just (funQual g)] ->
                                     let (prefixOuter, suffixOuter) = splitAt (length (funRuntime g)) captures
                                      in Right (ProofSlotInstance inst g prefixOuter suffixOuter)
-                              _ -> Left ("proof precondition dictionary mismatch for " <> show ref)
+                              _ -> Left (CorePreconditionDictMismatch ref)
                             dictTy <- rewriteProofSlotDict proofSlots boundMap source expectedMethodTy
                             validateDictionary env slots variables dictTy actualOuter
-                        | otherwise -> Left ("invalid dictionary slot arity in precondition for " <> show ref)
+                        | otherwise -> Left (CorePreconditionInvalidSlotArity ref)
                 _ -> case (expected, actualExpr) of
                   (S.Var x, S.Var y) | x == y -> Right Set.empty
                   (S.Nat m, S.Nat n) | m == n -> Right Set.empty
@@ -747,11 +900,11 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                         d1 <- case (bd1, bd2) of
                           (Nothing, Nothing) -> Right Set.empty
                           (Just (r1, t1), Just (r2, t2)) | r1 == r2 -> go toOuter liftOuter table t1 t2
-                          _ -> Left ("core precondition quantifier bound mismatch for " <> show ref)
+                          _ -> Left (CorePreconditionQuantifierBoundMismatch ref)
                         d2 <- case (ty1, ty2) of
                           (Nothing, Nothing) -> Right Set.empty
                           (Just t1, Just t2) -> go toOuter liftOuter table t1 t2
-                          _ -> Left ("core precondition quantifier annotation mismatch for " <> show ref)
+                          _ -> Left (CorePreconditionQuantifierAnnotationMismatch ref)
                         d3 <- goScoped b1 b2
                         pure (d1 <> d2 <> d3)
                   (S.If a1 b1 c1, S.If a2 b2 c2) -> do
@@ -763,7 +916,7 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
                   (S.Case s1 as1, S.Case s2 as2)
                     | length as1 == length as2 && map fst as1 == map fst as2 -> do
                         d0 <- go toOuter liftOuter table s1 s2
-                        ds <- sequence (zipWith (goScoped) (map snd as1) (map snd as2))
+                        ds <- sequence (zipWith goScoped (map snd as1) (map snd as2))
                         pure (Set.unions (d0 : ds))
                   (S.Pi _ i1 d1 b1, S.Pi _ i2 d2 b2) | i1 == i2 -> (<>) <$> go toOuter liftOuter table d1 d2 <*> goScoped b1 b2
                   (S.SchemaParameter _ r1 e1, S.SchemaParameter _ r2 e2) | r1 == r2 -> go toOuter liftOuter table e1 e2
@@ -780,29 +933,29 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
           nullaryProof = valueSlots proofSlots
           nullaryCaller = valueSlots slots
           resolveDict j = do
-            depSlot <- maybe (Left "invalid dependent dictionary index in precondition") Right (listToMaybe (drop j nullaryProof))
+            depSlot <- maybe (Left (CorePreconditionInvalidDepDictIndex j)) Right (listToMaybe (drop j nullaryProof))
             case lookup depSlot boundMap of
               Just dictExpr ->
-                maybe (Left "dependent dictionary argument has no scoped index") Right (expressionIndex env variables dictExpr)
+                maybe (Left CorePreconditionDepDictNoScopedIndex) Right (expressionIndex env variables dictExpr)
               Nothing -> case source of
                 ProofSlotCaller callerSlot ->
                   case [k | (k, cs) <- zip [0 ..] nullaryCaller, slotMethod cs == slotMethod depSlot, slotParam cs == slotParam callerSlot] of
                     k : _ -> Right (Ty.IxDict k)
-                    [] -> Left "proof precondition depends on a nullary class method missing from caller dictionary"
+                    [] -> Left CorePreconditionMissingCallerDepMethod
                 ProofSlotInstance inst g prefixOuter suffixOuter -> do
-                  depFun <- maybe (Left "proof precondition depends on a nullary class method missing from instance") Right (Map.lookup (slotMethod depSlot) (instFunctions inst))
+                  depFun <- maybe (Left CorePreconditionMissingInstanceDepMethod) Right (Map.lookup (slotMethod depSlot) (instFunctions inst))
                   depRuntime <-
                     traverse
                       ( \rIdx -> case lookup rIdx (zip (funRuntime g) prefixOuter) of
-                          Just expr -> maybe (Left "instance dependent method runtime capture has no scoped index") Right (expressionIndex env variables expr)
-                          Nothing -> Left "instance dependent method runtime capture missing from proof precondition"
+                          Just expr -> maybe (Left CorePreconditionInstanceCaptureNoIndex) Right (expressionIndex env variables expr)
+                          Nothing -> Left CorePreconditionMissingInstanceRuntimeCapture
                       )
                       (funRuntime depFun)
                   depDicts <-
                     traverse
                       ( \dSlot -> case lookup dSlot (zip (funSlots g) suffixOuter) of
-                          Just expr -> maybe (Left "instance dependent method dictionary capture has no scoped index") Right (expressionIndex env variables expr)
-                          Nothing -> Left "instance dependent method dictionary capture missing from proof precondition"
+                          Just expr -> maybe (Left CorePreconditionInstanceCaptureNoIndex) Right (expressionIndex env variables expr)
+                          Nothing -> Left CorePreconditionMissingInstanceDictCapture
                       )
                       (funSlots depFun)
                   Right (Ty.IxFun (funCore depFun) (depRuntime <> depDicts))
@@ -819,11 +972,11 @@ validateGlobal env slots variables ref proofs explicitIndices compArgs actual re
 -- Dictionary entries retain their runtime index captures in the current
 -- value context. Check every captured value and dependent result against
 -- the selected implementation before discarding its source annotations.
-validateDictionary :: Env -> [Slot] -> Scoped -> Ty.Ty -> S.Expr Int -> Either String (Set Text)
+validateDictionary :: Env -> [Slot] -> Scoped -> Ty.Ty -> S.Expr Int -> Either CoreError (Set Text)
 validateDictionary env slots variables expected expression = case S.spine expression of
   (S.Global ref, captures)
     | Just _ <- lookup ref places -> do
-        unless (null captures) $ Left "a dictionary place cannot capture arguments"
+        unless (null captures) $ Left (CoreDictPlaceCannotCapture ref)
         let (ds, r) = arrows expected
         (_, _, dependencies) <- validateGlobal env slots variables ref [] [] [] ds r
         pure dependencies
@@ -839,11 +992,11 @@ validateDictionary env slots variables expected expression = case S.spine expres
               S.RefIndexedPartial a prefix -> a == arity && arity > 0 && prefix == runtimeCount
               S.RefFunction -> arity == 0
               _ -> False
-        unless (correctRole && length captures == runtimeCount + length (funSlots f)) $ Left "a dictionary has the wrong static arity"
+        unless (correctRole && length captures == runtimeCount + length (funSlots f)) $ Left (CoreDictWrongStaticArity ref)
         when (arity > 0 && any openCapture captures) $
-          Left "a static dictionary cannot capture scoped runtime values; pass a method whose runtime captures are closed"
-        runtimeIndices <- traverse (maybe (Left "a dictionary runtime capture has no first-order index") Right . sourceIndex) runtime
-        rawSlots <- traverse (dictionaryMethodScheme env (funSlots f)) (funSlots f)
+          Left (CoreDictOpenStaticCapture ref)
+        runtimeIndices <- traverse (maybe (Left (CoreDictRuntimeCaptureNoIndex ref)) Right . sourceIndex) runtime
+        rawSlots <- first CoreEnvError (traverse (dictionaryMethodScheme env (funSlots f)) (funSlots f))
         let freshBase = 1 + maximum (-1 : concatMap Ty.tyParams (expected : map (Ty.binderTy . snd) variables))
             shiftedRaw = [Ty.mapIx id rawTy | (_, rawTy) <- rawSlots]
         instantiated <- instantiateDictionary (funSlots f) (map sourceIndex dictionaryCaptures) (Ty.schemeType scheme : shiftedRaw)
@@ -852,14 +1005,14 @@ validateDictionary env slots variables expected expression = case S.spine expres
             seed = Ty.emptyAssignment {Ty.asValues = IM.fromList (zip (funRuntime f) (map normalizedIndex runtimeIndices))}
         case instantiated of
           signature : entries -> do
-            assignment <- maybe (Left "a dictionary implementation has the wrong type") Right (Ty.matchTyStrict n (normalizedType signature) (normalizedType expected) seed)
+            assignment <- maybe (Left (CoreDictWrongType ref signature expected)) Right (Ty.matchTyStrict n (normalizedType signature) (normalizedType expected) seed)
             let subFreshBase = max freshBase (1 + maximum (-1 : concatMap Ty.tyParams (IM.elems (Ty.asTypes assignment))))
             runtimeDependencies <-
               sequence
                 [ do
                     body <- elaborateScoped env slots variables value
                     let required = complete (Ty.substScheme n assignment (snd (Ty.schemeValues scheme !! i)))
-                    unless (null (obligations body) && normalizedType (bodyType body) == normalizedType required) $ Left "a dictionary runtime capture has the wrong type"
+                    unless (null (obligations body) && normalizedType (bodyType body) == normalizedType required) $ Left (CoreDictRuntimeCaptureWrongType ref required (bodyType body))
                     pure (indexDependencies body <> snd (normalizeTypeIndices env (bodyType body)) <> snd (normalizeTypeIndices env required))
                 | (i, value) <- zip (funRuntime f) runtime
                 ]
@@ -875,9 +1028,9 @@ validateDictionary env slots variables expected expression = case S.spine expres
                 | ((extra, _), ty, entry) <- zip3 rawSlots entries dictionaryCaptures
                 ]
             pure (Set.unions (runtimeDependencies <> dictionaryDependencies <> map (snd . normalizeIndex env) runtimeIndices <> map (snd . normalizeTypeIndices env) [signature, expected]))
-          [] -> Left "a dictionary lost its implementation signature"
-    | otherwise -> Left ("an unknown dictionary reference: " <> show ref)
-  _ -> Left "a dictionary entry must be a resolved reference"
+          [] -> Left (CoreDictLostSignature ref)
+    | otherwise -> Left (CoreUnknownDictRef ref)
+  _ -> Left CoreDictMustBeResolvedRef
   where
     openCapture value =
       not (null (toList value)) || any ((== S.RefValueParam) . S.refKind) (S.globalsOf value)
@@ -889,12 +1042,12 @@ validateDictionary env slots variables expected expression = case S.spine expres
 {- | Dictionary indices are tied to the actual value arguments. The typed
 annotation alone never chooses a different cardinality for a dictionary.
 -}
-instantiateDictionary :: [Slot] -> [Maybe Ty.Ix] -> [Ty.Ty] -> Either String [Ty.Ty]
+instantiateDictionary :: [Slot] -> [Maybe Ty.Ix] -> [Ty.Ty] -> Either CoreError [Ty.Ty]
 instantiateDictionary slots values types = do
   let used = concatMap (concatMap Ty.ixDicts . Ty.tyIndices) types
       positions = [position | (position, slot) <- zip [0 ..] slots, slotArity slot == 0]
       at i = listToMaybe (drop i positions) >>= (\position -> listToMaybe (drop position values)) >>= id
-  replacements <- traverse (\i -> maybe (Left "a dependent dictionary value has no checked index term") (Right . (i,)) (at i)) used
+  replacements <- traverse (\i -> maybe (Left (CoreDependentDictNoIndex i)) (Right . (i,)) (at i)) used
   let rewrite original@(Ty.IxDict i) = fromMaybe original (lookup i replacements)
       rewrite (Ty.IxSucc x) = Ty.IxSucc (rewrite x)
       rewrite (Ty.IxCon name xs) = Ty.IxCon name (map rewrite xs)

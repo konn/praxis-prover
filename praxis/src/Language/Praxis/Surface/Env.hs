@@ -41,6 +41,8 @@ module Language.Praxis.Surface.Env (
   ClassInfo (..),
   classEvidenceName,
   MethodInfo (..),
+  EnvError (..),
+  renderEnvError,
   methodIndex,
   methodTypeWith,
   dictionaryMethodType,
@@ -642,13 +644,27 @@ methodIndex q = IxMethod (renderQualName q)
 dictionaryIndex :: Int -> Ix
 dictionaryIndex = IxDict
 
+-- | Errors arising from class method and dictionary environment lookups.
+data EnvError
+  = -- | A dependent method requires an earlier nullary member missing from the dictionary.
+    MissingDependentMember !QualName
+  | -- | A dictionary slot references a method not present in the environment.
+    UnknownDictionaryMethod !QualName
+  deriving stock (Eq, Show)
+
+-- | Render an 'EnvError' as a diagnostic message.
+renderEnvError :: EnvError -> String
+renderEnvError = \case
+  MissingDependentMember q -> "the dictionary does not provide dependent member " <> T.unpack (displayQualName q)
+  UnknownDictionaryMethod _ -> "a dictionary place refers to no method"
+
 {- | Instantiate every dependency using the same dictionary as the method.
 Missing dependencies are errors, never unconstrained index holes.
 -}
-methodTypeWith :: (QualName -> Maybe Ix) -> MethodInfo -> Either String Ty
+methodTypeWith :: (QualName -> Maybe Ix) -> MethodInfo -> Either EnvError Ty
 methodTypeWith at method = do
   replacements <- forM (methodDependencies method) \(q, _) ->
-    maybe (Left ("the dictionary does not provide dependent member " <> T.unpack (displayQualName q))) (Right . (methodIndex q,)) (at q)
+    maybe (Left (MissingDependentMember q)) (Right . (methodIndex q,)) (at q)
   let rewrite x = case lookup x replacements of
         Just value -> value
         Nothing -> case x of
@@ -660,7 +676,7 @@ methodTypeWith at method = do
   pure (mapIx rewrite (schemeType (methodScheme method)))
 
 -- | Put uniquely selected nullary methods in scope as dependent indices.
-dictionaryScope :: Env -> [Slot] -> TyScope -> Either String TyScope
+dictionaryScope :: Env -> [Slot] -> TyScope -> Either EnvError TyScope
 dictionaryScope env slots scope = do
   values <- forM unique \(i, slot) -> do
     ty <- dictionaryMethodType env slots slot
@@ -677,14 +693,14 @@ dictionaryScope env slots scope = do
 {- | The complete type of a dictionary place, including indices from its
 preceding values. A dependency must be present at this same type parameter.
 -}
-dictionaryMethodType :: Env -> [Slot] -> Slot -> Either String Ty
+dictionaryMethodType :: Env -> [Slot] -> Slot -> Either EnvError Ty
 dictionaryMethodType env slots slot
   | isMembershipSlot slot = Right (TArrow (TParam (slotParam slot) []) TNat)
   | Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env) = do
       ty <- methodTypeWith dependency method
       let scheme = methodScheme method
       pure (substScheme (length (schemeParams scheme), length (schemeValues scheme)) emptyAssignment {asTypes = IM.singleton 0 (TParam (slotParam slot) [])} ty)
-  | otherwise = Left "a dictionary place refers to no method"
+  | otherwise = Left (UnknownDictionaryMethod (slotMethod slot))
   where
     dependency q = dictionaryIndex <$> lookup q [(slotMethod s, i) | (i, s) <- zip [0 ..] (valueSlots slots), slotParam s == slotParam slot]
 
@@ -693,7 +709,7 @@ type parameters @(extra)@ and the method type with those local parameters at
 @TParam 0 .. TParam (extra - 1)@ and the enclosing class parameter shifted to
 @TParam (extra + slotParam slot)@.
 -}
-dictionaryMethodScheme :: Env -> [Slot] -> Slot -> Either String (Int, Ty)
+dictionaryMethodScheme :: Env -> [Slot] -> Slot -> Either EnvError (Int, Ty)
 dictionaryMethodScheme env slots slot
   | isMembershipSlot slot = Right (0, TArrow (TParam (slotParam slot) []) TNat)
   | Just (GMethod method) <- Map.lookup (slotMethod slot) (envGlobals env) = do
@@ -702,7 +718,7 @@ dictionaryMethodScheme env slots slot
           extra = max 0 (length (schemeParams scheme) - 1)
           mapping = IM.fromList ((0, TParam (extra + slotParam slot) []) : [(1 + k, TParam k []) | k <- [0 .. extra - 1]])
       pure (extra, substScheme (length (schemeParams scheme), length (schemeValues scheme)) emptyAssignment {asTypes = mapping} ty)
-  | otherwise = Left "a dictionary place refers to no method"
+  | otherwise = Left (UnknownDictionaryMethod (slotMethod slot))
   where
     dependency q = dictionaryIndex <$> lookup q [(slotMethod s, i) | (i, s) <- zip [0 ..] (valueSlots slots), slotParam s == slotParam slot]
 

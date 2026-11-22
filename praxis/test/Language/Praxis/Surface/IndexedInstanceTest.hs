@@ -4,7 +4,7 @@ module Language.Praxis.Surface.IndexedInstanceTest (indexedInstanceTests) where
 
 import Data.Text qualified as T
 import Language.Praxis.Surface.Check
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Syntax.Raw (Span (..))
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -58,7 +58,7 @@ indexedInstanceTests =
         , "  identity-law x = rfl"
         ]
     check input = do
-      p <- either assertFailure pure prelude
+      p <- either (assertFailure . renderPreludeError) pure prelude
       pure (checkSource p "indexed.px" input)
 
 errors :: Checked -> [String]

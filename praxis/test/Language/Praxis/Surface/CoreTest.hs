@@ -19,13 +19,19 @@ coreTests =
   testGroup
     "explicit core"
     [ testCase "variables cannot escape their typed context" $ do
-        assertBool "out of scope" (isLeft (Core.elaborate emptyEnv [] [TNat] (Typed TNat [] [] (Var 1))))
-        assertBool "wrong type" (isLeft (Core.elaborate emptyEnv [] [TData "Box" [] []] (Typed TNat [] [] (Var 0))))
+        case Core.elaborate emptyEnv [] [TNat] (Typed TNat [] [] (Var 1)) of
+          Left (Core.CoreOutOfScopeVariable 1) -> pure ()
+          other -> assertFailure ("expected CoreOutOfScopeVariable 1, got " <> show (fmap Core.bodyType other))
+        case Core.elaborate emptyEnv [] [TData "Box" [] []] (Typed TNat [] [] (Var 0)) of
+          Left (Core.CoreTypeMismatch TNat (TData "Box" [] [])) -> pure ()
+          other -> assertFailure ("expected CoreTypeMismatch, got " <> show (fmap Core.bodyType other))
     , testCase "global annotations cannot invent signatures" $ do
         let succAt t = Typed t [] [] (App (Global (Ref RefBuiltin "S")) (Nat 0))
         assertBool "wrong result" (isLeft (Core.elaborate emptyEnv [] [] (succAt (TData "Box" [] []))))
-        assertBool "unknown name" (isLeft (Core.elaborate emptyEnv [] [] (Typed TNat [] [] (Global (Ref RefFunction "unknown")))))
-        value <- either assertFailure pure (Core.elaborate emptyEnv [] [] (succAt TNat))
+        case Core.elaborate emptyEnv [] [] (Typed TNat [] [] (Global (Ref RefFunction "unknown"))) of
+          Left (Core.CoreUnknownReference (Ref RefFunction "unknown")) -> pure ()
+          other -> assertFailure ("expected CoreUnknownReference, got " <> show (fmap Core.bodyType other))
+        value <- either (assertFailure . Core.renderCoreError) pure (Core.elaborate emptyEnv [] [] (succAt TNat))
         Core.computation value @?= Term.Call (Ref RefBuiltin "S") [Term.Literal 0]
     , testCase "dictionary annotations cannot invent implementations" $ do
         assertBool "unknown dictionary" (isLeft (Core.elaborate emptyEnv [] [] (Dictionary TNat (Global (Ref RefStatic "missing")))))
@@ -44,12 +50,12 @@ coreTests =
         assertBool "missing equality" (isLeft (check (transport [])))
         assertBool "wrong equality" (isLeft (check (transport [proof (Rel RelEq (Var 0) (Var 0))])))
         assertBool "different type structure" (isLeft (check (Transport (TData "Other" [TNat] [IxBound 0 1]) (Var 2) [proof equality])))
-        body <- either assertFailure pure (check (transport [proof equality]))
+        body <- either (assertFailure . Core.renderCoreError) pure (check (transport [proof equality]))
         Core.bodyType body @?= target
         Core.computation body @?= Term.Variable 2
         length (Core.obligations body) @?= 1
         Core.obligations (Core.mapObligations (const ()) body) @?= [()]
-        pending <- either assertFailure pure (Term.prepareTerm (transport [proof equality]))
+        pending <- either (assertFailure . Term.renderTermError) pure (Term.prepareTerm (transport [proof equality]))
         assertBool "term lowering erased equality evidence" (isLeft (Term.withoutObligations pending))
     , testCase "fixed callback parameters retain their schema identity and signature" $ do
         let ty = TArrow TNat TNat
@@ -62,7 +68,7 @@ coreTests =
         assertBool "a natural is no callback environment" (isLeft (Core.elaborateNamed env [] [namedBinder "f" TNat] (parameter ref 0)))
         assertBool "forged static identity" (isLeft (check (parameter (Ref RefStatic "f_2") 0)))
         assertBool "swapped closure environment" (isLeft (check (parameter ref 1)))
-        body <- either assertFailure pure (check (Typed TNat [] [] (App (parameter ref 0) (Nat 3))))
+        body <- either (assertFailure . Core.renderCoreError) pure (check (Typed TNat [] [] (App (parameter ref 0) (Nat 3))))
         Core.computation body @?= Term.Invoke (Term.Parameter ref (Term.Variable 0)) [Term.Literal 3]
     , testCase "a callback cannot be stored through a polymorphic data field" $ do
         let callbackTy = TArrow TNat TNat
@@ -86,7 +92,7 @@ coreTests =
         let ty = TArrow TNat TNat
             add x y = Typed TNat [] [] (apps (Global (Ref RefBuiltin "add")) [x, y])
             closure = SchemaClosure ty (Lam [Hint "x"] (toScope (add (Var (B 0)) (Var (F 0)))))
-        body <- either assertFailure pure (Core.elaborate emptyEnv [] [TNat] closure)
+        body <- either (assertFailure . Core.renderCoreError) pure (Core.elaborate emptyEnv [] [TNat] closure)
         Core.computation body @?= Term.Closure 1 (Term.Call (Ref RefBuiltin "add") [Term.Variable (B 0), Term.Variable (F 0)])
         let forged = SchemaClosure (TArrow TNat (TData "Box" [] [])) (Lam [Hint "x"] (toScope (Nat 0)))
             raw = R.Located R.noSpan (R.EProof (R.RBy []))
@@ -108,11 +114,11 @@ coreTests =
         assertBool "over-applied nullary datatype rejected" (isLeft (Core.elaborate env3 [] [TData "Void" [TNat] []] overApplied))
         assertBool "ill-kinded type argument rejected" (isLeft (Core.elaborate env3 [] [TData "Void" [] []] badKindArg))
         assertBool "mismatched higher-kinded parameter rejected" (isLeft (Core.elaborate env3 [] [TParam 1 [TNat]] mismatchedHkt))
-        body <- either assertFailure pure (Core.elaborate env3 [] [TData "List" [TNat] []] goodUnsaturated)
+        body <- either (assertFailure . Core.renderCoreError) pure (Core.elaborate env3 [] [TData "List" [TNat] []] goodUnsaturated)
         Core.bodyType body @?= TData "Box" [TData "List" [] [], TNat] []
     , testCase "core printing uses surface types and preserves application precedence" $ do
         let successor x = Typed TNat [] [] (App (Global (Ref RefBuiltin "S")) x)
-        value <- either assertFailure pure (Core.elaborate emptyEnv [] [TNat] (successor (successor (Var 0))))
+        value <- either (assertFailure . Core.renderCoreError) pure (Core.elaborate emptyEnv [] [TNat] (successor (successor (Var 0))))
         Core.dump value @?= "\\(v0 : Nat) -> (S (S v0) : Nat)"
         Pretty.typeText emptyEnv (Pretty.Scope ["a"] ["n"] []) 0 (TArrow (TArrow TNat TNat) (TData "Example.Vec" [TParam 0 []] [IxSucc (IxParam 0)])) @?= "(Nat -> Nat) -> Example.Vec a (S n)"
     ]

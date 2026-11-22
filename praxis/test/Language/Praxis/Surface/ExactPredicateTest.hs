@@ -58,7 +58,7 @@ exactPredicateTests =
     ]
   where
     check source = do
-      p <- either assertFailure pure prelude
+      p <- either (assertFailure . renderPreludeError) pure prelude
       pure (checkSource p "exact-predicate.px" source)
 
 errors :: Checked -> [Text]

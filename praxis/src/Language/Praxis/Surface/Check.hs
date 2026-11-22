@@ -44,6 +44,8 @@ module Language.Praxis.Surface.Check (
 
   -- * The core state
   Core (..),
+  CheckCoreError (..),
+  renderCheckCoreError,
   coreCertificates,
   coreLemmas,
   surfaceCore,
@@ -76,13 +78,13 @@ import Language.Praxis.PRA.Tactic qualified as PRA
 import Language.Praxis.PRA.Tactic.Parser (Decl (..), parseDeclsIn)
 import Language.Praxis.PRA.Tactic.Quote (SchemaName, renderSchemaTacticError, schemaScope)
 import Language.Praxis.Surface.Builtin qualified as Builtin
-import Language.Praxis.Surface.Compile (Compiled (..), compileFunction)
+import Language.Praxis.Surface.Compile (Compiled (..), compileFunction, renderCompileError)
 import Language.Praxis.Surface.Core qualified as SurfaceCore
 import Language.Praxis.Surface.Core.Pretty qualified as CorePretty
 import Language.Praxis.Surface.CoreText (CT (..))
 import Language.Praxis.Surface.Elab
-import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, validateEncoding)
-import Language.Praxis.Surface.Engine (Closure, DecideStep (..), EngineError (..), GeneratedDecl (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), UnfoldingIndex, emptyUnfoldingIndex, generatedDeclName, indexSpec, indexSpecOf, insertUnfoldings, proveClosure, proveSpec, proveTheoremDecls, renderGeneratedDecl, statementGoal, usesSharedFactsDecl)
+import Language.Praxis.Surface.Encode (Encoded (..), FieldPred, encodeData, renderEncodeError, validateEncoding)
+import Language.Praxis.Surface.Engine (Closure, DecideStep (..), EngineError (..), GeneratedDecl (..), Goal (..), IndexSpec (..), Knowledge (..), Spec (..), SpecProof (..), Unfolding (..), UnfoldingIndex, emptyUnfoldingIndex, generatedDeclName, indexSpec, indexSpecOf, insertUnfoldings, proveClosure, proveSpec, proveTheoremDecls, renderGeneratedDecl, renderProofError, statementGoal, usesSharedFactsDecl)
 import Language.Praxis.Surface.Env (ClassInfo (..), ConstructorSignature (..), CtorInfo (..), DataInfo (..), Env (..), FunInfo (..), Global (..), LawInfo (..), MethodInfo (..), QualName, TheoremInfo (..), classEvidenceName, displayQualName, emptyEnv, indexFunctionCores, lookupDataByName, renderQualName)
 import Language.Praxis.Surface.Evidence qualified as Evidence
 import Language.Praxis.Surface.Fixity (Fixities, moduleFixitiesWith, renderFixityError)
@@ -178,31 +180,51 @@ initialCore p =
       library = Set.fromList [T.pack n | n <- Map.keys lemmas, take 2 n /= "u_"]
    in Core (preludeCompiled p) (preludeSignature p) (preludeEnv p) store ruleMetas library Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty
 
+-- | Structured errors raised when extending the PRA core signature or certifying declarations.
+data CheckCoreError
+  = CheckEquationParseError !String
+  | CheckDefinitionCompileError !String
+  | CheckEnvironmentExtendError !String
+  | CheckSignatureError !String
+  | CheckDeclParseError !String
+  | CheckCertificateError !String
+  deriving stock (Eq, Show)
+
+-- | Render a 'CheckCoreError' as a diagnostic message.
+renderCheckCoreError :: CheckCoreError -> String
+renderCheckCoreError = \case
+  CheckEquationParseError msg -> msg
+  CheckDefinitionCompileError msg -> msg
+  CheckEnvironmentExtendError msg -> msg
+  CheckSignatureError msg -> msg
+  CheckDeclParseError msg -> msg
+  CheckCertificateError msg -> msg
+
 -- | Extend the core with definitions, as @prf@ equations.
-addDefinitions :: [Text] -> Core -> Either String Core
+addDefinitions :: [Text] -> Core -> Either CheckCoreError Core
 addDefinitions eqns core = do
-  eqs <- first displayException (parseEquations (T.unlines eqns))
+  eqs <- first (CheckEquationParseError . displayException) (parseEquations (T.unlines eqns))
   addEquations eqs core
 
 -- | The structured definition boundary; text parsing is only an adapter.
-addEquations :: [Equation Text] -> Core -> Either String Core
+addEquations :: [Equation Text] -> Core -> Either CheckCoreError Core
 addEquations eqs core = do
-  block <- first displayException (compileDefinitions (coreCompiled core) eqs)
-  compiled <- first displayException (extendEnvironment (coreCompiled core) block)
+  block <- first (CheckDefinitionCompileError . displayException) (compileDefinitions (coreCompiled core) eqs)
+  compiled <- first (CheckEnvironmentExtendError . displayException) (extendEnvironment (coreCompiled core) block)
   let sig = environmentSignature compiled
-  env <- first displayException (PRA.signatureEnv sig)
+  env <- first (CheckSignatureError . displayException) (PRA.signatureEnv sig)
   pure core {coreCompiled = compiled, coreSignature = sig, coreEnv = env}
 
 -- | Certify a declaration, given as text, and add it as a lemma; the core's verdict, demangled, when it fails.
-certifyDecl :: Text -> Core -> Either String Core
+certifyDecl :: Text -> Core -> Either CheckCoreError Core
 certifyDecl text core = do
-  decls <- first displayException (parseDeclsIn (storedMetas (coreCertificateStore core)) (schemaScope (coreSignature core)) (T.unpack text))
+  decls <- first (CheckDeclParseError . displayException) (parseDeclsIn (storedMetas (coreCertificateStore core)) (schemaScope (coreSignature core)) (T.unpack text))
   foldM (flip certifyDeclaration) core decls
 
 {- | Admit an elaborated sequent derivation, retaining its lexical dependencies
 for independent expansion to primitive PRA rules.
 -}
-certifyDeclaration :: Decl SchemaName -> Core -> Either String Core
+certifyDeclaration :: Decl SchemaName -> Core -> Either CheckCoreError Core
 certifyDeclaration declaration core = case checkAndInsertCertificate (coreEnv core) (coreCertificateStore core) declaration of
   Right (certificate, store) ->
     let rawName = declName declaration
@@ -215,9 +237,9 @@ certifyDeclaration declaration core = case checkAndInsertCertificate (coreEnv co
             , coreLibrary = if take 2 rawName /= "u_" then Set.insert nameT (coreLibrary core) else coreLibrary core
             , coreReductions = rememberReduction (coreSignature core) nameT certificate (coreReductions core)
             }
-  Left err -> Left (renderSchemaTacticError (coreSignature core) err)
+  Left err -> Left (CheckCertificateError (renderSchemaTacticError (coreSignature core) err))
 
-certifyGenerated :: GeneratedDecl -> Core -> Either String Core
+certifyGenerated :: GeneratedDecl -> Core -> Either CheckCoreError Core
 certifyGenerated gd core = case gd of
   GeneratedText _ text -> certifyDecl text core
   GeneratedDecide name lhs steps ->
@@ -444,7 +466,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
     -- gaining certificates usable by later declarations or imported modules.
     admitInternal (Located sp target) r success = case Map.lookup target (envGlobals env) of
       Just (GData info) -> case Internal.validateInternalEncoding env (runCheckedDeclarations r) (runMembers r) info of
-        Left why -> report sp SevError why r
+        Left why -> report sp SevError (Internal.renderInternalError why) r
         Right () -> success
       _ -> report sp SevError "internal mode requires a checked derivation datatype" r
 
@@ -481,10 +503,10 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
 
     register (Located roleSpan role) (Located targetSpan target) r =
       case Builtin.registerBuiltin (runBuiltins r) (activeEnv r) role target of
-        Left err -> report roleSpan SevError err r
+        Left err -> report roleSpan SevError (Builtin.renderBuiltinError err) r
         Right (registry, _) -> case admit target r of
-          Left err -> report targetSpan SevError err r
-          Right () -> r {runBuiltins = registry}
+          Just err -> report targetSpan SevError err r
+          Nothing -> r {runBuiltins = registry}
 
     admit target r = case Map.lookup target (envGlobals env) of
       Just (GData info) -> checked (Map.member (renderQualName (dataQual info)) (coreMembership core))
@@ -493,12 +515,12 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
       Just (GClass _) -> checked True
       Just (GMethod _) -> checked True
       Just (GLaw _) -> checked True
-      _ -> Left "a BUILTIN target must be a checked declaration"
+      _ -> Just "a BUILTIN target must be a checked declaration"
       where
         core = runCore r
         checked structuralEvidence
-          | target `Set.member` runCheckedDeclarations r && structuralEvidence = Right ()
-          | otherwise = Left ("BUILTIN target " <> T.unpack (displayQualName target) <> " has not completed checking successfully before this registration")
+          | target `Set.member` runCheckedDeclarations r && structuralEvidence = Nothing
+          | otherwise = Just ("BUILTIN target " <> T.unpack (displayQualName target) <> " has not completed checking successfully before this registration")
 
     {- A data type: the codes of its constructors; its index functions, by
     which its membership predicate checks the indices of its constructors'
@@ -511,7 +533,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
           enc = encodeData (`Map.lookup` encoded) (`Set.member` coreVariadic (runCore r)) indexFns info
           rejected (r', err) = report sp SevError ("the encoding of " <> T.unpack (displayQualName (dataQual info)) <> " was rejected: " <> err) r'
        in case validateEncoding indexFns info of
-            Left err -> rejected (r, err)
+            Left err -> rejected (r, renderEncodeError err)
             Right () -> encodeValidated enc rejected
       where
         self = renderQualName (dataQual info)
@@ -544,11 +566,11 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
       | null eqns = Right r
       | otherwise =
           let r1 = foldl (flip emit) r eqns
-           in either (\err -> Left (r1, err)) (\core -> Right r1 {runCore = core}) (addDefinitions eqns (runCore r1))
+           in either (\err -> Left (r1, renderCheckCoreError err)) (\core -> Right r1 {runCore = core}) (addDefinitions eqns (runCore r1))
 
     -- A function compiled and defined, its unfolding lemmas certified and its clauses' obligations proved; Left when refused, reported.
     defineFunction fd r = case compileFunction env fd of
-      Left err -> Left (report (fdSpan fd) SevError (funName fd <> ": " <> err) r)
+      Left err -> Left (report (fdSpan fd) SevError (funName fd <> ": " <> renderCompileError err) r)
       Right (Compiled eqns lemmas unfolds obligations) -> case define eqns r of
         Left (r1, err) -> Left (report (fdSpan fd) SevError ("the definition of " <> funName fd <> " was rejected: " <> err) r1)
         Right r1 ->
@@ -636,7 +658,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
         let r1 = emitGenerated gd r
          in case certifyGenerated gd (runCore r1) of
               Right core' -> certifyClosure fd cl (r1 {runCore = core'}) rest
-              Left err -> report (fdSpan fd) SevError ("internal: the generated lemma " <> T.unpack (generatedDeclName gd) <> " did not certify: " <> err) r1
+              Left err -> report (fdSpan fd) SevError ("internal: the generated lemma " <> T.unpack (generatedDeclName gd) <> " did not certify: " <> renderCheckCoreError err) r1
 
     -- The indices a function over indexed types gives its result, certified as its lemma f.#index: a failure refuses it.
     indexed fd r = case indexSpecOf (knowledge r) fd of
@@ -647,7 +669,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
             let name = funName fd
              in flip economically r \sharing r0 -> case proveSpec (knowledgeWith sharing r0) fd (indexSpec s) of
                   Left (EngineError sp msg) -> (report sp SevError (name <> ": " <> msg) r0, [])
-                  Right (Left why) -> (report (fdSpan fd) SevError (name <> ": the indices of its result: " <> why) r0, [])
+                  Right (Left why) -> (report (fdSpan fd) SevError (name <> ": the indices of its result: " <> renderProofError why) r0, [])
                   Right (Right proof) ->
                     let r' = certifyTheorem (fdSpan fd) (name <> ".#index") r0 (spDecls proof)
                      in (if Map.member (T.unpack (ixsLemma s)) (coreLemmas (runCore r')) then r' {runIndexSpecs = Map.insert (funCore (fdInfo fd)) s (runIndexSpecs r')} else r', spDecls proof)
@@ -658,7 +680,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
       let name = funName fd <> "." <> T.unpack (specName s)
        in flip economically r \sharing r0 -> case proveSpec (knowledgeWith sharing r0) fd s of
             Left (EngineError sp msg) -> (report sp SevError (name <> ": " <> msg) r0, [])
-            Right (Left why) -> (report (fdSpan fd) SevError (name <> ": " <> why) r0, [])
+            Right (Left why) -> (report (fdSpan fd) SevError (name <> ": " <> renderProofError why) r0, [])
             Right (Right proof) -> (certifyTheorem (fdSpan fd) name r0 (spDecls proof), spDecls proof)
 
     -- A theorem's declarations, the auxiliary ones first; the first failure is the theorem's.
@@ -668,7 +690,7 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
         let r1 = emitGenerated gd r
          in case certifyGenerated gd (runCore r1) of
               Right core' -> certifyTheorem sp name (r1 {runCore = core'}) rest
-              Left err -> report sp SevError (name <> ": " <> err) r1
+              Left err -> report sp SevError (name <> ": " <> renderCheckCoreError err) r1
 
     -- Generated lemmas: a failure is a bug of the generator, reported where the declaration is.
     certifyAll sp r lemmas = foldl (certifyOne sp) r lemmas
@@ -676,4 +698,4 @@ runItems specsOf fx env build0 exports reports0 items = finish (foldl step start
       let r1 = emit text r
        in case certifyDecl text (runCore r1) of
             Right core' -> r1 {runCore = core'}
-            Left err -> report sp SevError ("internal: the generated lemma " <> T.unpack name <> " did not certify: " <> err) r1
+            Left err -> report sp SevError ("internal: the generated lemma " <> T.unpack name <> " did not certify: " <> renderCheckCoreError err) r1

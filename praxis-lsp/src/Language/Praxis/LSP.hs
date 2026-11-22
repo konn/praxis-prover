@@ -82,7 +82,7 @@ import Language.Praxis.Package.Build (ModuleResult (..), Prefix, Progress, check
 import Language.Praxis.Surface.Check qualified as Surface
 import Language.Praxis.Surface.Engine (Knowledge (..))
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (Prelude, prelude, preludeLemmas)
+import Language.Praxis.Surface.Prelude (Prelude, PreludeError, prelude, preludeLemmas, renderPreludeError)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..), Span (..), segmentText)
 import System.Directory (canonicalizePath)
 import System.Exit (ExitCode (..))
@@ -581,7 +581,7 @@ replaceAt target new = go
 -- * The surface language
 
 -- | The prelude of the surface language, certified once for the server's lifetime.
-surfacePrelude :: Either String Prelude
+surfacePrelude :: Either PreludeError Prelude
 surfacePrelude = prelude
 
 -- | A report of the driver, as the server reports it.
@@ -610,7 +610,7 @@ documentOf p path text others checked = Document (map surfaceReport (Surface.che
 -- | A module of the surface language on its own, outside any package.
 analysePx :: FilePath -> Text -> Document
 analysePx path text = case surfacePrelude of
-  Left err -> Document [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err)) Nothing] mempty False
+  Left err -> Document [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> renderPreludeError err)) Nothing] mempty False
   Right p -> documentOf p path text Map.empty (Surface.checkSource p "<document>" text)
 
 {- |
@@ -624,7 +624,7 @@ next check.
 -}
 analysePxIn :: Progress -> Map FilePath Text -> Maybe Prefix -> FilePath -> Text -> IO (Document, Maybe Prefix)
 analysePxIn progress texts prefix path text = case surfacePrelude of
-  Left err -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> err)) Nothing] mempty False, Nothing)
+  Left err -> pure (Document [Report 1 1 DiagnosticSeverity_Error (T.pack ("the prelude of the surface language did not certify: " <> renderPreludeError err)) Nothing] mempty False, Nothing)
   Right p -> do
     inPackage <- checkFileCachedWith progress (editorBuild p) (Map.insert path text texts) prefix path
     case inPackage of

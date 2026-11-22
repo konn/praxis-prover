@@ -42,6 +42,8 @@ definitional equality is never used on the codes of constructors themselves.
 -}
 module Language.Praxis.Surface.Compile (
   Compiled (..),
+  CompileError (..),
+  renderCompileError,
   compileFunction,
   functionLemma,
   dictionaryCT,
@@ -50,6 +52,7 @@ module Language.Praxis.Surface.Compile (
 ) where
 
 import Control.Monad (forM, forM_, unless, when)
+import Data.Bifunctor (first)
 import Data.List (nub)
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
@@ -115,8 +118,67 @@ data MultiPlace = Whole !Int | Part !Int !Int | Other !Int
 data Place = Arg !Int | Field !Int
   deriving stock (Eq, Show)
 
+-- | Structured errors raised when compiling surface functions into PRA definitions and unfolding lemmas.
+data CompileError
+  = CompileCoreTextError !CoreTextError
+  | CompileMatchError !MatchError
+  | CompileNonZeroNatPattern
+  | CompileNestedPattern
+  | CompileNoClauses
+  | CompileNestedRecursionInCallback
+  | CompileMultipleNonMatchingClauses
+  | CompileRecursiveWithoutConstructorMatch
+  | CompileUnknownConstructor !Text
+  | CompileConstructorWithoutData !Text
+  | CompileNoConstructors
+  | CompileInvalidConstructorCoverage
+  | CompileInvalidNatCoverage
+  | CompileMultipleMatchedArguments
+  | CompileNonVariableUnmatchedArgument
+  | CompileMissingConstructorCombination
+  | CompileOverlappingConstructorCombination
+  | CompileRecursiveCallArityMismatch !Int !Int
+  | CompileRecursiveCallInvalidMatchedArg
+  | CompileRecursiveCallOtherArgChanged
+  | CompileRecursiveCallNotDescending
+  | CompileRecursiveCallNonField
+  | CompileRecursiveCallCallbackChanged
+  | CompileRecursiveCallDictionaryChanged
+  | CompileInternal !String
+  deriving stock (Eq, Show)
+
+-- | Render a 'CompileError' as a diagnostic message.
+renderCompileError :: CompileError -> String
+renderCompileError = \case
+  CompileCoreTextError err -> renderCoreTextError err
+  CompileMatchError err -> renderMatchError err
+  CompileNonZeroNatPattern -> "a numeral other than 0 in a pattern: write it S n"
+  CompileNestedPattern -> "nested patterns are not supported yet"
+  CompileNoClauses -> "a function with no clauses"
+  CompileNestedRecursionInCallback -> "a recursive call cannot occur inside a callback lambda"
+  CompileMultipleNonMatchingClauses -> "several clauses, none of which matches on a constructor"
+  CompileRecursiveWithoutConstructorMatch -> "a recursive function must match on a constructor of the argument it recurses on"
+  CompileUnknownConstructor _ -> "internal: an unknown constructor"
+  CompileConstructorWithoutData _ -> "internal: a constructor of no data type"
+  CompileNoConstructors -> "internal: no constructor"
+  CompileInvalidConstructorCoverage -> "the clauses must match each constructor of the scrutinee's type exactly once, but those impossible at the indices of its signature (no overlap, no catch-all) for now"
+  CompileInvalidNatCoverage -> "the clauses must match 0 and S n, each exactly once (no overlap, no catch-all) for now"
+  CompileMultipleMatchedArguments -> "only one argument may be matched on, for now"
+  CompileNonVariableUnmatchedArgument -> "the values not matched on are variables, for now"
+  CompileMissingConstructorCombination -> "the clauses miss a possible combination of constructors"
+  CompileOverlappingConstructorCombination -> "the clauses overlap on a combination of constructors"
+  CompileRecursiveCallArityMismatch got expected ->
+    "a recursive call with " <> show got <> " arguments, where the function takes " <> show expected
+  CompileRecursiveCallInvalidMatchedArg -> "a recursive call passes each matched argument unchanged or a field of its own constructor"
+  CompileRecursiveCallOtherArgChanged -> "a recursive call must pass the other arguments unchanged (primitive recursion)"
+  CompileRecursiveCallNotDescending -> "a recursive call must descend in at least one matched argument"
+  CompileRecursiveCallNonField -> "a recursive call must pass a field of the matched constructor where the function matches"
+  CompileRecursiveCallCallbackChanged -> "a recursive call must keep its fixed callback unchanged"
+  CompileRecursiveCallDictionaryChanged -> "a recursive call passes the dictionary on unchanged: primitive recursion keeps the parameters of its schema"
+  CompileInternal msg -> msg
+
 -- | The places of a clause's variables, in the order they are numbered.
-places :: [Pattern] -> Either String [Place]
+places :: [Pattern] -> Either CompileError [Place]
 places = fmap concat . traverse one . zip [0 ..]
   where
     one (i, p) = case p of
@@ -128,45 +190,45 @@ places = fmap concat . traverse one . zip [0 ..]
       PSucc sub -> field (0, sub)
       -- An absurd pattern binds nothing: the clause is never reached.
       PAbsurd -> Right []
-      _ -> Left "a numeral other than 0 in a pattern: write it S n"
+      _ -> Left CompileNonZeroNatPattern
     field (j, p) = case p of
       PVar _ -> Right [Field j]
       PWild -> Right []
-      _ -> Left "nested patterns are not supported yet"
+      _ -> Left CompileNestedPattern
 
-compileFunction :: Env -> FunDef -> Either String Compiled
+compileFunction :: Env -> FunDef -> Either CompileError Compiled
 compileFunction env fd = do
   let columns = nub [i | fc <- clauses, (i, p) <- zip [0 ..] (fcPatterns fc), matchesOn p]
-  when (null clauses) $ Left "a function with no clauses"
-  when (any (nestedRecursion . fcBody) clauses) $ Left "a recursive call cannot occur inside a callback lambda"
+  when (null clauses) $ Left CompileNoClauses
+  when (any (nestedRecursion . fcBody) clauses) $ Left CompileNestedRecursionInCallback
   case columns of
     [] -> do
       -- No case analysis: one clause, and no recursion.
       fc <- case clauses of
         [fc] -> Right fc
-        _ -> Left "several clauses, none of which matches on a constructor"
+        _ -> Left CompileMultipleNonMatchingClauses
       ps <- places (fcPatterns fc)
-      when (callsSelf core (fcBody fc)) $ Left "a recursive function must match on a constructor of the argument it recurses on"
-      b <- body (\i -> args !! argIndex ps i) inDef (const (Left "unreachable")) fc
+      when (callsSelf core (fcBody fc)) $ Left CompileRecursiveWithoutConstructorMatch
+      b <- body (\i -> args !! argIndex ps i) inDef (const (Left (CompileInternal "unreachable"))) fc
       rhs <- clauseRhs ps fc
       let triples = [(call (patternArgs ps fc <> dict), rhs, "refl")]
       pure (compiled [definition b] (unfoldings triples) (table triples))
     [c] | fdArgs fd !! c == TNat -> natColumn c
     [c] -> do
       let ctorRefs = [r | fc <- clauses, PCon r _ <- [fcPatterns fc !! c]]
-      ctorsSeen <- forM ctorRefs \(Ref _ r) -> maybe (Left "internal: an unknown constructor") Right (ctorByCore env r)
+      ctorsSeen <- forM ctorRefs \(Ref _ r) -> maybe (Left (CompileUnknownConstructor r)) Right (ctorByCore env r)
       dat <- case ctorsSeen of
-        ci : _ -> maybe (Left "internal: a constructor of no data type") Right (dataOfCtor env ci)
-        [] -> Left "internal: no constructor"
+        ci : _ -> maybe (Left (CompileConstructorWithoutData (ctorCore ci))) Right (dataOfCtor env ci)
+        [] -> Left CompileNoConstructors
       let ctors = dataCtors dat
       unless (all (\ci -> let k = length [() | cj <- ctorsSeen, ctorCore cj == ctorCore ci] in k == 1 || (k == 0 && ctorCore ci `elem` fdImpossible fd)) ctors) $
-        Left "the clauses must match each constructor of the scrutinee's type exactly once, but those impossible at the indices of its signature (no overlap, no catch-all) for now"
-      forM_' clauses \fc -> unless (all (\(i, p) -> i == c || isVar p) (zip [0 ..] (fcPatterns fc))) (Left "only one argument may be matched on, for now")
+        Left CompileInvalidConstructorCoverage
+      forM_' clauses \fc -> unless (all (\(i, p) -> i == c || isVar p) (zip [0 ..] (fcPatterns fc))) (Left CompileMultipleMatchedArguments)
       infos <- forM clauses \fc -> do
         ps <- places (fcPatterns fc)
         ci <- case fcPatterns fc !! c of
-          PCon (Ref _ r) _ -> maybe (Left "internal") Right (ctorByCore env r)
-          _ -> Left "internal"
+          PCon (Ref _ r) _ -> maybe (Left (CompileInternal "internal")) Right (ctorByCore env r)
+          _ -> Left (CompileInternal "internal")
         pure (fc, ps, ci)
       let recursive = any (\(fc, _, _) -> callsSelf core (fcBody fc)) infos
           -- The other arguments: the function's own, then the values of its dictionary.
@@ -180,9 +242,9 @@ compileFunction env fd = do
       if not recursive
         then do
           branches <- forM orderedM $ maybe (Right (CNum 0)) \(fc, ps, _) ->
-            body (placeCT (args !! c) (\i -> args !! i) ps) inDef (const (Left "unreachable")) fc
+            body (placeCT (args !! c) (\i -> args !! i) ps) inDef (const (Left (CompileInternal "unreachable"))) fc
           let dispatch = ifChain (hdT (args !! c)) branches
-              dispatchAt scr others' = ifChain (hdT scr) [maybe (CNum 0) (\(fc, ps, _) -> either (error "internal") id (body (placeCT scr others' ps) inLemma (const (Left "")) fc)) m | m <- orderedM]
+              dispatchAt scr others' = ifChain (hdT scr) [maybe (CNum 0) (\(fc, ps, _) -> either (error "internal") id (body (placeCT scr others' ps) inLemma (const (Left (CompileInternal ""))) fc)) m | m <- orderedM]
           proofs <- forM ordered \(fc, ps, ci) -> do
             rhs <- clauseRhs ps fc
             let scr = CSym (ctorCore ci) (fieldVars ps fc ci)
@@ -326,8 +388,8 @@ compileFunction env fd = do
             _ -> False
       (zeroC, succC) <- case (filter isZero clauses, filter isSucc clauses) of
         ([z], [s]) | length clauses == 2 -> Right (z, s)
-        _ -> Left "the clauses must match 0 and S n, each exactly once (no overlap, no catch-all) for now"
-      forM_' clauses \fc -> unless (all (\(i, p) -> i == c || isVar p) (zip [0 ..] (fcPatterns fc))) (Left "only one argument may be matched on, for now")
+        _ -> Left CompileInvalidNatCoverage
+      forM_' clauses \fc -> unless (all (\(i, p) -> i == c || isVar p) (zip [0 ..] (fcPatterns fc))) (Left CompileMultipleMatchedArguments)
       psZ <- places (fcPatterns zeroC)
       psS <- places (fcPatterns succC)
       let placesOf fc = if isZero fc then psZ else psS
@@ -343,9 +405,9 @@ compileFunction env fd = do
           scrOf fc = if isZero fc then CNum 0 else CSym "S" [natFieldVar (placesOf fc) fc]
       if not recursive
         then do
-          b0 <- body (natPlace (args !! c) (args !!) psZ) inDef (const (Left "unreachable")) zeroC
-          bS <- body (natPlace (args !! c) (args !!) psS) inDef (const (Left "unreachable")) succC
-          let at' scr others' ps fc = either (error "internal") id (body (natPlace scr others' ps) inLemma (const (Left "")) fc)
+          b0 <- body (natPlace (args !! c) (args !!) psZ) inDef (const (Left (CompileInternal "unreachable"))) zeroC
+          bS <- body (natPlace (args !! c) (args !!) psS) inDef (const (Left (CompileInternal "unreachable"))) succC
+          let at' scr others' ps fc = either (error "internal") id (body (natPlace scr others' ps) inLemma (const (Left (CompileInternal ""))) fc)
               dispatchAt scr others' = ifChain (sgnT scr) [at' scr others' psZ zeroC, at' scr others' psS succC]
           proofs <- forM clauses \fc -> do
             let ps = placesOf fc
@@ -398,24 +460,24 @@ compileFunction env fd = do
     -- Several shallow patterns use recursion on the tuple of their codes.
     -- Every recursive component stays fixed or descends to a constructor field.
     matchingColumns cs = do
-      choices <- traverse (shapes env . (fdArgs fd !!)) cs
+      choices <- first CompileMatchError (traverse (shapes env . (fdArgs fd !!)) cs)
       let kc = length cs
           colIdx = zip cs [0 :: Int ..]
           shapeAt ci tag = choices !! ci !! tag
           comboShapes combo = zipWith shapeAt [0 ..] combo
           patAt fc c = fcPatterns fc !! c
           covers combo fc = and (zipWith (\c sh -> shapeMatches sh (patAt fc c)) cs (comboShapes combo))
-      forM_' clauses \fc -> unless (all (\(i, p) -> i `elem` cs || isVar p) (zip [0 ..] (fcPatterns fc))) (Left "the values not matched on are variables, for now")
+      forM_' clauses \fc -> unless (all (\(i, p) -> i `elem` cs || isVar p) (zip [0 ..] (fcPatterns fc))) (Left CompileNonVariableUnmatchedArgument)
       forM_' clauses \fc -> forM_' cs \c -> case patAt fc c of
-        PSucc sub | not (isVar sub) -> Left "nested patterns are not supported yet"
-        PCon _ subs | not (all isVar subs) -> Left "nested patterns are not supported yet"
-        PNat j | j > 0 -> Left "a numeral other than 0 in a pattern: write it S n"
+        PSucc sub | not (isVar sub) -> Left CompileNestedPattern
+        PCon _ subs | not (all isVar subs) -> Left CompileNestedPattern
+        PNat j | j > 0 -> Left CompileNonZeroNatPattern
         _ -> Right ()
       cases <- fmap catMaybes . forM (sequence [[0 .. length opts - 1] | opts <- choices]) $ \combo -> case filter (covers combo) clauses of
         [fc] -> Right (Just (combo, fc))
         [] | not (possibleShapes (fdArgs fd) (funRuntime info) (zip cs (comboShapes combo))) -> Right Nothing
-        [] -> Left "the clauses miss a possible combination of constructors"
-        _ -> Left "the clauses overlap on a combination of constructors"
+        [] -> Left CompileMissingConstructorCombination
+        _ -> Left CompileOverlappingConstructorCombination
       let others = [i | i <- [0 .. arity - 1], i `notElem` cs]
           userOthers = [i | i <- [0 .. userArity - 1], i `notElem` cs]
           defLemma = functionLemma info "#def"
@@ -442,15 +504,15 @@ compileFunction env fd = do
           -- A recursive call, at the code k of the tuple and its history h: the history at the tuple of what it passes.
           recAt kT value hT fc callArgs = do
             unless (length callArgs == userArity) $
-              Left ("a recursive call with " <> show (length callArgs) <> " arguments, where the function takes " <> show userArity)
+              Left (CompileRecursiveCallArityMismatch (length callArgs) userArity)
             comps <- forM colIdx \(c, ci) -> case fst (callArgs !! c) >>= roleOf fc of
               Just (Whole ci') | ci' == ci -> Right (False, value ci)
               Just place@(Part ci' _) | ci' == ci -> Right (True, roleTerm fc value (const (CNum 0)) place)
-              _ -> Left "a recursive call passes each matched argument unchanged or a field of its own constructor"
+              _ -> Left CompileRecursiveCallInvalidMatchedArg
             forM_' userOthers \a -> case fst (callArgs !! a) >>= roleOf fc of
               Just (Other a') | a' == a -> Right ()
-              _ -> Left "a recursive call must pass the other arguments unchanged (primitive recursion)"
-            unless (any fst comps) $ Left "a recursive call must descend in at least one matched argument"
+              _ -> Left CompileRecursiveCallOtherArgChanged
+            unless (any fst comps) $ Left CompileRecursiveCallNotDescending
             Right (CSym "at" [hT, kT, tupleT (map snd comps)])
           -- A clause's body at the code k of the tuple, its values, its history h, the other arguments and the dictionary's values.
           bodyAt kT value hT other dv fc = body (\v -> maybe (CVar "?") (roleTerm fc value other) (roleOf fc v)) dv (recAt kT value hT fc) fc
@@ -661,7 +723,7 @@ compileFunction env fd = do
     placeCT scr other ps i = case ps !! i of
       Arg a -> other a
       Field j -> fieldT j scr
-    branchAt scr ps fc = either (error "internal") id (body (placeCT scr (argVar ps fc) ps) inLemma (const (Left "")) fc)
+    branchAt scr ps fc = either (error "internal") id (body (placeCT scr (argVar ps fc) ps) inLemma (const (Left (CompileInternal ""))) fc)
     fieldSteps ci scr fields branch =
       drop 1 $
         scanl
@@ -677,13 +739,13 @@ compileFunction env fd = do
     -- A recursive call: on a field of the scrutinee, the function's other arguments unchanged.
     recursiveCall c userOthers ps _fc k h callArgs = do
       unless (length callArgs == length userOthers + 1) $
-        Left ("a recursive call with " <> show (length callArgs) <> " arguments, where the function takes " <> show (length userOthers + 1))
+        Left (CompileRecursiveCallArityMismatch (length callArgs) (length userOthers + 1))
       field <- case fst (callArgs !! c) of
         Just i | Field j <- ps !! i -> Right j
-        _ -> Left "a recursive call must pass a field of the matched constructor where the function matches"
+        _ -> Left CompileRecursiveCallNonField
       forM_' [(i, a) | (i, (a, _)) <- zip [0 ..] callArgs, i /= c] \(i, a) -> case (a, [j | (j, Arg x) <- zip [0 ..] ps, x == i]) of
         (Just v, [j]) | v == j -> Right ()
-        _ -> Left "a recursive call must pass the other arguments unchanged (primitive recursion)"
+        _ -> Left CompileRecursiveCallOtherArgChanged
       -- The field of a value of Nat is its predecessor.
       Right (CSym "at" [h, k, if fdArgs fd !! c == TNat then CSym "prd" [k] else fieldT field k])
 
@@ -730,8 +792,8 @@ dictionary on unchanged, as primitive recursion keeps the parameters of a
 schema.  A parameter of the dictionary, applied, is the parameter of the
 schema applied; passed on, the parameter in braces.
 -}
-bodyCT :: FunInfo -> Int -> (Int -> CT) -> (Int -> CT) -> ([(Maybe Int, CT)] -> Either String CT) -> FunClause -> Either String CT
-bodyCT info userArity var dvar rec fc = lowerTermWith lowering (fcBody fc)
+bodyCT :: FunInfo -> Int -> (Int -> CT) -> (Int -> CT) -> ([(Maybe Int, CT)] -> Either CompileError CT) -> FunClause -> Either CompileError CT
+bodyCT info userArity var dvar rec fc = lowerTermWith CompileCoreTextError lowering (fcBody fc)
   where
     lowering =
       (standardLowering var)
@@ -743,9 +805,9 @@ bodyCT info userArity var dvar rec fc = lowerTermWith lowering (fcBody fc)
                 forM_ (funSchemaArguments info) \(position, expected, _) ->
                   case fst (users !! position) of
                     Term.Parameter actual _ | actual == expected -> Right ()
-                    _ -> Left "a recursive call must keep its fixed callback unchanged"
+                    _ -> Left CompileRecursiveCallCallbackChanged
                 unless (map (Term.toExpr . fst) passed == ownDictionary (funSlots info)) $
-                  Left "a recursive call passes the dictionary on unchanged: primitive recursion keeps the parameters of its schema"
+                  Left CompileRecursiveCallDictionaryChanged
                 rec [(variable arg, callbackEnvironment ct) | (arg, ct) <- users]
               else lowerApplication (standardLowering var) ref args
         }

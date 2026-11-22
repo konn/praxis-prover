@@ -6,6 +6,8 @@ ordinary function compiler retains the derivation and certifies its
 membership and conclusion in PRA.
 -}
 module Language.Praxis.Surface.Internal (
+  InternalError (..),
+  renderInternalError,
   internalFamily,
   internalSignature,
   validateInternalEncoding,
@@ -49,13 +51,33 @@ internalSignature family = go
       EConstrained constraints rest -> EConstrained constraints (go rest)
       _ -> EApp (EName <$> family) e
 
+-- | Errors raised when validating an internal derivation datatype or encoding.
+data InternalError
+  = InternalInvalidFamily !Span !QName
+  | InternalUncheckedDatatype !QualName
+  | InternalParameterizedDatatype !QualName
+  | InternalIncompleteFieldMembership !QualName
+  | InternalNonClosedField !QualName !Ty
+  | InternalNonClosedValueType !Ty
+  deriving stock (Eq, Show)
+
+-- | Render an 'InternalError' as a diagnostic message.
+renderInternalError :: InternalError -> String
+renderInternalError = \case
+  InternalInvalidFamily _ _ -> "internal mode selects an indexed datatype with one explicit conclusion index and no type parameters"
+  InternalUncheckedDatatype q -> "internal theory depends on a datatype that has not completed checking: " <> T.unpack (displayQualName q)
+  InternalParameterizedDatatype _ -> "internal mode currently requires closed, parameterless datatypes throughout its derivation encoding"
+  InternalIncompleteFieldMembership q -> "internal mode needs complete field membership checks for " <> T.unpack (displayQualName q) <> "; declare its field datatypes before it and use direct recursion"
+  InternalNonClosedField {} -> "internal mode currently requires closed first-order fields without type parameters"
+  InternalNonClosedValueType _ -> "internal mode currently requires closed first-order datatypes for fields and conclusion indices"
+
 {- | Internal mode promises actual derivations, so refuse the deliberately
 weaker membership encodings allowed for some general surface datatypes.
 Check the predicates that were really admitted, including dependencies:
 every non-Nat stored field must have its full datatype membership test.
 The first interface conservatively excludes parameterized field types.
 -}
-validateInternalEncoding :: Env -> Set QualName -> Map Text [(Int, FieldPred)] -> DataInfo -> Either String ()
+validateInternalEncoding :: Env -> Set QualName -> Map Text [(Int, FieldPred)] -> DataInfo -> Either InternalError ()
 validateInternalEncoding env checked members root = visit Set.empty root >> pure ()
   where
     datatypes = envDataByName env
@@ -63,9 +85,9 @@ validateInternalEncoding env checked members root = visit Set.empty root >> pure
       | dataQual d `Set.member` seen = Right seen
       | otherwise = do
           unless (dataQual d `Set.member` checked) $
-            Left ("internal theory depends on a datatype that has not completed checking: " <> T.unpack (displayQualName (dataQual d)))
+            Left (InternalUncheckedDatatype (dataQual d))
           unless (null (dataParams d)) $
-            Left "internal mode currently requires closed, parameterless datatypes throughout its derivation encoding"
+            Left (InternalParameterizedDatatype (dataQual d))
           let next = Set.insert (dataQual d) seen
           fields <- foldM (constructor d) next (dataCtors d)
           foldM value fields (dataIndices d)
@@ -75,10 +97,10 @@ validateInternalEncoding env checked members root = visit Set.empty root >> pure
         TData name [] _
           | Just field <- Map.lookup name datatypes ->
               unless (lookup i (Map.findWithDefault [] (ctorCore c) members) == Just (FieldData (dataIs field) [])) $
-                Left ("internal mode needs complete field membership checks for " <> T.unpack (displayQualName (dataQual d)) <> "; declare its field datatypes before it and use direct recursion")
-        _ -> Left "internal mode currently requires closed first-order fields without type parameters"
+                Left (InternalIncompleteFieldMembership (dataQual d))
+        _ -> Left (InternalNonClosedField (dataQual d) ty)
       foldM value seen (ctorFields c)
     value seen = \case
       TNat -> Right seen
       TData name [] _ | Just d <- Map.lookup name datatypes -> visit seen d
-      _ -> Left "internal mode currently requires closed first-order datatypes for fields and conclusion indices"
+      ty -> Left (InternalNonClosedValueType ty)

@@ -5,7 +5,7 @@ module Language.Praxis.Surface.LogicalPreconditionTest (logicalPreconditionTests
 import Data.Text qualified as T
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.FiniteFixtures
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -14,7 +14,7 @@ logicalPreconditionTests =
   testGroup
     "logical finite preconditions"
     [ testCase "generic result closure retains and discharges quantified preconditions" $ do
-        library <- either assertFailure pure prelude
+        library <- either (assertFailure . renderPreludeError) pure prelude
         let source =
               "module Logical where\n"
                 <> finitePrelude
@@ -30,7 +30,7 @@ logicalPreconditionTests =
         [message | Report _ SevError message <- checkedReports checked] @?= []
         assertBool "result closure absent" (any ("u_Logical_sforward_s_x23_closed" `T.isInfixOf`) (checkedCore checked))
     , testCase "a quantified bound variable cannot escape into a free argument" $ do
-        library <- either assertFailure pure prelude
+        library <- either (assertFailure . renderPreludeError) pure prelude
         let prefix =
               "module Escape where\n"
                 <> T.unlines

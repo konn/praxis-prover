@@ -10,7 +10,7 @@ import Data.Map.Strict qualified as Map
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Language.Praxis.Surface.Check
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename (Imports)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Test.Tasty.HUnit
@@ -25,7 +25,7 @@ data FirstOrderFixture = FirstOrderFixture
 
 loadFirstOrderFixture :: IO FirstOrderFixture
 loadFirstOrderFixture = do
-  p <- either assertFailure pure prelude
+  p <- either (assertFailure . renderPreludeError) pure prelude
   (build, imports, checked) <- foldM load ((initialBuild p) {buildRetainGeneratedText = False}, Map.empty, []) ["Syntax", "Proof", "Peano"]
   case checked of
     [syntax, proof, peano] -> pure (FirstOrderFixture build imports syntax proof peano)

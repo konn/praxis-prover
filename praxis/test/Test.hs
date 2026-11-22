@@ -45,7 +45,7 @@ main =
     testGroup
       "praxis"
       [ testCase "the prelude certifies, and states the lemmas generated proofs appeal to" $ do
-          p <- either assertFailure pure prelude
+          p <- either (assertFailure . renderPreludeError) pure prelude
           mapM_ (\n -> assertBool n (Map.member n (preludeLemmas p))) ["hdCons", "tlCons", "dropConsSucc", "cvrecUnfold", "histAt", "cvInduction", "belowElim", T.unpack natInductionLemma]
       , parserTests
       , resolveTests

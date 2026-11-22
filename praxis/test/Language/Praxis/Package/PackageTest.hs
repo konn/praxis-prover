@@ -18,7 +18,7 @@ import Language.Praxis.Package.Manifest
 import Language.Praxis.Package.Version
 import Language.Praxis.Surface.Check (Checked (..), Report (..), Severity (..), initialBuild)
 import Language.Praxis.Surface.Env (QualName)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename (Renamed (..))
 import Language.Praxis.Surface.Syntax.Raw (Segment (Ident, Op), Span (..), segmentText)
 import Language.Praxis.Surface.Syntax.Raw qualified as R
@@ -133,7 +133,7 @@ buildTests =
   testGroup
     "building"
     [ testCase "base: all bundled modules certify and a dependent package can use their definitions and proofs" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         results <- either assertFailure pure =<< checkProject p "test/data/base"
         errorsOf results @?= []
         let baseModules = [renderName (mrModule r) | r <- results, componentId (mrComponent r) == "base"]
@@ -154,7 +154,7 @@ buildTests =
         located <- locate "test/data/base/src/Main.px"
         fmap (\(_, c, name) -> (componentId c, renderName name)) located @?= Just ("base-client", "Main")
     , testCase "a project: its libraries each after its dependencies, every module certified, imports across libraries and packages, two modules of one name told apart" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         results <- either assertFailure pure =<< checkProject p "test/data/project"
         map (\r -> (componentId (mrComponent r), renderName (mrModule r))) results @?= [("lists", "Data.List"), ("other", "Data.List"), ("lists:extra", "Data.List.Extra"), ("app", "Main")]
         errorsOf results @?= []
@@ -169,7 +169,7 @@ buildTests =
         assertBool "lists' List" (any ("u_lists_sData_sList_sList_sis" `T.isPrefixOf`) (cores (head' results)))
         assertBool "other's List" (any ("u_other_sData_sList_sList_sis" `T.isPrefixOf`) (cores (results !! 1)))
     , testCase "a file is checked as a module of the package enclosing it, after the modules it imports, and located in its library" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let path = "test/data/project/packages/app/src/Main.px"
         text <- TIO.readFile path
         located <- locate path
@@ -182,7 +182,7 @@ buildTests =
         alone <- checkFile p "test/data/list.px" "module Data.List where"
         assertBool "no package encloses test/data" (maybe True (const False) alone)
     , testCase "a file checked again reuses the modules before it, the libraries before its own and those it imports, while their sources stand: its own change does not rebuild them, a change of an import open in the editor does" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let path = "test/data/project/packages/app/src/Main.px"
             dep = "test/data/project/packages/lists/src/Data/List.px"
             run texts cache = maybe (assertFailure "no package encloses the file") (either assertFailure pure) =<< checkFileCached (initialBuild p) texts cache path
@@ -200,7 +200,7 @@ buildTests =
         reuse'' @?= Rebuilt
         assertBool "the edited import's error is reported" (not (null (errorsOf results'')))
     , testCase "a prefix is told to stand by what checking its modules read, their manifests included: a dependency dropped from a manifest with every source unchanged rebuilds it" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         tmp <- getTemporaryDirectory
         let root = tmp </> "praxis-prefix-manifest-test"
         already <- doesDirectoryExist root
@@ -223,7 +223,7 @@ buildTests =
         assertBool "the import the dependency dropped resolved is reported" (not (null (errorsOf results'')))
         removeDirectoryRecursive root
     , testCase "the renamer records the module headers, and what the names of imports, openings and directives resolve to" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         results <- either assertFailure pure =<< checkProject p "test/data/project"
         let renamedOf component name = [rn | r <- results, componentId (mrComponent r) == component, renderName (mrModule r) == name, Just rn <- [checkedRenamed (mrChecked r)]]
             lists segs = R.Component "lists" : map Ident segs
@@ -245,7 +245,7 @@ buildTests =
         -- The nested module's header, after the file's.
         map rnHeaders (renamedOf "lists" "Data.List") @?= [[(Span (1, 8) (1, 17), lists ["Data", "List"]), (Span (22, 8) (22, 14), lists ["Data", "List", "Length"])]]
     , testCase "scope errors: an ambiguous import, no such library, no such module, a missing member, a private name, a header naming another module, and modules importing one another" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         results <- either assertFailure pure =<< checkProject p "test/data/scope-bad"
         let messagesOf name = [T.unpack m | r <- results, renderName (mrModule r) == name, Report _ SevError m <- checkedReports (mrChecked r)]
             mentions name needle = assertBool (name <> " reports " <> needle <> ":\n" <> unlines (messagesOf (T.pack name))) (any (needle `isInfixOf`) (messagesOf (T.pack name)))

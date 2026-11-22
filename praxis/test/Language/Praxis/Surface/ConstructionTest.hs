@@ -9,9 +9,9 @@ import Data.Text qualified as T
 import Language.Praxis.PRA.Certificate (Certificate)
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Core qualified as Core
-import Language.Praxis.Surface.Eval (EvalResult (..), Value (..), evaluateEntryWithNats)
+import Language.Praxis.Surface.Eval (EvalResult (..), Value (..), evaluateEntryWithNats, renderEvalError)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename (Imports)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Test.Tasty
@@ -177,12 +177,12 @@ body core name = case Map.lookup (mangleGlobal ["Construction", name]) (coreBodi
 
 evaluates :: Checked -> Text -> Integer -> Assertion
 evaluates checked name expected = do
-  result <- either assertFailure pure (evaluateEntryWithNats 1000 ("Construction." <> name) [] checked)
+  result <- either (assertFailure . renderEvalError) pure (evaluateEntryWithNats 1000 ("Construction." <> name) [] checked)
   evalValue result @?= NatValue (fromInteger expected)
 
 fixtures :: IO (Build, Imports)
 fixtures = do
-  library <- either assertFailure pure prelude
+  library <- either (assertFailure . renderPreludeError) pure prelude
   let source =
         T.unlines
           [ "module ConstructionFixtures where"

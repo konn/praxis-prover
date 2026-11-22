@@ -7,7 +7,7 @@ import Data.Text qualified as T
 import Language.Praxis.Runtime qualified as R
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Extract
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -57,7 +57,7 @@ extractTests =
             )
         assertBool "unbounded JSON expansion" ("JSON output limit exceeded" `T.isInfixOf` R.evaluateJSONText 1000 p "{\"value\":[20]}")
     , testCase "failed checks and proof-requiring entry points are not extracted" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let failed = checkSource p "bad.px" (source <> "\nwrong : 0 = 1\nwrong = by rfl\n")
         assertBool "exported an erroneous module" (isLeft (extractProgram "API.add" failed))
         let valid = checkSource p "api.px" source
@@ -65,10 +65,10 @@ extractTests =
     ]
   where
     exported name src = do
-      p <- either assertFailure pure prelude
+      p <- either (assertFailure . renderPreludeError) pure prelude
       let checked = checkSource p "api.px" src
       [reportMessage r | r <- checkedReports checked, reportSeverity r == SevError] @?= []
-      either assertFailure pure (extractProgram name checked)
+      either (assertFailure . renderExtractError) pure (extractProgram name checked)
     source =
       T.unlines
         [ "module API where"

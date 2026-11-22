@@ -8,7 +8,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Language.Praxis.Surface.Check
-import Language.Praxis.Surface.Eval (EvalResult (..), Value (..), evaluateEntryWithNats)
+import Language.Praxis.Surface.Eval (EvalResult (..), Value (..), evaluateEntryWithNats, renderEvalError)
 import Language.Praxis.Surface.FirstOrderFixtures (FirstOrderFixture (..))
 import Language.Praxis.Surface.Mangle (mangleGlobal)
 import Language.Praxis.Surface.Rename (Imports)
@@ -108,7 +108,7 @@ definitionsTests getFirstOrder = withResource (fixtures getFirstOrder) (const (p
     certificate name suffix = T.unpack (mangleGlobal ["Logic", "FirstOrder", "Definitions", name, "#" <> suffix])
     syntax name = DataValue ("Logic.FirstOrder.Syntax." <> name)
     definition name = DataValue ("Logic.FirstOrder.Definitions." <> name)
-    run checked name = either assertFailure pure (evaluateEntryWithNats 100000 ("DefinitionTests." <> name) [] checked)
+    run checked name = either (assertFailure . renderEvalError) pure (evaluateEntryWithNats 100000 ("DefinitionTests." <> name) [] checked)
 
 header :: Text
 header =

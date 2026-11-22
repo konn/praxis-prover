@@ -11,7 +11,7 @@ import Language.Praxis.Surface.Elab (FunDef (..))
 import Language.Praxis.Surface.Engine (Knowledge (..), Spec (..), equationCase)
 import Language.Praxis.Surface.Env (Env (..), FunInfo (..), QualName)
 import Language.Praxis.Surface.Mangle (mangleGlobal)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Syntax (Expr (..), RelOp (..))
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Test.Tasty
@@ -69,7 +69,7 @@ builtinCheckTests =
         hasError "has not completed checking successfully" checked
         assertBool "unchecked proof erasure cannot implement a builtin" (Map.notMember "FIN_TO_NAT" (active checked))
     , testCase "a later contract failure prevents activation even when the body exists" $ do
-        p <- either assertFailure pure prelude
+        p <- either (assertFailure . renderPreludeError) pure prelude
         let checked = checkSourceWith rejectRank p "builtin-check.px" (source (finDeclaration <> [pragma "FIN" "Fin"] <> rankDeclaration <> [pragma "FIN_TO_NAT" "rank"]))
         hasError "has not completed checking successfully" checked
         (_, core) <- maybe (assertFailure "no checked module") pure (checkedFinal checked)
@@ -83,7 +83,7 @@ builtinCheckTests =
 
 check :: [Text] -> IO Checked
 check declarations = do
-  p <- either assertFailure pure prelude
+  p <- either (assertFailure . renderPreludeError) pure prelude
   pure (checkSource p "builtin-check.px" (source declarations))
 
 source :: [Text] -> Text

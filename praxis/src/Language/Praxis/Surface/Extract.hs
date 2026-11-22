@@ -1,10 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Extraction of checked Surface computations, independent of PRA execution.
-module Language.Praxis.Surface.Extract (extractProgram, haskellModule) where
+module Language.Praxis.Surface.Extract (
+  ExtractError (..),
+  renderExtractError,
+  extractProgram,
+  haskellModule,
+) where
 
 import Bound (Var (..), instantiate)
 import Control.Monad (unless)
+import Data.Bifunctor (first)
 import Data.List (elemIndex, find)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -20,19 +26,61 @@ import Language.Praxis.Surface.Syntax
 import Language.Praxis.Surface.Term qualified as Term
 import Language.Praxis.Surface.Types
 
-extractProgram :: Text -> Checked -> Either String R.Program
+-- | Structured errors raised when extracting a checked surface module into a runtime program.
+data ExtractError
+  = ExtractModuleHasErrors
+  | ExtractNoCheckedModule
+  | ExtractUnknownEntry !Text
+  | ExtractEntryHasPreconditions !Text
+  | ExtractEntryIsPolymorphic !Text
+  | ExtractEntryRequiresDictionary !Text
+  | ExtractNoDefinition !Text
+  | ExtractRuntimeDictionaryUnsupported !Text
+  | ExtractMissingBodies !Text
+  | ExtractMissingPatterns !Text
+  | ExtractPatternBodyCountMismatch !Text !Int !Int
+  | ExtractUnsupportedRef !Ref
+  | ExtractPackedPredicateUnsupported
+  | ExtractUnsupportedType !Ty
+  | ExtractUnsupportedIndex !Ix
+  | ExtractNonExecutablePrecondition
+  | ExtractTermError !Term.TermError
+  deriving stock (Eq, Show)
+
+-- | Render an 'ExtractError' as a diagnostic message.
+renderExtractError :: ExtractError -> String
+renderExtractError = \case
+  ExtractModuleHasErrors -> "cannot extract a module with checking errors"
+  ExtractNoCheckedModule -> "no checked module to extract"
+  ExtractUnknownEntry entry -> "unknown entry point: " <> T.unpack entry
+  ExtractEntryHasPreconditions _ -> "export a wrapper with discharged proof preconditions"
+  ExtractEntryIsPolymorphic _ -> "export a monomorphic wrapper for a polymorphic entry point"
+  ExtractEntryRequiresDictionary _ -> "export a wrapper with a concrete dictionary"
+  ExtractNoDefinition name -> "no extractable definition for " <> T.unpack name
+  ExtractRuntimeDictionaryUnsupported name -> "runtime dictionaries are not yet extractable: " <> T.unpack name
+  ExtractMissingBodies name -> "missing checked bodies: " <> T.unpack name
+  ExtractMissingPatterns name -> "missing runtime patterns: " <> T.unpack name
+  ExtractPatternBodyCountMismatch {} -> "pattern/body count mismatch"
+  ExtractUnsupportedRef ref -> "unsupported extraction reference: " <> show ref
+  ExtractPackedPredicateUnsupported -> "packed dictionary predicates are not yet extractable"
+  ExtractUnsupportedType ty -> "type is not a closed first-order JSON domain: " <> show ty
+  ExtractUnsupportedIndex ix -> "index is not executable: " <> show ix
+  ExtractNonExecutablePrecondition -> "proof precondition is outside the executable quantifier-free fragment"
+  ExtractTermError err -> Term.renderTermError err
+
+extractProgram :: Text -> Checked -> Either ExtractError R.Program
 extractProgram entry checked = do
-  unless (all ((/= SevError) . reportSeverity) (checkedReports checked)) $ Left "cannot extract a module with checking errors"
-  (knowledge, core) <- maybe (Left "no checked module to extract") Right (checkedFinal checked)
+  unless (all ((/= SevError) . reportSeverity) (checkedReports checked)) $ Left ExtractModuleHasErrors
+  (knowledge, core) <- maybe (Left ExtractNoCheckedModule) Right (checkedFinal checked)
   let env = knowEnv knowledge
       globals = Map.elems (envGlobals env)
       functions = Map.fromList [(demangle (funCore f), f) | GFun f <- globals]
       constructors = [c | GCtor c <- globals]
       projections = Map.fromList [(demangle name, i) | GData d <- globals, Just names <- [indexFunctionCores env (renderQualName (dataQual d))], (name, i) <- zip names [0 ..]]
-  root <- maybe (Left ("unknown entry point: " <> T.unpack entry)) Right (find ((== entry) . demangle . funCore) (Map.elems functions))
-  unless (null (funProofs root)) $ Left "export a wrapper with discharged proof preconditions"
-  unless (null (schemeParams (funScheme root))) $ Left "export a monomorphic wrapper for a polymorphic entry point"
-  unless (null (funSlots root)) $ Left "export a wrapper with a concrete dictionary"
+  root <- maybe (Left (ExtractUnknownEntry entry)) Right (find ((== entry) . demangle . funCore) (Map.elems functions))
+  unless (null (funProofs root)) $ Left (ExtractEntryHasPreconditions entry)
+  unless (null (schemeParams (funScheme root))) $ Left (ExtractEntryIsPolymorphic entry)
+  unless (null (funSlots root)) $ Left (ExtractEntryRequiresDictionary entry)
   let scheme = funScheme root
       domains (TArrow a b) = a : domains b
       domains _ = []
@@ -52,7 +100,7 @@ extractProgram entry checked = do
       visit seen (name : rest)
         | Map.member name seen || Map.member name projections || name `elem` ["S", "add", "sub", "mul"] = visit seen rest
         | otherwise = do
-            compiled <- maybe (Left ("no extractable definition for " <> T.unpack name)) id (Map.lookup name bodies)
+            compiled <- maybe (Left (ExtractNoDefinition name)) id (Map.lookup name bodies)
             let R.Function clauses = compiled
             visit (Map.insert name compiled seen) (concatMap (\(R.Clause _ body) -> termCalls body) clauses <> rest)
   fs <- visit Map.empty (entry : inputCalls <> auxiliary)
@@ -66,12 +114,12 @@ extractProgram entry checked = do
       , R.programProjections = projections
       }
 
-compileFunction :: Core -> Text -> FunInfo -> Either String R.Function
+compileFunction :: Core -> Text -> FunInfo -> Either ExtractError R.Function
 compileFunction core name info = do
-  unless (null (funSlots info)) $ Left ("runtime dictionaries are not yet extractable: " <> T.unpack name)
-  bodies <- maybe (Left ("missing checked bodies: " <> T.unpack name)) Right (Map.lookup (funCore info) (coreBodies core))
-  patterns <- maybe (Left ("missing runtime patterns: " <> T.unpack name)) Right (Map.lookup (funCore info) (corePatterns core))
-  unless (length bodies == length patterns) $ Left "pattern/body count mismatch"
+  unless (null (funSlots info)) $ Left (ExtractRuntimeDictionaryUnsupported name)
+  bodies <- maybe (Left (ExtractMissingBodies name)) Right (Map.lookup (funCore info) (coreBodies core))
+  patterns <- maybe (Left (ExtractMissingPatterns name)) Right (Map.lookup (funCore info) (corePatterns core))
+  unless (length bodies == length patterns) $ Left (ExtractPatternBodyCountMismatch name (length bodies) (length patterns))
   R.Function <$> sequence [R.Clause (map translatePattern ps) <$> translateTerm (Core.computation body) | (ps, body) <- zip patterns bodies]
 
 translatePattern :: Pattern -> R.Pattern
@@ -83,7 +131,7 @@ translatePattern = \case
   PCon r ps -> R.ConstructorPattern (demangle (refName r)) (map translatePattern ps)
   PAbsurd -> R.Impossible
 
-translateTerm :: Term.Term Int -> Either String R.Term
+translateTerm :: Term.Term Int -> Either ExtractError R.Term
 translateTerm = \case
   Term.Variable i -> Right (R.Variable i)
   Term.Literal n -> Right (R.Literal n)
@@ -93,30 +141,30 @@ translateTerm = \case
       RefConstructor -> Right (R.Construct (demangle (refName ref)) xs)
       RefFunction -> Right (R.Call (demangle (refName ref)) xs)
       RefBuiltin -> Right (R.Call (refName ref) xs)
-      _ -> Left ("unsupported extraction reference: " <> show ref)
+      _ -> Left (ExtractUnsupportedRef ref)
   Term.Parameter _ environment -> translateTerm environment
   Term.Closure arity body -> R.Lambda arity <$> translateTerm (fmap (\case B i -> i; F i -> arity + i) body)
   Term.PackedClosure hints body environment -> R.Packed (length hints - 1) <$> translateTerm body <*> translateTerm environment
   Term.Invoke callback args -> R.Apply <$> translateTerm callback <*> traverse translateTerm args
-  Term.PackedPredicate {} -> Left "packed dictionary predicates are not yet extractable"
+  Term.PackedPredicate {} -> Left ExtractPackedPredicateUnsupported
 
-translateType :: Ty -> Either String R.Type
+translateType :: Ty -> Either ExtractError R.Type
 translateType = \case
   TNat -> Right R.NaturalType
   TParam i [] -> Right (R.TypeParameter i)
   TData name types indices -> R.DataType name <$> traverse translateType types <*> traverse translateIndex indices
-  ty -> Left ("type is not a closed first-order JSON domain: " <> show ty)
+  ty -> Left (ExtractUnsupportedType ty)
 
-translateIndex :: Ix -> Either String R.Term
+translateIndex :: Ix -> Either ExtractError R.Term
 translateIndex = \case
   IxParam i -> Right (R.Variable i)
   IxNat n -> Right (R.Literal n)
   IxSucc n -> R.Call "S" . (: []) <$> translateIndex n
   IxCon name xs -> R.Construct (demangle name) <$> traverse translateIndex xs
   IxFun name xs -> R.Call (demangle name) <$> traverse translateIndex xs
-  ix -> Left ("index is not executable: " <> show ix)
+  ix -> Left (ExtractUnsupportedIndex ix)
 
-translateConstructor :: CtorInfo -> Either String R.Constructor
+translateConstructor :: CtorInfo -> Either ExtractError R.Constructor
 translateConstructor c = do
   let signature = ctorSignature c
   fields <- traverse (\e -> R.Field <$> translateType (teType e) <*> pure (location (teRole e))) (constructorTele signature)
@@ -128,7 +176,7 @@ translateConstructor c = do
     location (Stored i) = R.Stored i
     location (Recovered i j) = R.Recovered i j
 
-translatePredicate :: Expr Int -> Either String R.Predicate
+translatePredicate :: Expr Int -> Either ExtractError R.Predicate
 translatePredicate expression = case stripLocations expression of
   Rel relation a b -> do
     l <- computational a
@@ -150,9 +198,9 @@ translatePredicate expression = case stripLocations expression of
   Not a -> R.Negation <$> translatePredicate a
   Top -> Right (R.Truth True)
   Bottom -> Right (R.Truth False)
-  _ -> Left "proof precondition is outside the executable quantifier-free fragment"
+  _ -> Left ExtractNonExecutablePrecondition
   where
-    computational e = Term.prepareTerm e >>= Term.withoutObligations >>= translateTerm
+    computational e = first ExtractTermError (Term.prepareTerm e >>= Term.withoutObligations) >>= translateTerm
 
 termCalls :: R.Term -> [Text]
 termCalls = \case

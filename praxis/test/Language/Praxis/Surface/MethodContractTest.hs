@@ -10,12 +10,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.Surface.Check
 import Language.Praxis.Surface.Elab (Item (..), TheoremDef (..), elabModule)
-import Language.Praxis.Surface.Engine (Knowledge (..), proveTheorem, theoremStatement)
+import Language.Praxis.Surface.Engine (Knowledge (..), proveTheorem, renderProofError, theoremStatement)
 import Language.Praxis.Surface.Env
 import Language.Praxis.Surface.Fixity (moduleFixities)
 import Language.Praxis.Surface.Mangle (demangle)
 import Language.Praxis.Surface.Parser (parseModule)
-import Language.Praxis.Surface.Prelude (prelude)
+import Language.Praxis.Surface.Prelude (prelude, renderPreludeError)
 import Language.Praxis.Surface.Rename (renameModule)
 import Language.Praxis.Surface.Syntax.Raw (Segment (..))
 import Test.Tasty
@@ -37,7 +37,7 @@ methodContractTests =
         errors checked @?= []
         (knowledge, _) <- maybe (assertFailure "no checked module") pure (checkedFinal checked)
         theorem <- definition "nullary"
-        statement <- either assertFailure pure (theoremStatement (knowMembership knowledge) theorem)
+        statement <- either (assertFailure . renderProofError) pure (theoremStatement (knowMembership knowledge) theorem)
         let text = demangle (T.unlines (checkedCore checked))
         assertBool "no method contract was emitted" ("method_closed_" `T.isInfixOf` text)
         assertBool "the method contract lost its exact vector index" ("Methods.Vec.#idx" `T.isInfixOf` text)
@@ -63,7 +63,7 @@ methodContractTests =
     ]
   where
     check = do
-      p <- either assertFailure pure prelude
+      p <- either (assertFailure . renderPreludeError) pure prelude
       pure (checkSource p "method-contracts.px" source)
     concrete = do
       checked <- check

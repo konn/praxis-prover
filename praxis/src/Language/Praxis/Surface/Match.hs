@@ -3,6 +3,8 @@
 -- | Shallow constructor cases shared by compilation and specification proofs.
 module Language.Praxis.Surface.Match (
   Shape (..),
+  MatchError (..),
+  renderMatchError,
   shapes,
   shapeFields,
   shapeTerm,
@@ -13,8 +15,6 @@ module Language.Praxis.Surface.Match (
   possibleShapes,
 ) where
 
-import Data.List (find)
-import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Language.Praxis.Surface.CoreText
@@ -28,12 +28,24 @@ import Language.Praxis.Surface.Types
 data Shape = Zero | Successor | Constructor CtorInfo
   deriving stock (Show)
 
-shapes :: Env -> Ty -> Either String [Shape]
+-- | Why a matched argument's type has no shallow constructor shapes.
+data MatchError
+  = MissingDataDeclaration !Text
+  | UnmatchableArgumentType !Ty
+  deriving stock (Eq, Show)
+
+-- | Render a 'MatchError' as a diagnostic message.
+renderMatchError :: MatchError -> String
+renderMatchError = \case
+  MissingDataDeclaration _ -> "a matched argument has no data declaration"
+  UnmatchableArgumentType _ -> "a matched argument must be Nat or a data type"
+
+shapes :: Env -> Ty -> Either MatchError [Shape]
 shapes _ TNat = Right [Zero, Successor]
-shapes env (TData name _ _) = case find ((== name) . renderQualName . dataQual) [d | GData d <- Map.elems (envGlobals env)] of
+shapes env (TData name _ _) = case lookupDataByName env name of
   Just d -> Right (map Constructor (dataCtors d))
-  Nothing -> Left "a matched argument has no data declaration"
-shapes _ _ = Left "a matched argument must be Nat or a data type"
+  Nothing -> Left (MissingDataDeclaration name)
+shapes _ ty = Left (UnmatchableArgumentType ty)
 
 shapeFields :: Shape -> [Ty]
 shapeFields Zero = []

@@ -51,7 +51,7 @@ firstOrderTests getFixture =
           , ("locally-closed", NatValue 0)
           ]
           $ \(name, expected) -> do
-            result <- either assertFailure pure (evaluateEntry 100000 ("FirstOrderCase." <> name) checked)
+            result <- either (assertFailure . renderEvalError) pure (evaluateEntry 100000 ("FirstOrderCase." <> name) checked)
             evalValue result @?= expected
     , rejects "instantiation cannot lie about the opened formula" $
         T.unlines

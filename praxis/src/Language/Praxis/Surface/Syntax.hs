@@ -33,6 +33,8 @@ module Language.Praxis.Surface.Syntax (
   stripLocations,
   spine,
   apps,
+  PropositionError (..),
+  renderPropositionError,
   boundedProposition,
   isProofArg,
   dropProofs,
@@ -329,6 +331,20 @@ spine = go []
 apps :: Expr a -> [Expr a] -> Expr a
 apps = foldl App
 
+-- | Why an expression is not a bounded proposition.
+data PropositionError
+  = -- | A quantifier has no upper bound.
+    UnboundedQuantifier
+  | -- | An expression is not a proposition.
+    NotAProposition
+  deriving stock (Eq, Show)
+
+-- | Render a 'PropositionError' as a diagnostic message.
+renderPropositionError :: PropositionError -> String
+renderPropositionError = \case
+  UnboundedQuantifier -> "a quantifier without a bound"
+  NotAProposition -> "not a proposition"
+
 {- |
 Whether an expression is a proposition every quantifier of which is
 bounded: relations between terms, the connectives, @⊤@, @⊥@, and quantifiers
@@ -337,10 +353,10 @@ a primitive recursive function of its terms, and so has a code the core can
 check.  A quantifier without a bound, or what is no proposition, is refused,
 with why.
 -}
-boundedProposition :: Expr a -> Either String ()
+boundedProposition :: Expr a -> Either PropositionError ()
 boundedProposition = go
   where
-    go :: Expr b -> Either String ()
+    go :: Expr b -> Either PropositionError ()
     go = \case
       At _ e -> go e
       Rel {} -> Right ()
@@ -350,8 +366,8 @@ boundedProposition = go
       Top -> Right ()
       Bottom -> Right ()
       Quant _ _ (Just _) _ body -> go (fromScope body)
-      Quant {} -> Left "a quantifier without a bound"
-      _ -> Left "not a proposition"
+      Quant {} -> Left UnboundedQuantifier
+      _ -> Left NotAProposition
 
 -- | Whether an argument is a proof, which the code does not take.
 isProofArg :: Expr a -> Bool
